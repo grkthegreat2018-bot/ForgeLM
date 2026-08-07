@@ -1,0 +1,30 @@
+# PyTorch wheels for CUDA 12.8 (Blackwell / RTX 5070)
+# PyPI is the default index; the PyTorch index is only used for +cu128 wheels.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+numpy==2.2.6
+tqdm==4.67.1
+
+# Hugging Face stack (from PyPI)
+datasets==4.5.0
+transformers==4.51.3
+tokenizers==0.21.4
+accelerate==1.9.0
+huggingface_hub==0.30.0
+
+# Fast BPE tokenizer (~1000x faster than HF tokenizers on bulk encode).
+# Used by research.prep_data when --tokenizer-backend gigatoken-* is set.
+# Optional: prep_data falls back to HF AutoTokenizer if this is absent and
+# the backend is `hf` (the default).
+gigatoken==0.9.0
+
+# 8-bit/4-bit optimizer support — now available on Windows with Blackwell (sm120) builds.
+# Falls back to torch.optim.AdamW if absent.
+bitsandbytes==0.49.2
+
+# Triton for torch.compile on Windows (patched at runtime by research.training_utils).
+triton-windows==3.4.0.post21
+
+# Logging and utilities
+wandb==0.19.11
+python-dotenv==1.0.1

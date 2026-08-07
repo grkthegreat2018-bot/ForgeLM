@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ForgeAI Chat</title>
+  <link rel="icon" type="image/png" href="ForgeAI_Icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">ForgeAI</div>
+        <button class="new-chat" id="newChatBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New chat
+        </button>
+      </div>
+      <div class="chat-list" id="chatList"></div>
+      <div class="sidebar-footer">
+        <button class="models-btn" id="modelsBtn">Models</button>
+        <button class="tasks-btn" id="tasksBtn">Tasks</button>
+        <button class="settings-btn" id="settingsBtn">Settings</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="menu-toggle" id="menuToggle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <div class="topbar-title" id="topbarTitle">New chat</div>
+        <div class="topbar-model" id="topbarModel" title="Click to change model"><span class="model-name">llama3</span><span class="status-dot" id="statusDot"></span></div>
+      </header>
+
+      <div class="messages" id="messages"></div>
+
+      <div class="input-area">
+        <div class="input-box">
+          <textarea id="prompt" rows="1" placeholder="Message ForgeAI..."></textarea>
+          <button id="sendBtn" class="action send" aria-label="Send">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9"/></svg>
+          </button>
+          <button id="stopBtn" class="action stop hidden" aria-label="Stop">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+        <div class="footer-note">Local LLM chat. Enter to send, Shift+Enter for a new line.</div>
+      </div>
+    </main>
+  </div>
+
+  <div class="overlay hidden" id="settingsOverlay">
+    <div class="settings-card">
+      <h2>Settings</h2>
+      <label>Local preset
+        <select id="localPreset">
+          <option value="">Custom</option>
+          <option value="/v1">Ollama (localhost:11434)</option>
+          <option value="http://localhost:1234/v1">LM Studio</option>
+          <option value="http://localhost:8080/v1">ForgeAI Custom (local server)</option>
+          <option value="http://localhost:8081/v1">llama.cpp</option>
+        </select>
+      </label>
+      <label>API Base URL
+        <input id="baseUrl" type="text" value="/v1">
+      </label>
+      <label>API Key
+        <input id="apiKey" type="password">
+      </label>
+      <label>Model
+        <input id="model" type="text" list="modelList" value="llama3">
+      </label>
+      <datalist id="modelList"></datalist>
+      <label>Temperature
+        <input id="temperature" type="number" step="0.1" min="0" max="2" value="0.7">
+      </label>
+      <label>System prompt
+        <textarea id="systemPrompt" rows="3" placeholder="Optional instructions for the current chat..."></textarea>
+      </label>
+      <div class="tools-section">
+        <div class="tools-title">Tools</div>
+        <div class="tools-list" id="toolsList"></div>
+      </div>
+      <div id="modelsStatus" class="status"></div>
+      <div class="settings-actions">
+        <button id="fetchModels" class="secondary">Fetch models</button>
+        <button id="saveSettings">Save</button>
+      </div>
+      <div class="settings-actions">
+        <button id="exportChat" class="secondary">Export chat</button>
+        <label class="import-label">
+          <input type="file" id="importChat" accept="application/json" class="hidden">
+          <span class="button secondary">Import chat</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="modelsOverlay">
+    <div class="models-card">
+      <h2>Local Models</h2>
+      <input id="modelSearch" type="text" class="model-search" placeholder="Filter models...">
+      <div id="modelsOverlayStatus" class="status"></div>
+      <div class="models-list" id="modelsListView"></div>
+      <div class="models-actions">
+        <button id="refreshModels" class="secondary">Refresh</button>
+        <button id="closeModels">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="tasksOverlay">
+    <div class="tasks-card">
+      <h2>Running Tasks</h2>
+      <div id="tasksOverlayStatus" class="status">Loading...</div>
+      <div class="tasks-list" id="tasksListView"></div>
+      <div class="task-detail hidden" id="taskDetail">
+        <h3 id="taskDetailTitle"></h3>
+        <pre id="taskDetailLog"></pre>
+      </div>
+      <div class="tasks-actions">
+        <button id="refreshTasks" class="secondary">Refresh</button>
+        <button id="stopTask" class="secondary">Stop</button>
+        <button id="closeTasks">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="tools.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

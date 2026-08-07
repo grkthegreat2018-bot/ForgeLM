@@ -1,0 +1,911 @@
+"""DSpark — Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation.
+
+Paper: https://arxiv.org/html/2607.05147 (Cheng et al., DeepSeek-AI, 2026)
+
+DSpark unifies high-throughput parallel generation with adaptive, load-aware
+verification via two complementary mechanisms:
+
+1. **Semi-autoregressive generation** (Section 3.1): a parallel backbone (like
+   Medusa/MTP) predicts N tokens in one forward pass, then a lightweight sequential
+   module injects intra-block dependency modeling to mitigate suffix decay.
+   - Parallel stage: base logits U_1..U_gamma from n_predict independent heads.
+   - Sequential stage: transition bias B_k conditioned on previously sampled tokens
+     within the block, via an RNN head with GRU-like gated update (Eq. 6).
+   - Final distribution: p_k(v) = softmax(U_k(v) + B_k(x_0, x_{<k}, v))  (Eq. 4)
+
+2. **Confidence-scheduled verification** (Section 3.2): a confidence head estimates
+   per-position prefix survival probabilities c_k (Eq. 7), and a hardware-aware
+   scheduler dynamically chooses the verification length per request based on
+   throughput profiles (Algorithm 1).
+
+Architecture:
+    - Parallel backbone: n_predict independent prediction heads (Medusa-style MLPs)
+    - Sequential module: RNN head with GRU-like gated update + low-rank transition
+      (W1 embedding + W2 projection, r=256 by default)
+    - Confidence head: linear projection + sigmoid per position
+
+Usage:
+    from research.dspark import DSparkHead, dspark_generate, DSparkTrainer
+
+    head = DSparkHead(d_model=1024, vocab_size=151665, n_predict=4, n_layers=2)
+    output = dspark_generate(model, head, input_ids, max_new_tokens=100)
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Optional, Tuple, Dict, Callable
+
+
+class DSparkHead(nn.Module):
+    """DSpark semi-autoregressive speculative decoding head.
+
+    Combines a parallel backbone (n_predict Medusa-style heads) with a lightweight
+    sequential RNN module that injects intra-block dependencies, plus a confidence
+    head for scheduled verification.
+
+    Args:
+        d_model: hidden dimension of the main model
+        vocab_size: vocabulary size
+        n_predict: number of tokens to predict in parallel (block size gamma)
+        n_layers: depth of each parallel prediction head's MLP
+        seq_rank: rank r for the low-rank transition factorization (default 256)
+        seq_mode: 'rnn' for RNN head (full prefix history) or 'markov' for
+            first-order Markov head (memoryless beyond one step)
+        share_embedding: optional nn.Embedding to tie W1 weights with
+    """
+
+    def __init__(self, d_model: int, vocab_size: int, n_predict: int = 4,
+                 n_layers: int = 2, seq_rank: int = 256, seq_mode: str = "rnn",
+                 share_embedding: Optional[nn.Embedding] = None):
+        super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.n_predict = n_predict
+        self.n_layers = n_layers
+        self.seq_rank = seq_rank
+        self.seq_mode = seq_mode
+
+        # ── Parallel backbone: n_predict independent prediction heads ──
+        # Head k predicts token at position t + k + 1 (Medusa-style).
+        # Each head is an n_layers-deep MLP: Linear → GELU → ... → Linear(vocab).
+        self.parallel_heads = nn.ModuleList()
+        for _ in range(n_predict):
+            layers: List[nn.Module] = []
+            in_dim = d_model
+            for li in range(n_layers):
+                out_dim = d_model if li < n_layers - 1 else vocab_size
+                layers.append(nn.Linear(in_dim, out_dim, bias=(li == n_layers - 1)))
+                if li < n_layers - 1:
+                    layers.append(nn.GELU())
+                    layers.append(nn.LayerNorm(out_dim))
+                in_dim = out_dim
+            self.parallel_heads.append(nn.Sequential(*layers))
+
+        # ── Sequential module: low-rank transition bias ──
+        # W1: token embedding lookup (V × r), W2: logit projection (r → V).
+        # Shared with confidence head's Markov embedding.
+        if share_embedding is not None and share_embedding.embedding_dim == seq_rank:
+            self.W1 = share_embedding
+        else:
+            self.W1 = nn.Embedding(vocab_size, seq_rank)
+        self.W2 = nn.Linear(seq_rank, vocab_size, bias=False)
+
+        if seq_mode == "rnn":
+            # RNN head: GRU-like gated update over full prefix history.
+            # z_k = [s_{k-1}; W1[x_{k-1}]; h_k] ∈ R^{2r + d}
+            # s_k = σ(W_g z_k) ⊙ s_{k-1} + (1 - σ(W_g z_k)) ⊙ tanh(W_c z_k)
+            # B_k = W2^T tanh(W_o z_k)
+            # Single projection split into gate, candidate, output (3 × r).
+            self.seq_proj = nn.Linear(2 * seq_rank + d_model, 3 * seq_rank, bias=True)
+        elif seq_mode == "markov":
+            # Markov head: B(x_{k-1}, ·) = W1[x_{k-1}] W2 — no recurrent state.
+            self.seq_proj = None
+        else:
+            raise ValueError(f"Unknown seq_mode: {seq_mode!r} (expected 'rnn' or 'markov')")
+
+        # ── Confidence head: c_k = σ(w^T [h_k; W1[x_{k-1}]])  (Eq. 7) ──
+        self.conf_proj = nn.Linear(d_model + seq_rank, 1, bias=True)
+
+        # Post-hoc calibration temperatures (Sequential Temperature Scaling).
+        # One per position; initialized to 1.0 (no scaling).
+        self.register_buffer("calib_temps", torch.ones(n_predict))
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Internal helpers
+    # ──────────────────────────────────────────────────────────────────
+
+    def _parallel_backbone(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
+        """Run parallel backbone: produce base logits U_1..U_gamma.
+
+        Args:
+            hidden_states: (B, T, d_model)
+
+        Returns:
+            list of (B, T, vocab_size) base logits, one per prediction position
+        """
+        return [head(hidden_states) for head in self.parallel_heads]
+
+    def _seq_step(self, k: int, hidden_k: torch.Tensor,
+                  prev_token: torch.Tensor,
+                  state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """One step of the sequential module at position k.
+
+        Computes transition bias B_k and updates recurrent state.
+
+        Args:
+            k: position index (0-based within block)
+            hidden_k: (B, d_model) backbone hidden state at position k
+            prev_token: (B,) previously sampled token id (x_{k-1})
+            state: (B, r) recurrent state s_{k-1}, or None for k=0
+
+        Returns:
+            bias: (B, vocab_size) transition bias B_k
+            new_state: (B, r) updated recurrent state s_k
+        """
+        B = hidden_k.size(0)
+        r = self.seq_rank
+        prev_emb = self.W1(prev_token)  # (B, r)
+
+        if self.seq_mode == "markov":
+            # B(x_{k-1}, ·) = W1[x_{k-1}] W2  (Eq. 5)
+            bias = self.W2(prev_emb)  # (B, vocab)
+            return bias, prev_emb  # state not used, return emb as placeholder
+
+        # RNN head (Eq. 6)
+        if state is None:
+            state = torch.zeros(B, r, device=hidden_k.device, dtype=hidden_k.dtype)
+
+        z = torch.cat([state, prev_emb, hidden_k], dim=-1)  # (B, 2r + d)
+        proj = self.seq_proj(z)  # (B, 3r)
+        gate, candidate, output = proj.chunk(3, dim=-1)  # each (B, r)
+
+        gate_s = torch.sigmoid(gate)
+        new_state = gate_s * state + (1.0 - gate_s) * torch.tanh(candidate)
+        bias = self.W2(torch.tanh(output))  # (B, vocab)
+
+        return bias, new_state
+
+    def _confidence(self, hidden_k: torch.Tensor,
+                    prev_token: torch.Tensor) -> torch.Tensor:
+        """Compute confidence score c_k = σ(w^T [h_k; W1[x_{k-1}]])  (Eq. 7).
+
+        Args:
+            hidden_k: (B, d_model)
+            prev_token: (B,) previous token id
+
+        Returns:
+            conf: (B,) confidence score in (0, 1)
+        """
+        prev_emb = self.W1(prev_token)  # (B, r)
+        feat = torch.cat([hidden_k, prev_emb], dim=-1)  # (B, d + r)
+        return torch.sigmoid(self.conf_proj(feat).squeeze(-1))  # (B,)
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Forward (training)
+    # ──────────────────────────────────────────────────────────────────
+
+    def forward(self, hidden_states: torch.Tensor,
+                input_ids: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
+        """Forward pass: parallel backbone + sequential refinement.
+
+        During training, uses ground-truth input_ids as the "previous predictions"
+        to compute transition biases. During inference, use generate_block() instead.
+
+        Args:
+            hidden_states: (B, T, d_model) from the main model
+            input_ids: (B, T) token ids (used for sequential conditioning)
+
+        Returns:
+            logits_list: list of n_predict tensors, each (B, T, vocab_size).
+                logits_list[k] = U_k + B_k (base logits + transition bias)
+            confidences: (B, T, n_predict) per-position confidence scores
+        """
+        B, T, _ = hidden_states.shape
+
+        # Parallel stage: base logits U_1..U_gamma.
+        base_logits = self._parallel_backbone(hidden_states)  # list of (B, T, V)
+
+        # Sequential stage: add transition bias B_k conditioned on prev tokens.
+        logits_list = []
+        conf_list = []
+
+        for k in range(self.n_predict):
+            # Hidden state at position k (for sequential + confidence).
+            h_k = hidden_states  # (B, T, d)
+
+            # Previous token for sequential conditioning.
+            # During training, each position t uses the ground-truth token at t
+            # as x_{k-1} (teacher forcing). Head k predicts token at t+k+1,
+            # so the "previous" token within the block is at offset k from t.
+            if k == 0:
+                # Position 0 conditions on the anchor (current position t).
+                prev_tok = input_ids  # (B, T)
+            else:
+                # Position k conditions on token at t+k (the k-th ground-truth
+                # token ahead, which is what head k-1 would have predicted).
+                prev_tok = input_ids  # teacher forcing: use ground truth at t+k
+                # We shift by k so that position t sees token at t+k.
+                if T > k:
+                    prev_tok = torch.cat(
+                        [input_ids[:, k:], input_ids[:, :k]], dim=1
+                    )
+
+            # Compute transition bias and confidence for all positions at once.
+            # Reshape for batch processing: (B*T, ...) per position k.
+            h_flat = h_k.reshape(B * T, self.d_model)
+            prev_flat = prev_tok.reshape(B * T)
+
+            if self.seq_mode == "rnn":
+                # For training, we process all timesteps with the RNN.
+                # We need to run the RNN across the block dimension (k), not time.
+                # Since each k is independent across time positions, we can
+                # use a simplified approach: treat each (b, t) independently.
+                # For efficiency, we approximate by using zero state for training.
+                state = torch.zeros(B * T, self.seq_rank,
+                                    device=hidden_states.device, dtype=hidden_states.dtype)
+                bias, _ = self._seq_step(k, h_flat, prev_flat, state)
+            else:
+                bias, _ = self._seq_step(k, h_flat, prev_flat, None)
+
+            bias = bias.reshape(B, T, self.vocab_size)
+            refined = base_logits[k] + bias  # U_k + B_k  (Eq. 4)
+            logits_list.append(refined)
+
+            # Confidence: c_k = σ(w^T [h_k; W1[x_{k-1}]])
+            conf = self._confidence(h_flat, prev_flat)  # (B*T,)
+            conf_list.append(conf.reshape(B, T))
+
+        confidences = torch.stack(conf_list, dim=-1)  # (B, T, n_predict)
+        return logits_list, confidences
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Block generation (inference)
+    # ──────────────────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def generate_block(self, model: nn.Module, input_ids: torch.Tensor,
+                       max_block_size: int = 4,
+                       temperature: float = 0.0) -> List[Tuple[int, float]]:
+        """Generate a block of up to max_block_size tokens using semi-AR generation.
+
+        Algorithm:
+        1. Forward pass through main model → hidden states (anchor).
+        2. Parallel backbone produces base logits U_1..U_gamma.
+        3. Sequential module samples left-to-right: at each position k,
+           p_k = softmax(U_k + B_k(x_0, x_{<k})), sample x_k.
+        4. Confidence head estimates c_k at each position.
+
+        Args:
+            model: the main LLM
+            input_ids: (1, T) current token sequence
+            max_block_size: maximum tokens to draft (capped by n_predict)
+            temperature: 0 for greedy, >0 for sampling
+
+        Returns:
+            list of (token_id, confidence) pairs, length ≤ max_block_size
+        """
+        model.eval()
+        self.eval()
+        device = input_ids.device
+        block_size = min(max_block_size, self.n_predict)
+
+        # 1. Forward pass through main model to get hidden states.
+        try:
+            out = model(input_ids, return_hidden=True)
+            # (logits, loss, hidden) when return_hidden=True
+            hidden = out[2] if len(out) > 2 else out[0]
+        except TypeError:
+            # Model doesn't support return_hidden
+            out = model(input_ids)
+            hidden = out[0] if isinstance(out, tuple) else out
+        # Handle model returning logits instead of hidden states.
+        if hidden.size(-1) == self.vocab_size:
+            if hasattr(model, "embed"):
+                hidden = model.embed(hidden.argmax(-1))
+            elif hasattr(model, "wte"):
+                hidden = model.wte(hidden.argmax(-1))
+            elif hasattr(model, "embed_tokens"):
+                hidden = model.embed_tokens(hidden.argmax(-1))
+            else:
+                return []
+
+        # Use the last position's hidden state as the anchor context.
+        anchor_hidden = hidden[:, -1:, :]  # (1, 1, d_model)
+
+        # 2. Parallel backbone: base logits for all positions.
+        base_logits = self._parallel_backbone(anchor_hidden)  # list of (1, 1, V)
+        base_logits = [bl[:, -1, :] for bl in base_logits]  # list of (1, V)
+
+        # 3. Sequential sampling: left-to-right within the block.
+        anchor_token = input_ids[:, -1]  # (1,) last token = anchor x_0
+        results: List[Tuple[int, float]] = []
+        state = None  # RNN state
+        prev_token = anchor_token  # x_{k-1}, starts with anchor
+
+        for k in range(block_size):
+            h_k = anchor_hidden[:, 0, :]  # (1, d_model) — same anchor for all k
+
+            # Sequential step: transition bias + state update.
+            bias, state = self._seq_step(k, h_k, prev_token, state)  # (1, V), (1, r)
+
+            # Refined logits: U_k + B_k  (Eq. 4)
+            refined = base_logits[k] + bias  # (1, V)
+
+            # Apply calibration temperature (post-hoc STS).
+            calib_temp = self.calib_temps[k].item()
+            refined = refined / max(calib_temp, 1e-6)
+
+            # Sample token.
+            if temperature == 0:
+                token = refined.argmax(dim=-1)  # (1,)
+            else:
+                probs = F.softmax(refined / temperature, dim=-1)
+                token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # (1,)
+
+            # Confidence score c_k.
+            conf = self._confidence(h_k, prev_token)  # (1,)
+            conf_val = conf.item()
+
+            results.append((token.item(), conf_val))
+            prev_token = token  # x_k becomes x_{k-1} for next step
+
+        return results
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Confidence-scheduled verification (Section 3.2)
+    # ──────────────────────────────────────────────────────────────────
+
+    def confidence_schedule(self, confidences: List[float],
+                            throughput_profile: Optional[Callable[[int], float]] = None,
+                            threshold: float = 0.5) -> int:
+        """Decide how many tokens to verify based on confidence scores.
+
+        Implements Algorithm 1 (Hardware-Aware Prefix Scheduler) when a throughput
+        profile is provided, or a simple cumulative-threshold heuristic otherwise.
+
+        Args:
+            confidences: list of per-position confidence scores c_1..c_gamma
+            throughput_profile: optional function SPS(B) → steps/sec for batch
+                size B. If provided, uses the greedy throughput maximization.
+            threshold: minimum cumulative survival probability for the simple
+                heuristic (used when no throughput_profile is given).
+
+        Returns:
+            n_verify: number of tokens to verify (0 to len(confidences))
+        """
+        gamma = len(confidences)
+        if gamma == 0:
+            return 0
+
+        # Compute prefix survival probabilities: a_j = ∏_{i≤j} c_i.
+        survival = []
+        cum = 1.0
+        for c in confidences:
+            cum *= c
+            survival.append(cum)
+
+        if throughput_profile is not None:
+            # ── Algorithm 1: Hardware-Aware Prefix Scheduler ──
+            # Greedy admission maximizing Θ = τ · SPS(B).
+            # Single-request version: B = 1 + ℓ, τ = 1 + Σ a_j.
+            # Start with ℓ=0 (verify only the anchor/bonus token).
+            best_theta = 1.0 * throughput_profile(1)  # τ=R=1, B=1
+            best_ell = 0
+
+            tau = 1.0  # expected accepts (starts with 1 for the bonus token)
+            B = 1  # batch size
+
+            for j in range(gamma):
+                B += 1
+                tau += survival[j]
+                theta = tau * throughput_profile(B)
+                if theta > best_theta:
+                    best_theta = theta
+                    best_ell = j + 1
+                else:
+                    # Early stopping (non-anticipating property).
+                    break
+
+            return best_ell
+
+        # ── Simple heuristic: cumulative survival probability threshold ──
+        # Verify the longest prefix where cumulative survival ≥ threshold.
+        n_verify = 0
+        for j in range(gamma):
+            if survival[j] >= threshold:
+                n_verify = j + 1
+            else:
+                break
+
+        return n_verify
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Trainer
+# ──────────────────────────────────────────────────────────────────────
+
+class DSparkTrainer:
+    """Trains a DSpark head with the three-term objective from Section 3.3.
+
+    Loss = L_ce + L_tv + L_conf, position-weighted by w_k = exp(-(k-1)/gamma).
+
+    Args:
+        model: the main LLM (frozen during DSpark training)
+        dspark_head: DSparkHead instance
+        lr: learning rate
+        tv_weight: weight for distribution-matching loss L_tv
+        conf_weight: weight for confidence loss L_conf
+    """
+
+    def __init__(self, model, dspark_head, lr=1e-4,
+                 tv_weight=0.2, conf_weight=0.5):
+        self.model = model
+        self.dspark_head = dspark_head
+        self.tv_weight = tv_weight
+        self.conf_weight = conf_weight
+        self.optimizer = torch.optim.AdamW(dspark_head.parameters(), lr=lr)
+
+        # Freeze main model.
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _position_weights(self, gamma: int) -> torch.Tensor:
+        """Exponential decay weights: w_k = exp(-(k-1)/gamma)."""
+        k = torch.arange(1, gamma + 1, dtype=torch.float)
+        return torch.exp(-(k - 1) / gamma)
+
+    def compute_loss(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+        """Compute the three-term DSpark training loss.
+
+        L_ce: cross-entropy for draft token prediction (Eq. 9)
+        L_tv: total variation distance between draft and target distributions (Eq. 10)
+        L_conf: BCE between predicted confidence and analytical acceptance rate (Eq. 8)
+
+        Args:
+            input_ids: (B, T) token ids
+
+        Returns:
+            (total_loss, stats_dict)
+        """
+        B, T = input_ids.shape
+        gamma = self.dspark_head.n_predict
+        device = input_ids.device
+
+        # Forward through frozen main model.
+        with torch.no_grad():
+            out = self.model(input_ids)
+            hidden = out[0] if isinstance(out, tuple) else out
+
+        # Handle model returning logits.
+        if hidden.size(-1) == self.dspark_head.vocab_size:
+            if hasattr(self.model, "wte"):
+                hidden = self.model.wte(hidden.argmax(-1))
+            elif hasattr(self.model, "embed_tokens"):
+                hidden = self.model.embed_tokens(hidden.argmax(-1))
+
+        # DSpark forward: refined logits + confidences.
+        logits_list, confidences = self.dspark_head(hidden, input_ids)
+        # logits_list: list of (B, T, V), confidences: (B, T, gamma)
+
+        # Get target distributions from the main model (for L_tv and L_conf).
+        with torch.no_grad():
+            target_logits_list = []
+            for k in range(gamma):
+                offset = k + 1
+                if offset >= T:
+                    break
+                # Target distribution at position t+k+1.
+                shifted = input_ids[:, offset:]
+                if hasattr(self.model, "lm_head"):
+                    tgt_hidden = hidden[:, :-offset, :]
+                    tgt_logits = self.model.lm_head(tgt_hidden)
+                else:
+                    tgt_logits = hidden[:, :-offset, :]
+                target_logits_list.append(tgt_logits)
+
+        weights = self._position_weights(gamma).to(device)  # (gamma,)
+
+        # ── L_ce: cross-entropy loss (Eq. 9) ──
+        ce_loss = 0.0
+        for k in range(min(gamma, len(target_logits_list))):
+            offset = k + 1
+            if offset >= T:
+                break
+            pred = logits_list[k][:, :-offset, :].contiguous()
+            target = input_ids[:, offset:].contiguous()
+            loss_k = F.cross_entropy(
+                pred.view(-1, pred.size(-1)),
+                target.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            )
+            loss_k = loss_k.mean() * weights[k]
+            ce_loss = ce_loss + loss_k
+
+        # ── L_tv: total variation distance (Eq. 10) ──
+        tv_loss = 0.0
+        for k in range(min(gamma, len(target_logits_list))):
+            offset = k + 1
+            if offset >= T:
+                break
+            draft_logits = logits_list[k][:, :-offset, :].contiguous()
+            target_logits = target_logits_list[k].contiguous()
+
+            draft_probs = F.softmax(draft_logits, dim=-1)
+            target_probs = F.softmax(target_logits, dim=-1)
+
+            # TV distance = 0.5 * ||p_d - p_t||_1
+            tv_dist = 0.5 * (draft_probs - target_probs).abs().sum(dim=-1).mean()
+            tv_loss = tv_loss + tv_dist * weights[k]
+
+        # ── L_conf: confidence loss (Eq. 7, 8) ──
+        # c_k* = 1 - 0.5 * ||p_k^d - p_k^t||_1  (analytical acceptance rate)
+        conf_loss = 0.0
+        for k in range(min(gamma, len(target_logits_list))):
+            offset = k + 1
+            if offset >= T:
+                break
+            draft_logits = logits_list[k][:, :-offset, :].contiguous()
+            target_logits = target_logits_list[k].contiguous()
+
+            draft_probs = F.softmax(draft_logits, dim=-1)
+            target_probs = F.softmax(target_logits, dim=-1)
+
+            # Analytical acceptance rate per token.
+            c_star = 1.0 - 0.5 * (draft_probs - target_probs).abs().sum(dim=-1)  # (B, T')
+
+            # Predicted confidence.
+            c_pred = confidences[:, :-offset, k].contiguous()  # (B, T')
+
+            conf_loss = conf_loss + F.binary_cross_entropy(
+                c_pred.clamp(1e-6, 1 - 1e-6),
+                c_star.clamp(1e-6, 1 - 1e-6),
+                reduction="mean",
+            ) * weights[k]
+
+        total_loss = ce_loss + self.tv_weight * tv_loss + self.conf_weight * conf_loss
+
+        return total_loss, {
+            "ce_loss": float(ce_loss) if isinstance(ce_loss, float) else ce_loss.item(),
+            "tv_loss": float(tv_loss) if isinstance(tv_loss, float) else tv_loss.item(),
+            "conf_loss": float(conf_loss) if isinstance(conf_loss, float) else conf_loss.item(),
+            "total_loss": total_loss.item(),
+        }
+
+    def train_step(self, input_ids: torch.Tensor) -> Dict:
+        """Single training step.
+
+        Args:
+            input_ids: (B, T) token ids
+
+        Returns:
+            stats dict
+        """
+        self.dspark_head.train()
+        loss, stats = self.compute_loss(input_ids)
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.dspark_head.parameters(), 1.0)
+        self.optimizer.step()
+        return stats
+
+    def calibrate(self, validation_data: List[torch.Tensor],
+                  n_grid: int = 50) -> Dict:
+        """Post-hoc Sequential Temperature Scaling (STS) calibration.
+
+        Calibrates confidence scores left-to-right, finding optimal temperature
+        per position via 1D grid search to minimize ECE of cumulative products.
+
+        Args:
+            validation_data: list of (B, T) validation token id batches
+            n_grid: grid search resolution
+
+        Returns:
+            dict with calibration results
+        """
+        self.dspark_head.eval()
+        gamma = self.dspark_head.n_predict
+        device = next(self.dspark_head.parameters()).device
+
+        # Collect predicted confidences and empirical acceptance rates.
+        all_preds = [[] for _ in range(gamma)]  # predicted c_k per position
+        all_labels = [[] for _ in range(gamma)]  # empirical accept (0/1) per position
+
+        with torch.no_grad():
+            for input_ids in validation_data:
+                input_ids = input_ids.to(device)
+                out = self.model(input_ids)
+                hidden = out[0] if isinstance(out, tuple) else out
+                if hidden.size(-1) == self.dspark_head.vocab_size:
+                    if hasattr(self.model, "wte"):
+                        hidden = self.model.wte(hidden.argmax(-1))
+                    elif hasattr(self.model, "embed_tokens"):
+                        hidden = self.model.embed_tokens(hidden.argmax(-1))
+
+                logits_list, confidences = self.dspark_head(hidden, input_ids)
+
+                for k in range(gamma):
+                    offset = k + 1
+                    if offset >= input_ids.shape[1]:
+                        continue
+                    # Empirical acceptance: does draft top-1 match target top-1?
+                    draft_tok = logits_list[k][:, :-offset, :].argmax(-1)
+                    target_tok = input_ids[:, offset:]
+                    accept = (draft_tok == target_tok).float().view(-1)
+
+                    c_pred = confidences[:, :-offset, k].contiguous().view(-1)
+                    all_preds[k].append(c_pred)
+                    all_labels[k].append(accept)
+
+        # Sequential temperature scaling: left-to-right.
+        temps = []
+        for k in range(gamma):
+            if not all_preds[k]:
+                temps.append(1.0)
+                continue
+
+            preds = torch.cat(all_preds[k])
+            labels = torch.cat(all_labels[k])
+
+            # Apply already-calibrated temperatures for positions < k.
+            for j in range(k):
+                preds = preds / max(temps[j], 1e-6)
+
+            # Grid search for optimal temperature at position k.
+            best_temp, best_ece = 1.0, float("inf")
+            for t_val in torch.linspace(0.1, 5.0, n_grid):
+                scaled = (preds / t_val).clamp(1e-6, 1 - 1e-6)
+                # ECE for this position's conditional probability.
+                ece = ((scaled - labels).abs()).mean().item()
+                if ece < best_ece:
+                    best_ece = ece
+                    best_temp = t_val.item()
+
+            temps.append(best_temp)
+
+        self.dspark_head.calib_temps.copy_(torch.tensor(temps, device=device))
+        return {"calib_temps": temps, "method": "STS"}
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Generation (inference)
+# ──────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
+                    input_ids: torch.Tensor, max_new_tokens: int = 100,
+                    temperature: float = 0.0, max_block_size: int = 4,
+                    throughput_profile: Optional[Callable[[int], float]] = None,
+                    conf_threshold: float = 0.5,
+                    device: str = "cuda") -> torch.Tensor:
+    """Generate tokens using DSpark speculative decoding.
+
+    Algorithm (per cycle):
+    1. Main model forward pass → anchor token + hidden states.
+    2. DSparkHead.generate_block() → draft block of (token, confidence) pairs.
+    3. confidence_schedule() → decide how many tokens to verify.
+    4. Main model verifies the scheduled prefix in a single forward pass.
+    5. Accept longest matching prefix; append bonus token from target.
+    6. On rejection (0 accepted), fall back to regular greedy generation.
+
+    Args:
+        model: the main LLM
+        dspark_head: DSparkHead instance
+        input_ids: (1, T) prompt token ids
+        max_new_tokens: maximum tokens to generate
+        temperature: 0 for greedy, >0 for sampling
+        max_block_size: maximum draft block size per cycle
+        throughput_profile: optional SPS(B) function for hardware-aware scheduling
+        conf_threshold: confidence threshold for simple scheduling (no profile)
+        device: cuda or cpu
+
+    Returns:
+        (1, T + generated) token ids
+    """
+    model.eval()
+    dspark_head.eval()
+    dev = torch.device(device)
+    input_ids = input_ids.to(dev)
+    prompt_len = input_ids.shape[1]
+
+    # EOS detection: Qwen uses <|im_end|> (151645) and <|endoftext|> (151643)
+    eos_ids = set()
+    if hasattr(model, "config") and hasattr(model.config, "eos_token_id"):
+        eid = model.config.eos_token_id
+        if eid is not None:
+            eos_ids.add(eid)
+    # Qwen2.5 special tokens
+    eos_ids.update({151643, 151645})  # <|endoftext|>, <|im_end|>
+
+    def _get_lm_head_logits(hidden: torch.Tensor) -> torch.Tensor:
+        """Get logits from hidden states using the model's LM head."""
+        if hidden.size(-1) == dspark_head.vocab_size:
+            return hidden  # already logits
+        if hasattr(model, "lm_head"):
+            return model.lm_head(hidden)
+        if hasattr(model, "head"):
+            return model.head(hidden)
+        return hidden
+
+    while input_ids.shape[1] - prompt_len < max_new_tokens:
+        # ── Step 1: Main model forward → anchor token ──
+        out = model(input_ids, return_hidden=True)
+        # (logits, loss, hidden) when return_hidden=True, no use_cache
+        hidden = out[2] if len(out) > 2 else out[0]
+        main_logits = _get_lm_head_logits(hidden)
+
+        # Anchor token: the main model's prediction for the next position.
+        if temperature == 0:
+            anchor_token = main_logits[:, -1, :].argmax(-1, keepdim=True)  # (1, 1)
+        else:
+            probs = F.softmax(main_logits[:, -1, :] / temperature, dim=-1)
+            anchor_token = torch.multinomial(probs, num_samples=1)  # (1, 1)
+
+        # Check for EOS on anchor token.
+        if anchor_token.item() in eos_ids:
+            input_ids = torch.cat([input_ids, anchor_token], dim=1)
+            break
+
+        # ── Step 2: DSpark generates a draft block ──
+        # Temp append anchor to get hidden states for drafting.
+        draft_input = torch.cat([input_ids, anchor_token], dim=1)
+        block = dspark_head.generate_block(
+            model, draft_input, max_block_size=max_block_size,
+            temperature=temperature,
+        )
+
+        if not block:
+            # No draft possible — just accept the anchor token.
+            input_ids = draft_input
+            continue
+
+        draft_tokens = [tok for tok, _ in block]
+        draft_confs = [conf for _, conf in block]
+
+        # Check if any draft token is EOS — stop early
+        if any(t in eos_ids for t in draft_tokens):
+            # Find first EOS in draft, accept up to and including it
+            for i, t in enumerate(draft_tokens):
+                if t in eos_ids:
+                    eos_draft = torch.tensor([[t]], dtype=input_ids.dtype, device=dev)
+                    input_ids = torch.cat([draft_input, eos_draft], dim=1)
+                    return input_ids
+
+        # ── Step 3: Confidence-scheduled verification ──
+        n_verify = dspark_head.confidence_schedule(
+            draft_confs, throughput_profile=throughput_profile,
+            threshold=conf_threshold,
+        )
+
+        if n_verify == 0:
+            # No tokens worth verifying — accept just the anchor.
+            input_ids = draft_input
+            continue
+
+        # ── Step 4: Verify scheduled prefix with main model ──
+        verify_tokens = draft_tokens[:n_verify]
+        verify_seq = torch.tensor(
+            [verify_tokens], dtype=input_ids.dtype, device=dev,
+        )  # (1, n_verify)
+        verify_input = torch.cat([draft_input, verify_seq], dim=1)
+        # verify_input = [prompt ... anchor_token draft_1 ... draft_n_verify]
+
+        verify_out = model(verify_input, return_hidden=True)
+        verify_hidden = verify_out[2] if len(verify_out) > 2 else verify_out[0]
+        verify_logits = _get_lm_head_logits(verify_hidden)
+
+        # ── Step 5: Accept longest matching prefix ──
+        # The anchor token is at position `input_ids.shape[1]` in verify_input.
+        # Draft token k is verified against the model's prediction at position
+        # `input_ids.shape[1] + k` (i.e., the model predicts what comes after
+        # the anchor + accepted drafts).
+        anchor_pos = input_ids.shape[1]  # position of anchor in verify_input
+        n_accepted = 0
+        bonus_token = None
+
+        for k in range(n_verify):
+            pos = anchor_pos + k  # model's prediction at this position
+            if pos >= verify_logits.shape[1] - 1:
+                break
+            model_pred = verify_logits[:, pos, :].argmax(-1)  # (1,)
+            if model_pred.item() == verify_tokens[k]:
+                n_accepted += 1
+            else:
+                # Rejection: the bonus token is the model's prediction here.
+                bonus_token = model_pred.unsqueeze(-1)  # (1, 1)
+                break
+
+        # If all verified tokens accepted, bonus = model's prediction after last.
+        if bonus_token is None and n_verify > 0:
+            pos = anchor_pos + n_verify
+            if pos < verify_logits.shape[1]:
+                bonus_token = verify_logits[:, pos, :].argmax(-1, keepdim=True)
+            else:
+                bonus_token = anchor_token  # fallback
+
+        # ── Step 6: Assemble accepted tokens ──
+        # Always accept the anchor token + accepted draft prefix + bonus.
+        accepted_drafts = torch.tensor(
+            [verify_tokens[:n_accepted]], dtype=input_ids.dtype, device=dev,
+        ) if n_accepted > 0 else None
+
+        new_tokens = [anchor_token]  # anchor always accepted
+        if accepted_drafts is not None:
+            new_tokens.append(accepted_drafts)
+        if bonus_token is not None:
+            new_tokens.append(bonus_token)
+
+        new_tokens = torch.cat(new_tokens, dim=1)  # (1, 1 + n_accepted + 1)
+        input_ids = torch.cat([input_ids, new_tokens], dim=1)
+
+        # Check EOS on bonus token and accepted drafts.
+        all_new = new_tokens[0]  # (1, n)
+        for i in range(all_new.shape[1]):
+            if all_new[0, i].item() in eos_ids:
+                input_ids = input_ids[:, :input_ids.shape[1] - (all_new.shape[1] - i - 1)]
+                break
+        else:
+            continue
+        break
+
+    # Trim to max_new_tokens if exceeded.
+    excess = input_ids.shape[1] - prompt_len - max_new_tokens
+    if excess > 0:
+        input_ids = input_ids[:, :-excess]
+
+    return input_ids
+
+
+def add_dspark_to_model(model: nn.Module, d_model: int = None,
+                        vocab_size: int = None, n_predict: int = 4,
+                        n_layers: int = 2) -> DSparkHead:
+    """Create a DSparkHead and attach it to a model.
+
+    Auto-detects d_model and vocab_size from the model if not specified.
+
+    Args:
+        model: the main LLM
+        d_model: hidden dimension (auto-detected if None)
+        vocab_size: vocab size (auto-detected if None)
+        n_predict: number of tokens to predict in parallel
+        n_layers: depth of each parallel prediction head
+
+    Returns:
+        DSparkHead module
+    """
+    # Auto-detect dimensions.
+    if d_model is None:
+        if hasattr(model, "config"):
+            d_model = getattr(model.config, "d_model", None)
+            if d_model is None:
+                d_model = getattr(model.config, "hidden_size", None)
+        if d_model is None:
+            for m in model.modules():
+                if isinstance(m, nn.Linear):
+                    d_model = m.in_features
+                    break
+    if vocab_size is None:
+        if hasattr(model, "config"):
+            vocab_size = getattr(model.config, "vocab_size", None)
+        if vocab_size is None and hasattr(model, "lm_head"):
+            vocab_size = model.lm_head.out_features
+        if vocab_size is None and hasattr(model, "head"):
+            vocab_size = model.head.out_features
+
+    # Try to share embedding weights.
+    share_emb = None
+    if hasattr(model, "wte"):
+        share_emb = model.wte
+    elif hasattr(model, "embed_tokens"):
+        share_emb = model.embed_tokens
+
+    head = DSparkHead(
+        d_model=d_model, vocab_size=vocab_size,
+        n_predict=n_predict, n_layers=n_layers,
+        share_embedding=share_emb,
+    )
+    n_params = sum(p.numel() for p in head.parameters())
+    print(f"  [DSpark] {n_predict} predict heads, {n_layers} layers "
+          f"({n_params:,} params, "
+          f"{'shared' if share_emb is not None else 'separate'} embeddings)")
+    return head

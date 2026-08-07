@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(Get-Process)",
+      "Exec(Write-Output)",
+      "Exec(Start-Sleep)",
+      "Exec(Select-Object)",
+      "Exec(nvidia-smi)",
+      "Exec(ConvertFrom-Json)"
+    ]
+  }
+}
