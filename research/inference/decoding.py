@@ -118,7 +118,7 @@ class MedusaDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0):
-        from research.medusa import medusa_generate
+        from research.decoding.medusa import medusa_generate
         return medusa_generate(
             model, self.medusa, input_ids,
             max_new_tokens=max_new_tokens,
@@ -134,7 +134,7 @@ class DSparkDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0):
-        from research.dspark import dspark_generate
+        from research.decoding.dspark import dspark_generate
         return dspark_generate(
             model, self.dspark, input_ids,
             max_new_tokens=max_new_tokens,

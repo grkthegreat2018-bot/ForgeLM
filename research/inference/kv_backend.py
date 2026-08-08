@@ -90,7 +90,7 @@ class PagedKVCacheStrategy(KVCacheStrategy):
     """vLLM-style paged KV cache — wraps existing paged_kv.py."""
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
-        from research.paged_kv import PagedKVCache
+        from research.quantization.paged_kv import PagedKVCache
         self.cache = PagedKVCache(
             n_blocks=max(256, max_seq_len // 16),
             block_size=16, n_heads=n_kv_heads,
@@ -123,7 +123,7 @@ class RotorQuantKVCache(KVCacheStrategy):
     """
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
-        from research.rotorquant import RotorQuantCache
+        from research.quantization.rotorquant import RotorQuantCache
         self.cache = RotorQuantCache(
             d_model=n_kv_heads * head_dim, n_heads=n_kv_heads,
             head_dim=head_dim, bits=4, max_seq_len=max_seq_len,
@@ -272,7 +272,7 @@ class CompressedKVCacheStrategy(KVCacheStrategy):
     """H2O heavy-hitter eviction + KV quantization — wraps kv_compress.py."""
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
-        from research.kv_compress import CompressedKVCache
+        from research.quantization.kv_compress import CompressedKVCache
         self.cache = CompressedKVCache(
             n_heads=n_kv_heads, head_dim=head_dim,
             max_tokens=max_seq_len, bits=8,

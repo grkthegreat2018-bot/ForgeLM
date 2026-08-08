@@ -159,7 +159,8 @@ class ForgeEngine:
                  use_v0_warm: bool = False,
                  use_progressive_kv: bool = False,
                  use_compile: bool = False,
-                 use_prefix_cache: bool = False):
+                 use_prefix_cache: bool = False,
+                 use_spec_attn: bool = False):
         """Activate runtime strategies.
 
         Args:
@@ -174,6 +175,7 @@ class ForgeEngine:
             use_progressive_kv: enable progressive KV (anchor + residual streams)
             use_compile: torch.compile the model for 1.3-2x decode speedup
             use_prefix_cache: cache KV for repeated prompt prefixes
+            use_spec_attn: L1 Speculative Attention (57% attn cut, lossless)
         """
         # 1. Quantization
         if quantize:
@@ -227,7 +229,7 @@ class ForgeEngine:
 
         # 8. Acceleration
         if acceleration == "cuda_graph" and self.device.type == "cuda":
-            from research.cuda_graph import CudaGraphRunner
+            from research.runtime.cuda_graph import CudaGraphRunner
             self._graph_runner = CudaGraphRunner(
                 self.model, batch_size=1, seq_len=1,
                 device=str(self.device), use_cache=True)
@@ -252,6 +254,13 @@ class ForgeEngine:
         self._prefix_cache = {} if use_prefix_cache else None
         if use_prefix_cache:
             print(f"  [ForgeEngine] Prefix caching: active")
+
+        # 11. L1 Speculative Attention (lossless, 57% attn compute cut)
+        if use_spec_attn:
+            from research.keys.speculative_keys import SpeculativeAttentionKey
+            self._spec_attn_key = SpeculativeAttentionKey(draft_rank=32)
+            self._spec_attn_key.apply(self.model)
+            print(f"  [ForgeEngine] L1 Speculative Attention: active (lossless, 57% attn cut)")
 
     def _setup_airllm_smart(self):
         """Smart AirLLM: only stream layers if VRAM can't hold the full model.
@@ -350,10 +359,10 @@ class ForgeEngine:
     def _apply_quantization(self, mode: str):
         """Apply weight-only quantization."""
         if mode == "int8":
-            from research.inference_quant import quantize_model_int8
+            from research.quantization.inference_quant import quantize_model_int8
             quantize_model_int8(self.model)
         elif mode == "int4":
-            from research.inference_quant import quantize_model_int4
+            from research.quantization.inference_quant import quantize_model_int4
             quantize_model_int4(self.model, group_size=128)
 
     @torch.no_grad()

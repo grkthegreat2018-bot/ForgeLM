@@ -99,6 +99,7 @@ class AirMoEManifest:
         self.compressed = compressed
         self.experts: List[Dict] = []
         self.bundles: List[Dict] = []
+        self.topics_map: Dict[str, Any] = {}  # V4 format: topic -> metadata
         self.created = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def add_expert(self, layer: int, expert_idx: int, file_path: str,
@@ -132,10 +133,19 @@ class AirMoEManifest:
         return entry
 
     def get_expert_file(self, layer: int, expert_idx: int) -> Optional[str]:
-        """Get the file path for a specific expert."""
+        """Get the file path for a specific expert.
+
+        Handles both v2 (expert_idx) and v4 (topic-based, no expert_idx) formats.
+        For v4, expert_idx is used as a sequential index into the layer's experts.
+        """
+        # v2 format: has expert_idx field
         for e in self.experts:
-            if e["layer"] == layer and e["expert_idx"] == expert_idx:
+            if e.get("layer") == layer and e.get("expert_idx") == expert_idx:
                 return e["file"]
+        # v4 format: no expert_idx, use sequential order within layer
+        layer_experts = [e for e in self.experts if e.get("layer") == layer]
+        if layer_experts and expert_idx < len(layer_experts):
+            return layer_experts[expert_idx]["file"]
         return None
 
     def get_experts_by_topic(self, topic: str) -> List[Dict]:
@@ -168,20 +178,28 @@ class AirMoEManifest:
 
     @classmethod
     def load(cls, path: str) -> "AirMoEManifest":
-        """Load manifest from JSON."""
+        """Load manifest from JSON.
+
+        Handles both the original AirMoE format and the V4 format
+        (which uses different field names and topic-based experts).
+        """
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        # V4 format uses 'name'/'base_model_file' instead of 'model_name'/'base_model'
         m = cls(
-            model_name=data.get("model_name", ""),
-            base_model=data.get("base_model", ""),
+            model_name=data.get("model_name", data.get("name", "")),
+            base_model=data.get("base_model", data.get("base_model_file", "")),
             n_layers=data.get("n_layers", 0),
             n_experts=data.get("n_experts", 0),
             expert_dim=data.get("expert_dim", 0),
-            compressed=data.get("compressed", False),
+            compressed=data.get("compressed", bool(data.get("expert_compression", False))),
         )
         m.experts = data.get("experts", [])
         m.bundles = data.get("bundles", [])
         m.created = data.get("created", "")
+        # Store V4-specific fields if present
+        if "topics" in data:
+            m.topics_map = data["topics"]
         return m
 
     def print_summary(self):
@@ -321,16 +339,10 @@ def build_airmoe_module(state: Dict[str, torch.Tensor],
     for i in range(n_layers):
         for ei in range(n_experts):
             expert_state = {}
-            for part in ["w_gate", "w_up", "w_down"]:
+            for part in ["w1", "w2", "w3"]:
                 k = f"blocks.{i}.ffn.experts.{ei}.{part}.weight"
                 if k in state:
                     if compress:
-                        expert_state.update({
-                            f"{part}_U": _compress_expert_svd(state[k], svd_energy)["U"],
-                            f"{part}_S": _compress_expert_svd(state[k], svd_energy)["S"],
-                            f"{part}_Vh": _compress_expert_svd(state[k], svd_energy)["Vh"],
-                        })
-                        # Recompute to avoid double work
                         U, S, Vh = torch.linalg.svd(state[k].float(), full_matrices=False)
                         cumsum = (S ** 2).cumsum(0)
                         total = cumsum[-1]
@@ -338,9 +350,10 @@ def build_airmoe_module(state: Dict[str, torch.Tensor],
                         expert_state[f"{part}_U"] = U[:, :k_rank].to(torch.bfloat16)
                         expert_state[f"{part}_S"] = S[:k_rank].to(torch.float16)
                         expert_state[f"{part}_Vh"] = Vh[:k_rank, :].to(torch.bfloat16)
+                        expert_state[f"{part}_rank"] = torch.tensor([k_rank], dtype=torch.int32)
                         svd_rank = k_rank
                     else:
-                        expert_state[part] = state[k]
+                        expert_state[f"{part}.weight"] = state[k]
                         svd_rank = 0
                     expert_keys_to_remove.append(k)
 
@@ -480,39 +493,93 @@ class AirMoECache:
         Supports both naming conventions:
           - v4: expert_l{layer}_{topic}.safetensors (topic-based)
           - v2: expert_l{layer}_e{idx}.safetensors (index-based)
+          - v4: expert_l{layer}_{topic}.safetensors (topic-based, many topics)
         """
         if self.manifest:
             rel = self.manifest.get_expert_file(layer_idx, expert_idx)
             if rel:
                 return os.path.join(self.base_dir, rel)
-        # Try topic-based naming first (v4)
-        topic_names = {0: "math", 1: "code", 2: "reasoning", 3: "general"}
-        topic_name = topic_names.get(expert_idx, "general")
-        topic_path = os.path.join(self.cache_dir,
-                                   f"expert_l{layer_idx}_{topic_name}.safetensors")
-        if os.path.exists(topic_path):
-            return topic_path
-        # Fallback to index-based naming (v2)
-        return os.path.join(self.cache_dir, f"expert_l{layer_idx}_e{expert_idx}.safetensors")
+        # Try index-based naming first (v2/v3)
+        idx_path = os.path.join(self.cache_dir, f"expert_l{layer_idx}_e{expert_idx}.safetensors")
+        if os.path.exists(idx_path):
+            return idx_path
+        # Try topic-based naming (v4): scan for expert_l{layer}_*.safetensors
+        # V4 has many topics per layer, so we can't use a hardcoded mapping.
+        # Instead, list files matching the pattern and return the first match.
+        import re
+        if os.path.isdir(self.cache_dir):
+            pattern = re.compile(rf'expert_l{layer_idx}_(.+)\.safetensors$')
+            for fname in sorted(os.listdir(self.cache_dir)):
+                m = pattern.match(fname)
+                if m:
+                    return os.path.join(self.cache_dir, fname)
+        # No match found — return the index-based path (will fail with clear error)
+        return idx_path
 
     def get_expert_by_topic(self, layer_idx: int, topic: str) -> Dict[str, torch.Tensor]:
-        """Get expert weights by topic name (e.g., 'math', 'code').
+        """Get expert weights by topic name (e.g., 'math_algebra', 'python_strings').
 
         This is the preferred method for v4 checkpoints where experts
-        are named by topic.
+        are named by topic. Works with any topic name from the manifest.
         """
-        # Map topic name to expert index
-        topic_to_idx = {"math": 0, "code": 1, "reasoning": 2, "general": 3}
-        expert_idx = topic_to_idx.get(topic, 3)
-        return self.get_expert(layer_idx, expert_idx)
+        if self.manifest:
+            # Search manifest for matching topic + layer
+            for e in self.manifest.experts:
+                if e.get("layer") == layer_idx and e.get("topic") == topic:
+                    expert_idx = e.get("expert_idx", -1)
+                    return self.get_expert(layer_idx, expert_idx)
+        # Direct file path construction
+        topic_path = os.path.join(self.cache_dir,
+                                   f"expert_l{layer_idx}_{topic}.safetensors")
+        if os.path.exists(topic_path):
+            # Load directly (bypass get_expert's index-based cache key)
+            key = (layer_idx, hash(topic) % 10000)
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                self.hit_count += 1
+                return self.cache[key]
+            self.miss_count += 1
+            from safetensors.torch import load_file
+            expert_state = load_file(topic_path)
+            if any(k.endswith("_U") for k in expert_state):
+                reconstructed = {}
+                for part_base in ["w1", "w2", "w3"]:
+                    U = expert_state.get(f"{part_base}_U")
+                    S = expert_state.get(f"{part_base}_S")
+                    Vh = expert_state.get(f"{part_base}_Vh")
+                    if U is not None and S is not None and Vh is not None:
+                        W = (U.float() * S.float().unsqueeze(0)) @ Vh.float()
+                        reconstructed[f"{part_base}.weight"] = W.to(torch.bfloat16).to(self.device)
+                expert_state = reconstructed
+            else:
+                expert_state = {k: v.to(self.device) for k, v in expert_state.items()}
+            self.cache[key] = expert_state
+            while len(self.cache) > self.max_resident:
+                self.cache.popitem(last=False)
+            return expert_state
+        raise FileNotFoundError(f"Expert file not found: {topic_path}")
+
+    def list_topics(self) -> List[str]:
+        """List all available expert topics (v4 format)."""
+        if self.manifest:
+            return list(set(e.get("topic", "") for e in self.manifest.experts if e.get("topic")))
+        import re
+        topics = set()
+        if os.path.isdir(self.cache_dir):
+            for fname in os.listdir(self.cache_dir):
+                m = re.match(r'expert_l\d+_(.+)\.safetensors$', fname)
+                if m:
+                    topics.add(m.group(1))
+        return sorted(topics)
 
     def get_experts_for_topic(self, topic: str) -> List[Dict[str, torch.Tensor]]:
         """Get all expert weights for a given topic across all layers.
 
         Returns a list of dicts, one per layer.
         """
+        n_layers = self.manifest.n_layers if self.manifest else 28
         experts = []
-        for layer in range(28):  # N_LAYERS
+        for layer in range(n_layers):
             try:
                 expert = self.get_expert_by_topic(layer, topic)
                 experts.append(expert)
@@ -544,7 +611,7 @@ class AirMoECache:
         # If compressed (SVD), reconstruct full weights
         if any(k.endswith("_U") for k in expert_state):
             reconstructed = {}
-            for part_base in ["w_gate", "w_up", "w_down"]:
+            for part_base in ["w1", "w2", "w3"]:
                 U = expert_state.get(f"{part_base}_U")
                 S = expert_state.get(f"{part_base}_S")
                 Vh = expert_state.get(f"{part_base}_Vh")

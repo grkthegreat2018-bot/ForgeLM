@@ -259,4 +259,13 @@ def build_xp_keystack() -> KeyStack:
     stack.add(AirMoEKey())          # AirLLM+MoE: expert hotswap from disk (novel arch)
     stack.add(KnowledgePackKey())   # zero-token knowledge via KV cache injection (2026)
     stack.add(CoTKnowledgePackKey())  # CoT reasoning traces as KV packs (self-play + 2026)
+    # --- Boot-time + storage optimization keys (lossless, 2026-08-08) ---
+    from .tensor_dedup_key import TensorDedupKey
+    from .attn_scale_fold_key import AttnScaleFoldKey
+    from .dead_weight_key import DeadWeightKey
+    from .rope_share_key import RoPEShareKey
+    stack.add(TensorDedupKey())      # dedup exact-same tensors (467 MB save on V2)
+    stack.add(AttnScaleFoldKey())    # fold 1/sqrt(d_k) into q/k_proj (compute save)
+    stack.add(DeadWeightKey())       # prune all-zero tensors (dead weight from init keys)
+    stack.add(RoPEShareKey())        # share RoPE cos/sin buffers across layers (VRAM save)
     return stack

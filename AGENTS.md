@@ -119,9 +119,126 @@ Transform weights directly between architectures, no extraction needed:
   - Combines ContextPatchKey + self-play (prompt→solution) pairs
   - Test-passed → positive patches, failed → negative anti-patches
   - LOSSLESS — safe for ForgeLM V2 and expert packs
-- **KeyStack**: 44 keys total (10 FULL, 5 BI, 21 PARTIAL, 8 TRIVIAL)
+- **MAC-Attention**: Match-Amend-Complete attention reuse — **IMPLEMENTED** (`keys/attn_reuse_key.py`)
+  - arxiv 2604.00235: reuse attention for similar queries, 14.3x attention speedup
+  - Caches (pre-RoPE query, unnormalized attention, sum_scores) per layer
+  - On match: amend cached attention with only NEW KV entries (O(new) not O(total))
+  - 99% hit rate in self-play, lossless at init (cache empty = all misses)
+  - TRIVIAL class: runtime cache, training-free, model-agnostic
+  - Conditional O(1) — O(1) on hit, O(N) on miss. Not true O(1).
+- **Gated DeltaNet-2**: Fixed-state recurrent attention — **IMPLEMENTED** (`keys/gated_deltanet_key.py`)
+  - arxiv 2605.22791: used in Qwen3.5, Kimi, Olmo Hybrid (production-ready)
+  - Channel-wise erase + write gates (decoupled), fixed (d×d) state per head
+  - TRUE O(1) per token — state NEVER grows, context length irrelevant
+  - Verified: 0.02x ratio (perfectly O(1)), 192 KB fixed state per layer
+  - PARTIAL class: needs fine-tuning (lossy at init). NOT for ForgeLM V2.
+- **SATA**: Symmetry-Aware Taylor Attention — **IMPLEMENTED** (`keys/sata_key.py`)
+  - arxiv 2602.00294: PROVES softmax attention is O(1) per token via Taylor expansion
+  - P=4 terms = Float16 precision (mathematical identity, not approximation)
+  - Fixed hidden state: (dV+1) × C(dK+P-1, P-1) per head, never grows
+  - Verified: 0.95x ratio (O(1)), cos=0.9997 vs standard attention at P=2
+  - PARTIAL class: near-lossless at P=4, needs fine-tuning for quality
+- **Context Phase Transition**: Bake context into weights, O(1) generation — **IMPLEMENTED** (`context_phase_transition.py`)
+  - Combines Context Patch + Knowledge Pack + Fact Injection (3 existing keys)
+  - 3-phase: Ingest (O(N), one-time) → Transition (apply patches) → Generate (O(1)/token)
+  - Context is IN THE WEIGHTS — no KV cache for context at generation
+  - PARTIAL class: approximation (rank-1 patches), best for structured context
+- **Stateful Transformers**: Async pre-compute, O(|query|) latency — **IMPLEMENTED** (`stateful_transformer.py`)
+  - arxiv 2605.13784: decouple data plane (async) from query plane (O(|q|))
+  - Process context in background thread, queries consume pre-computed KV
+  - 2.4-5.9x speedup, preserves full attention quality
+  - TRIVIAL class: runtime orchestration, training-free
+- **Forward Cache**: Cache forward passes for repeated inputs — **IMPLEMENTED** (`forward_cache.py`)
+  - SYSTEMS_IDEATION.md C2: 20-40% fewer forward passes in self-play
+  - LRU cache keyed on input token ID hash, returns cached logits on hit
+  - TRIVIAL class: runtime cache, training-free
+- **Self-Modeling**: Model predicts own errors, retries — **IMPLEMENTED** (`self_model.py`)
+  - SYSTEMS_IDEATION.md D5: confidence-based retry policy
+  - ConfidenceScorer (logit gap + entropy + top-1 prob) + RetryPolicy
+  - Retry with higher temperature on low confidence
+  - TRIVIAL class: runtime policy, training-free
+- **Expert Tying (V3)**: Tie expert weights across consecutive layer pairs — **IMPLEMENTED** (`keys/expert_tying_key.py`)
+  - arxiv 2606.16825: share MoE experts between layer pairs (0,1), (2,3), etc.
+  - 2x FFN VRAM reduction (924.8M -> 462.4M, saved 882 MB)
+  - LOSSY: cos=0.53 (experts between layers are NOT similar, cos=0.01)
+  - PARTIAL class: needs fine-tuning to recover quality
+- **WiSparse (C2)**: Weight-aware activation sparsity — **IMPLEMENTED** (`keys/wisparse_key.py`)
+  - Skip neurons where |activation| * |weight| < percentile threshold
+  - Training-free, cos=0.99995 at 3% target (14% actual sparsity)
+  - Precomputes weight importance (w1_norm * w3_norm * w2_norm per neuron)
+  - TRIVIAL class: runtime sparsity, no weight changes
+- **SharQ FP4 (C3)**: FP4 weights + sparse residual — **IMPLEMENTED** (`keys/sharq_fp4_key.py`)
+  - Decompose: weight = FP4_quantize(weight) + sparse_residual
+  - Per-channel scaling (better than per-tensor)
+  - cos=0.97 at 15% residual (2.5x compression), cos=0.99 at 40% (1.5x)
+  - TRIVIAL class: runtime quantization, training-free
+- **L1 Speculative Attention**: Draft low-rank attn, verify with full — **IMPLEMENTED** (`keys/speculative_keys.py`)
+  - Entropy-based accept/reject: low-entropy attention = easy to approximate
+  - cos=1.0 (LOSSLESS), 71% accept rate, 56.8% attention compute saved
+  - TRIVIAL class: runtime optimization, training-free
+- **L6 Speculative FFN**: Draft top-1 expert, verify with full — **IMPLEMENTED** (`keys/speculative_keys.py`)
+  - cos=1.0 (LOSSLESS), 0% accept rate with dense_bypass (experts differ)
+  - Would work with routed MoE (top-2 of 4) where top-1 dominates
+  - TRIVIAL class: runtime optimization, training-free
+- **L7 Redundant Layer Skip**: Skip near-identity layers — **IMPLEMENTED** (`keys/speculative_keys.py`)
+  - Greedy calibration: try each layer individually, skip only if output unchanged
+  - cos=1.0 (LOSSLESS) at 0% skip — this model has no truly redundant layers
+  - At 0.99 threshold: 9/28 skippable but cos=0.916 (lossy)
+  - TRIVIAL class: runtime optimization, training-free
+- **Tensor Deduplication**: Dedup exact-same tensors — **IMPLEMENTED** (`keys/tensor_dedup_key.py`)
+  - LOSSLESS: identical bytes → shared storage, zero information loss
+  - V2 has 165 duplicate tensors (467.3 MB): embed==head (466.75 MB tied but stored separately),
+    56x post_attn_norm==post_ffn_norm (all identity), 56x q_norm==k_norm (all identity),
+    28x router.gate==router.noise (all zeros)
+  - FULL class: reversible (dedup map records aliases), composable
+  - Applied to V2: 928 → 735 tensors, 3643 → 3176 MB (12.8% smaller, bit-exact)
+- **Attention Scale Folding**: Fold 1/sqrt(head_dim) into q_proj/k_up_proj — **IMPLEMENTED** (`keys/attn_scale_fold_key.py`)
+  - Math identity: fold^2 = scale, RoPE is linear so scale propagates through
+  - **NOT APPLIED to V2**: PyTorch's `F.scaled_dot_product_attention` bakes in 1/sqrt(head_dim)
+    internally, so folding into weights causes double-scaling. Would need model code change
+    to pass `scale=1.0` to SDPA. Key is correct math but incompatible with SDPA's default.
+  - FULL class: reversible (divide back), composable
+- **Dead Weight Pruning**: Remove all-zero tensors — **IMPLEMENTED** (`keys/dead_weight_key.py`)
+  - LOSSLESS: zero tensors contribute nothing to forward pass
+  - V2 has 28 dead tensors (0.34 MB): router.noise (all zeros from init)
+  - Skips router.gate (all-zero but IS used by MoE router forward pass)
+  - FULL class: reversible (record what was removed), composable
+- **RoPE Buffer Sharing**: Share cos/sin buffers across all layers — **IMPLEMENTED** (`keys/rope_share_key.py`)
+  - LOSSLESS: all layers use same RoPE (same head_dim, base, max_seq_len)
+  - Saves (n_layers-1) × 2 × max_seq_len × head_dim × 4 bytes VRAM
+  - TRIVIAL class: runtime optimization, no weight changes
+  - `apply_rope_sharing(model)` — call after model load, before inference
+- **V2 Optimized Checkpoint**: v2 + Dedup + DeadWeight (bit-exact lossless)
+  - Apply: `py -3.13 .devin\optimize_v2.py --apply --no-scale-fold` (bit-exact lossless)
+  - Load: `from research.optimized_loader import load_optimized_v2, load_optimized_v2_fast`
+  - Checkpoint: `research/checkpoints/forgelm_v2_opt.safetensors` (735 tensors, 3176 MB)
+  - Metadata: `forgelm_v2_opt.safetensors.meta.json` (dedup map)
+  - **Verified: logit cos=1.0, top-1 match=100%, KL=0.0 — PERFECTLY LOSSLESS**
+  - **Save: 467.6 MB (12.8%), 193 fewer tensors (20.8%)**
+- **KeyStack**: 61 keys total (13 FULL, 5 BI, 26 PARTIAL, 17 TRIVIAL)
 - **Version naming**: V1 = published. V2+ = unpublished dev versions until published to HF.
-- **Pipeline**: `python -m research.forge_pipeline` chains MLA → MoE → BitNet
+- **Pipeline**: `python -m research.serving.forge_pipeline` chains MLA → MoE → BitNet
+
+### Directory Structure (refactored)
+```
+research/
+  __init__.py, config.py, model_loader.py, checkpoint_io.py,
+  convert_keys.py, convert_key_svd.py    # core
+  training/         # self_play_expert_training, dpo_align, bake_v4, training_utils, chunked_ce
+  decoding/         # dspark, eagle, medusa, mtp
+  quantization/     # bitnet, spinquant, rotorquant, wanda_prune, inference_quant, kv_compress, paged_kv
+  evaluation/       # reasoning_benchmarks, prompt_tests*, goal_scorer, goal_tasks, livecodebench_eval
+  moe/              # moe (core conversion), airmoe_infinite, airmoe_hotswap, mola
+  serving/          # forge_pipeline, serve, chat_ui, fast_infer
+  runtime/          # vram_manager, cuda_graph, forward_cache, self_model, signal_capture, task_logger
+  architecture/     # dora, gateskip, live_learn, thinking_model
+  o1_generation/    # context_phase_transition, stateful_transformer
+  self_play/        # infinite_curriculum, recursive_self_play, self_play_sandbox
+  keys/             # 75 key implementations (weight transforms + runtime keys)
+  inference/        # forge_engine, kv_backend, decoding, streaming_llm, snapkv
+  checkpoints/      # forgelm_v2.safetensors, qwen_hf/ (tokenizer), forgelm_v4/ (AirMoE experts)
+  data/             # expert_training/ (training results)
+```
 
 ### Prong 2: Extraction + Fine-tune (same-arch, reduce training)
 Extract what's exact, approximate the rest, copy the impossible, then fine-tune:
@@ -132,7 +249,7 @@ Extract what's exact, approximate the rest, copy the impossible, then fine-tune:
 - **Trivial (direct copy):** Embedding, LM Head (tied), RoPE, Causal mask
 - **Numerical:** use `lstsq` (QR) not `pinv` (SVD); float64 for solve; center data with bias
 
-**Code:** `research/weight_extraction.py` (Prong 2), `research/convert_keys.py` + `convert_key_svd.py` (Prong 1)
+**Code:** `research/convert_keys.py` + `convert_key_svd.py` (Prong 1, core)
 **Docs:** `docs/keys/KEY_DEFINITION.md` — full classification with literature
 **Technique survey:** `docs/research/LLM_TECHNIQUES_SURVEY.md` — 320+ techniques across 6 parts (weights, runtime, KV cache, architecture, + 2026 addendum: MISA/Alloc-MoE/SpecMoE/LightMoE, TEMPO/PoT/ORCA/DiSCTT, task-vector=gradient/Pico, FOREVER/self-generated-replay/OAKS)
 **Novel ideation:** `docs/research/NOVEL_SOLUTION_IDEATION.md` — the AirMoE-style "combine techniques to solve each other's weaknesses" methodology + 12 novel idea candidates (GhostMoE, TTT-Pack, ExpertGenesis, FoldedHeadMoE, ConfSpec, FastExpertMerge, BudgetGuard, PocketExpert, DoRAPatch, CompressedPack, UncertainLearn, MTP-EAGLE-DSpark) + residual-problem map + research gaps. Use this to generate new keys.
@@ -619,3 +736,90 @@ At 12,000 tok/s: 50K steps × 2 × 1024 = 102.4M tokens, ~8.5 hours total.
 | KVQuant+H2O | kv_compress.py | 2-bit KV cache + eviction | 32K context on 12GB |
 | SSA | ssa.py | Sparse+full attention training | Sparse inference w/o loss |
 | EAGLE-3 | eagle.py | Lightweight spec decode head | 318x smaller draft |
+
+## Novel Runtime Keys (2026-08-08)
+
+Three new TRIVIAL-class keys for inference speed/memory optimization:
+
+- **CLKV (Cross-Layer KV Sharing)**: Share KV cache across consecutive layer pairs -- `keys/clkv_key.py`
+  - Novel: odd layers reuse preceding even layer's KV (skip KV compute entirely)
+  - 50% KV cache VRAM reduction (28 layers -> 14 unique KV caches)
+  - At T=32768: saves ~2.8 GB KV VRAM for ForgeLM V2
+  - TRIVIAL class: runtime cache sharing, training-free, reversible
+  - LOSSY (adjacent layer KV correlated but not identical, cos~0.7-0.9)
+  - Tested: 50% KV VRAM reduction verified, reversible (output matches baseline)
+  - Usage: `CLKVKey(share_factor=2).apply(model)` / `.revert(model)`
+
+- **AnchorVocab (Anchor Vocab Pruning)**: Cluster-based top-K logit projection -- `keys/anchor_vocab_key.py`
+  - Novel: k-means cluster vocab embeddings into K anchors, only compute exact
+    logits for top-C highest-scoring clusters (skip 98%+ of vocab)
+  - For ForgeLM V2 (vocab=151936): K=512, C=8 -> ~2374 candidates (1.6% of vocab)
+  - 46.8x head FLOPs reduction, 1.92x wall-clock speedup measured on RTX 5070
+  - Near-lossless: top-1 token matches baseline (correct token always in top clusters)
+  - TRIVIAL class: runtime optimization, training-free, reversible
+  - One-time k-means clustering at apply() (~2s for 151936 embeddings)
+  - Multi-token prefill uses full projection (fallback), single-token decode uses pruning
+  - Usage: `AnchorVocabKey(n_anchors=512, top_clusters=8).apply(model)` / `.revert(model)`
+
+- **AdaTopK (Adaptive Expert Top-K)**: Entropy-based dynamic expert routing -- `keys/adaptive_topk_key.py`
+  - Novel: per-token adaptive k based on router logit entropy
+  - Confident tokens (low entropy) -> top-1 (50% FFN FLOPs saved)
+  - Uncertain tokens (high entropy) -> top-3 (more experts, better quality)
+  - ~15% average FFN FLOPs reduction (avg k=1.7 vs fixed k=2)
+  - TRIVIAL class: runtime routing, training-free, reversible
+  - Orthogonal to Expert Tying (weight sharing) and Expert Consolidation (merging)
+  - Usage: `AdaTopKKey(min_k=1, max_k=3).apply(model)` / `.revert(model)`
+
+Test script: `python -u test_novel_keys.py` (all 5 tests pass: CLKV, AnchorVocab, AdaTopK, Combined, Benchmark)
+
+## Expert Training System
+
+### convert_to_v4.py — V2 to V4 AirMoE converter
+Re-runnable converter: rebuilds base model from V2, preserves trained experts.
+```powershell
+python convert_to_v4.py                              # Default: preserve trained, skip existing
+python convert_to_v4.py --rebuild-all                 # Wipe and rebuild everything
+python convert_to_v4.py --no-int4-base --svd-energy 0.99  # bf16 base, higher SVD quality
+```
+- 5 phases: load V2 -> separate base/experts -> int4 quantize base -> build expert library -> save manifest
+- Preserves `.trained_*` marker files (trained expert files not overwritten)
+- Skips existing seed expert files (only rebuilds if missing or --no-skip-existing)
+
+### train_expert.py — Simple expert trainer for ANY domain
+Dead simple CLI: throw data at a topic, get an improved expert.
+```powershell
+# Supervised mode (any domain: math, science, history, code, ...)
+python train_expert.py --topic physics --data physics.json --keywords "physics,force,energy,momentum"
+python train_expert.py --topic math_algebra --data problems.jsonl --epochs 5 --lr 1e-3
+python train_expert.py --topic history --data history.txt --label "History Knowledge"
+
+# Self-play mode (code tasks with I/O verification, delegates to existing system)
+python train_expert.py --topic python_algorithms --mode selfplay --epochs 3
+```
+Data formats: JSON `[{"prompt":"...","completion":"..."}]`, JSONL, CSV (prompt,completion), TXT (one per paragraph)
+- Auto-registers new topics in manifest (no source code edits needed)
+- Loads existing trained expert for continual improvement (not re-seed each time)
+- Only saves if val accuracy improves over baseline (prevents degradation)
+- Early stopping with best-weight restoration
+- LoRA fine-tuning on last 8 layers, expert 0 only (0.4M trainable params)
+- SVD compressed at 0.99 energy (near-lossless)
+- Writes `.trained_{topic}` marker file for the loader
+
+### AirMoE V4 Compatibility Fixes
+- Weight names: `w_gate/w_up/w_down` -> `w1/w2/w3` (matches actual model)
+- Topic paths: hardcoded 4-topic mapping -> directory scan for any topic name
+- Manifest: handles both V4 format (`name/base_model_file/topics`) and AirMoE format (`model_name/base_model`)
+- `get_expert_by_topic()`: takes any topic string, not just hardcoded names
+- `list_topics()`: scans expert directory for all available topics
+
+### Self-Play Expert Training (existing system)
+`research/training/self_play_expert_training.py` — code tasks with I/O verification
+- GoalTaskGenerator: programming archetypes (fibonacci, sort, is_prime, etc.)
+- RecursiveSelfPlay: generate -> execute -> fix -> retry
+- Quality scoring: minimalism + efficiency + diversity
+- LoRA fine-tuning on accepted solutions only (quality > 0.7)
+- Label smoothing + input dropout (fights self-reinforcing overfitting)
+- LiveCodeBench + reasoning benchmarks (contamination-free eval)
+- `_save_expert` now uses standalone SVD compression (no bake_v4.py dependency)
+- `_save_expert` now updates manifest.json (was missing — new topics invisible to router)
+- `train_all_topics` now reads topics from manifest (was hardcoded to 4 topics)

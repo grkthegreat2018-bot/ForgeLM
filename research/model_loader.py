@@ -38,10 +38,14 @@ def flash_attention(q, k, v, is_causal=True):
         return torch.matmul(attn, v)
 
 
-def _causal_mask(seq_len: int, total_len: int, past_len: int, device: torch.device) -> torch.Tensor:
+def _causal_mask(seq_len: int, total_len: int, past_len: int, device: torch.device,
+                 dtype: torch.dtype = None) -> torch.Tensor:
     """Create a causal mask for a query of length `seq_len` attending to `total_len` keys."""
     # For standard prefill (past_len == 0, seq_len == total_len) this is the usual upper-triangular mask.
-    return torch.triu(torch.full((seq_len, total_len), float("-inf"), device=device), diagonal=past_len + 1)
+    if dtype is None:
+        dtype = torch.float32
+    return torch.triu(torch.full((seq_len, total_len), float("-inf"), device=device, dtype=dtype),
+                      diagonal=past_len + 1)
 
 
 class RMSNorm(nn.Module):
@@ -202,7 +206,7 @@ class DifferentialAttention(nn.Module):
         else:
             # Chunked prefill with a custom causal mask — manual attention.
             scale = 1.0 / math.sqrt(self.head_dim)
-            mask = _causal_mask(T, total_len, past_len, x.device)
+            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
             scores1 = torch.matmul(q1, k1.transpose(-2, -1)) * scale + mask
             scores2 = torch.matmul(q2, k2.transpose(-2, -1)) * scale + mask
             attn1 = F.softmax(scores1, dim=-1)
@@ -296,7 +300,7 @@ class MultiHeadLatentAttention(nn.Module):
         elif past_len == 0 and T == total_len:
             out = flash_attention(q, k, v, is_causal=True)
         else:
-            mask = _causal_mask(T, total_len, past_len, x.device)
+            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
         out = out.transpose(1, 2).contiguous().view(B, T, C)
@@ -344,7 +348,7 @@ class StandardSDPA(nn.Module):
         elif past_len == 0 and T == total_len:
             out = flash_attention(q, k, v, is_causal=True)
         else:
-            mask = _causal_mask(T, total_len, past_len, x.device)
+            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
         out = out.transpose(1, 2).contiguous().view(B, T, C)
@@ -573,7 +577,7 @@ class ConfigurableResearchLLM(nn.Module):
         # The head Linear + CE are fused into chunked passes over the token dim,
         # saving ~2.8 GB at batch 2 / seq 1024 / vocab 151665.
         if self.config.use_chunked_ce and targets is not None and not use_cache:
-            from research.chunked_ce import chunked_linear_cross_entropy
+            from research.training.chunked_ce import chunked_linear_cross_entropy
             loss = chunked_linear_cross_entropy(
                 hidden.view(-1, hidden.size(-1)),
                 self.head.weight,

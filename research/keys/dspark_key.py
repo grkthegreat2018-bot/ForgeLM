@@ -117,6 +117,9 @@ class DSparkKey(Key):
 def init_dspark_from_lm_head(dspark_head, lm_head_weight):
     """Initialize a DSparkHead module from LM head weights (in-place).
 
+    Uses the DSparkKey to steal LM head weights for the parallel backbone.
+    The RNN and confidence head are zero-initialized (identity at start).
+
     Args:
         dspark_head: DSparkHead module
         lm_head_weight: LM head weight tensor (vocab_size, d_model)
@@ -139,23 +142,32 @@ def init_dspark_from_lm_head(dspark_head, lm_head_weight):
 
     w = result.weights
 
-    # Copy parallel backbone heads
+    # Copy parallel backbone heads — each head is nn.Sequential, last layer is Linear(vocab, d_model)
+    # The key outputs raw (vocab, d_model) weights that go into the LAST layer of each head
     for i, head_w in enumerate(w["parallel_heads"]):
         if i < len(dspark_head.parallel_heads):
-            dspark_head.parallel_heads[i].weight.data.copy_(head_w)
+            last_layer = dspark_head.parallel_heads[i][-1]  # nn.Linear(d_model, vocab_size)
+            if last_layer.weight.shape == head_w.shape:
+                last_layer.weight.data.copy_(head_w)
+            else:
+                # Shape mismatch — try partial copy
+                min_out = min(last_layer.weight.shape[0], head_w.shape[0])
+                min_in = min(last_layer.weight.shape[1], head_w.shape[1])
+                last_layer.weight.data[:min_out, :min_in].copy_(head_w[:min_out, :min_in])
 
-    # Zero-init RNN (already zero from key, but ensure)
-    if hasattr(dspark_head, 'rnn_W1'):
-        dspark_head.rnn_W1.data.zero_()
-        dspark_head.rnn_W2.data.zero_()
-    if hasattr(dspark_head, 'rnn_gate'):
-        dspark_head.rnn_gate.data.zero_()
-
-    # Confidence head: zero weight, zero bias → sigmoid(0) = 0.5
-    if hasattr(dspark_head, 'confidence_head'):
-        dspark_head.confidence_head.weight.data.zero_()
-        if dspark_head.confidence_head.bias is not None:
-            dspark_head.confidence_head.bias.data.zero_()
+    # Zero-init sequential module (RNN/Markov) — identity at start
+    # DSparkHead uses: W1 (nn.Embedding), W2 (nn.Linear), seq_proj (nn.Linear), conf_proj (nn.Linear)
+    with torch.no_grad():
+        dspark_head.W1.weight.zero_()  # nn.Embedding weight
+        dspark_head.W2.weight.zero_()  # nn.Linear weight (no bias)
+        if hasattr(dspark_head, 'seq_proj') and dspark_head.seq_proj is not None:
+            dspark_head.seq_proj.weight.zero_()
+            if dspark_head.seq_proj.bias is not None:
+                dspark_head.seq_proj.bias.zero_()
+        # Confidence head: zero weight + zero bias → sigmoid(0) = 0.5 (uniform)
+        dspark_head.conf_proj.weight.zero_()
+        if dspark_head.conf_proj.bias is not None:
+            dspark_head.conf_proj.bias.zero_()
 
     return result
 

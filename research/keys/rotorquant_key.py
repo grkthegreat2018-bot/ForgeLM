@@ -8,7 +8,7 @@ Key class: TRIVIAL — fixed formula, no data or training needed.
 """
 import torch
 from research.keys.base import Key, KeyClass, KeyResult
-from research.rotorquant import make_givens_rotations, rot2_apply, rot2_inverse
+from research.quantization.rotorquant import make_givens_rotations, rot2_apply, rot2_inverse
 
 
 class RotorQuantKey(Key):
