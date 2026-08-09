@@ -22,14 +22,12 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
+
+from research.tokenizer_cache import get_tokenizer
 
 load_dotenv()
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
-from research.config import get_config
-from research.model_loader import ModelLoader
-from research.runtime.task_logger import task_scope
 from research.checkpoint_io import (
     cleanup_step_checkpoints,
     emergency_save,
@@ -37,6 +35,10 @@ from research.checkpoint_io import (
     save_training_checkpoint,
     step_checkpoint_path,
 )
+from research.config import get_config
+from research.json_compat import dumps, loads
+from research.model_loader import ModelLoader
+from research.runtime.task_logger import task_scope
 from research.training.training_utils import (
     add_safeguard_args,
     configure_optimizer,
@@ -288,7 +290,7 @@ def main():
     cfg.max_seq_len = max(cfg.max_seq_len, args.max_seq_length)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = get_tokenizer("Qwen/Qwen2.5-0.5B")
 
     weights_path = args.resume or args.checkpoint
     print(f"Loading base model from {weights_path}...")
@@ -332,7 +334,7 @@ def main():
             import json
             with open(args.self_reward_prompts) as f:
                 for line in f:
-                    d = json.loads(line)
+                    d = loads(line)
                     prompts.append(d.get("prompt", d.get("text", "")))
         else:
             # Default prompts for self-rewarding.

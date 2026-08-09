@@ -30,8 +30,10 @@ Usage:
     # Replace WQ with identity in checkpoint
     apply_wq_elim(state_dict, n_layers=28, d_model=1536)
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -55,7 +57,7 @@ class WQElimKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Generate identity Q projection weights.
 
         Args:
@@ -90,7 +92,7 @@ class WQElimKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Check if Q projection is identity (eliminated)."""
         data = {}
         eliminated_layers = 0
@@ -107,8 +109,8 @@ class WQElimKey(Key):
         )
 
 
-def apply_wq_elim(state: Dict[str, torch.Tensor], n_layers: int,
-                  d_model: int) -> Dict[str, torch.Tensor]:
+def apply_wq_elim(state: dict[str, torch.Tensor], n_layers: int,
+                  d_model: int) -> dict[str, torch.Tensor]:
     """Replace Q projection with identity in a state dict.
 
     This is a lossless transform IF the model is fine-tuned afterwards
@@ -140,8 +142,8 @@ def apply_wq_elim(state: Dict[str, torch.Tensor], n_layers: int,
     return state
 
 
-def restore_wq_from_finetuned(state: Dict[str, torch.Tensor],
-                               n_layers: int) -> Dict[str, torch.Tensor]:
+def restore_wq_from_finetuned(state: dict[str, torch.Tensor],
+                               n_layers: int) -> dict[str, torch.Tensor]:
     """After fine-tuning with identity WQ, extract the effective WQ.
 
     If the model learned to compensate via norm and other projections,

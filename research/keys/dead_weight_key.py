@@ -16,8 +16,10 @@ Usage:
     from research.keys.dead_weight_key import DeadWeightKey, apply_dead_weight_prune
     state, removed = apply_dead_weight_prune(state)
 """
-import torch
 from typing import Dict, List, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -40,7 +42,7 @@ class DeadWeightKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Remove all-zero tensors from state dict.
 
         Args:
@@ -52,7 +54,7 @@ class DeadWeightKey(Key):
         """
         try:
             state = dict(data)
-            removed: List[str] = []
+            removed: list[str] = []
             saved_bytes = 0
 
             for key in list(state.keys()):
@@ -82,7 +84,7 @@ class DeadWeightKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Cannot restore without knowing original shapes — metadata needed."""
         return KeyResult(
             success=True,
@@ -91,7 +93,7 @@ class DeadWeightKey(Key):
         )
 
 
-def apply_dead_weight_prune(state: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+def apply_dead_weight_prune(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], list[str]]:
     """Remove all-zero tensors from state dict.
 
     Returns:

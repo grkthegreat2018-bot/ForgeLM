@@ -17,8 +17,10 @@ WARNING: Lossy key. Do NOT apply to ForgeLM V2 or expert packs.
 
 Key class: PARTIAL — lossy, reverse() is approximate (not exact round-trip).
 """
-import torch
 from typing import Dict, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -44,7 +46,7 @@ class BinaryG128Key(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Quantize FP16 weights to binary + group scales.
 
         Args:
@@ -69,7 +71,7 @@ class BinaryG128Key(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Reconstruct approximate FP16 weights from binary + scales (lossy)."""
         try:
             signs = weights["signs"]
@@ -85,7 +87,7 @@ class BinaryG128Key(Key):
 
 
 def binary_g128_quantize(weight: torch.Tensor,
-                         group_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+                         group_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a weight tensor to binary signs + per-group FP16 scales.
 
     Args:
@@ -133,8 +135,8 @@ def binary_g128_dequantize(signs: torch.Tensor, scales: torch.Tensor,
     return deq.reshape(-1)[:n].reshape(orig_shape)
 
 
-def apply_binary_g128(state_dict: Dict[str, torch.Tensor],
-                      group_size: int = 128) -> Dict[str, torch.Tensor]:
+def apply_binary_g128(state_dict: dict[str, torch.Tensor],
+                      group_size: int = 128) -> dict[str, torch.Tensor]:
     """Quantize all 2D Linear weights in a state dict to binary g128.
 
     Replaces each 2D weight with dequantized (lossy) FP16 so the model

@@ -10,9 +10,11 @@ Usage:
     # Apply to model
     apply_logit_cap(model, cap=30.0)
 """
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-from typing import Dict, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -29,10 +31,10 @@ class LogitCapKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL  # No weights, runtime only
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights={}, metadata={"cap": self.cap})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data={})
 
 

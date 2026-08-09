@@ -4,8 +4,10 @@ Reference: Xiao et al., "Efficient Streaming Language Models with Attention Sink
 (ICLR 2024, MIT). Enables infinite-length generation by pinning the first N
 tokens (attention sinks) and keeping a sliding window of recent K tokens.
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -30,7 +32,7 @@ class StreamingLLMKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Build a cache mask: first n_sinks + last window_size tokens kept."""
         seq_len = int(data["seq_len"])
         n_sinks = int(data.get("n_sinks", 4))
@@ -51,7 +53,7 @@ class StreamingLLMKey(Key):
             metadata={"seq_len": seq_len, "n_kept": n_kept},
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Passthrough — no weights to recover (policy is not invertible)."""
         return KeyResult(success=True, weights=weights,
                          metadata={"note": "trivial key, nothing to recover"})

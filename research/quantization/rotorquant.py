@@ -41,7 +41,6 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-
 # ── Lloyd-Max scalar quantizer (pure PyTorch, no scipy) ─────────────
 
 
@@ -180,7 +179,7 @@ class RotorQuantCache:
 
     def __init__(self, d_model: int, n_heads: int, head_dim: int,
                  bits: int = 4, max_seq_len: int = 2048,
-                 n_kv_heads: Optional[int] = None,
+                 n_kv_heads: int | None = None,
                  attention_type: str = "gqa",
                  seed: int = 42, device: str = "cpu",
                  dtype: torch.dtype = torch.float32):
@@ -210,23 +209,23 @@ class RotorQuantCache:
 
         # --- Storage ---
         # Deferred prefill buffers (FP16). Non-None while in prefill mode.
-        self._prefill_k: Optional[torch.Tensor] = None  # (B, Hkv, T, D) fp16
-        self._prefill_v: Optional[torch.Tensor] = None
+        self._prefill_k: torch.Tensor | None = None  # (B, Hkv, T, D) fp16
+        self._prefill_v: torch.Tensor | None = None
 
         # Quantized storage (after deferred conversion / decode insertion).
         # norms:   (B, Hkv, T)        fp16  — per-vector L2 norm
         # indices: (B, Hkv, T, D)     int32 — centroid index per coordinate
-        self._k_norms: Optional[torch.Tensor] = None
-        self._k_idx: Optional[torch.Tensor] = None
-        self._v_norms: Optional[torch.Tensor] = None
-        self._v_idx: Optional[torch.Tensor] = None
+        self._k_norms: torch.Tensor | None = None
+        self._k_idx: torch.Tensor | None = None
+        self._v_norms: torch.Tensor | None = None
+        self._v_idx: torch.Tensor | None = None
 
         self.current_length = 0
         self._quantized = False  # True once prefill buffer has been flushed to quantized
 
     # ── low-level quantize / dequantize for a single tensor ──
 
-    def _quantize_tensor(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _quantize_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Rotate + Lloyd-Max quantize a KV tensor.
 
         x: (B, Hkv, T, head_dim) float
@@ -279,7 +278,7 @@ class RotorQuantCache:
         and are appended in quantized form.
         """
         B, Hkv, T_new, D = k.shape
-        assert D == self.head_dim, f"head_dim mismatch: got {D}, expected {self.head_dim}"
+        assert self.head_dim == D, f"head_dim mismatch: got {D}, expected {self.head_dim}"
         assert Hkv == self.n_kv_heads, f"n_kv_heads mismatch: got {Hkv}, expected {self.n_kv_heads}"
 
         if T_new > 1:
@@ -322,7 +321,7 @@ class RotorQuantCache:
 
         self.current_length += T_new
 
-    def get(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def get(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Return approximate (K, V) tensors for attention computation.
 
         Returns:
@@ -336,7 +335,7 @@ class RotorQuantCache:
         v = self._dequantize_tensor(self._v_norms, self._v_idx)
         return k, v
 
-    def compress(self, k: torch.Tensor, v: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def compress(self, k: torch.Tensor, v: torch.Tensor) -> dict[str, torch.Tensor]:
         """Stateless compression of full K/V tensors.
 
         k, v: (B, n_kv_heads, T, head_dim) float
@@ -352,11 +351,11 @@ class RotorQuantCache:
             "n_kv_heads": self.n_kv_heads,
         }
 
-    def decompress(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def decompress(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Return approximate K/V from internal quantized storage (alias of get)."""
         return self.get()
 
-    def decompress_dict(self, comp: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def decompress_dict(self, comp: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress a dict produced by ``compress``."""
         k = self._dequantize_tensor(comp["k_norms"], comp["k_idx"])
         v = self._dequantize_tensor(comp["v_norms"], comp["v_idx"])
@@ -400,7 +399,7 @@ class RotorQuantCache:
 
 def benchmark(d_model: int = 4096, n_heads: int = 32, head_dim: int = 128,
               bits: int = 4, prefill_len: int = 512, decode_steps: int = 128,
-              device: str = "cpu", n_kv_heads: Optional[int] = None):
+              device: str = "cpu", n_kv_heads: int | None = None):
     """Benchmark RotorQuant compression ratio, speed, and reconstruction error.
 
     Prints:
@@ -447,7 +446,7 @@ def benchmark(d_model: int = 4096, n_heads: int = 32, head_dim: int = 128,
     v_rel = v_err / v_full.pow(2).mean().item()
 
     print("=" * 64)
-    print(f"RotorQuant (PlanarQuant) benchmark")
+    print("RotorQuant (PlanarQuant) benchmark")
     print("=" * 64)
     print(f"  config:        head_dim={head_dim}, bits={bits}, "
           f"n_kv_heads={n_kv_heads}, prefill={prefill_len}, decode={decode_steps}")

@@ -11,8 +11,11 @@ but the interpolation itself is lossy and irreversible.
 
 Key class: TRIVIAL — runtime weight mixing, no training, irreversible.
 """
+from collections.abc import Callable
+from typing import Dict, Optional
+
 import torch
-from typing import Dict, Callable, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -23,7 +26,7 @@ class PerQueryInterp:
     alpha in [0, 1]. Weights are mixed as W_mixed = alpha * W_A + (1-alpha) * W_B.
     """
 
-    def __init__(self, alpha_router: Optional[Callable[[torch.Tensor], float]] = None):
+    def __init__(self, alpha_router: Callable[[torch.Tensor], float] | None = None):
         self.alpha_router = alpha_router or self._default_router
 
     def _default_router(self, query_features: torch.Tensor) -> float:
@@ -36,10 +39,10 @@ class PerQueryInterp:
 
     def interpolate_weights(
         self,
-        weights_a: Dict[str, torch.Tensor],
-        weights_b: Dict[str, torch.Tensor],
+        weights_a: dict[str, torch.Tensor],
+        weights_b: dict[str, torch.Tensor],
         alpha: float,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """Interpolate two state dicts linearly.
 
         W_mixed = alpha * W_A + (1-alpha) * W_B
@@ -104,7 +107,7 @@ class PerQueryInterpKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Predict alpha from query features and interpolate weights.
 
         Args:
@@ -124,7 +127,7 @@ class PerQueryInterpKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Interpolation is lossy — cannot recover original weights."""
         return KeyResult(
             success=False,

@@ -31,8 +31,10 @@ Usage:
     state = apply_attn_scale_fold(state, n_layers=28, head_dim=128)
 """
 import math
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -56,7 +58,7 @@ class AttnScaleFoldKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Fold attention scale into q_proj and k_up_proj weights.
 
         Args:
@@ -157,7 +159,7 @@ class AttnScaleFoldKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Unfold scale from q_proj and k_up_proj (divide by fold_factor)."""
         try:
             state = dict(weights)
@@ -167,7 +169,7 @@ class AttnScaleFoldKey(Key):
                     layer = int(k.split(".")[1])
                     n_layers = max(n_layers, layer + 1)
 
-            out_dim = state[f"blocks.0.attn.q_proj.weight"].shape[0]
+            out_dim = state["blocks.0.attn.q_proj.weight"].shape[0]
             if out_dim == 1536:
                 head_dim = 128
             elif out_dim == 1024:
@@ -195,7 +197,7 @@ class AttnScaleFoldKey(Key):
             return KeyResult(success=False, error=str(e))
 
 
-def apply_attn_scale_fold(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def apply_attn_scale_fold(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Fold attention scale into q_proj and k_up_proj weights."""
     key = AttnScaleFoldKey()
     result = key.forward(state)

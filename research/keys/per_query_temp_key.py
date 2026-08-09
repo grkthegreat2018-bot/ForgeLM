@@ -125,7 +125,7 @@ def _adaptive_attention(
     v: torch.Tensor,
     temp: torch.Tensor,
     is_causal: bool = True,
-    attn_mask: Optional[torch.Tensor] = None,
+    attn_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Scaled dot-product attention with a *per-query* temperature.
 
@@ -192,7 +192,7 @@ class PerQueryTempKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL  # minimal identity-init weights, runtime patch
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """No-op — the key is a runtime configuration, not a weight generator."""
         return KeyResult(
             success=True,
@@ -205,7 +205,7 @@ class PerQueryTempKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op — nothing to extract (identity-init parameters)."""
         return KeyResult(success=True, data={})
 
@@ -221,7 +221,7 @@ def _make_patched_forward(original_forward, temp_module: PerQueryTemp):
     per-query temperature.
     """
 
-    def patched_forward(self, x, past_key_value=None, use_cache=False):
+    def patched_forward(self, x, past_key_value=None, use_cache=False, **kwargs):
         B, T, C = x.shape
         cls_name = type(self).__name__
 
@@ -274,7 +274,7 @@ def _make_patched_forward(original_forward, temp_module: PerQueryTemp):
             total_len = k.shape[-2]
             if T == 1 and total_len > 1:
                 out = _adaptive_attention(q, k, v, temp, is_causal=False)
-            elif past_len == 0 and T == total_len:
+            elif past_len == 0 and total_len == T:
                 out = _adaptive_attention(q, k, v, temp, is_causal=True)
             else:
                 from research.model_loader import _causal_mask
@@ -306,7 +306,7 @@ def _make_patched_forward(original_forward, temp_module: PerQueryTemp):
             total_len = k.shape[-2]
             if T == 1 and total_len > 1:
                 out = _adaptive_attention(q, k, v, temp, is_causal=False)
-            elif past_len == 0 and T == total_len:
+            elif past_len == 0 and total_len == T:
                 out = _adaptive_attention(q, k, v, temp, is_causal=True)
             else:
                 from research.model_loader import _causal_mask

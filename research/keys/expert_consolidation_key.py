@@ -23,9 +23,11 @@ Usage:
     from research.keys.expert_consolidation_key import ExpertConsolidationKey, apply_expert_consolidation
     state = apply_expert_consolidation(state, n_layers=28, n_experts=4, threshold=0.95)
 """
+from typing import Dict, List, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -53,7 +55,7 @@ class ExpertConsolidationKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Merge similar experts in the state dict.
 
         Args:
@@ -169,16 +171,16 @@ class ExpertConsolidationKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(
             success=True, data=weights,
             metadata={"reversible": False, "note": "Merged experts cannot be un-merged"},
         )
 
 
-def apply_expert_consolidation(state: Dict[str, torch.Tensor], n_layers: int,
+def apply_expert_consolidation(state: dict[str, torch.Tensor], n_layers: int,
                                 n_experts: int, threshold: float = 0.95,
-                                min_experts: int = 2) -> Dict[str, torch.Tensor]:
+                                min_experts: int = 2) -> dict[str, torch.Tensor]:
     """Merge similar MoE experts in the state dict.
 
     Args:
@@ -204,8 +206,8 @@ def apply_expert_consolidation(state: Dict[str, torch.Tensor], n_layers: int,
     return result.weights
 
 
-def compute_expert_similarities(state: Dict[str, torch.Tensor],
-                                 n_layers: int) -> List[List[float]]:
+def compute_expert_similarities(state: dict[str, torch.Tensor],
+                                 n_layers: int) -> list[list[float]]:
     """Compute expert similarity matrix for analysis (no merging)."""
     all_sims = []
     for i in range(n_layers):

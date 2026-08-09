@@ -41,23 +41,22 @@ sys.stdout.reconfigure(encoding="utf-8")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer
 
+from research.checkpoint_io import load_checkpoint, save_checkpoint
 from research.config import get_config
 from research.model_loader import ModelLoader
+from research.runtime.signal_capture import filter_training_pairs, load_signals
+from research.tokenizer_cache import get_tokenizer
+from research.training.dpo_align import dpo_loss
 from research.training.training_utils import (
     BinaryDataset,
     evaluate_loss,
+    get_lr,
     init_ema,
+    patch_triton_cache_for_windows,
     restore_ema,
     update_ema,
-    get_lr,
-    patch_triton_cache_for_windows,
 )
-from research.checkpoint_io import save_checkpoint, load_checkpoint
-from research.runtime.signal_capture import load_signals, filter_training_pairs
-from research.training.dpo_align import dpo_loss
-
 
 # ---------------------------------------------------------------------------
 # LoRA adapter
@@ -238,7 +237,7 @@ class LiveTrainer:
         self.device = device
         self.ema_decay = ema_decay
         self.max_seq_len = max_seq_len
-        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B", trust_remote_code=True)
+        self.tokenizer = get_tokenizer("Qwen/Qwen2.5-0.5B")
 
         # Load base model (frozen).
         print(f"Loading base model from {base_ckpt}...")
@@ -482,7 +481,7 @@ class LiveTrainer:
 
         dpo_every: run a DPO step every N SFT steps (uses edit pairs).
         """
-        print(f"\n=== Live Trainer ===")
+        print("\n=== Live Trainer ===")
         print(f"Signals: {signals_path} | steps: {steps} | lr: {lr} | batch: {batch_size}")
 
         interactions = load_signals(signals_path)

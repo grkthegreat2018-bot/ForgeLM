@@ -8,15 +8,14 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-
 
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class TaskLogger:
@@ -25,7 +24,7 @@ class TaskLogger:
         self.pid = os.getpid()
         self.tasks_dir = Path(tasks_dir) if tasks_dir else TASKS_DIR
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         self.task_id = task_id or f"{name}_{timestamp}_{self.pid}"
         self.task_dir = self.tasks_dir / self.task_id
         self.task_dir.mkdir(parents=True, exist_ok=True)
@@ -51,19 +50,23 @@ class TaskLogger:
             try:
                 with open(self.status_file, "w", encoding="utf-8") as f:
                     json.dump(self.status, f, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                import warnings
+                warnings.warn(f"task_logger: failed to write status: {e}",
+                              RuntimeWarning, stacklevel=2)
 
     def _write_log(self, text):
         with self._lock:
             try:
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(text + "\n")
-            except Exception:
-                pass
+            except Exception as e:
+                import warnings
+                warnings.warn(f"task_logger: failed to write log: {e}",
+                              RuntimeWarning, stacklevel=2)
 
     def log(self, message):
-        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        ts = datetime.now(UTC).strftime("%H:%M:%S")
         line = f"[{ts}] {message}"
         self.status["message"] = message
         self.status["updated_at"] = _now()
@@ -85,7 +88,7 @@ class TaskLogger:
         self.status["updated_at"] = _now()
         if message:
             self.status["message"] = message
-            self._write_log(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {message}")
+            self._write_log(f"[{datetime.now(UTC).strftime('%H:%M:%S')}] {message}")
         self._write_status()
 
 

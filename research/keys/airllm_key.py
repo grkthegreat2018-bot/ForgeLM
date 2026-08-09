@@ -19,11 +19,13 @@ Key class: TRIVIAL — no weights to learn, just a runtime strategy.
 The "forward" splits a checkpoint into shards; "reverse" reassembles it.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from pathlib import Path
-from typing import Dict, Optional, List, Tuple
-from concurrent.futures import ThreadPoolExecutor
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 
@@ -76,8 +78,8 @@ class AirLLMKey(Key):
             ])
 
             # Group tensors by layer
-            layer_tensors: Dict[str, Dict[str, torch.Tensor]] = {}
-            extra_tensors: Dict[str, torch.Tensor] = {}
+            layer_tensors: dict[str, dict[str, torch.Tensor]] = {}
+            extra_tensors: dict[str, torch.Tensor] = {}
 
             with safe_open(ckpt_path, framework="pt") as f:
                 all_keys = list(f.keys())
@@ -163,8 +165,8 @@ class AirLLMKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def _compress_tensors(self, tensors: Dict[str, torch.Tensor],
-                          mode: str) -> Dict[str, torch.Tensor]:
+    def _compress_tensors(self, tensors: dict[str, torch.Tensor],
+                          mode: str) -> dict[str, torch.Tensor]:
         """Block-wise weight quantization (4-bit or 8-bit).
 
         Only quantizes 2D weight matrices. Biases, norms, and 1D tensors
@@ -239,7 +241,7 @@ class StreamingInference:
         # Identify layer modules
         self.layer_modules = self._find_layer_modules()
 
-    def _find_layer_modules(self) -> List[str]:
+    def _find_layer_modules(self) -> list[str]:
         """Find module names that correspond to transformer layers."""
         layer_names = []
         for name, module in self.model.named_modules():

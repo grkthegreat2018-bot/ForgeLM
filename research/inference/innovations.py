@@ -24,9 +24,10 @@ XP model checkpoint:
     proceeds speculatively while the residual stream loads concurrently.
     Inspired by Lynx (arxiv 2607.01831).
 """
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict
 
 
 class MRLAdaptiveContext:
@@ -113,7 +114,7 @@ class MRLAdaptiveContext:
         print(f"  [MRL-AdaptiveContext] Truncated {d}→{d_k} dims "
               f"({self.keep_ratio*100:.0f}% kept, {(1-self.keep_ratio)*100:.0f}% saved)")
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         return {"name": "mrl_adaptive_context",
                 "d_model": self.d_model, "d_keep": self.d_keep,
                 "keep_ratio": self.keep_ratio,
@@ -144,7 +145,7 @@ class QuaRotKV:
         self.has_quarot = has_quarot
         self.qmax = (1 << (bits - 1)) - 1
 
-    def quantize_v(self, v: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def quantize_v(self, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize V values. If QuaRot was applied, V is already Gaussianized.
 
         Args:
@@ -157,7 +158,7 @@ class QuaRotKV:
         q = torch.clamp(torch.round(v / scale), -self.qmax, self.qmax)
         return q, scale
 
-    def quantize_k(self, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def quantize_k(self, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize K values. K was NOT rotated by QuaRot — apply rotation first.
 
         Uses a lightweight per-head Hadamard rotation (block-diagonal, 64-dim blocks)
@@ -195,7 +196,7 @@ class QuaRotKV:
         k_rot = q * scale
         return torch.matmul(k_rot, self._k_hadamard_inv)
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         return {"name": "quarot_kv", "bits": self.bits,
                 "has_quarot": self.has_quarot,
                 "v_rotation": "pre-applied (QuaRot)",
@@ -225,8 +226,8 @@ class V0WarmStart:
     gates can be >0 for layers that benefit most from V_0 warm start.
     """
 
-    def __init__(self, v0_weight: Optional[torch.Tensor] = None,
-                 gates: Optional[torch.Tensor] = None):
+    def __init__(self, v0_weight: torch.Tensor | None = None,
+                 gates: torch.Tensor | None = None):
         self.v0_weight = v0_weight  # [n_kv * head_dim, d_model]
         self.gates = gates  # [n_layers] — per-layer gate values
         self._v0_cache = None  # Cached V_0 projections for prompt tokens
@@ -242,7 +243,7 @@ class V0WarmStart:
             return None  # No ValueResidual in this checkpoint
         return cls(v0_weight=v0, gates=gates)
 
-    def warm_start(self, hidden_states: torch.Tensor) -> Dict[int, torch.Tensor]:
+    def warm_start(self, hidden_states: torch.Tensor) -> dict[int, torch.Tensor]:
         """Compute V_0 warm-start values for each layer.
 
         Args:
@@ -272,7 +273,7 @@ class V0WarmStart:
                     warm[li] = v0_proj * gate
         return warm
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         n_active = 0
         if self.gates is not None:
             n_active = (self.gates > 0).sum().item()
@@ -309,7 +310,7 @@ class ProgressiveKV:
         self.anchor_qmax = (1 << (anchor_bits - 1)) - 1
         self.residual_qmax = (1 << (residual_bits - 1)) - 1
 
-    def split(self, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def split(self, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split a tensor into anchor + residual streams.
 
         Args:
@@ -341,7 +342,7 @@ class ProgressiveKV:
         residual = residual_q * residual_scale
         return anchor + residual
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         return {"name": "progressive_kv",
                 "anchor_bits": self.anchor_bits,
                 "residual_bits": self.residual_bits,

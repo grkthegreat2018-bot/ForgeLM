@@ -27,9 +27,11 @@ Usage:
          "test_passed": False}],  # NOT injected — fails tests
         n_layers=28, d_model=1536, d_ff=8960)
 """
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -57,7 +59,7 @@ class TestGatedFactInjectionKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Inject test-verified facts into MLP weights.
         data: {"state", "verified_solutions", "n_layers", "d_model", "d_ff", "layer_idx"}
         """
@@ -86,7 +88,7 @@ class TestGatedFactInjectionKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not supported — injection overwrites hidden dims."""
         return KeyResult(
             success=False,
@@ -144,8 +146,8 @@ def extract_fact_vector(
 
 
 def inject_test_verified(
-    state: Dict[str, torch.Tensor],
-    verified_solutions: List[dict],
+    state: dict[str, torch.Tensor],
+    verified_solutions: list[dict],
     n_layers: int,
     d_model: int,
     d_ff: int = 8960,

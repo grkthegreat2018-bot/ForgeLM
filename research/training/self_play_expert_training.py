@@ -16,29 +16,35 @@ Usage:
     python -u -m research.self_play_expert_training --topics python_algorithms,math_arithmetic
     python -u -m research.self_play_expert_training --all-topics --rounds 50
 """
+import argparse
+import json
 import os
 import sys
-import time
-import json
-import argparse
-import torch
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
 
 from research.config import get_config
+from research.evaluation.goal_tasks import GoalTask, GoalTaskGenerator
+from research.json_compat import dumps, loads
 from research.model_loader import ModelLoader
-from research.self_play.recursive_self_play import RecursiveSelfPlay
 from research.moe.airmoe_infinite import InfiniteAirMoE
-from research.evaluation.goal_tasks import GoalTaskGenerator, GoalTask
-from research.self_play.infinite_curriculum import InfiniteCurriculum, ProposedTask
-from research.runtime.vram_manager import VRAMManager
-from research.keys.softpick_key import apply_softpick
-from research.keys.per_query_temp_key import apply_per_query_temp
+from research.self_play.recursive_self_play import RecursiveSelfPlay
+
+try:
+    from loguru import logger as _log
+except ImportError:
+    import logging
+    _log = logging.getLogger("training")
+from research.checkpoint_io import save_checkpoint
 from research.keys.norm_gated_mod_key import apply_norm_gated_mod
-from transformers import AutoTokenizer
+from research.keys.per_query_temp_key import apply_per_query_temp
+from research.keys.softpick_key import apply_softpick
+from research.runtime.vram_manager import VRAMManager
+from research.self_play.infinite_curriculum import InfiniteCurriculum, ProposedTask
+from research.tokenizer_cache import get_tokenizer
 
 # Goal-oriented task generator (replaces function-stub prompt library)
 # Generates GoalTasks with adaptive difficulty and I/O verification pairs
@@ -68,7 +74,7 @@ class ExpertSelfPlayTrainer:
     """
 
     def __init__(self, model, tokenizer, airmoe: InfiniteAirMoE,
-                 log_dir: str = "D:/windsurf/ForgeAI/research/data/expert_training",
+                 log_dir: str = None,
                  device: str = "cuda",
                  learning_rate: float = 1e-4,
                  max_rounds: int = 3,
@@ -81,6 +87,7 @@ class ExpertSelfPlayTrainer:
                  vram_manager: 'VRAMManager' = None,
                  max_gen_tokens: int = 120,
                  use_curriculum: bool = False):
+        if log_dir is None: from research.paths import EXPERT_TRAINING_DIR, as_str; log_dir = as_str(EXPERT_TRAINING_DIR)
         self.model = model
         self.tokenizer = tokenizer
         self.airmoe = airmoe
@@ -137,7 +144,7 @@ class ExpertSelfPlayTrainer:
                     n_epochs: int = 3,
                     patience: int = 2,
                     val_ratio: float = 0.2,
-                    k_samples: int = 1) -> Dict:
+                    k_samples: int = 1) -> dict:
         """Train one topic expert via goal-oriented self-play.
 
         Generates GoalTasks with adaptive difficulty, runs recursive self-play
@@ -158,15 +165,13 @@ class ExpertSelfPlayTrainer:
         import random
         rng = random.Random(42)
 
-        print(f"\n{'='*60}")
-        print(f"Training Expert: {topic} (goal-oriented)")
-        print(f"{'='*60}")
+        _log.info(f"Training Expert: {topic} (goal-oriented)")
 
         # Map topic to archetypes
-        archetypes = DOMAIN_ARCHETYPES.get(topic, list(GoalTaskGenerator.__init__.__code__.co_consts) if False else
-                                            ["fibonacci", "factorial", "is_prime", "gcd",
-                                             "reverse_string", "sum_list", "sort_list",
-                                             "count_vowels", "is_palindrome", "power"])
+        archetypes = DOMAIN_ARCHETYPES.get(topic,
+                                           ["fibonacci", "factorial", "is_prime", "gcd",
+                                            "reverse_string", "sum_list", "sort_list",
+                                            "count_vowels", "is_palindrome", "power"])
         print(f"  Archetypes: {archetypes}")
 
         # ── Task generation: curriculum or fixed archetypes ──────
@@ -203,8 +208,9 @@ class ExpertSelfPlayTrainer:
                         try:
                             task = _goal_gen.generate(archetype=arch, difficulty=diff)
                             all_tasks.append(task)
-                        except (ValueError, KeyError):
-                            pass
+                        except (ValueError, KeyError) as e:
+                            import warnings
+                            warnings.warn(f"task dedup: {e}", RuntimeWarning, stacklevel=2)
 
             self.curriculum.print_stats()
         else:
@@ -214,8 +220,9 @@ class ExpertSelfPlayTrainer:
                     try:
                         task = _goal_gen.generate(archetype=arch, difficulty=diff)
                         all_tasks.append(task)
-                    except (ValueError, KeyError):
-                        pass
+                    except (ValueError, KeyError) as e:
+                        import warnings
+                        warnings.warn(f"task dedup: {e}", RuntimeWarning, stacklevel=2)
             # Add more tasks by generating with adaptive difficulty
             for _ in range(n_tasks - len(all_tasks)):
                 try:
@@ -223,8 +230,9 @@ class ExpertSelfPlayTrainer:
                     arch = rng.choice(archetypes)
                     task = _goal_gen.generate(archetype=arch)
                     all_tasks.append(task)
-                except (ValueError, KeyError):
-                    pass
+                except (ValueError, KeyError) as e:
+                    import warnings
+                    warnings.warn(f"task dedup: {e}", RuntimeWarning, stacklevel=2)
 
         if not all_tasks:
             print(f"  No goal tasks generated for topic '{topic}', skipping")
@@ -257,13 +265,14 @@ class ExpertSelfPlayTrainer:
                 if loaded:
                     print(f"  [AirMoE] Loaded fine-tuned expert for topic '{topic}'")
                 else:
-                    print(f"  [AirMoE] Load failed — using base expert 0 weights")
+                    print("  [AirMoE] Load failed — using base expert 0 weights")
             else:
                 print(f"  [AirMoE] No fine-tuned expert for '{topic}' — using base weights")
         else:
-            print(f"  (AirMoE disabled — using base expert 0 weights)")
+            print("  (AirMoE disabled — using base expert 0 weights)")
 
         # Collect successful solutions
+        # Stream to JSONL to avoid OOM on large runs (each packet has full code + reasoning)
         successes = []
         failures = []
         val_history = []
@@ -275,6 +284,11 @@ class ExpertSelfPlayTrainer:
         best_ft_stats = None
         stopped_early = False
 
+        # JSONL stream for successes (append-only, prevents OOM on large runs)
+        successes_jsonl = self.log_dir / f"successes_{topic}.jsonl"
+        successes_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        _successes_file = open(successes_jsonl, 'a', encoding='utf-8')
+
         # ── Curriculum: sort by difficulty (easy first) ──────────────
         diff_order = {"easy": 0, "medium": 1, "hard": 2}
         train_tasks_sorted = sorted(train_tasks, key=lambda t: diff_order.get(t.difficulty, 1))
@@ -283,100 +297,120 @@ class ExpertSelfPlayTrainer:
         # to force the model to attempt unsolved tasks (prevents memorizing solved ones)
         solved_tasks = set()  # set of task descriptions that were solved
 
-        for epoch in range(n_epochs):
-            print(f"\n  Epoch {epoch+1}/{n_epochs}")
+        # tqdm for epoch-level progress (long-running training)
+        try:
+            from tqdm import tqdm
+            epoch_iter = tqdm(range(n_epochs), desc="Epochs", unit="ep")
+        except ImportError:
+            epoch_iter = range(n_epochs)
+
+        for epoch in epoch_iter:
+            if not hasattr(epoch_iter, 'set_description'):  # plain range, no tqdm
+                _log.info(f"Epoch {epoch+1}/{n_epochs}")
             epoch_successes = 0
             epoch_skipped = 0
 
+            # Filter out already-solved tasks (anti-overfitting)
+            active_tasks = []
             for i, task in enumerate(train_tasks_sorted):
-                # Skip tasks already solved in previous epochs (anti-overfitting)
                 if task.description in solved_tasks and epoch > 0:
                     epoch_skipped += 1
-                    continue
-
-                task_short = f"{task.archetype}({task.difficulty}): {task.description[:40]}"
-                if (i + 1) % 10 == 0 or i == 0:
-                    print(f"\n    [{i+1}/{len(train_tasks_sorted)}] {task_short}")
-
-                # Run goal-oriented self-play with multi-dim scoring
-                result = self.engine.run_goal_task(task, k_samples=k_samples,
-                                                   use_reasoning=True)
-
-                attempts = result.get("attempts", [])
-                success = result.get("final_success", False)
-                best_quality = result.get("best_quality", 0.0)
-
-                # Record result for adaptive difficulty
-                _goal_gen.record_result(task.domain, success)
-
-                # Record result for curriculum difficulty adaptation (Goldilocks)
-                if self.curriculum is not None:
-                    # Find the ProposedTask that generated this GoalTask
-                    proposed = next((t for t in self.curriculum._task_queue
-                                     if t.id == task.id), None)
-                    if proposed is not None:
-                        self.curriculum.record_result(proposed, success)
-
-                # Show results
-                show = success or (i + 1) % 10 == 0
-                if show:
-                    for att in attempts:
-                        if att.get("sample", 0) > 0:
-                            continue  # only show sample 0 for brevity
-                        code_lines = att["code"].strip().split("\n")
-                        code_preview = code_lines[0][:80] if code_lines else ""
-                        status = "OK" if att["success"] else "FAIL"
-                        q = att.get("quality", 0)
-                        acc = "acc" if att.get("accepted") else "rej"
-                        print(f"      R{att['round']}: {status} {acc} q={q:.2f} | {code_preview}")
-                        if att["success"]:
-                            ems = att.get("exec_time_ms", 0)
-                            gms = att.get("gen_time_ms", 0)
-                            nodes = att.get("ast_nodes", 0)
-                            print(f"        {gms:.0f}ms gen + {ems:.0f}ms exec | {nodes} AST nodes")
-                        elif att.get("error"):
-                            err_lines = att["error"].split("\n")
-                            for el in err_lines[:2]:
-                                if el.strip():
-                                    print(f"        Error: {el.strip()[:100]}")
-
-                if success:
-                    epoch_successes += 1
-                    solved_tasks.add(task.description)  # mark as solved (skip next epoch)
-                    # Find the best accepted attempt
-                    best_att = max(
-                        (a for a in attempts if a.get("accepted")),
-                        key=lambda a: a.get("quality", 0),
-                        default=attempts[-1] if attempts else {})
-                    successes.append({
-                        "prompt": task.description,
-                        "goal_id": task.id,
-                        "solution": best_att.get("code", ""),
-                        "reasoning": result.get("reasoning_text", ""),
-                        "rounds": result.get("rounds_used", 0),
-                        "quality": best_quality,
-                        "scores": best_att.get("scores", {}),
-                        "ast_nodes": best_att.get("ast_nodes", 0),
-                        "fingerprint": best_att.get("fingerprint", {}),
-                        "gen_ms": best_att.get("gen_time_ms", 0),
-                        "exec_ms": best_att.get("exec_time_ms", 0),
-                        "archetype": task.archetype,
-                        "difficulty": task.difficulty,
-                        "epoch": epoch,
-                    })
                 else:
-                    last_err = attempts[-1].get("error", "no output") if attempts else "no output"
-                    failures.append({
-                        "goal_id": task.id,
-                        "archetype": task.archetype,
-                        "last_error": last_err,
-                        "rounds": result.get("rounds_used", 0),
-                    })
+                    active_tasks.append((i, task))
+
+            if active_tasks:
+                print(f"\n    Running {len(active_tasks)} tasks in batches of 8...")
+                # Batched self-play: all tasks processed round-by-round in parallel
+                batch_goals = [t for _, t in active_tasks]
+                results = self.engine.run_goal_tasks_batch(
+                    batch_goals, k_samples=k_samples,
+                    use_reasoning=True, batch_size=8)
+
+                # Process results
+                from research.buffered_log import blog
+                for (i, task), result in zip(active_tasks, results):
+                    attempts = result.get("attempts", [])
+                    success = result.get("final_success", False)
+                    best_quality = result.get("best_quality", 0.0)
+
+                    # Record result for adaptive difficulty
+                    _goal_gen.record_result(task.domain, success)
+
+                    # Record result for curriculum difficulty adaptation
+                    if self.curriculum is not None:
+                        proposed = next((t for t in self.curriculum._task_queue
+                                         if t.id == task.id), None)
+                        if proposed is not None:
+                            self.curriculum.record_result(proposed, success)
+
+                    # Show results
+                    task_short = f"{task.archetype}({task.difficulty}): {task.description[:40]}"
+                    show = success or (i + 1) % 10 == 0
+                    if show:
+                        blog.print(f"    [{i+1}/{len(train_tasks_sorted)}] {task_short}")
+                        for att in attempts:
+                            if att.get("sample", 0) > 0:
+                                continue
+                            code_lines = att["code"].strip().split("\n")
+                            code_preview = code_lines[0][:80] if code_lines else ""
+                            status = "OK" if att["success"] else "FAIL"
+                            q = att.get("quality", 0)
+                            acc = "acc" if att.get("accepted") else "rej"
+                            blog.print(f"      R{att['round']}: {status} {acc} q={q:.2f} | {code_preview}")
+                            if att["success"]:
+                                ems = att.get("exec_time_ms", 0)
+                                gms = att.get("gen_time_ms", 0)
+                                nodes = att.get("ast_nodes", 0)
+                                blog.print(f"        {gms:.0f}ms gen + {ems:.0f}ms exec | {nodes} AST nodes")
+                            elif att.get("error"):
+                                err_lines = att["error"].split("\n")
+                                for el in err_lines[:2]:
+                                    if el.strip():
+                                        blog.print(f"        Error: {el.strip()[:100]}")
+
+                    if success:
+                        epoch_successes += 1
+                        solved_tasks.add(task.description)
+                        best_att = max(
+                            (a for a in attempts if a.get("accepted")),
+                            key=lambda a: a.get("quality", 0),
+                            default=attempts[-1] if attempts else {})
+                        successes.append({
+                            "prompt": task.description,
+                            "goal_id": task.id,
+                            "solution": best_att.get("code", ""),
+                            "reasoning": result.get("reasoning_text", ""),
+                            "rounds": result.get("rounds_used", 0),
+                            "quality": best_quality,
+                            "scores": best_att.get("scores", {}),
+                            "ast_nodes": best_att.get("ast_nodes", 0),
+                            "fingerprint": best_att.get("fingerprint", {}),
+                            "gen_ms": best_att.get("gen_time_ms", 0),
+                            "exec_ms": best_att.get("exec_time_ms", 0),
+                            "archetype": task.archetype,
+                            "difficulty": task.difficulty,
+                            "epoch": epoch,
+                        })
+                        _successes_file.write(dumps(
+                            successes[-1], ensure_ascii=False) + "\n")
+                        _successes_file.flush()
+                    else:
+                        last_err = attempts[-1].get("error", "no output") if attempts else "no output"
+                        failures.append({
+                            "goal_id": task.id,
+                            "archetype": task.archetype,
+                            "last_error": last_err,
+                            "rounds": result.get("rounds_used", 0),
+                        })
 
             train_rate = epoch_successes / len(train_tasks_sorted)
             skip_info = f" (skipped {epoch_skipped} solved)" if epoch_skipped > 0 else ""
-            print(f"\n  Epoch {epoch+1} train: {epoch_successes}/{len(train_tasks_sorted)} "
-                  f"({train_rate:.1%}){skip_info}")
+            blog.flush()  # flush buffered per-task output before epoch summary
+            _log.info(f"Epoch {epoch+1} train: {epoch_successes}/{len(train_tasks_sorted)} "
+                      f"({train_rate:.1%}){skip_info}")
+            if hasattr(epoch_iter, 'set_postfix'):
+                epoch_iter.set_postfix(success=f"{epoch_successes}/{len(train_tasks_sorted)}",
+                                       rate=f"{train_rate:.0%}")
 
             # ── Deduplicate THIS EPOCH's new successes only ───────────
             # Only train on solutions from this epoch (not accumulated).
@@ -500,8 +534,8 @@ class ExpertSelfPlayTrainer:
                 epochs_without_improve = 0
                 best_expert_state = self._snapshot_expert()
                 best_ft_stats = ft_stats
-                print(f"  * New best rolling val: {best_val_rate:.1%} "
-                      f"(single={val_rate:.1%})")
+                _log.success(f"New best rolling val: {best_val_rate:.1%} "
+                             f"(single={val_rate:.1%})")
             else:
                 epochs_without_improve += 1
                 # Also check if single epoch is new best (catch non-monotonic improvement)
@@ -509,12 +543,12 @@ class ExpertSelfPlayTrainer:
                     best_single = val_rate
                     best_expert_state = self._snapshot_expert()
                     best_ft_stats = ft_stats
-                    print(f"  * New best single val: {best_single:.1%} "
-                          f"(rolling={rolling_avg:.1%})")
+                    _log.success(f"New best single val: {best_single:.1%} "
+                                 f"(rolling={rolling_avg:.1%})")
                 else:
-                    print(f"  No improvement ({epochs_without_improve}/{patience})")
+                    _log.debug(f"No improvement ({epochs_without_improve}/{patience})")
                 if epochs_without_improve >= patience:
-                    print(f"  ! Early stopping at epoch {epoch+1}")
+                    _log.warning(f"Early stopping at epoch {epoch+1}")
                     stopped_early = True
                     break
 
@@ -546,7 +580,7 @@ class ExpertSelfPlayTrainer:
             if best_ft_stats:
                 stats["finetune"] = best_ft_stats
         else:
-            print(f"  No verified successes - skipping save")
+            print("  No verified successes - skipping save")
             stats["saved"] = False
 
         # Log
@@ -555,9 +589,12 @@ class ExpertSelfPlayTrainer:
             json.dump({**stats, "successes": successes, "failures": failures},
                       f, indent=2)
 
+        # Close JSONL stream
+        _successes_file.close()
+
         return stats
 
-    def _dedup_successes(self, successes: List[Dict]) -> List[Dict]:
+    def _dedup_successes(self, successes: list[dict]) -> list[dict]:
         """Deduplicate successful solutions by (prompt, solution) key.
 
         Also caps per-prompt solutions to avoid dominance of any single prompt
@@ -574,7 +611,7 @@ class ExpertSelfPlayTrainer:
                 return 0.0
             return len(ta & tb) / len(ta | tb)
 
-        by_prompt: Dict[str, List[Dict]] = {}
+        by_prompt: dict[str, list[dict]] = {}
         for s in successes:
             key = s.get("prompt", "")
             by_prompt.setdefault(key, []).append(s)
@@ -601,7 +638,7 @@ class ExpertSelfPlayTrainer:
                     break
         return deduped
 
-    def _snapshot_expert(self) -> Dict:
+    def _snapshot_expert(self) -> dict:
         """Snapshot current expert 0 weights across all layers."""
         state = {}
         for i, block in enumerate(self.model.blocks):
@@ -614,7 +651,7 @@ class ExpertSelfPlayTrainer:
                 }
         return state
 
-    def _restore_expert(self, state: Dict):
+    def _restore_expert(self, state: dict):
         """Restore expert 0 weights from snapshot."""
         for i, block in enumerate(self.model.blocks):
             if i in state and hasattr(block.ffn, 'experts') and len(block.ffn.experts) > 0:
@@ -623,7 +660,7 @@ class ExpertSelfPlayTrainer:
                 exp.w2.weight.data.copy_(state[i]["w2"])
                 exp.w3.weight.data.copy_(state[i]["w3"])
 
-    def _finetune_expert(self, topic: str, successes: List[Dict]) -> Dict:
+    def _finetune_expert(self, topic: str, successes: list[dict]) -> dict:
         """Fine-tune on successful solutions using LoRA adapters.
 
         Applies LoRA to FFN layers (w1, w2, w3 or fc1, fc2) of each block.
@@ -687,16 +724,16 @@ class ExpertSelfPlayTrainer:
         try:
             import bitsandbytes as bnb
             optimizer = bnb.optim.AdamW8bit(trainable, lr=self.lr, weight_decay=0.15)
-            print(f"    Optimizer: bnb AdamW8bit (wd=0.15)")
+            print("    Optimizer: bnb AdamW8bit (wd=0.15)")
         except ImportError:
             optimizer = torch.optim.AdamW(trainable, lr=self.lr, weight_decay=0.15)
-            print(f"    Optimizer: torch AdamW")
+            print("    Optimizer: torch AdamW")
 
         # Gradient checkpointing to save activation VRAM
         use_grad_ckpt = hasattr(self.model, 'gradient_checkpointing_enable')
         if use_grad_ckpt:
             self.model.gradient_checkpointing_enable()
-            print(f"    Gradient checkpointing: ON")
+            print("    Gradient checkpointing: ON")
 
         # Regularization: label smoothing prevents overconfidence on self-generated
         # data; input dropout noise adds robustness. Both fight overfitting to the
@@ -741,26 +778,40 @@ class ExpertSelfPlayTrainer:
             # Forward pass (gradient accumulation)
             self.model.train()
 
-            logits, _ = self.model(input_ids)
+            try:
+                logits, _ = self.model(input_ids)
 
-            # Loss only on solution tokens (shift by 1 for next-token prediction)
-            solution_logits = logits[0, prompt_len-1:-1, :]  # predict solution tokens
-            solution_targets = input_ids[0, prompt_len:]
+                # Loss only on solution tokens (shift by 1 for next-token prediction)
+                solution_logits = logits[0, prompt_len-1:-1, :]  # predict solution tokens
+                solution_targets = input_ids[0, prompt_len:].long()
 
-            if solution_logits.shape[0] == 0:
+                if solution_logits.shape[0] == 0:
+                    continue
+
+                # Label smoothing regularization — prevents overconfidence on
+                # self-generated solutions (which may contain subtle errors)
+                loss = torch.nn.functional.cross_entropy(
+                    solution_logits, solution_targets, label_smoothing=LABEL_SMOOTHING)
+
+                # Weight loss by quality — efficient + test-passed solutions get more gradient
+                # Higher quality = lower weighted loss (we want to learn more from good solutions)
+                # So we scale the loss: quality=1.0 → full loss, quality=0.3 → 0.3x loss
+                weighted_loss = loss * quality / GRAD_ACCUM_STEPS
+                weighted_loss.backward()
+                accum_count += 1
+            except torch.cuda.OutOfMemoryError:
+                # Skip this sample and clear cache to prevent cascading OOM
+                print(f"  [OOM] Skipping sample {n_batches} (seq_len={input_ids.shape[1]}), clearing cache...")
+                torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                accum_count = 0
                 continue
-
-            # Label smoothing regularization — prevents overconfidence on
-            # self-generated solutions (which may contain subtle errors)
-            loss = torch.nn.functional.cross_entropy(
-                solution_logits, solution_targets, label_smoothing=LABEL_SMOOTHING)
-
-            # Weight loss by quality — efficient + test-passed solutions get more gradient
-            # Higher quality = lower weighted loss (we want to learn more from good solutions)
-            # So we scale the loss: quality=1.0 → full loss, quality=0.3 → 0.3x loss
-            weighted_loss = loss * quality / GRAD_ACCUM_STEPS
-            weighted_loss.backward()
-            accum_count += 1
+            except Exception as e:
+                print(f"  [Finetune] Error on sample {n_batches}: {e}")
+                print(f"    logits shape: {logits.shape if 'logits' in dir() else 'N/A'}")
+                print(f"    input_ids shape: {input_ids.shape}, prompt_len: {prompt_len}")
+                torch.cuda.empty_cache()
+                continue
 
             # Only step every GRAD_ACCUM_STEPS samples (effective batch size = 4)
             if accum_count >= GRAD_ACCUM_STEPS:
@@ -819,7 +870,12 @@ class ExpertSelfPlayTrainer:
         }
 
     def _save_expert(self, topic: str):
-        """Save the fine-tuned expert back to the v4 library."""
+        """Save the fine-tuned expert back to the v4 library.
+
+        Uses ThreadPoolExecutor for parallel file writes (I/O bound).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
         from safetensors.torch import save_file
 
         def _compress_svd(w, energy=0.99):
@@ -830,7 +886,7 @@ class ExpertSelfPlayTrainer:
             return {
                 "U": U[:, :rank].contiguous().to(torch.bfloat16),
                 "U_shape": torch.tensor(U[:, :rank].shape, dtype=torch.int32),
-                "S": S[:rank].to(torch.float16),
+                "S": S[:rank].to(torch.bfloat16),
                 "Vh": Vh[:rank, :].contiguous().to(torch.bfloat16),
                 "Vh_shape": torch.tensor(Vh[:rank, :].shape, dtype=torch.int32),
                 "rank": torch.tensor([rank], dtype=torch.int32),
@@ -847,34 +903,55 @@ class ExpertSelfPlayTrainer:
             n_layers = self.airmoe.n_layers
             v4_dir = str(self.airmoe.module_dir)
 
-        n_saved = 0
-
+        # Collect expert weights first (fast GPU→CPU transfer)
+        layer_weights = []
         for layer in range(n_layers):
             try:
                 block = self.model.blocks[layer]
                 ffn = block.ffn
                 if not (hasattr(ffn, 'experts') and len(ffn.experts) > 0):
                     continue
-
                 expert = ffn.experts[0]
-
-                # Compress each weight part (SVD only — near-lossless at 0.99)
-                compressed = {}
+                weights = {}
                 for part_name, param in [("w1", expert.w1.weight.data),
                                           ("w2", expert.w2.weight.data),
                                           ("w3", expert.w3.weight.data)]:
-                    w = param.detach().cpu().float()
-                    comp = _compress_svd(w, energy=0.99)
-                    for k, v in comp.items():
-                        compressed[f"{part_name}_{k}"] = v
-
-                shard_name = f"expert_l{layer}_{topic}.safetensors"
-                shard_path = experts_dir / shard_name
-                save_file(compressed, str(shard_path))
-                n_saved += 1
-
+                    weights[part_name] = param.detach().cpu().float()
+                shard_path = experts_dir / f"expert_l{layer}_{topic}.safetensors"
+                layer_weights.append((shard_path, weights))
             except (IndexError, AttributeError):
                 continue
+
+        # Parallel SVD compression (CPU-bound, but torch.linalg.svd releases GIL)
+        def _compress_layer(path_weights_tuple):
+            path, weights = path_weights_tuple
+            compressed = {}
+            for part_name, w in weights.items():
+                comp = _compress_svd(w, energy=0.99)
+                for k, v in comp.items():
+                    compressed[f"{part_name}_{k}"] = v
+            return path, compressed
+
+        layer_data = []
+        if layer_weights:
+            # Limit to 2 workers — SVD is extremely CPU-intensive (800% spike with 8).
+            # 2 workers balance speed vs CPU spike (200% vs 800%).
+            max_workers = min(2, len(layer_weights))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                layer_data = list(executor.map(_compress_layer, layer_weights))
+
+        # Parallel file writes (I/O bound — threads safe for safetensors save)
+        def _save_one(path_data_tuple):
+            path, data = path_data_tuple
+            save_file(data, str(path))
+            return path
+
+        n_saved = 0
+        if layer_data:
+            max_workers = min(4, len(layer_data))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                list(executor.map(_save_one, layer_data))
+            n_saved = len(layer_data)
 
         print(f"    Saved {n_saved} expert files for topic '{topic}'")
 
@@ -897,7 +974,7 @@ class ExpertSelfPlayTrainer:
             except Exception as e:
                 print(f"    (Manifest update skipped: {e})")
 
-    def train_all_topics(self, n_epochs: int = 3, n_tasks: int = 50) -> List[Dict]:
+    def train_all_topics(self, n_epochs: int = 3, n_tasks: int = 50) -> list[dict]:
         """Train all available topics in the library.
 
         Reads topics from the V4 manifest (not hardcoded list).
@@ -962,6 +1039,8 @@ def main():
                         help="Enable MAC-Attention (reuse attention for similar queries, long context)")
     parser.add_argument("--use-spec-attn", action="store_true", default=False,
                         help="Enable L1 Speculative Attention (low-rank draft + entropy verify, 57% attn cut, lossless)")
+    parser.add_argument("--no-compile", action="store_true", default=False,
+                        help="Disable torch.compile (use eager mode for debugging)")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -988,7 +1067,7 @@ def main():
         moe_top_k=0,  # 0 = dense_bypass: skip untrained router, run all experts
         dtype=load_dtype)
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Profile VRAM after model load (Stage 4: growable KV cache pattern)
     vram.profile_after_model_load(model, "v2_loaded")
@@ -1025,6 +1104,16 @@ def main():
 
     vram.empty_cache()
 
+    # torch.compile for inference speedup (kernel fusion, ~1.3-2x decode).
+    # Uses mode="default" (no CUDA graphs) because the pre-allocated KV cache
+    # has dynamic fill lengths incompatible with CUDA graph capture.
+    if not args.no_compile:
+        try:
+            model = model.compile_for_inference(mode="default")
+            print("  [torch.compile] active (default mode, kernel fusion)")
+        except Exception as e:
+            print(f"  [torch.compile] failed ({e}), using eager mode")
+
     # Warmup generation to measure peak VRAM (captures CUDA kernel overhead)
     vram.profile_after_warmup(model, tokenizer, max_warmup_tokens=16)
 
@@ -1048,10 +1137,10 @@ def main():
     # layers 20-27 — all other topics use experts 1/2/3 which were not corrupted.
     # v2 has since been rebuilt from v1 (clean). The v4 library will be rebuilt
     # from clean v2 in a future pass; for now, non-math topics are safe to use.
-    v4_dir = "D:/windsurf/ForgeAI/research/checkpoints/forgelm_v4"
+    from research.paths import FORGELM_V4_DIR, as_str; v4_dir = as_str(FORGELM_V4_DIR)
     v4_manifest = os.path.join(v4_dir, "manifest.json")
     if os.path.exists(v4_manifest):
-        print(f"\n[3] Creating AirMoE (v4 expert library)...")
+        print("\n[3] Creating AirMoE (v4 expert library)...")
         airmoe = InfiniteAirMoE(
             model, tokenizer, v4_dir,
             device="cuda",
@@ -1094,8 +1183,32 @@ def main():
 
     print(f"\n[5] Training topics: {topics}")
 
+    # ── Signal handler: emergency checkpoint on SIGINT/SIGTERM ──────
+    # Saves training progress before exiting on Ctrl+C or kill command.
+    import signal
+    _emergency_state = {"trainer": trainer, "model": model, "aborted": False}
+
+    def _emergency_save(signum, frame):
+        _emergency_state["aborted"] = True
+        sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+        print(f"\n\n[!] {sig_name} received — saving emergency checkpoint...")
+        try:
+            emergency_path = trainer.log_dir / "emergency_checkpoint.safetensors"
+            save_checkpoint(model.state_dict(), str(emergency_path))
+            print(f"  Emergency checkpoint saved: {emergency_path}")
+        except Exception as e:
+            print(f"  Failed to save emergency checkpoint: {e}")
+        print("  Exiting gracefully. Re-run to resume training.\n")
+        sys.exit(130)  # 128 + SIGINT
+
+    signal.signal(signal.SIGINT, _emergency_save)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, _emergency_save)
+
     all_stats = []
     for topic in topics:
+        if _emergency_state["aborted"]:
+            break
         stats = trainer.train_topic(topic, n_tasks=args.n_tasks,
                                     n_epochs=args.epochs,
                                     patience=args.patience,
@@ -1152,4 +1265,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from research.dx_setup import setup
+    setup(log_file="logs/training.log")
     main()

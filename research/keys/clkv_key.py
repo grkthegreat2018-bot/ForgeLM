@@ -35,9 +35,11 @@ Usage:
     # ... generate ...
     key.revert(model)  # restore original forward
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -72,7 +74,7 @@ class CLKVKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """CLKV is a runtime key â€” state dict is unchanged."""
         state = dict(data.get("state", data))
         return KeyResult(
@@ -86,7 +88,7 @@ class CLKVKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op â€” CLKV doesn't modify weights."""
         return KeyResult(success=True, weights=weights)
 
@@ -114,7 +116,7 @@ class CLKVKey(Key):
             _sf=share_factor,
         ):
             x = model.embed(idx)
-            presents: List[Optional[Tuple]] = []
+            presents: list[tuple | None] = []
             n_layers = len(model.blocks)
 
             for i, block in enumerate(model.blocks):
@@ -193,5 +195,5 @@ class CLKVKey(Key):
             model.forward = self._original_forward
             self._original_forward = None
             self._applied = False
-            print(f"  [CLKV] Reverted to per-layer KV cache")
+            print("  [CLKV] Reverted to per-layer KV cache")
 

@@ -20,9 +20,10 @@ Usage:
 """
 import os
 import sys
-import torch
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
+
+import torch
 
 
 @dataclass
@@ -52,19 +53,20 @@ class VRAMManager:
         self,
         total_vram_gb: float = 12.0,
         safety_margin_gb: float = 1.0,
-        compile_cache_dir: str = "D:/windsurf/ForgeAI/.devin/torch_cache",
+        compile_cache_dir: str = None,
     ):
+        if compile_cache_dir is None: from research.paths import TORCH_CACHE_DIR, as_str; compile_cache_dir = as_str(TORCH_CACHE_DIR)
         self.total_vram_mb = total_vram_gb * 1024
         self.safety_margin_mb = safety_margin_gb * 1024
         self.compile_cache_dir = compile_cache_dir
 
         # Filled by profile_after_model_load
         self.model_weights_mb: float = 0
-        self.post_load_profile: Optional[VRAMProfile] = None
+        self.post_load_profile: VRAMProfile | None = None
 
         # Filled by profile_after_warmup
         self.warmup_peak_mb: float = 0
-        self.warmup_profile: Optional[VRAMProfile] = None
+        self.warmup_profile: VRAMProfile | None = None
 
     # ── Stage 3: Persistent compile cache ──────────────────────────
 
@@ -353,7 +355,7 @@ class VRAMManager:
 
         prof = self.snapshot("report")
         lines = [
-            f"=== VRAM Report ===",
+            "=== VRAM Report ===",
             f"  Total: {prof.total_mb:.0f} MB",
             f"  Allocated: {prof.allocated_mb:.0f} MB",
             f"  Reserved: {prof.reserved_mb:.0f} MB",

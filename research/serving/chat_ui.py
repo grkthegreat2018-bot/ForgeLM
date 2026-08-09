@@ -11,23 +11,27 @@ Usage:
     python -m research.chat_ui
     python -m research.chat_ui --port 7860
 """
-import sys, os, time, torch, argparse
-sys.path.insert(0, '.')
+import argparse
+import os
+import time
+
+import torch
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
-import gradio as gr
-from typing import Optional, List, Dict, Generator
+from collections.abc import Generator
+from typing import Dict, List, Optional
 
-from research.inference.forge_engine import ForgeEngine
-from research.inference.decoding import DSparkDecoding, StandardDecoding
-from research.decoding.dspark import DSparkHead
+import gradio as gr
 from safetensors.torch import load_file
 
+from research.decoding.dspark import DSparkHead
+from research.inference.decoding import DSparkDecoding, StandardDecoding
+from research.inference.forge_engine import ForgeEngine
 
 # ─── Global state ────────────────────────────────────────────────────
-engine: Optional[ForgeEngine] = None
-dspark_head: Optional[DSparkHead] = None
+engine: ForgeEngine | None = None
+dspark_head: DSparkHead | None = None
 giga_tokenizer = None
 hf_tokenizer = None
 
@@ -75,15 +79,14 @@ def load_model():
         ).to("cuda")
         dspark_head.eval()
 
-    # 3. Load Gigatoken tokenizer
+    # 3. Load Gigatoken tokenizer (cached, ~35x faster encode)
     print("\n[3/3] Loading Gigatoken tokenizer...")
     try:
-        import gigatoken as gt
-        from transformers import AutoTokenizer
-        hf_tok = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
-        giga_tokenizer = gt.Tokenizer(hf_tok).as_hf()
-        hf_tokenizer = hf_tok
-        print("  Gigatoken loaded (compat mode)")
+        from research.tokenizer_cache import get_tokenizer, get_tokenizer_no_wrap
+
+        giga_tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
+        hf_tokenizer = get_tokenizer_no_wrap("research/checkpoints/qwen_hf")
+        print("  Gigatoken loaded (compat mode, cached)")
     except Exception as e:
         print(f"  Gigatoken failed ({e}), falling back to HF tokenizer")
         giga_tokenizer = hf_tokenizer = engine.tokenizer
@@ -103,7 +106,7 @@ def load_model():
     print("=" * 60)
 
 
-def format_chat_prompt(messages: List[Dict[str, str]]) -> str:
+def format_chat_prompt(messages: list[dict[str, str]]) -> str:
     """Format chat history into Qwen2.5 chat template."""
     prompt = ""
     for msg in messages:
@@ -116,7 +119,7 @@ def format_chat_prompt(messages: List[Dict[str, str]]) -> str:
 
 def generate_response(
     message: str,
-    history: List[Dict],
+    history: list[dict],
     max_tokens: int,
     temperature: float,
     kv_strategy: str,

@@ -11,6 +11,7 @@ but no training or weight updates.
 Reference: Wanda, arxiv 2306.11695
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

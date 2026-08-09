@@ -36,11 +36,13 @@ Usage:
     # ... generate with sparse logits ...
     key.revert(model)  # restore full head
 """
+import math
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
-import math
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -164,7 +166,7 @@ class AnchorVocabHead(nn.Module):
 
         return out_logits.view(B, T, self.vocab_size)
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         if self._total_tokens == 0:
             return {"tokens": 0}
         standard_flops = self._total_tokens * self.d_model * self.vocab_size
@@ -217,7 +219,7 @@ class AnchorVocabKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """AnchorVocab is a runtime key â€” state dict is unchanged."""
         state = dict(data.get("state", data))
         return KeyResult(
@@ -232,11 +234,11 @@ class AnchorVocabKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op â€” AnchorVocab doesn't modify weights."""
         return KeyResult(success=True, weights=weights)
 
-    def _kmeans(self, embeddings: torch.Tensor, k: int, max_iter: int = 20) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _kmeans(self, embeddings: torch.Tensor, k: int, max_iter: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
         """Simple k-means clustering on embedding vectors.
 
         Args:
@@ -334,9 +336,9 @@ class AnchorVocabKey(Key):
             model.head = self._original_head
             self._original_head = None
             self._applied = False
-            print(f"  [AnchorVocab] Reverted to full vocabulary projection")
+            print("  [AnchorVocab] Reverted to full vocabulary projection")
 
-    def get_stats(self, model: nn.Module) -> Dict:
+    def get_stats(self, model: nn.Module) -> dict:
         """Get pruning statistics from the anchor head."""
         if isinstance(model.head, AnchorVocabHead):
             return model.head.stats()

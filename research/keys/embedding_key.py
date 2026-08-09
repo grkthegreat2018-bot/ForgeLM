@@ -8,6 +8,7 @@ Reverse key: data = W[token_ids]            (read rows)
 Classification: Bi (exact both directions, trivial)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

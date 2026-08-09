@@ -41,11 +41,12 @@ Usage:
     # ... generate normally — attention is automatically cached/reused
     key.print_stats()  # show hit rate
 """
+from collections import deque
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import deque
-from typing import Optional, Tuple, Dict
 
 
 class QueryAttnCache:
@@ -70,7 +71,7 @@ class QueryAttnCache:
         self._amend_tokens = 0  # total tokens processed via amend (vs full)
         self._full_tokens = 0   # total tokens processed via full attention
 
-    def find_match(self, q_pre_rope: torch.Tensor, max_check: int = 4) -> Optional[int]:
+    def find_match(self, q_pre_rope: torch.Tensor, max_check: int = 4) -> int | None:
         """Find the best matching cached query (check only recent entries for speed).
 
         Args:
@@ -115,7 +116,7 @@ class QueryAttnCache:
             return best_idx
         return None
 
-    def get(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def get(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Get cached entry by index."""
         return self._buffer[idx]
 
@@ -142,7 +143,7 @@ class QueryAttnCache:
         total = self._hits + self._misses
         return self._hits / max(total, 1)
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         total = self._hits + self._misses
         return {
             "hits": self._hits,
@@ -372,8 +373,7 @@ class AttnReuseKey:
 
     def apply(self, model):
         """Patch all attention layers in the model (MLA or GQA)."""
-        from research.model_loader import (
-            MultiHeadLatentAttention, GroupedQueryAttention)
+        from research.model_loader import GroupedQueryAttention, MultiHeadLatentAttention
 
         for name, module in model.named_modules():
             if isinstance(module, (MultiHeadLatentAttention, GroupedQueryAttention)):
@@ -434,7 +434,7 @@ class AttnReuseKey:
         print(f"    tokens: full={total_full} amend={total_amend} "
               f"saved={tokens_saved} speedup={speedup:.1f}x")
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         """Return aggregate stats."""
         total_hits = sum(c._hits for c in self._caches)
         total_misses = sum(c._misses for c in self._caches)

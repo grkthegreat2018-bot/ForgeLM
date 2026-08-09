@@ -13,6 +13,7 @@ This is a TRIVIAL key — pure quantization formula, no data or training.
 Reference: KIVI, arxiv 2402.02750
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

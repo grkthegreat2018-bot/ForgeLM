@@ -27,8 +27,10 @@ Usage:
     # Inject at inference
     pack.inject(model, kv_cache, alpha=1.0)
 """
-import torch
 from typing import Dict, List, Optional, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -52,11 +54,11 @@ class KnowledgePackKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights=data,
                          metadata={"runtime": True, "zero_token": True})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights)
 
 
@@ -71,8 +73,8 @@ class KnowledgePack:
       KV_cache(F) == KV_entries_for_F_in_joint_pass(F◦q)
     """
 
-    def __init__(self, kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-                 text: str = "", metadata: Optional[dict] = None):
+    def __init__(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+                 text: str = "", metadata: dict | None = None):
         self.kv_caches = kv_caches  # per-layer (K, V) tuples
         self.text = text
         self.metadata = metadata or {}
@@ -128,8 +130,8 @@ class KnowledgePack:
                    metadata={"n_tokens": input_ids.shape[1],
                              "n_layers": len(kv_caches)})
 
-    def inject(self, model, past_key_values: List,
-               alpha: float = 1.0, device: str = "cuda") -> List:
+    def inject(self, model, past_key_values: list,
+               alpha: float = 1.0, device: str = "cuda") -> list:
         """Inject this Knowledge Pack into an inference run's KV cache.
 
         Prepends the knowledge KV entries to the existing cache.
@@ -211,8 +213,8 @@ class ContrastiveSteeringPack:
     (cos ≈ 0) and compose."
     """
 
-    def __init__(self, value_deltas: List[Optional[torch.Tensor]],
-                 layer_range: Tuple[int, int] = (9, 18)):
+    def __init__(self, value_deltas: list[torch.Tensor | None],
+                 layer_range: tuple[int, int] = (9, 18)):
         self.value_deltas = value_deltas  # per-layer V deltas
         self.layer_range = layer_range
 
@@ -220,7 +222,7 @@ class ContrastiveSteeringPack:
     def from_contrast(cls, model, tokenizer,
                       positive_text: str, negative_text: str,
                       device: str = "cuda",
-                      layer_range: Tuple[int, int] = (9, 18)) -> "ContrastiveSteeringPack":
+                      layer_range: tuple[int, int] = (9, 18)) -> "ContrastiveSteeringPack":
         """Create a steering pack from positive vs negative examples.
 
         Args:
@@ -247,8 +249,8 @@ class ContrastiveSteeringPack:
 
         return cls(deltas, layer_range)
 
-    def steer(self, past_key_values: List, alpha: float = 0.5,
-              device: str = "cuda") -> List:
+    def steer(self, past_key_values: list, alpha: float = 0.5,
+              device: str = "cuda") -> list:
         """Apply steering to KV cache.
 
         Args:

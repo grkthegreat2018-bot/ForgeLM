@@ -30,10 +30,11 @@ Usage:
     # Inference with speculative decoding
     output = medusa_generate(model, heads, tokenizer, prompt, max_new_tokens=100)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Dict
 
 
 class MedusaHeads(nn.Module):
@@ -71,7 +72,7 @@ class MedusaHeads(nn.Module):
             for head in self.heads:
                 head[-1].weight = share_embedding.weight
 
-    def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> list[torch.Tensor]:
         """Predict next n_heads tokens from hidden states.
 
         Args:
@@ -83,7 +84,7 @@ class MedusaHeads(nn.Module):
         return [head(hidden_states) for head in self.heads]
 
     def predict_candidates(self, hidden_states: torch.Tensor,
-                           top_k: int = 5) -> Tuple[torch.Tensor, torch.Tensor]:
+                           top_k: int = 5) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict top-k candidate tokens for each position.
 
         Args:
@@ -129,7 +130,7 @@ class MedusaTrainer:
         for param in self.model.parameters():
             param.requires_grad = False
 
-    def compute_loss(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+    def compute_loss(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """Compute Medusa training loss.
 
         Head k predicts token at position t + k + 1.
@@ -185,7 +186,7 @@ class MedusaTrainer:
 
         return total_loss, {"head_losses": head_losses, "avg_loss": total_loss.item()}
 
-    def train_step(self, input_ids: torch.Tensor) -> Dict:
+    def train_step(self, input_ids: torch.Tensor) -> dict:
         """Single training step.
 
         Args:
@@ -295,17 +296,15 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
 
             # 5. Accept longest matching prefix.
             # Compare Medusa predictions with actual model predictions.
-            n_accepted = 0
-            for k in range(medusa.n_heads):
-                # Model's prediction at position len(input) + 1 + k.
-                pos = input_ids.shape[1] + k
-                if pos >= verify_logits.shape[1]:
-                    break
-                model_pred = verify_logits[:, pos, :].argmax(-1)
-                if model_pred.item() == medusa_tokens[k].item():
-                    n_accepted += 1
-                else:
-                    break  # reject this and all subsequent
+            n_heads = medusa.n_heads
+            start_pos = input_ids.shape[1]
+            n_heads = min(n_heads, verify_logits.shape[1] - start_pos)
+            if n_heads > 0:
+                target_preds = verify_logits[0, start_pos:start_pos + n_heads, :].argmax(-1)
+                matches = (medusa_tokens[:n_heads] == target_preds)
+                n_accepted = matches.cumprod(dim=-1).sum().item()
+            else:
+                n_accepted = 0
 
             # 6. Append accepted tokens.
             accepted = candidate_seq[:, :n_accepted + 1]  # +1 for main_token
@@ -317,7 +316,8 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
 
             # Check for EOS (simplified).
             if hasattr(model, "config") and hasattr(model.config, "eos_token_id"):
-                if main_token.item() == model.config.eos_token_id:
+                eos_id = model.config.eos_token_id
+                if (main_token == eos_id).reshape(-1).any().item():
                     break
 
     return input_ids

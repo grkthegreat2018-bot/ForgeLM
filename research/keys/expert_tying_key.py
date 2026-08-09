@@ -27,9 +27,11 @@ Usage:
     # Or as a state dict transform:
     result = key.forward({"state": state, "n_layers": 28})
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -58,7 +60,7 @@ class ExpertTyingKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Transform state dict to tie expert weights."""
         try:
             state = dict(data.get("state", data))
@@ -84,7 +86,7 @@ class ExpertTyingKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def apply(self, model: nn.Module, similarity_threshold: float = 0.0) -> List[Tuple[int, int]]:
+    def apply(self, model: nn.Module, similarity_threshold: float = 0.0) -> list[tuple[int, int]]:
         """Apply expert tying to a live model (in-place pointer assignment).
 
         For each consecutive layer pair (N, N+1):
@@ -170,8 +172,8 @@ class ExpertTyingKey(Key):
 
         return tied_pairs
 
-    def _tie_state_dict(self, state: Dict[str, torch.Tensor],
-                        n_layers: int) -> Tuple[List[Tuple[int, int]], int]:
+    def _tie_state_dict(self, state: dict[str, torch.Tensor],
+                        n_layers: int) -> tuple[list[tuple[int, int]], int]:
         """Tie expert weights in a state dict (for checkpoint saving)."""
         tied_pairs = []
         saved_bytes = 0
@@ -208,7 +210,7 @@ class ExpertTyingKey(Key):
 
         return tied_pairs, saved_bytes
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not supported — untying requires retraining to recover unique weights."""
         return KeyResult(
             success=False,

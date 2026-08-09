@@ -18,8 +18,10 @@ WARNING: Lossy key. Do NOT apply to ForgeLM V2 or expert packs.
 
 Key class: PARTIAL — lossy, reverse() is approximate (not exact round-trip).
 """
-import torch
 from typing import Dict, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -45,7 +47,7 @@ class KV4BitKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Quantize KV tensors to 4-bit + per-channel scales.
 
         Args:
@@ -75,7 +77,7 @@ class KV4BitKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Dequantize 4-bit KV cache to approximate FP16 (lossy)."""
         try:
             k_approx = dequantize_kv_4bit(
@@ -92,7 +94,7 @@ class KV4BitKey(Key):
 
 
 def quantize_kv_4bit(kv: torch.Tensor,
-                     group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor]:
+                     group_size: int = 32) -> tuple[torch.Tensor, torch.Tensor]:
     """Group-wise 4-bit symmetric quantization with per-channel scales.
 
     Quantization is along the last dimension (head_dim). Each group of

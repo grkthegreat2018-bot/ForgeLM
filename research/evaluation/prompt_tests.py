@@ -12,11 +12,10 @@ Exports:
     run_tests(code, func_name): execs code, runs tests, returns (all_passed, error_message).
 """
 
-from typing import Any, List, Tuple, Dict
 import math
+from typing import Any, Dict, List, Tuple
 
-
-TESTS: Dict[str, List[Dict[str, Any]]] = {
+TESTS: dict[str, list[dict[str, Any]]] = {
     # ----------------------------------------------------------------- #
     # Python General (easy)
     # ----------------------------------------------------------------- #
@@ -439,14 +438,14 @@ except ImportError:
     pass
 
 
-def get_tests(func_name: str) -> List[Tuple[tuple, Any]]:
+def get_tests(func_name: str) -> list[tuple[tuple, Any]]:
     """Return a list of (args_tuple, expected_result) pairs for a function name.
 
     For class tests, returns the raw test dicts (with type='class') so callers
     can distinguish them. Returns an empty list if no tests are registered.
     """
     tests = TESTS.get(func_name, [])
-    result: List[Tuple[tuple, Any]] = []
+    result: list[tuple[tuple, Any]] = []
     for t in tests:
         if t.get("type") == "class":
             # Return the dict itself wrapped so callers can detect class tests.
@@ -471,7 +470,7 @@ def _values_equal(actual: Any, expected: Any, approx: bool = False) -> bool:
     return actual == expected
 
 
-def run_tests(code: str, func_name: str) -> Tuple[bool, str]:
+def run_tests(code: str, func_name: str) -> tuple[bool, str]:
     """Execute the given code, run all registered tests for func_name.
 
     Returns (True, "") if all tests pass.
@@ -481,10 +480,10 @@ def run_tests(code: str, func_name: str) -> Tuple[bool, str]:
     if not tests:
         return False, f"no tests registered for '{func_name}'"
 
-    namespace: Dict[str, Any] = {}
+    namespace: dict[str, Any] = {}
     try:
         exec(code, namespace)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, f"code execution failed: {type(e).__name__}: {e}"
 
     if func_name not in namespace:
@@ -518,7 +517,7 @@ def run_tests(code: str, func_name: str) -> Tuple[bool, str]:
                 args = test["args"]
                 expected = test["expected"]
                 actual = obj(*args)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return False, f"test {i} raised: {type(e).__name__}: {e}"
 
         if not _values_equal(actual, expected, approx=test.get("approx", False)):

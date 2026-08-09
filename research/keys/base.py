@@ -9,9 +9,10 @@ Each key has:
 Keys are discovered by training a minimal probe, then finding the
 closed-form algorithm that produces the same weights instantly.
 """
-from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
+from enum import Enum
+from typing import Any, Dict, Optional
+
 import torch
 
 
@@ -27,10 +28,10 @@ class KeyClass(Enum):
 class KeyResult:
     """Result of a key operation."""
     success: bool
-    weights: Optional[Dict[str, torch.Tensor]] = None
-    data: Optional[Dict[str, torch.Tensor]] = None
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    weights: dict[str, torch.Tensor] | None = None
+    data: dict[str, torch.Tensor] | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class Key:
@@ -57,15 +58,15 @@ class Key:
     def key_class(self) -> KeyClass:
         raise NotImplementedError
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights (replace training)."""
         raise NotImplementedError
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """weights -> data (extract what was learned)."""
         raise NotImplementedError
 
-    def cross_arch(self, weights_a: Dict[str, torch.Tensor],
+    def cross_arch(self, weights_a: dict[str, torch.Tensor],
                    key_b: 'Key') -> KeyResult:
         """weights(A) -> data -> weights(B). Requires both keys to be Bi."""
         # Default implementation: reverse through self, forward through key_b

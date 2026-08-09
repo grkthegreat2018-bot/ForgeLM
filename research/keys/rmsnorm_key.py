@@ -8,6 +8,7 @@ Reverse key: y = x_normalized * weight
 Classification: Bi (exact both directions)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

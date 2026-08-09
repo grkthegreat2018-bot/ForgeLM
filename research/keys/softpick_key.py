@@ -23,12 +23,12 @@ Key class: TRIVIAL — fixed formula, no data or training.
 Reference: zuhri-etal-2026, github.com/zuhdzuhri/softpick-attention
 """
 import math
-import torch
-import torch.nn.functional as F
 from typing import Dict, Optional
 
-from .base import Key, KeyClass, KeyResult
+import torch
+import torch.nn.functional as F
 
+from .base import Key, KeyClass, KeyResult
 
 # ---------------------------------------------------------------------------
 # Functional helpers
@@ -56,8 +56,8 @@ def softpick_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     is_causal: bool = True,
-    attn_mask: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
+    attn_mask: torch.Tensor | None = None,
+    scale: float | None = None,
 ) -> torch.Tensor:
     """Manual attention with softpick replacing softmax.
 
@@ -124,7 +124,7 @@ class SoftpickKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Apply softpick to attention scores.
 
         Args:
@@ -144,7 +144,7 @@ class SoftpickKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Cannot reverse softpick (information is discarded by the gate)."""
         return KeyResult(
             success=True,
@@ -202,10 +202,10 @@ def _patch_sdpa_calls(model):
     ``softpick_attention`` instead.
     """
     from research.model_loader import (
+        DifferentialAttention,
+        GroupedQueryAttention,
         MultiHeadLatentAttention,
         StandardSDPA,
-        GroupedQueryAttention,
-        DifferentialAttention,
     )
 
     target_types = (
@@ -311,10 +311,10 @@ def apply_softpick(model):
     # 3. Enable the runtime flag.
     _SOFTPICK_ENABLED = True
 
-    print(f"  [Softpick] Applied softpick attention to model")
+    print("  [Softpick] Applied softpick attention to model")
     print(f"  [Softpick]   flash_attention: {'patched' if module_patched else 'not found'}")
     print(f"  [Softpick]   attention modules patched: {module_count}")
-    print(f"  [Softpick]   formula: softmax(x) * sigmoid(x)")
+    print("  [Softpick]   formula: softmax(x) * sigmoid(x)")
     return model
 
 
@@ -341,10 +341,10 @@ def revert_softpick(model):
 
     # Restore per-module forwards.
     from research.model_loader import (
+        DifferentialAttention,
+        GroupedQueryAttention,
         MultiHeadLatentAttention,
         StandardSDPA,
-        GroupedQueryAttention,
-        DifferentialAttention,
     )
     target_types = (
         MultiHeadLatentAttention,

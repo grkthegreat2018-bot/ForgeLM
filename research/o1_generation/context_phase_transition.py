@@ -36,10 +36,11 @@ Usage:
     output = cpt.generate(prompt, max_tokens=100)  # Phase 3: O(1) generation
     cpt.reset()  # Remove patches, restore original weights
 """
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
-from collections import defaultdict
 
 
 class ContextPhaseTransition:
@@ -64,15 +65,15 @@ class ContextPhaseTransition:
         self.max_context_tokens = max_context_tokens
 
         # Store original weights for restoration
-        self._original_weights: Dict[str, torch.Tensor] = {}
+        self._original_weights: dict[str, torch.Tensor] = {}
         self._patched: bool = False
 
         # Extracted patches and packs
-        self._context_patches: Dict[str, torch.Tensor] = {}  # per-layer rank-1 patches
-        self._knowledge_pack: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-        self._fact_vectors: List[Dict] = []
+        self._context_patches: dict[str, torch.Tensor] = {}  # per-layer rank-1 patches
+        self._knowledge_pack: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._fact_vectors: list[dict] = []
 
-    def ingest(self, context: str, extract_facts: bool = True) -> Dict:
+    def ingest(self, context: str, extract_facts: bool = True) -> dict:
         """Phase 1+2: Ingest context and internalize into weights.
 
         Args:
@@ -117,7 +118,7 @@ class ContextPhaseTransition:
 
         return stats
 
-    def _extract_context_patches(self, input_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _extract_context_patches(self, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         """Extract rank-1 context patches from each layer.
 
         For each FFN layer, compute the context effect as a rank-1
@@ -159,7 +160,7 @@ class ContextPhaseTransition:
 
         return patches
 
-    def _extract_knowledge_pack(self, input_ids: torch.Tensor) -> Optional[Tuple]:
+    def _extract_knowledge_pack(self, input_ids: torch.Tensor) -> tuple | None:
         """Extract KV cache as a Knowledge Pack.
 
         Run a forward pass with use_cache=True and store the KV.
@@ -188,7 +189,7 @@ class ContextPhaseTransition:
                 return (past_kvs[0].detach(), past_kvs[1].detach())
             return None
 
-    def _extract_facts(self, context: str) -> List[Dict]:
+    def _extract_facts(self, context: str) -> list[dict]:
         """Extract simple facts from context for closed-form injection.
 
         This is a simplified version — looks for "X is Y" patterns.
@@ -257,25 +258,33 @@ class ContextPhaseTransition:
         with torch.no_grad():
             past_kvs = None
             generated = []
+            eos_id = self.tokenizer.eos_token_id
+            # Pinned memory for async D2H.
+            token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
 
             # Initial pass
             logits, _, past_kvs = self.model(
                 input_ids, past_key_values=None, use_cache=True)
-            next_token = logits[0, -1].argmax().item()
+            next_token_gpu = logits[0, -1].argmax(keepdim=True)
+            token_pinned.copy_(next_token_gpu, non_blocking=True)
+            next_token = token_pinned.item()
             generated.append(next_token)
 
             # Generate tokens (O(1) per token — only new token in KV cache)
             for _ in range(max_tokens - 1):
-                if next_token == self.tokenizer.eos_token_id:
+                if next_token == eos_id:
                     break
                 cur = torch.tensor([[next_token]], device=self.device)
                 logits, _, past_kvs = self.model(
                     cur, past_key_values=past_kvs, use_cache=True)
                 if temperature > 0:
                     probs = torch.softmax(logits[0, -1] / temperature, dim=-1)
-                    next_token = torch.multinomial(probs, 1).item()
+                    next_token_gpu = torch.multinomial(probs, 1)
                 else:
-                    next_token = logits[0, -1].argmax().item()
+                    next_token_gpu = logits[0, -1].argmax(keepdim=True)
+                # Async D2H via pinned memory.
+                token_pinned.copy_(next_token_gpu, non_blocking=True)
+                next_token = token_pinned.item()
                 generated.append(next_token)
 
         return self.tokenizer.decode(generated, skip_special_tokens=True)
@@ -296,7 +305,7 @@ class ContextPhaseTransition:
         self._fact_vectors = []
         self._original_weights = {}
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         """Return stats about the current state."""
         return {
             "patched": self._patched,

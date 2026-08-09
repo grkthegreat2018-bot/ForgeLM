@@ -33,24 +33,28 @@ Usage:
     engine = RecursiveSelfPlay(model, tokenizer, log_dir="research/data/recursive_self_play")
     engine.run_recursive_task("Check if 17 is prime", max_rounds=5)
 """
+import json
 import os
+import re
 import sys
 import time
-import json
-import re
-import torch
-import tempfile
+
+# Pre-compiled regex patterns (avoids recompilation per task).
+_RE_FUNC_DEF = re.compile(r'def\s+(\w+)\s*\(([^)]*)\)')
+_RE_FUNC_NAME = re.compile(r'def\s+(\w+)\s*\(')
+_RE_DIGITS = re.compile(r'\d+')
 import subprocess
-from pathlib import Path
+import tempfile
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure project root is on path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
 
-from research.self_play.self_play_sandbox import SandboxExecutor, SelfPlaySandbox
-from research.evaluation.goal_tasks import GoalTask, build_goal_prompt
 from research.evaluation.goal_scorer import GoalScorer, ScoreResult
+from research.evaluation.goal_tasks import GoalTask, build_goal_prompt
+from research.json_compat import dumps, loads
+from research.self_play.self_play_sandbox import SandboxExecutor, SelfPlaySandbox
 
 
 class RecursiveSelfPlay(SelfPlaySandbox):
@@ -66,11 +70,14 @@ class RecursiveSelfPlay(SelfPlaySandbox):
 
     def __init__(self, model, tokenizer, log_dir: str = "research/data/recursive_self_play",
                  device: str = "cuda", max_gen_tokens: int = 150,
-                 max_rounds: int = 5, temp_dir: str = "D:/windsurf/ForgeAI/.devin/tmp",
+                 max_rounds: int = 5, temp_dir: str = None,
                  temperature: float = 0.0, top_k: int = 0, top_p: float = 0.0,
                  vram_manager=None):
         super().__init__(model, tokenizer, log_dir, device, max_gen_tokens)
         self.max_rounds = max_rounds
+        if temp_dir is None:
+            from research.paths import TMP_DIR, as_str
+            temp_dir = as_str(TMP_DIR)
         self.temp_dir = temp_dir
         os.makedirs(temp_dir, exist_ok=True)
         # Sampling params: temperature=0 (greedy) for reproducibility,
@@ -85,8 +92,8 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         self.executor = DDriveSandboxExecutor(temp_dir=self.temp_dir)
 
         # Track reasoning improvement
-        self.reasoning_history: List[Dict] = []
-        self.learnings: List[str] = []
+        self.reasoning_history: list[dict] = []
+        self.learnings: list[str] = []
         self.success_by_round = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
         self.total_recursive_tasks = 0
 
@@ -114,22 +121,16 @@ class RecursiveSelfPlay(SelfPlaySandbox):
             probs = probs.masked_fill(mask, 0.0)
             probs = probs / probs.sum()
 
-        # Top-p (nucleus) filtering
+        # Top-p (nucleus) filtering — optimized via topk (avoids full vocab sort)
         if 0.0 < self.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumsum = torch.cumsum(sorted_probs, dim=-1)
-            cutoff = cumsum > self.top_p
-            # Keep at least one token
-            cutoff[0] = False
-            sorted_probs[cutoff] = 0.0
-            probs = torch.zeros_like(probs).scatter_(0, sorted_idx, sorted_probs)
-            probs = probs / probs.sum()
+            from research.sampling_utils import top_p_sample_probs
+            probs = top_p_sample_probs(probs, self.top_p)
 
         return torch.multinomial(probs, num_samples=1).squeeze()
 
     def generate_fix(self, original_code: str, error: str,
                       task_prompt: str, round_num: int,
-                      prev_compute: Optional[Dict] = None) -> Tuple[str, Dict]:
+                      prev_compute: dict | None = None) -> tuple[str, dict]:
         """Generate a fix for broken code using error feedback.
 
         Args:
@@ -178,9 +179,26 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         newline_id = newline_token[0] if newline_token else 198
 
         with torch.inference_mode():
-            cur_ids = input_ids
-            past_kv = None
+            prompt_len = input_ids.shape[1]
+            max_total = prompt_len + self.max_gen_tokens
+            # Pre-allocate output buffer — O(1) write per token instead of O(n) torch.cat.
+            out_ids = torch.zeros(1, max_total, dtype=input_ids.dtype, device=input_ids.device)
+            out_ids[:, :prompt_len] = input_ids
+
+            # Pre-allocated KV cache — O(1) append instead of O(n) torch.cat per token.
+            from research.model_loader import PreAllocatedKVCache
+            cfg = self.model.config
+            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
+            head_dim = cfg.d_model // cfg.n_heads
+            dtype = next(self.model.parameters()).dtype
+            cache = PreAllocatedKVCache(
+                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
+                max_seq_len=min(cfg.max_seq_len, max_total),
+                head_dim=head_dim, dtype=dtype, device=input_ids.device,
+            )
+
             newline_count = 0
+            eos_id = self.tokenizer.eos_token_id
             for step in range(self.max_gen_tokens):
                 # VRAM check: abort generation if approaching OOM
                 if self.vram and step > 0 and step % 32 == 0:
@@ -188,26 +206,29 @@ class RecursiveSelfPlay(SelfPlaySandbox):
                             step, self.max_gen_tokens, label="gen_loop"):
                         break
 
-                # Use KV cache: first step processes full prompt, subsequent
-                # steps only process the new token (O(1) not O(n) per step)
-                if past_kv is not None:
-                    logits, _, past_kv = self.model(
-                        cur_ids[:, -1:], past_key_values=past_kv, use_cache=True)
+                pos = prompt_len + step
+                if step == 0:
+                    # Prefill: feed the full prompt.
+                    logits, _ = self.model(out_ids[:, :prompt_len], preallocated_cache=cache)
                 else:
-                    logits, _, past_kv = self.model(
-                        cur_ids, use_cache=True)
+                    # Decode: feed only the last generated token.
+                    logits, _ = self.model(out_ids[:, pos - 1:pos], preallocated_cache=cache)
+
                 next_logits = logits[0, -1]
                 next_token = self._sample_next_token(next_logits)
 
-                lp = torch.log_softmax(next_logits, dim=-1)[next_token].item()
-                log_probs.append(lp)
+                # Batch sync: single .tolist() for log prob + token value.
+                lp = torch.log_softmax(next_logits, dim=-1)[next_token]
+                out_ids[0, pos] = next_token
 
-                cur_ids = torch.cat([cur_ids, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
-
-                if next_token.item() == self.tokenizer.eos_token_id:
+                # GPU-side EOS + newline check: single sync for both conditions.
+                checks = torch.stack([(next_token == eos_id), (next_token == newline_id)])
+                is_eos, is_newline = checks.tolist()
+                log_probs.append(lp.item())
+                if is_eos:
                     break
 
-                if next_token.item() == newline_id:
+                if is_newline:
                     newline_count += 1
                     if newline_count >= 3 and step > 5:
                         break
@@ -215,13 +236,13 @@ class RecursiveSelfPlay(SelfPlaySandbox):
                     newline_count = 0
 
         gen_time_ms = (time.time() - t0) * 1000
-        tokens_generated = cur_ids.shape[1] - input_ids.shape[1]
+        tokens_generated = step + 1
 
-        generated_text = self.tokenizer.decode(cur_ids[0, input_ids.shape[1]:],
+        generated_text = self.tokenizer.decode(out_ids[0, prompt_len:prompt_len + tokens_generated],
                                                 skip_special_tokens=True)
 
         # Free generation tensors and KV cache to keep VRAM tight
-        del cur_ids, logits, past_kv
+        del out_ids, logits, cache
         torch.cuda.empty_cache()
 
         code = generated_text.strip()
@@ -244,7 +265,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
 
         return code, telemetry
 
-    def extract_reasoning(self, attempts: List[Dict]) -> Dict:
+    def extract_reasoning(self, attempts: list[dict]) -> dict:
         """Extract reasoning quality metrics from the attempt chain.
 
         Analyzes:
@@ -311,13 +332,13 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         }
 
     def run_recursive_task(self, task_prompt: str,
-                            expected_output: Optional[str] = None,
+                            expected_output: str | None = None,
                             task_type: str = "python",
                             task_name: str = "",
-                            reference_code: Optional[str] = None,
+                            reference_code: str | None = None,
                             code_prefix: str = "",
-                            test_cases: Optional[List[Dict]] = None,
-                            use_reasoning: bool = True) -> Dict:
+                            test_cases: list[dict] | None = None,
+                            use_reasoning: bool = True) -> dict:
         """Run a task with recursive fix-retry loop.
 
         The model generates code, executes it, and if it fails:
@@ -377,11 +398,11 @@ class RecursiveSelfPlay(SelfPlaySandbox):
 
             # Auto-append print() if needed
             if "def " in code and "print(" not in code and expected_output is not None:
-                func_match = re.search(r'def\s+(\w+)\s*\(([^)]*)\)', code)
+                func_match = _RE_FUNC_DEF.search(code)
                 if func_match:
                     func_name = func_match.group(1)
                     args = func_match.group(2)
-                    numbers = re.findall(r'\d+', task_prompt)
+                    numbers = _RE_DIGITS.findall(task_prompt)
                     if numbers:
                         n_args = len([a for a in args.split(',') if a.strip()]) if args else 0
                         call_args = ", ".join(numbers[:max(n_args, 1)])
@@ -519,7 +540,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         return packet
 
     @staticmethod
-    def _verify_tests(code: str, test_cases: List[Dict]) -> Tuple[bool, str]:
+    def _verify_tests(code: str, test_cases: list[dict]) -> tuple[bool, str]:
         """Run test cases against generated code.
 
         Args:
@@ -533,8 +554,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         try:
             from research.evaluation.prompt_tests import run_tests
             # Extract function name from code
-            import re
-            match = re.search(r'def\s+(\w+)\s*\(', code)
+            match = _RE_FUNC_NAME.search(code)
             if not match:
                 return False, "No function definition found in code"
             func_name = match.group(1)
@@ -546,7 +566,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         except Exception as e:
             return False, f"Test execution error: {e}"
 
-    def run_recursive_domain(self, domain: str, n_tasks: int = 5) -> List[Dict]:
+    def run_recursive_domain(self, domain: str, n_tasks: int = 5) -> list[dict]:
         """Run multiple tasks from a domain with recursive fix-retry."""
         import random
         templates = self.TASK_TEMPLATES.get(domain, [])
@@ -585,8 +605,9 @@ class RecursiveSelfPlay(SelfPlaySandbox):
                     ref_result = self.executor.execute(ref_code)
                     if ref_result["returncode"] == 0:
                         expected = ref_result["stdout"].strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"self-play reference execution error: {e}", RuntimeWarning, stacklevel=2)
 
             code_prefix = "import math" if domain == "math" else ""
 
@@ -613,7 +634,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         """Print recursive self-play statistics."""
         s = self.get_stats()
         print(f"\n{'='*70}")
-        print(f"Recursive Self-Play Statistics")
+        print("Recursive Self-Play Statistics")
         print(f"{'='*70}")
         print(f"  Total tasks:       {self.total_recursive_tasks}")
         print(f"  Successful:        {s['successful']} ({s['success_rate']:.1%})")
@@ -624,7 +645,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         print(f"  Avg exec time:     {s['avg_exec_time_ms']:.0f}ms")
         print(f"  Avg tokens/sec:    {s['avg_tokens_per_second']:.0f}")
         print(f"  Packets logged:    {len(self.packets)}")
-        print(f"\n  Success by round:")
+        print("\n  Success by round:")
         for r, count in sorted(self.success_by_round.items()):
             pct = count / max(self.total_recursive_tasks, 1) * 100
             print(f"    Round {r}: {count} ({pct:.1f}%)")
@@ -654,9 +675,9 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         if not hasattr(self, '_goal_scorer'):
             self._goal_scorer = GoalScorer()
 
-    def _verify_goal_io(self, code: str, test_cases: List[Dict],
+    def _verify_goal_io(self, code: str, test_cases: list[dict],
                         solve_name: str = "solve",
-                        stress_index: Optional[int] = None) -> Tuple[bool, float, str, List[Dict]]:
+                        stress_index: int | None = None) -> tuple[bool, float, str, list[dict]]:
         """Verify generated code against I/O test cases.
 
         Executes the code to define solve(), then calls solve(*args) for each
@@ -674,7 +695,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         import json as _json
 
         # Build verification wrapper
-        test_data = _json.dumps([
+        test_data = dumps([
             {"args": list(tc["args"]), "expected": repr(tc["expected"])}
             for tc in test_cases
         ])
@@ -720,7 +741,7 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
             return False, 0.0, f"Execution error: {err}", []
 
         try:
-            output = _json.loads(exec_result["stdout"].strip().split("\n")[-1])
+            output = loads(exec_result["stdout"].strip().split("\n")[-1])
             all_pass = output["all_pass"]
             stress_ms = output.get("stress_ms", 0.0)
             results = output.get("results", [])
@@ -733,7 +754,7 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
             return False, 0.0, f"Verification parse error: {e}", []
 
     def run_goal_task(self, goal: GoalTask, k_samples: int = 1,
-                      use_reasoning: bool = True) -> Dict:
+                      use_reasoning: bool = True) -> dict:
         """Run a goal-oriented task with recursive fix-retry and multi-dim scoring.
 
         The model is given a GOAL (target output for inputs) and must define
@@ -880,17 +901,275 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
         self.packets.append(packet)
         return packet
 
+    def run_goal_tasks_batch(self, goals: list[GoalTask],
+                             k_samples: int = 1,
+                             use_reasoning: bool = True,
+                             batch_size: int = 8) -> list[dict]:
+        """Run multiple goal tasks with batched generation.
+
+        Instead of processing tasks one-by-one, this processes all tasks
+        round-by-round: all round-0 generations happen in one batched forward
+        pass, then all round-1 fixes for failed tasks in another batched pass,
+        etc. This gives batch_size× speedup on GPU.
+
+        Args:
+            goals: list of GoalTasks to solve
+            k_samples: independent samples per task (VERSE self-consistency)
+            use_reasoning: generate CoT before code on round 0
+            batch_size: max prompts per batched forward pass
+
+        Returns:
+            list of result packets (same order as goals)
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        self.__init_goal_scorer()
+
+        n = len(goals)
+        # State per task: [active, current_code, current_error, attempts, reasoning, sample_outputs]
+        states = [{
+            "active": True,
+            "code": None,
+            "error": None,
+            "attempts": [],
+            "reasoning": "",
+            "sample_outputs": [],
+            "sample_idx": 0,
+            "round_num": 0,
+        } for _ in range(n)]
+
+        self.total_recursive_tasks += n
+        self.stats["total_tasks"] += n
+
+        # Process round-by-round across all tasks
+        max_total_rounds = self.max_rounds * k_samples
+        for round_iter in range(max_total_rounds):
+            # Find tasks that still need generation this round
+            active_indices = [i for i, s in enumerate(states) if s["active"]]
+            if not active_indices:
+                break
+
+            # Build prompts for all active tasks
+            prompts = []
+            prompt_types = []  # "code" or "fix" or "reasoning"
+            for i in active_indices:
+                s = states[i]
+                goal = goals[i]
+
+                if s["round_num"] == 0 and s["sample_idx"] == 0:
+                    # Round 0: generate from goal prompt
+                    gen_prompt = build_goal_prompt(goal)
+                    if use_reasoning and "def " in gen_prompt:
+                        # For batched mode, skip reasoning generation (too complex to batch)
+                        # Just use code generation directly
+                        pass
+                    prompts.append(gen_prompt)
+                    prompt_types.append("code")
+                elif s["round_num"] == 0 and s["sample_idx"] > 0:
+                    # New sample, round 0
+                    gen_prompt = build_goal_prompt(goal)
+                    prompts.append(gen_prompt)
+                    prompt_types.append("code")
+                else:
+                    # Fix round: generate fix based on error
+                    prompts.append((s["code"], s["error"], goal.description, s["round_num"]))
+                    prompt_types.append("fix")
+
+            # Batched generation
+            # Split into chunks of batch_size
+            all_codes = []
+            all_telems = []
+            for chunk_start in range(0, len(prompts), batch_size):
+                chunk_end = min(chunk_start + batch_size, len(prompts))
+                chunk = prompts[chunk_start:chunk_end]
+                chunk_types = prompt_types[chunk_start:chunk_end]
+
+                code_prompts = []
+                fix_prompts = []
+                code_indices = []
+                fix_indices = []
+
+                for j, (p, pt) in enumerate(zip(chunk, chunk_types)):
+                    if pt == "code":
+                        code_prompts.append(p)
+                        code_indices.append(j)
+                    else:
+                        fix_prompts.append(p)
+                        fix_indices.append(j)
+
+                # Generate code in batch
+                if code_prompts:
+                    code_results = self.generate_code_batch(code_prompts)
+                else:
+                    code_results = []
+
+                # Generate fixes (sequential for now — fix generation is complex)
+                fix_results = []
+                for fp in fix_prompts:
+                    sample_code, sample_error, task_desc, round_num = fp
+                    prev_att = states[active_indices[chunk_start + fix_indices[len(fix_results)]]]["attempts"][-1] if states[active_indices[chunk_start + fix_indices[len(fix_results)]]]["attempts"] else None
+                    prev_compute = None
+                    if prev_att:
+                        prev_compute = {
+                            "gen_tokens": prev_att.get("tokens_generated", 0),
+                            "gen_ms": prev_att.get("gen_time_ms", 0),
+                            "exec_ms": prev_att.get("exec_time_ms", 0),
+                            "code_len": len(prev_att.get("code", "")),
+                        }
+                    fix_code, fix_telem = self.generate_fix(
+                        sample_code, sample_error, task_desc, round_num,
+                        prev_compute=prev_compute)
+                    fix_results.append((fix_code, fix_telem))
+
+                # Reassemble in order
+                chunk_results = [None] * len(chunk)
+                for j, idx in enumerate(code_indices):
+                    chunk_results[idx] = code_results[j]
+                for j, idx in enumerate(fix_indices):
+                    chunk_results[idx] = fix_results[j]
+
+                for code, telem in chunk_results:
+                    all_codes.append(code)
+                    all_telems.append(telem)
+
+            # Verify all generated codes in parallel (subprocess execution)
+            def verify_one(idx):
+                i = active_indices[idx]
+                s = states[i]
+                goal = goals[i]
+                code = all_codes[idx]
+                model_telem = all_telems[idx]
+
+                # For round 0, code = prompt + completion
+                if s["round_num"] == 0:
+                    gen_prompt = build_goal_prompt(goal)
+                    full_code = gen_prompt + code
+                else:
+                    full_code = code  # fix already includes context
+
+                all_pass, stress_ms, verify_error, test_results = self._verify_goal_io(
+                    full_code, goal.test_cases, goal.solve_name, goal.stress_index)
+
+                return i, full_code, model_telem, all_pass, stress_ms, verify_error, test_results
+
+            with ThreadPoolExecutor(max_workers=min(2, len(active_indices))) as executor:
+                verify_results = list(executor.map(verify_one, range(len(active_indices))))
+
+            # Process verification results
+            for i, full_code, model_telem, all_pass, stress_ms, verify_error, test_results in verify_results:
+                s = states[i]
+                goal = goals[i]
+                round_num = s["round_num"]
+                sample_idx = s["sample_idx"]
+
+                score_result = self._goal_scorer.score(
+                    code=full_code,
+                    correct=all_pass,
+                    exec_time_ms=stress_ms if stress_ms > 0 else model_telem.get("gen_time_ms", 0),
+                    stress_exec_ms=stress_ms if stress_ms > 0 else None,
+                    mean_logprob=model_telem.get("mean_logprob", -1.0),
+                    goal_id=goal.id,
+                    tokens_generated=model_telem.get("tokens_generated", 0),
+                    k_samples=k_samples,
+                    n_agreeing=1,
+                )
+
+                attempt = {
+                    "sample": sample_idx,
+                    "round": round_num,
+                    "code": full_code,
+                    "error": verify_error if not all_pass else "",
+                    "success": all_pass,
+                    "accepted": score_result.accepted,
+                    "quality": score_result.quality,
+                    "scores": score_result.scores,
+                    "fingerprint": score_result.fingerprint,
+                    "ast_nodes": score_result.ast_node_count,
+                    "exec_time_ms": stress_ms,
+                    "gen_time_ms": model_telem.get("gen_time_ms", 0),
+                    "tokens_generated": model_telem.get("tokens_generated", 0),
+                    "confidence": model_telem.get("confidence", 0),
+                    "reasoning": s["reasoning"] if round_num == 0 else "",
+                    "test_results": test_results,
+                    "rejected_reason": score_result.rejected_reason,
+                }
+                s["attempts"].append(attempt)
+
+                if all_pass:
+                    if score_result.accepted:
+                        self._goal_scorer.record_fingerprint(goal.id, score_result.fingerprint)
+                    s["sample_outputs"].append(test_results)
+                    s["active"] = False  # done
+                else:
+                    # Prepare for fix round
+                    s["code"] = full_code
+                    s["error"] = verify_error or "I/O verification failed"
+                    s["round_num"] += 1
+                    if s["round_num"] >= self.max_rounds:
+                        # Move to next sample or finish
+                        s["sample_idx"] += 1
+                        s["round_num"] = 0
+                        s["code"] = None
+                        s["error"] = None
+                        if s["sample_idx"] >= k_samples:
+                            s["active"] = False  # exhausted all samples
+
+        # Build result packets
+        packets = []
+        for i, goal in enumerate(goals):
+            s = states[i]
+            attempts = s["attempts"]
+            n_agreeing = len(s["sample_outputs"]) if k_samples > 1 else 1
+
+            best_attempt = None
+            best_quality = -1
+            for att in attempts:
+                if att["accepted"] and att["quality"] > best_quality:
+                    best_attempt = att
+                    best_quality = att["quality"]
+
+            final_success = best_attempt is not None
+            if final_success:
+                self.success_by_round[best_attempt["round"]] = \
+                    self.success_by_round.get(best_attempt["round"], 0) + 1
+                self.stats["successful"] += 1
+                self.stats["correct"] += 1
+
+            packet = {
+                "goal_id": goal.id,
+                "goal": goal.description,
+                "domain": goal.domain,
+                "difficulty": goal.difficulty,
+                "archetype": goal.archetype,
+                "input_signature": goal.input_signature,
+                "test_cases": goal.test_cases,
+                "attempts": attempts,
+                "final_success": final_success,
+                "best_quality": best_quality if final_success else 0.0,
+                "rounds_used": len([a for a in attempts if a["sample"] == 0]) if k_samples == 1 else len(attempts),
+                "k_samples": k_samples,
+                "n_agreeing": n_agreeing,
+                "reasoning_text": s["reasoning"],
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.packets.append(packet)
+            packets.append(packet)
+
+        return packets
+
 
 class DDriveSandboxExecutor(SandboxExecutor):
     """SandboxExecutor that uses D: drive for temp files."""
 
     def __init__(self, timeout_s: float = 5.0, memory_limit_mb: int = 256,
-                 temp_dir: str = "D:/windsurf/ForgeAI/.devin/tmp"):
+                 temp_dir: str = None):
         super().__init__(timeout_s, memory_limit_mb)
+        if temp_dir is None:
+            from research.paths import TMP_DIR, as_str
+            temp_dir = as_str(TMP_DIR)
         self.temp_dir = temp_dir
         os.makedirs(temp_dir, exist_ok=True)
 
-    def execute(self, code: str, expected_output: Optional[str] = None) -> Dict:
+    def execute(self, code: str, expected_output: str | None = None) -> dict:
         """Execute Python code using D: drive temp files."""
         # Write code to D: temp file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
@@ -910,7 +1189,7 @@ class DDriveSandboxExecutor(SandboxExecutor):
 
         wrapper = f'''
 import sys, os
-{f"import resource" if sys.platform != "win32" else ""}
+{"import resource" if sys.platform != "win32" else ""}
 {mem_code}
 
 import builtins
@@ -959,6 +1238,13 @@ exec(open(r"{temp_path}", encoding='utf-8').read())
                     expected_output.strip() == result["stdout"].strip())
 
         except subprocess.TimeoutExpired:
+            # Force-kill to prevent zombie processes
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"subprocess cleanup: {e}", RuntimeWarning, stacklevel=2)
             result["timed_out"] = True
             result["stderr"] = f"Execution timed out after {self.timeout_s}s"
             result["exec_time_ms"] = self.timeout_s * 1000
@@ -969,19 +1255,18 @@ exec(open(r"{temp_path}", encoding='utf-8').read())
             try:
                 os.unlink(temp_path)
                 os.unlink(wrapper_path)
-            except OSError:
-                pass
+            except OSError as e:
+                import warnings
+                warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
 
         return result
 
 
 def main():
     """Run recursive self-play with ForgeLM."""
-    sys.path.insert(0, '.')
-
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print("=" * 70)
     print("Recursive Self-Play Engine - ForgeLM V2")
@@ -993,15 +1278,14 @@ def main():
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Create recursive engine
     print("\n[2] Creating recursive self-play engine...")
     engine = RecursiveSelfPlay(model, tokenizer,
                                log_dir="research/data/recursive_self_play",
                                max_gen_tokens=100,
-                               max_rounds=5,
-                               temp_dir="D:/windsurf/ForgeAI/.devin/tmp")
+                               max_rounds=5)
 
     # Run domains with recursive fix-retry
     print("\n[3] Running recursive self-play tasks...")
@@ -1026,7 +1310,7 @@ def main():
     engine.print_recursive_stats()
 
     print(f"\n  Data packet file: {path}")
-    print(f"  Ready for knowledge injection via fact_injection_key or knowledge_pack_key")
+    print("  Ready for knowledge injection via fact_injection_key or knowledge_pack_key")
 
 
 if __name__ == "__main__":

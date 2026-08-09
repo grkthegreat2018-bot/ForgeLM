@@ -16,6 +16,7 @@ Key class: TRIVIAL — fixed Hadamard, no data or training.
 Reference: QuaRot, arxiv 2404.00456
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 from research.keys.spinquant_key import hadamard_matrix
 

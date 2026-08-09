@@ -30,10 +30,12 @@ Usage:
     head = DSparkHead(d_model=1024, vocab_size=151665, n_predict=4, n_layers=2)
     output = dspark_generate(model, head, input_ids, max_new_tokens=100)
 """
+from collections.abc import Callable
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Dict, Callable
 
 
 class DSparkHead(nn.Module):
@@ -56,7 +58,7 @@ class DSparkHead(nn.Module):
 
     def __init__(self, d_model: int, vocab_size: int, n_predict: int = 4,
                  n_layers: int = 2, seq_rank: int = 256, seq_mode: str = "rnn",
-                 share_embedding: Optional[nn.Embedding] = None):
+                 share_embedding: nn.Embedding | None = None):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
@@ -70,7 +72,7 @@ class DSparkHead(nn.Module):
         # Each head is an n_layers-deep MLP: Linear → GELU → ... → Linear(vocab).
         self.parallel_heads = nn.ModuleList()
         for _ in range(n_predict):
-            layers: List[nn.Module] = []
+            layers: list[nn.Module] = []
             in_dim = d_model
             for li in range(n_layers):
                 out_dim = d_model if li < n_layers - 1 else vocab_size
@@ -114,7 +116,7 @@ class DSparkHead(nn.Module):
     #  Internal helpers
     # ──────────────────────────────────────────────────────────────────
 
-    def _parallel_backbone(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
+    def _parallel_backbone(self, hidden_states: torch.Tensor) -> list[torch.Tensor]:
         """Run parallel backbone: produce base logits U_1..U_gamma.
 
         Args:
@@ -127,7 +129,7 @@ class DSparkHead(nn.Module):
 
     def _seq_step(self, k: int, hidden_k: torch.Tensor,
                   prev_token: torch.Tensor,
-                  state: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+                  state: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
         """One step of the sequential module at position k.
 
         Computes transition bias B_k and updates recurrent state.
@@ -185,7 +187,7 @@ class DSparkHead(nn.Module):
     # ──────────────────────────────────────────────────────────────────
 
     def forward(self, hidden_states: torch.Tensor,
-                input_ids: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
+                input_ids: torch.Tensor) -> tuple[list[torch.Tensor], torch.Tensor]:
         """Forward pass: parallel backbone + sequential refinement.
 
         During training, uses ground-truth input_ids as the "previous predictions"
@@ -225,7 +227,7 @@ class DSparkHead(nn.Module):
                 # token ahead, which is what head k-1 would have predicted).
                 prev_tok = input_ids  # teacher forcing: use ground truth at t+k
                 # We shift by k so that position t sees token at t+k.
-                if T > k:
+                if k < T:
                     prev_tok = torch.cat(
                         [input_ids[:, k:], input_ids[:, :k]], dim=1
                     )
@@ -265,7 +267,7 @@ class DSparkHead(nn.Module):
     @torch.no_grad()
     def generate_block(self, model: nn.Module, input_ids: torch.Tensor,
                        max_block_size: int = 4,
-                       temperature: float = 0.0) -> List[Tuple[int, float]]:
+                       temperature: float = 0.0) -> list[tuple[int, float]]:
         """Generate a block of up to max_block_size tokens using semi-AR generation.
 
         Algorithm:
@@ -318,7 +320,7 @@ class DSparkHead(nn.Module):
 
         # 3. Sequential sampling: left-to-right within the block.
         anchor_token = input_ids[:, -1]  # (1,) last token = anchor x_0
-        results: List[Tuple[int, float]] = []
+        results: list[tuple[int, float]] = []
         state = None  # RNN state
         prev_token = anchor_token  # x_{k-1}, starts with anchor
 
@@ -332,8 +334,8 @@ class DSparkHead(nn.Module):
             refined = base_logits[k] + bias  # (1, V)
 
             # Apply calibration temperature (post-hoc STS).
-            calib_temp = self.calib_temps[k].item()
-            refined = refined / max(calib_temp, 1e-6)
+            calib_temp = self.calib_temps[k]
+            refined = refined / torch.clamp(calib_temp, min=1e-6)
 
             # Sample token.
             if temperature == 0:
@@ -344,9 +346,10 @@ class DSparkHead(nn.Module):
 
             # Confidence score c_k.
             conf = self._confidence(h_k, prev_token)  # (1,)
-            conf_val = conf.item()
 
-            results.append((token.item(), conf_val))
+            # Batch sync: single .tolist() for token + confidence.
+            tok_conf = torch.stack([token, conf]).tolist()
+            results.append((tok_conf[0], tok_conf[1]))
             prev_token = token  # x_k becomes x_{k-1} for next step
 
         return results
@@ -355,8 +358,8 @@ class DSparkHead(nn.Module):
     #  Confidence-scheduled verification (Section 3.2)
     # ──────────────────────────────────────────────────────────────────
 
-    def confidence_schedule(self, confidences: List[float],
-                            throughput_profile: Optional[Callable[[int], float]] = None,
+    def confidence_schedule(self, confidences: list[float],
+                            throughput_profile: Callable[[int], float] | None = None,
                             threshold: float = 0.5) -> int:
         """Decide how many tokens to verify based on confidence scores.
 
@@ -454,7 +457,7 @@ class DSparkTrainer:
         k = torch.arange(1, gamma + 1, dtype=torch.float)
         return torch.exp(-(k - 1) / gamma)
 
-    def compute_loss(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+    def compute_loss(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """Compute the three-term DSpark training loss.
 
         L_ce: cross-entropy for draft token prediction (Eq. 9)
@@ -531,24 +534,9 @@ class DSparkTrainer:
             loss_k = loss_k.mean() * weights[k]
             ce_loss = ce_loss + loss_k
 
-        # ── L_tv: total variation distance (Eq. 10) ──
+        # ── L_tv + L_conf: combined loop (avoids redundant softmax computation) ──
+        # Both losses need draft_probs and target_probs — compute once, reuse.
         tv_loss = 0.0
-        for k in range(min(gamma, len(target_logits_list))):
-            offset = k + 1
-            if offset >= T:
-                break
-            draft_logits = logits_list[k][:, :-offset, :].contiguous()
-            target_logits = target_logits_list[k].contiguous()
-
-            draft_probs = F.softmax(draft_logits, dim=-1)
-            target_probs = F.softmax(target_logits, dim=-1)
-
-            # TV distance = 0.5 * ||p_d - p_t||_1
-            tv_dist = 0.5 * (draft_probs - target_probs).abs().sum(dim=-1).mean()
-            tv_loss = tv_loss + tv_dist * weights[k]
-
-        # ── L_conf: confidence loss (Eq. 7, 8) ──
-        # c_k* = 1 - 0.5 * ||p_k^d - p_k^t||_1  (analytical acceptance rate)
         conf_loss = 0.0
         for k in range(min(gamma, len(target_logits_list))):
             offset = k + 1
@@ -559,11 +547,14 @@ class DSparkTrainer:
 
             draft_probs = F.softmax(draft_logits, dim=-1)
             target_probs = F.softmax(target_logits, dim=-1)
+            prob_diff = (draft_probs - target_probs).abs()  # (B, T', V)
 
-            # Analytical acceptance rate per token.
-            c_star = 1.0 - 0.5 * (draft_probs - target_probs).abs().sum(dim=-1)  # (B, T')
+            # L_tv: TV distance = 0.5 * ||p_d - p_t||_1
+            tv_dist = 0.5 * prob_diff.sum(dim=-1).mean()
+            tv_loss = tv_loss + tv_dist * weights[k]
 
-            # Predicted confidence.
+            # L_conf: c_k* = 1 - 0.5 * ||p_k^d - p_k^t||_1  (analytical acceptance rate)
+            c_star = 1.0 - 0.5 * prob_diff.sum(dim=-1)  # (B, T')
             c_pred = confidences[:, :-offset, k].contiguous()  # (B, T')
 
             conf_loss = conf_loss + F.binary_cross_entropy(
@@ -581,7 +572,7 @@ class DSparkTrainer:
             "total_loss": total_loss.item(),
         }
 
-    def train_step(self, input_ids: torch.Tensor) -> Dict:
+    def train_step(self, input_ids: torch.Tensor) -> dict:
         """Single training step.
 
         Args:
@@ -598,8 +589,8 @@ class DSparkTrainer:
         self.optimizer.step()
         return stats
 
-    def calibrate(self, validation_data: List[torch.Tensor],
-                  n_grid: int = 50) -> Dict:
+    def calibrate(self, validation_data: list[torch.Tensor],
+                  n_grid: int = 50) -> dict:
         """Post-hoc Sequential Temperature Scaling (STS) calibration.
 
         Calibrates confidence scores left-to-right, finding optimal temperature
@@ -690,7 +681,7 @@ class DSparkTrainer:
 def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
                     input_ids: torch.Tensor, max_new_tokens: int = 100,
                     temperature: float = 0.0, max_block_size: int = 4,
-                    throughput_profile: Optional[Callable[[int], float]] = None,
+                    throughput_profile: Callable[[int], float] | None = None,
                     conf_threshold: float = 0.5,
                     device: str = "cuda") -> torch.Tensor:
     """Generate tokens using DSpark speculative decoding.
@@ -730,7 +721,8 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         if eid is not None:
             eos_ids.add(eid)
     # Qwen2.5 special tokens
-    eos_ids.update({151643, 151645})  # <|endoftext|>, <|im_end|>
+    eos_ids.update({151643, 151645})
+    eos_ids_tensor = torch.tensor(list(eos_ids), device=next(model.parameters()).device)  # <|endoftext|>, <|im_end|>
 
     def _get_lm_head_logits(hidden: torch.Tensor) -> torch.Tensor:
         """Get logits from hidden states using the model's LM head."""
@@ -756,8 +748,8 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
             probs = F.softmax(main_logits[:, -1, :] / temperature, dim=-1)
             anchor_token = torch.multinomial(probs, num_samples=1)  # (1, 1)
 
-        # Check for EOS on anchor token.
-        if anchor_token.item() in eos_ids:
+        # Check for EOS on anchor token — GPU-side check avoids .item() sync.
+        if eos_ids_tensor is not None and (anchor_token == eos_ids_tensor).any().item():
             input_ids = torch.cat([input_ids, anchor_token], dim=1)
             break
 
@@ -818,25 +810,27 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         n_accepted = 0
         bonus_token = None
 
-        for k in range(n_verify):
-            pos = anchor_pos + k  # model's prediction at this position
-            if pos >= verify_logits.shape[1] - 1:
-                break
-            model_pred = verify_logits[:, pos, :].argmax(-1)  # (1,)
-            if model_pred.item() == verify_tokens[k]:
-                n_accepted += 1
-            else:
-                # Rejection: the bonus token is the model's prediction here.
-                bonus_token = model_pred.unsqueeze(-1)  # (1, 1)
-                break
+        # GPU-side: compare all draft tokens with model predictions at once.
+        n_check = min(n_verify, verify_logits.shape[1] - 1 - anchor_pos)
+        if n_check > 0:
+            target_preds = verify_logits[0, anchor_pos:anchor_pos + n_check, :].argmax(-1)
+            verify_tensor = torch.tensor(verify_tokens[:n_check], device=dev)
+            matches = (verify_tensor == target_preds)
+            n_accepted = matches.cumprod(dim=-1).sum().item()
 
-        # If all verified tokens accepted, bonus = model's prediction after last.
-        if bonus_token is None and n_verify > 0:
-            pos = anchor_pos + n_verify
-            if pos < verify_logits.shape[1]:
-                bonus_token = verify_logits[:, pos, :].argmax(-1, keepdim=True)
+            if n_accepted < n_check:
+                # Rejection at position n_accepted — bonus is model's prediction.
+                bonus_token = target_preds[n_accepted:n_accepted + 1].unsqueeze(-1)
             else:
-                bonus_token = anchor_token  # fallback
+                # All verified tokens accepted — bonus = model's prediction after last.
+                pos = anchor_pos + n_verify
+                if pos < verify_logits.shape[1]:
+                    bonus_token = verify_logits[:, pos, :].argmax(-1, keepdim=True)
+                else:
+                    bonus_token = anchor_token  # fallback
+        else:
+            n_accepted = 0
+            bonus_token = anchor_token  # fallback
 
         # ── Step 6: Assemble accepted tokens ──
         # Always accept the anchor token + accepted draft prefix + bonus.
@@ -853,19 +847,18 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         new_tokens = torch.cat(new_tokens, dim=1)  # (1, 1 + n_accepted + 1)
         input_ids = torch.cat([input_ids, new_tokens], dim=1)
 
-        # Check EOS on bonus token and accepted drafts.
+        # Check EOS on bonus token and accepted drafts — GPU-side.
         all_new = new_tokens[0]  # (n,) or (1, n)
         if all_new.dim() == 0:
             all_new = all_new.unsqueeze(0)
         n_new = all_new.shape[-1]
-        for i in range(n_new):
-            tok = all_new[i].item() if all_new.dim() == 1 else all_new[0, i].item()
-            if tok in eos_ids:
-                input_ids = input_ids[:, :input_ids.shape[1] - (n_new - i - 1)]
-                break
-        else:
-            continue
-        break
+        # GPU-side: check which tokens are EOS, find first EOS index.
+        eos_mask = torch.isin(all_new, eos_ids_tensor)  # (n_new,) bool GPU
+        if eos_mask.any().item():  # single sync
+            first_eos = eos_mask.nonzero()[0].item()  # second sync (rare path)
+            input_ids = input_ids[:, :input_ids.shape[1] - (n_new - first_eos - 1)]
+            break
+        # No EOS — continue loop.
 
     # Trim to max_new_tokens if exceeded.
     excess = input_ids.shape[1] - prompt_len - max_new_tokens

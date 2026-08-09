@@ -30,14 +30,16 @@ Usage:
     key.apply(model)  # decompose weights into FP4 + sparse
     key.print_stats()
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
-def _quantize_to_fp4(w: torch.Tensor, per_channel: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+def _quantize_to_fp4(w: torch.Tensor, per_channel: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize weights to FP4 and return (quantized, residual).
 
     FP4 format: 2 exponent bits, 1 mantissa bit (e2m1)
@@ -98,7 +100,7 @@ def _quantize_to_fp4(w: torch.Tensor, per_channel: bool = True) -> Tuple[torch.T
 
 
 def _sparsify_residual(residual: torch.Tensor,
-                       sparsity_threshold: float = 0.05) -> Tuple[torch.Tensor, torch.Tensor]:
+                       sparsity_threshold: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
     """Keep only the top-k largest residual entries (sparsify).
 
     Args:
@@ -178,7 +180,7 @@ class SharQLinear(nn.Module):
         self._forward_calls += 1
         return output
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         return {
             "sparse_density": self._sparse_density,
             "forward_calls": self._forward_calls,
@@ -205,7 +207,7 @@ class SharQFP4Key(Key):
 
     def __init__(self, sparsity_threshold: float = 0.05):
         self.sparsity_threshold = sparsity_threshold
-        self._patched_layers: List[SharQLinear] = []
+        self._patched_layers: list[SharQLinear] = []
 
     @property
     def name(self) -> str:
@@ -219,7 +221,7 @@ class SharQFP4Key(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """SharQ is a runtime key — state dict is unchanged."""
         state = dict(data.get("state", data))
         return KeyResult(
@@ -293,7 +295,7 @@ class SharQFP4Key(Key):
               f"(sparsity={self.sparsity_threshold:.0%})")
         print(f"    Average compression: {avg_compression:.1f}x")
         print(f"    FP4 base: 0.5 bytes/weight, Sparse residual: {self.sparsity_threshold:.0%} density")
-        print(f"    Near-lossless (FP4 + residual ≈ FP16 quality)")
+        print("    Near-lossless (FP4 + residual ≈ FP16 quality)")
 
         return count
 
@@ -309,7 +311,7 @@ class SharQFP4Key(Key):
               f"avg_compression={avg_compression:.1f}x, "
               f"forward_calls={total_calls}")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """SharQ is runtime-only — state dict is unchanged."""
         return KeyResult(success=True, weights=weights,
                         metadata={"note": "SharQ FP4 is runtime-only, no reversal needed"})

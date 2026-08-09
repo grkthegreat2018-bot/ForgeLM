@@ -26,8 +26,10 @@ Usage:
     # Convert few-shot context into permanent weight patches
     state = apply_context_patch(state, model, tokenizer, few_shot_examples)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -40,7 +42,7 @@ class ContextPatchKey(Key):
     Key class: PARTIAL — modifies weights, approximate.
     """
 
-    def __init__(self, alpha: float = 1.0, layers: Optional[List[int]] = None):
+    def __init__(self, alpha: float = 1.0, layers: list[int] | None = None):
         self.alpha = alpha  # patch strength
         self.layers = layers  # which layers to patch (None = all)
 
@@ -55,7 +57,7 @@ class ContextPatchKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Apply rank-1 patches to MLP weights.
 
         Args:
@@ -89,14 +91,14 @@ class ContextPatchKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": False})
 
 
 def extract_context_patches(model, tokenizer, context_text: str,
                              query_text: str, device: str = "cuda",
-                             layers: Optional[List[int]] = None) -> List[Tuple]:
+                             layers: list[int] | None = None) -> list[tuple]:
     """Extract rank-1 weight patches from in-context learning.
 
     Runs the model with and without context, measures the activation
@@ -187,10 +189,10 @@ def extract_context_patches(model, tokenizer, context_text: str,
     return patches
 
 
-def apply_context_patch(state: Dict[str, torch.Tensor], model, tokenizer,
+def apply_context_patch(state: dict[str, torch.Tensor], model, tokenizer,
                         context_text: str, query_text: str,
                         n_layers: int, device: str = "cuda",
-                        alpha: float = 1.0) -> Dict[str, torch.Tensor]:
+                        alpha: float = 1.0) -> dict[str, torch.Tensor]:
     """Convert in-context learning to permanent weight patches.
 
     Args:

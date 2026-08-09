@@ -22,7 +22,9 @@ Where:
 Reference: YaRN, arxiv 2309.00071
 """
 import math
+
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 
@@ -249,4 +251,4 @@ if __name__ == "__main__":
     ratio = yarn_freq / orig_freq
     print(f"  Freq ratio (first 5): {ratio[:5].tolist()}")
     print(f"  Freq ratio (last 5):  {ratio[-5:].tolist()}")
-    print(f"  Low-freq dims scaled down (interpolate), high-freq preserved (extrapolate)")
+    print("  Low-freq dims scaled down (interpolate), high-freq preserved (extrapolate)")

@@ -28,19 +28,17 @@ With 2 GB VRAM budget: ~35 topics cached simultaneously.
 Usage:
     python -m research.bake_v4
 """
-import os
-import sys
-import time
-import json
-import torch
 import hashlib
+import json
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
 
 SRC = "research/checkpoints/forgelm_v2.safetensors"  # v2 base (QK-Norm bug fixed)
-OUT_DIR = "D:/windsurf/ForgeAI/research/checkpoints/forgelm_v4"
+from research.paths import FORGELM_V4_DIR, as_str; OUT_DIR = as_str(FORGELM_V4_DIR)
+from research.json_compat import dumps, loads
 
 N_LAYERS = 28
 N_EXPERTS = 4  # original MoE experts in v2
@@ -122,7 +120,7 @@ TOPIC_LIBRARY = {
 }
 
 
-def _quantize_int4(w: torch.Tensor, group_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+def _quantize_int4(w: torch.Tensor, group_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-group symmetric int4 quantization (stored as int8)."""
     original_shape = w.shape
     n_elements = w.numel()
@@ -141,7 +139,7 @@ def _quantize_int4(w: torch.Tensor, group_size: int = 128) -> Tuple[torch.Tensor
 
 def compress_expert_svd_int4(w: torch.Tensor,
                               svd_energy: float = 0.99,
-                              use_int4: bool = False) -> Dict[str, torch.Tensor]:
+                              use_int4: bool = False) -> dict[str, torch.Tensor]:
     """Compress expert weight with SVD (+ optional int4).
 
     Args:
@@ -166,7 +164,7 @@ def compress_expert_svd_int4(w: torch.Tensor,
             "U_q": U_q,
             "U_scale": U_scale,
             "U_shape": torch.tensor(U.shape, dtype=torch.int32),
-            "S": S.to(torch.float16),
+            "S": S.to(torch.bfloat16),
             "Vh_q": Vh_q,
             "Vh_scale": Vh_scale,
             "Vh_shape": torch.tensor(Vh.shape, dtype=torch.int32),
@@ -177,16 +175,16 @@ def compress_expert_svd_int4(w: torch.Tensor,
         return {
             "U": U.contiguous().to(torch.bfloat16),
             "U_shape": torch.tensor(U.shape, dtype=torch.int32),
-            "S": S.to(torch.float16),
+            "S": S.to(torch.bfloat16),
             "Vh": Vh.contiguous().to(torch.bfloat16),
             "Vh_shape": torch.tensor(Vh.shape, dtype=torch.int32),
             "rank": torch.tensor([rank], dtype=torch.int32),
         }
 
 
-def quantize_base_int4(state: Dict[str, torch.Tensor],
+def quantize_base_int4(state: dict[str, torch.Tensor],
                        group_size: int = 128,
-                       rotate: bool = True) -> Dict[str, torch.Tensor]:
+                       rotate: bool = True) -> dict[str, torch.Tensor]:
     """Apply SpinQuant + int4 to base model weights (not experts)."""
     from research.keys.spinquant_key import hadamard_matrix
 
@@ -219,23 +217,24 @@ def quantize_base_int4(state: Dict[str, torch.Tensor],
 
 def bake_v4():
     """Bake v4: base model (int4) + infinite expert library (SVD+int4)."""
+    from safetensors.torch import save_file
+
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from safetensors.torch import save_file
 
     print("=" * 70)
     print("Bake ForgeLM v4 — v2 base (int4) + Infinite AirMoE Library")
     print("=" * 70)
 
     # Phase 1: Load v2 (QK-Norm identity skip = lossless = v1 quality)
-    print(f"\n[1] Loading ForgeLM v2 (base model)...")
+    print("\n[1] Loading ForgeLM v2 (base model)...")
     t0 = time.time()
     cfg = get_config("forgelm_v2", device="cpu")
     model = ModelLoader.build_model_fast(cfg, checkpoint_path=SRC)
     print(f"  Loaded in {time.time()-t0:.1f}s")
 
     # Phase 2: Extract state — separate base from experts
-    print(f"\n[2] Extracting model state...")
+    print("\n[2] Extracting model state...")
     base_state = {}
     expert_state = {}  # {layer: {expert_idx: {w1, w2, w3}}}
 
@@ -263,7 +262,7 @@ def bake_v4():
     print(f"  Expert layers: {n_expert_layers} × {N_EXPERTS} experts")
 
     # Phase 3: int4 quantize base weights
-    print(f"\n[3] Quantizing base weights to int4...")
+    print("\n[3] Quantizing base weights to int4...")
     t0 = time.time()
     base_int4 = quantize_base_int4(base_state, group_size=128, rotate=True)
     base_orig_mb = sum(t.numel() * t.element_size() for t in base_state.values()) / 1e6
@@ -361,14 +360,14 @@ def bake_v4():
     print(f"  Time: {time.time()-t0:.1f}s")
 
     # Phase 5: Save base model (int4, no routed experts)
-    print(f"\n[5] Saving base model (int4, shared FFN only)...")
+    print("\n[5] Saving base model (int4, shared FFN only)...")
     base_path = out / "base_model_int4.safetensors"
     save_file(base_int4, str(base_path))
     base_file_size = base_path.stat().st_size
     print(f"  Base model: {base_file_size/1e6:.0f} MB")
 
     # Phase 6: Save RotorQuant rotations
-    print(f"\n[6] Saving RotorQuant rotations...")
+    print("\n[6] Saving RotorQuant rotations...")
     try:
         from research.quantization.rotorquant import make_givens_rotations
         rotations = make_givens_rotations(128, seed=42)
@@ -379,7 +378,7 @@ def bake_v4():
         print(f"  RotorQuant skipped: {e}")
 
     # Phase 7: Save manifest with topic index
-    print(f"\n[7] Saving manifest...")
+    print("\n[7] Saving manifest...")
     manifest = {
         "name": "ForgeLM-v4",
         "description": "v2 base (int4, QK-Norm fixed) + infinite AirMoE expert library",
@@ -417,7 +416,7 @@ def bake_v4():
     }
 
     manifest_path = out / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_path.write_text(dumps(manifest, indent=2), encoding="utf-8")
 
     # Phase 8: Save config
     v4_config = {
@@ -434,7 +433,7 @@ def bake_v4():
         "expert_library": "experts/ (unlimited topics, add anytime)",
         "router": "keyword-based, maps query → topic → expert files",
     }
-    (out / "config.json").write_text(json.dumps(v4_config, indent=2), encoding="utf-8")
+    (out / "config.json").write_text(dumps(v4_config, indent=2), encoding="utf-8")
 
     # Summary
     total_size = base_file_size + total_expert_comp
@@ -442,15 +441,15 @@ def bake_v4():
     per_topic_mb = total_expert_comp / len(TOPIC_LIBRARY) / 1e6
 
     print(f"\n{'='*70}")
-    print(f"ForgeLM v4 — Infinite AirMoE Expert Library")
+    print("ForgeLM v4 — Infinite AirMoE Expert Library")
     print(f"{'='*70}")
     print(f"\n  Output: {OUT_DIR}")
-    print(f"\n  Files:")
+    print("\n  Files:")
     print(f"    base_model_int4.safetensors  ({base_file_size/1e6:.0f} MB)")
-    print(f"    manifest.json                (topic index + expert registry)")
-    print(f"    config.json")
-    print(f"    rotorquant_rotations.pt")
-    print(f"    experts/                     (INFINITE expert library)")
+    print("    manifest.json                (topic index + expert registry)")
+    print("    config.json")
+    print("    rotorquant_rotations.pt")
+    print("    experts/                     (INFINITE expert library)")
     for topic in TOPIC_LIBRARY:
         print(f"      expert_l*_{topic}.safetensors  ({N_LAYERS} files, ~{per_topic_mb:.0f} MB total)")
 
@@ -459,12 +458,12 @@ def bake_v4():
         print(f"    {topic}: {info['label']}")
         print(f"      keywords: {', '.join(info['keywords'][:4])}...")
 
-    print(f"\n  Compression:")
+    print("\n  Compression:")
     print(f"    Base weights:  {base_orig_mb:.0f} MB → {base_comp_mb:.0f} MB ({base_orig_mb/base_comp_mb:.1f}x)")
     print(f"    Expert weights: {total_expert_orig/1e6:.0f} MB → {total_expert_comp/1e6:.0f} MB ({expert_ratio:.1f}x)")
     print(f"    Per topic:      ~{per_topic_mb:.0f} MB ({N_LAYERS} files × ~{per_topic_mb/N_LAYERS:.1f} MB)")
 
-    print(f"\n  VRAM at inference:")
+    print("\n  VRAM at inference:")
     print(f"    Base (int4):           {vram_est['base_int4_gb']:.3f} GB (always loaded)")
     print(f"    Per topic (cached):    {vram_est['per_topic_gb']:.3f} GB")
     print(f"    KV cache (RotorQuant): {vram_est['kv_cache_rotorquant_gb']:.3f} GB")
@@ -472,10 +471,10 @@ def bake_v4():
 
     budget_2gb = int(2.0 / vram_est['per_topic_gb'])
     budget_3gb = int(3.0 / vram_est['per_topic_gb'])
-    print(f"\n  Topic caching (VRAM-limited, NO hard limit):")
+    print("\n  Topic caching (VRAM-limited, NO hard limit):")
     print(f"    2 GB budget → ~{budget_2gb} topics cached simultaneously")
     print(f"    3 GB budget → ~{budget_3gb} topics cached simultaneously")
-    print(f"    Library is INFINITE — add new topics anytime")
+    print("    Library is INFINITE — add new topics anytime")
 
     print(f"\n  Total on disk: {total_size/1e6:.0f} MB")
     print(f"  v2 bf16 was: 3180 MB → v4: {total_size/1e6:.0f} MB ({3180/(total_size/1e6):.1f}x smaller)")

@@ -33,8 +33,8 @@ Usage:
 """
 import json
 import time
-from pathlib import Path
 from collections import OrderedDict
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
@@ -67,8 +67,8 @@ class AdapterRouter(nn.Module):
         )
 
         # Adapter name -> index mapping.
-        self.adapter_names: List[str] = []
-        self.adapter_metadata: Dict[str, dict] = {}
+        self.adapter_names: list[str] = []
+        self.adapter_metadata: dict[str, dict] = {}
 
     def register_adapter(self, name, metadata=None):
         """Register a new adapter name. Returns its index."""
@@ -126,7 +126,7 @@ class AdapterCache:
         self.capacity = capacity
         self.device = device
         self.cache: OrderedDict[str, dict] = OrderedDict()  # name -> lora_state_dict
-        self.load_times: Dict[str, float] = {}  # name -> last load time (for stats)
+        self.load_times: dict[str, float] = {}  # name -> last load time (for stats)
 
     def get(self, name):
         """Get adapter from cache. Returns None if not cached."""
@@ -195,7 +195,7 @@ class MoLAModel(nn.Module):
         self.adapter_dir.mkdir(parents=True, exist_ok=True)
 
         # Adapter registry: name -> {path, metadata, registered}
-        self.adapter_paths: Dict[str, Path] = {}
+        self.adapter_paths: dict[str, Path] = {}
 
     def register_adapter(self, name, lora_state_dict=None, metadata=None):
         """Register a new adapter. If lora_state_dict given, save it to disk."""

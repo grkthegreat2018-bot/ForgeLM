@@ -28,8 +28,10 @@ Usage:
     # Fold all norms into adjacent weights
     state = apply_norm_folding(state, n_layers=28, d_model=1536)
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -53,7 +55,7 @@ class NormFoldingKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Fold norm weights into adjacent linear weights.
 
         Args:
@@ -147,7 +149,7 @@ class NormFoldingKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Cannot un-fold without the original norm weights (they were deleted)."""
         return KeyResult(
             success=True,
@@ -156,8 +158,8 @@ class NormFoldingKey(Key):
         )
 
 
-def apply_norm_folding(state: Dict[str, torch.Tensor], n_layers: int,
-                       d_model: int) -> Dict[str, torch.Tensor]:
+def apply_norm_folding(state: dict[str, torch.Tensor], n_layers: int,
+                       d_model: int) -> dict[str, torch.Tensor]:
     """Fold all RMSNorm scales into adjacent Linear weights.
 
     After folding:

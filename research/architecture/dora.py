@@ -17,10 +17,11 @@ Usage:
     # Apply DoRA to all attention/FFN projections
     n = apply_dora_to_model(model, rank=16, alpha=32)
 """
-import torch
-import torch.nn as nn
 import math
 from typing import List, Optional
+
+import torch
+import torch.nn as nn
 
 
 class DoRALinear(nn.Module):

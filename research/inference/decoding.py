@@ -10,10 +10,11 @@ Pluggable decoding strategies selectable at runtime:
 All implement the DecodingStrategy interface:
   generate(model, input_ids, max_new_tokens, temperature, top_p) -> output_ids
 """
+from abc import ABC, abstractmethod
+from typing import Dict, Optional
+
 import torch
 import torch.nn.functional as F
-from typing import Optional, Dict
-from abc import ABC, abstractmethod
 
 
 class DecodingStrategy(ABC):
@@ -38,6 +39,7 @@ class StandardDecoding(DecodingStrategy):
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0):
         ids = input_ids.clone()
+        device = input_ids.device
         # EOS detection: check model attr, config, then Qwen defaults
         eos = getattr(model, "eos_token_id", None)
         if eos is None:
@@ -47,6 +49,9 @@ class StandardDecoding(DecodingStrategy):
         eos_set = {151643, 151645}
         if eos is not None:
             eos_set.add(eos)
+        eos_tensor = torch.tensor(list(eos_set), device=device)
+        # Pinned memory for async D2H (reduces CPU sync spikes).
+        token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
 
         # Prefill — model returns (logits, loss, presents) when use_cache=True
         with torch.inference_mode():
@@ -69,7 +74,10 @@ class StandardDecoding(DecodingStrategy):
                 next_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
 
-            if next_token.item() in eos_set:
+            # GPU-side EOS check: single sync only if token matches EOS.
+            is_eos = (next_token == eos_tensor).any()
+            token_pinned.copy_(next_token, non_blocking=True)
+            if is_eos.item():
                 break
 
             ids = torch.cat([ids, next_token], dim=-1)
@@ -84,13 +92,8 @@ class StandardDecoding(DecodingStrategy):
         return ids
 
     def _top_p(self, logits, top_p):
-        sorted_logits, sorted_idx = torch.sort(logits, descending=True)
-        cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-        remove = cum_probs > top_p
-        remove[..., 1:] = remove[..., :-1].clone()
-        remove[..., 0] = False
-        indices = remove.scatter(1, sorted_idx, remove)
-        return logits.masked_fill(indices, float("-inf"))
+        from research.sampling_utils import top_p_filter_logits
+        return top_p_filter_logits(logits, top_p)
 
 
 class SpeculativeDecoding(DecodingStrategy):
@@ -197,7 +200,7 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                 main_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
 
-            if eos and main_token.item() == eos:
+            if eos and (main_token == eos).any().item():
                 ids = torch.cat([ids, main_token], dim=-1)
                 break
 
@@ -230,7 +233,9 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                     verify_hidden = out[3]
 
                 pred = verify_logits[:, -1, :].argmax(-1, keepdim=True)  # [B, 1]
-                if pred.item() == draft_tokens[i + 1].item():
+                # GPU-side comparison: single sync instead of two .item() calls.
+                match = (pred == draft_tokens[i + 1]).any()
+                if match.item():
                     n_accepted += 1
                 else:
                     # Replace rejected draft with main model's prediction
@@ -248,7 +253,11 @@ class MTPSelfSpecDecoding(DecodingStrategy):
             # (verify_logits is from the last processed token)
             logits = verify_logits
 
-            if eos and any(t.item() == eos for t in draft_tokens[:n_accepted + 1]):
+            if eos:
+                # GPU-side EOS check: stack accepted tokens, single sync.
+                accepted_stack = torch.cat(draft_tokens[:n_accepted + 1], dim=-1)
+                if (accepted_stack == eos).any().item():
+                    break
                 break
 
         return ids

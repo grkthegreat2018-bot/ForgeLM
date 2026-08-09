@@ -17,9 +17,10 @@ Usage:
     engine.optimize(quantize="int8", use_cuda_graph=True, use_medusa=True)
     output = engine.generate("Hello, world!", max_new_tokens=100)
 """
-import torch
 import time
 from typing import Dict
+
+import torch
 
 
 class FastInferenceEngine:
@@ -152,7 +153,7 @@ class FastInferenceEngine:
         for _ in range(max_new_tokens - 1):
             # Check EOS.
             eos = getattr(self.tokenizer, "eos_token_id", None)
-            if eos and next_token.item() == eos:
+            if eos and (next_token == eos).any().item():
                 break
 
             if self.graph_runner:
@@ -181,20 +182,12 @@ class FastInferenceEngine:
         return torch.cat([ids, all_gen], dim=1)
 
     def _top_p_filter(self, logits, top_p):
-        """Nucleus sampling filter."""
-        import torch.nn.functional as F
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = False
-        indices_to_remove = sorted_indices_to_remove.scatter(
-            1, sorted_indices, sorted_indices_to_remove
-        )
-        return logits.masked_fill(indices_to_remove, float("-inf"))
+        """Nucleus sampling filter — optimized via topk (avoids full vocab sort)."""
+        from research.sampling_utils import top_p_filter_logits
+        return top_p_filter_logits(logits, top_p)
 
     def benchmark(self, prompt: str, max_new_tokens: int = 50,
-                  n_runs: int = 3) -> Dict:
+                  n_runs: int = 3) -> dict:
         """Benchmark generation speed.
 
         Returns:
@@ -222,7 +215,7 @@ class FastInferenceEngine:
         return {"tokens_per_sec": tps, "latency_ms": avg_time * 1000,
                 "tokens": max_new_tokens, "runs": n_runs}
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         """Get engine statistics."""
         return {
             "generation_count": self.generation_count,
@@ -235,7 +228,7 @@ class FastInferenceEngine:
 
 
 def compare_inference_methods(model, tokenizer, prompt: str,
-                              max_new_tokens: int = 50, device="cuda") -> Dict:
+                              max_new_tokens: int = 50, device="cuda") -> dict:
     """Compare different inference optimization methods.
 
     Runs generation with each method and reports speedup.
@@ -267,7 +260,7 @@ def compare_inference_methods(model, tokenizer, prompt: str,
         results["cuda_graph"] = engine_cg.benchmark(base_prompt, max_new_tokens)
 
     # Summary.
-    print(f"\n=== Summary ===")
+    print("\n=== Summary ===")
     base_tps = results["baseline"]["tokens_per_sec"]
     for method, r in results.items():
         speedup = r["tokens_per_sec"] / base_tps

@@ -19,6 +19,7 @@ attention Q/K projection (approximate).
 """
 import torch
 import torch.nn as nn
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

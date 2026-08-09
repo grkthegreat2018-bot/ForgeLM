@@ -21,9 +21,11 @@ Usage:
     # Add QK-Norm weights to checkpoint (identity init)
     apply_qk_norm_mla(state_dict, n_layers=28, head_dim=128)
 """
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -49,7 +51,7 @@ class QKNormMLAKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Initialize QK-Norm weights (identity init).
 
         Args:
@@ -79,7 +81,7 @@ class QKNormMLAKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Extract QK-Norm weights from checkpoint.
 
         If norms were absorbed into projections, un-absorb them.
@@ -102,8 +104,8 @@ class QKNormMLAKey(Key):
         )
 
 
-def apply_qk_norm_mla(state: Dict[str, torch.Tensor], n_layers: int,
-                      head_dim: int) -> Dict[str, torch.Tensor]:
+def apply_qk_norm_mla(state: dict[str, torch.Tensor], n_layers: int,
+                      head_dim: int) -> dict[str, torch.Tensor]:
     """Add QK-Norm weights to a state dict (identity init).
 
     Adds q_norm.weight and k_norm.weight (all ones) to each layer.
@@ -116,8 +118,8 @@ def apply_qk_norm_mla(state: Dict[str, torch.Tensor], n_layers: int,
     return state
 
 
-def absorb_qk_norm_into_projections(state: Dict[str, torch.Tensor],
-                                     n_layers: int, head_dim: int) -> Dict[str, torch.Tensor]:
+def absorb_qk_norm_into_projections(state: dict[str, torch.Tensor],
+                                     n_layers: int, head_dim: int) -> dict[str, torch.Tensor]:
     """Absorb QK-Norm weights into MLA projections (training-free).
 
     For each layer:

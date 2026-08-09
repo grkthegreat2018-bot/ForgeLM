@@ -1,6 +1,8 @@
 """GQA → MQA key — mean-pool KV heads to reduce cache by n_kv_heads×."""
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -24,7 +26,7 @@ class GQAToMQAKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights. Mean-pool n_kv_heads KV heads into one.
 
         Expected data:
@@ -37,7 +39,7 @@ class GQAToMQAKey(Key):
         try:
             n_kv_heads = int(data["n_kv_heads"])
             head_dim = int(data["head_dim"])
-            weights: Dict[str, torch.Tensor] = {}
+            weights: dict[str, torch.Tensor] = {}
 
             for prefix in ("k", "v"):
                 w = data[f"{prefix}_weight"]
@@ -60,7 +62,7 @@ class GQAToMQAKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Cannot reverse — mean-pooling is lossy (individual heads lost)."""
         return KeyResult(
             success=False,

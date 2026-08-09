@@ -10,16 +10,18 @@ Pattern: speculate cheap → verify expensive → reject wrong guesses.
 L4 Block Fusion is a kernel-level optimization (torch.compile / CUDA graphs),
 not a Python-level key — handled separately via torch.compile().
 """
+import math
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, List, Optional, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 # Import flash_attention from model_loader (same module structure)
 try:
-    from ..model_loader import flash_attention, _causal_mask
+    from ..model_loader import _causal_mask, flash_attention
 except ImportError:
     # Fallback: use F.scaled_dot_product_attention
     def flash_attention(q, k, v, is_causal=True):
@@ -192,7 +194,7 @@ class SpeculativeAttention(nn.Module):
         # Step 2: Compute full attention (always — for lossless guarantee)
         if T == 1 and total_len > 1:
             out = flash_attention(q, k, v, is_causal=False)
-        elif past_len == 0 and T == total_len:
+        elif past_len == 0 and total_len == T:
             out = flash_attention(q, k, v, is_causal=True)
         else:
             mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
@@ -210,7 +212,7 @@ class SpeculativeAttention(nn.Module):
             return out, (k, v)
         return out, None
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         total = self._total_tokens
         if total == 0:
             return {"accept_rate": 0, "tokens": 0}
@@ -232,7 +234,7 @@ class SpeculativeAttentionKey(Key):
     def __init__(self, draft_rank: int = 32, tolerance: float = 1e-3):
         self.draft_rank = draft_rank
         self.tolerance = tolerance
-        self._patched: List[SpeculativeAttention] = []
+        self._patched: list[SpeculativeAttention] = []
 
     @property
     def name(self) -> str:
@@ -246,7 +248,7 @@ class SpeculativeAttentionKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         state = dict(data.get("state", data))
         return KeyResult(success=True, weights=state,
                         metadata={"lossy": False, "lossless": True,
@@ -283,7 +285,7 @@ class SpeculativeAttentionKey(Key):
               f"tokens={total_tokens}, "
               f"compute_saved={avg_accept * 0.8:.1%}")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights=weights)
 
 
@@ -392,7 +394,7 @@ class SpeculativeFFN(nn.Module):
 
         return output.view(B, T, D), aux_loss
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         total = self._total_tokens
         if total == 0:
             return {"accept_rate": 0, "tokens": 0}
@@ -413,7 +415,7 @@ class SpeculativeFFNKey(Key):
 
     def __init__(self, tolerance: float = 0.01):
         self.tolerance = tolerance
-        self._patched: List[SpeculativeFFN] = []
+        self._patched: list[SpeculativeFFN] = []
 
     @property
     def name(self) -> str:
@@ -427,7 +429,7 @@ class SpeculativeFFNKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         state = dict(data.get("state", data))
         return KeyResult(success=True, weights=state,
                         metadata={"lossy": False, "lossless": True,
@@ -466,7 +468,7 @@ class SpeculativeFFNKey(Key):
               f"tokens={total_tokens}, "
               f"compute_saved={avg_accept * 0.5:.1%}")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights=weights)
 
 
@@ -493,7 +495,7 @@ class RedundantLayerSkipKey(Key):
     def __init__(self, threshold: float = 0.999):
         self.threshold = threshold
         self._skip_layers: set = set()
-        self._layer_sims: Dict[int, float] = {}
+        self._layer_sims: dict[int, float] = {}
 
     @property
     def name(self) -> str:
@@ -507,7 +509,7 @@ class RedundantLayerSkipKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         state = dict(data.get("state", data))
         return KeyResult(success=True, weights=state,
                         metadata={"lossy": False, "lossless": True,
@@ -579,7 +581,7 @@ class RedundantLayerSkipKey(Key):
 
         # Greedy skip: try each layer individually, skip only if final
         # output cos > threshold
-        print(f"  [LayerSkip] Per-layer cos(in,out):")
+        print("  [LayerSkip] Per-layer cos(in,out):")
         for idx in sorted(self._layer_sims.keys()):
             print(f"    Layer {idx:2d}: cos={self._layer_sims[idx]:.6f}")
 
@@ -592,7 +594,7 @@ class RedundantLayerSkipKey(Key):
 
             # Replace with identity
             def skip_forward(x, *args, **kwargs):
-                past_kv = args[0] if args else kwargs.get('past_key_value', None)
+                past_kv = args[0] if args else kwargs.get('past_key_value')
                 return x, past_kv
 
             block.forward = skip_forward
@@ -651,11 +653,11 @@ class RedundantLayerSkipKey(Key):
                     def skip_forward(x, *args, **kwargs):
                         # Return x unchanged (skip attention + FFN)
                         # But still return KV cache for compatibility
-                        past_kv = args[0] if args else kwargs.get('past_key_value', None)
+                        past_kv = args[0] if args else kwargs.get('past_key_value')
                         return x, past_kv
                     return skip_forward
 
                 block.forward = make_skip(original_forward)
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights=weights)

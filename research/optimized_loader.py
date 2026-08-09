@@ -13,8 +13,9 @@ Usage:
     state = load_optimized_v2()  # returns full 928-tensor state dict
     model.load_state_dict(state, strict=False)
 """
-import os
 import json
+import os
+
 import torch
 from safetensors.torch import load_file
 
@@ -55,7 +56,7 @@ def load_optimized_v2(ckpt_path: str = None, meta_path: str = None) -> dict:
     state = load_file(ckpt_path)
 
     # Load metadata
-    with open(meta_path, "r") as f:
+    with open(meta_path) as f:
         meta = json.load(f)
 
     dedup_map = meta["dedup_map"]
@@ -139,7 +140,7 @@ def load_optimized_v2_fast(ckpt_path: str = None, meta_path: str = None) -> dict
     state = load_file(ckpt_path)
 
     # Load metadata
-    with open(meta_path, "r") as f:
+    with open(meta_path) as f:
         meta = json.load(f)
 
     dedup_map = meta["dedup_map"]

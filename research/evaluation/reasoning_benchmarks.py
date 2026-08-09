@@ -29,25 +29,28 @@ Usage:
     # Or via CLI:
     # python -m research.reasoning_benchmarks --benchmarks arc_agi2,neocoder --n-problems 20
 """
-import os
-import sys
 import json
-import time
+import os
 import re
 import subprocess
+import sys
 import tempfile
+import time
 import urllib.request
-import torch
-from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
+
+from research.json_compat import dumps, loads
+from research.paths import BENCH_CACHE_DIR as _BENCH_CACHE
+from research.paths import REASONING_BENCH_DIR, TMP_DIR, as_str
 
 # ─── Shared infrastructure ───────────────────────────────────────────
 
-BENCH_CACHE_DIR = "D:/windsurf/ForgeAI/.devin/bench_cache"
-BENCH_LOG_DIR = "D:/windsurf/ForgeAI/research/data/reasoning_bench"
+BENCH_CACHE_DIR = as_str(_BENCH_CACHE)
+BENCH_LOG_DIR = as_str(REASONING_BENCH_DIR)
 
 
 def _ensure_dirs():
@@ -67,7 +70,7 @@ def _download_file(url: str, dest: str) -> str:
 
 
 def _generate_solution(model, tokenizer, prompt: str, device: str = "cuda",
-                       max_tokens: int = 512, temperature: float = 0.0) -> Tuple[str, Dict]:
+                       max_tokens: int = 512, temperature: float = 0.0) -> tuple[str, dict]:
     """Generate text using ForgeLM with telemetry."""
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
@@ -111,18 +114,15 @@ def _generate_solution(model, tokenizer, prompt: str, device: str = "cuda",
 
 def _extract_code(text: str) -> str:
     """Extract Python code from markdown fences or raw text."""
-    pattern = r"```(?:python)?\s*\n(.*?)```"
-    matches = re.findall(pattern, text, re.DOTALL)
-    if matches:
-        return matches[-1].strip()
-    return text.strip()
+    from research.evaluation.code_extract import extract_code
+    return extract_code(text)
 
 
 def _run_code_with_input(code: str, test_input: str,
-                         timeout_s: float = 10.0) -> Tuple[str, str, bool]:
+                         timeout_s: float = 10.0) -> tuple[str, str, bool]:
     """Run Python code with stdin input, return (stdout, stderr, success)."""
     code = _extract_code(text=code)
-    temp_dir = "D:/windsurf/ForgeAI/.devin/tmp"
+    temp_dir = as_str(TMP_DIR)
     os.makedirs(temp_dir, exist_ok=True)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,
@@ -142,8 +142,9 @@ def _run_code_with_input(code: str, test_input: str,
     finally:
         try:
             os.unlink(code_path)
-        except OSError:
-            pass
+        except OSError as e:
+            import warnings
+            warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -154,7 +155,7 @@ ARC_AGI2_REPO = "https://raw.githubusercontent.com/arcprize/ARC-AGI-2/main"
 ARC_AGI2_API = "https://api.github.com/repos/arcprize/ARC-AGI-2/contents/data/evaluation"
 
 
-def load_arc_agi2(max_tasks: Optional[int] = None) -> List[Dict]:
+def load_arc_agi2(max_tasks: int | None = None) -> list[dict]:
     """Load ARC-AGI-2 evaluation tasks from GitHub."""
     _ensure_dirs()
     cache_dir = os.path.join(BENCH_CACHE_DIR, "arc_agi2")
@@ -166,7 +167,7 @@ def load_arc_agi2(max_tasks: Optional[int] = None) -> List[Dict]:
         print("[ARC-AGI-2] Fetching task list from GitHub...")
         urllib.request.urlretrieve(ARC_AGI2_API, list_file)
 
-    with open(list_file, "r") as f:
+    with open(list_file) as f:
         files = json.load(f)
 
     task_files = [f for f in files if f["name"].endswith(".json")]
@@ -180,7 +181,7 @@ def load_arc_agi2(max_tasks: Optional[int] = None) -> List[Dict]:
         task_path = os.path.join(cache_dir, tf["name"])
         if not os.path.exists(task_path):
             urllib.request.urlretrieve(tf["download_url"], task_path)
-        with open(task_path, "r") as f:
+        with open(task_path) as f:
             task = json.load(f)
             task["task_id"] = tf["name"].replace(".json", "")
             tasks.append(task)
@@ -189,12 +190,12 @@ def load_arc_agi2(max_tasks: Optional[int] = None) -> List[Dict]:
     return tasks
 
 
-def _grid_to_text(grid: List[List[int]]) -> str:
+def _grid_to_text(grid: list[list[int]]) -> str:
     """Convert a grid to a compact text representation."""
     return "\n".join(" ".join(str(c) for c in row) for row in grid)
 
 
-def _parse_grid_output(text: str) -> Optional[List[List[int]]]:
+def _parse_grid_output(text: str) -> list[list[int]] | None:
     """Parse model output into a grid."""
     text = text.strip()
     # Try to extract from code block
@@ -221,20 +222,21 @@ def _parse_grid_output(text: str) -> Optional[List[List[int]]]:
         result = eval(text.split("\n")[0])
         if isinstance(result, list) and all(isinstance(r, list) for r in result):
             return result
-    except Exception:
-        pass
+    except Exception as e:
+        import warnings
+        warnings.warn(f"benchmark result parsing: {e}", RuntimeWarning, stacklevel=2)
 
     return None
 
 
-def _grids_equal(g1: List[List[int]], g2: List[List[int]]) -> bool:
+def _grids_equal(g1: list[list[int]], g2: list[list[int]]) -> bool:
     """Check if two grids are equal."""
     if len(g1) != len(g2):
         return False
     return all(r1 == r2 for r1, r2 in zip(g1, g2))
 
 
-def build_arc_agi2_prompt(task: Dict) -> str:
+def build_arc_agi2_prompt(task: dict) -> str:
     """Build a prompt for ARC-AGI-2 task."""
     prompt = "You are solving an abstract reasoning puzzle.\n"
     prompt += "Each puzzle shows input/output grid pairs. Discover the transformation rule.\n"
@@ -255,8 +257,8 @@ def build_arc_agi2_prompt(task: Dict) -> str:
 
 
 def run_arc_agi2(model, tokenizer, device: str = "cuda",
-                 max_tasks: Optional[int] = None,
-                 max_tokens: int = 400) -> Dict:
+                 max_tasks: int | None = None,
+                 max_tokens: int = 400) -> dict:
     """Run ARC-AGI-2 evaluation."""
     print("\n" + "=" * 60)
     print("ARC-AGI-2: Fluid Intelligence Benchmark")
@@ -316,7 +318,7 @@ def run_arc_agi2(model, tokenizer, device: str = "cuda",
 NEOCODER_BASE = "https://raw.githubusercontent.com/JHU-CLSP/NeoCoder/main/datasets/CodeForce/NeoCoder"
 
 
-def load_neocoder(max_problems: Optional[int] = None) -> Tuple[List[Dict], Dict, Dict]:
+def load_neocoder(max_problems: int | None = None) -> tuple[list[dict], dict, dict]:
     """Load NeoCoder dataset: problems, human solutions, test cases."""
     _ensure_dirs()
     cache_dir = os.path.join(BENCH_CACHE_DIR, "neocoder")
@@ -333,7 +335,7 @@ def load_neocoder(max_problems: Optional[int] = None) -> Tuple[List[Dict], Dict,
         dest = os.path.join(cache_dir, fname)
         if not os.path.exists(dest):
             _download_file(f"{NEOCODER_BASE}/{fname}", dest)
-        with open(dest, "r", encoding="utf-8") as f:
+        with open(dest, encoding="utf-8") as f:
             data[key] = json.load(f)
 
     problems = data["problems"]
@@ -347,7 +349,7 @@ def load_neocoder(max_problems: Optional[int] = None) -> Tuple[List[Dict], Dict,
     return problems, data["human_solutions"], data["test_cases"]
 
 
-def _build_neocoder_prompt(problem: Dict, denied_approaches: List[str] = None) -> str:
+def _build_neocoder_prompt(problem: dict, denied_approaches: list[str] = None) -> str:
     """Build a prompt for a NeoCoder problem with optional denial constraints."""
     # Extract problem text — NeoCoder format varies, try common fields
     statement = problem.get("statement", problem.get("question_content", ""))
@@ -400,10 +402,10 @@ def _extract_technique(code: str) -> str:
 
 
 def run_neocoder(model, tokenizer, device: str = "cuda",
-                 max_problems: Optional[int] = None,
+                 max_problems: int | None = None,
                  denial_rounds: int = 3,
                  max_tokens: int = 512,
-                 timeout_s: float = 10.0) -> Dict:
+                 timeout_s: float = 10.0) -> dict:
     """Run NeoCoder creativity evaluation with denial prompting.
 
     For each problem:
@@ -524,7 +526,7 @@ def run_neocoder(model, tokenizer, device: str = "cuda",
 # 3. FineReason — Deliberate Reasoning with Step Validation
 # ═══════════════════════════════════════════════════════════════════════
 
-def load_finereason(max_problems: Optional[int] = None) -> List[Dict]:
+def load_finereason(max_problems: int | None = None) -> list[dict]:
     """Load FineReason logic puzzle dataset.
 
     FineReason (ACL 2025, DAMO-NLP-SG) uses 4 puzzle types:
@@ -560,13 +562,13 @@ def load_finereason(max_problems: Optional[int] = None) -> List[Dict]:
             try:
                 if not os.path.exists(dest):
                     _download_file(url, dest)
-                with open(dest, "r", encoding="utf-8") as f:
+                with open(dest, encoding="utf-8") as f:
                     # Could be JSONL or JSON
                     content = f.read().strip()
                     if content.startswith("["):
-                        data = json.loads(content)
+                        data = loads(content)
                     else:
-                        data = [json.loads(line) for line in content.split("\n") if line.strip()]
+                        data = [loads(line) for line in content.split("\n") if line.strip()]
                     for item in data:
                         item["puzzle_type"] = ptype
                         problems.append(item)
@@ -588,7 +590,7 @@ def load_finereason(max_problems: Optional[int] = None) -> List[Dict]:
     return builtin_puzzles
 
 
-def _get_builtin_logic_puzzles() -> List[Dict]:
+def _get_builtin_logic_puzzles() -> list[dict]:
     """Built-in logic puzzles for reasoning evaluation.
 
     Each puzzle has:
@@ -709,7 +711,7 @@ def _get_builtin_logic_puzzles() -> List[Dict]:
     ]
 
 
-def build_finereason_prompt(puzzle: Dict) -> str:
+def build_finereason_prompt(puzzle: dict) -> str:
     """Build a prompt for a FineReason logic puzzle.
 
     Handles two formats:
@@ -719,12 +721,12 @@ def build_finereason_prompt(puzzle: Dict) -> str:
     prompt = "Solve this logic puzzle step by step. Show your reasoning.\n\n"
 
     # Real FineReason format: use the provided prompt field
-    if "prompt" in puzzle and puzzle["prompt"]:
+    if puzzle.get("prompt"):
         prompt += puzzle["prompt"]
     elif "inputs" in puzzle:
         # Construct prompt from inputs dict
         inputs = puzzle["inputs"]
-        prompt += json.dumps(inputs, indent=2)
+        prompt += dumps(inputs, indent=2)
     elif "setup" in puzzle:
         # Built-in format
         prompt += puzzle["setup"]
@@ -735,7 +737,7 @@ def build_finereason_prompt(puzzle: Dict) -> str:
     return prompt
 
 
-def _evaluate_finereason(response: str, puzzle: Dict) -> Tuple[bool, int, str]:
+def _evaluate_finereason(response: str, puzzle: dict) -> tuple[bool, int, str]:
     """Evaluate a FineReason response.
 
     Real format: outputs['current_status'] (exact match)
@@ -777,8 +779,8 @@ def _evaluate_finereason(response: str, puzzle: Dict) -> Tuple[bool, int, str]:
 
 
 def run_finereason(model, tokenizer, device: str = "cuda",
-                   max_problems: Optional[int] = None,
-                   max_tokens: int = 400) -> Dict:
+                   max_problems: int | None = None,
+                   max_tokens: int = 400) -> dict:
     """Run FineReason evaluation."""
     print("\n" + "=" * 60)
     print("FineReason: Deliberate Reasoning Benchmark")
@@ -836,7 +838,7 @@ def run_finereason(model, tokenizer, device: str = "cuda",
 # 4. ThinkBench — OOD Reasoning Robustness
 # ═══════════════════════════════════════════════════════════════════════
 
-def load_thinkbench(max_problems: Optional[int] = None) -> List[Dict]:
+def load_thinkbench(max_problems: int | None = None) -> list[dict]:
     """Load ThinkBench OOD reasoning dataset.
 
     ThinkBench (NeurIPS 2025) generates OOD variants of reasoning tasks:
@@ -878,7 +880,7 @@ def load_thinkbench(max_problems: Optional[int] = None) -> List[Dict]:
             _download_file(
                 "https://raw.githubusercontent.com/huangshulin123/ThinkBench/main/data/ood_samples.json",
                 dest)
-        with open(dest, "r", encoding="utf-8") as f:
+        with open(dest, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
             problems = data
@@ -899,7 +901,7 @@ def load_thinkbench(max_problems: Optional[int] = None) -> List[Dict]:
     return problems
 
 
-def _generate_ood_reasoning_problems() -> List[Dict]:
+def _generate_ood_reasoning_problems() -> list[dict]:
     """Generate synthetic OOD reasoning problems.
 
     These test reasoning robustness by using unusual framings of
@@ -1009,7 +1011,7 @@ def _generate_ood_reasoning_problems() -> List[Dict]:
     ]
 
 
-def build_thinkbench_prompt(problem: Dict) -> str:
+def build_thinkbench_prompt(problem: dict) -> str:
     """Build a prompt for a ThinkBench OOD problem.
 
     Handles both real ThinkBench format (original_question, scenario_paraphrased,
@@ -1032,7 +1034,7 @@ def build_thinkbench_prompt(problem: Dict) -> str:
     return prompt
 
 
-def _evaluate_thinkbench(response: str, problem: Dict) -> Tuple[bool, str]:
+def _evaluate_thinkbench(response: str, problem: dict) -> tuple[bool, str]:
     """Evaluate a ThinkBench response.
 
     Real format: answer is a string (numeric for AIME, letter for GPQA).
@@ -1068,8 +1070,8 @@ def _evaluate_thinkbench(response: str, problem: Dict) -> Tuple[bool, str]:
 
 
 def run_thinkbench(model, tokenizer, device: str = "cuda",
-                   max_problems: Optional[int] = None,
-                   max_tokens: int = 400) -> Dict:
+                   max_problems: int | None = None,
+                   max_tokens: int = 400) -> dict:
     """Run ThinkBench OOD reasoning evaluation."""
     print("\n" + "=" * 60)
     print("ThinkBench: OOD Reasoning Robustness Benchmark")
@@ -1146,9 +1148,9 @@ class ReasoningBenchmarkSuite:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self, benchmarks: List[str] = None,
-            n_problems: Optional[int] = None,
-            **kwargs) -> Dict:
+    def run(self, benchmarks: list[str] = None,
+            n_problems: int | None = None,
+            **kwargs) -> dict:
         """Run specified benchmarks.
 
         Args:
@@ -1193,7 +1195,7 @@ class ReasoningBenchmarkSuite:
 
         return combined
 
-    def print_report(self, combined: Dict):
+    def print_report(self, combined: dict):
         """Print a formatted report of all benchmark results."""
         results = combined.get("results", {})
 
@@ -1207,21 +1209,21 @@ class ReasoningBenchmarkSuite:
                 continue
 
             if bench_name == "arc_agi2":
-                print(f"\n  ARC-AGI-2 (Fluid Intelligence):")
+                print("\n  ARC-AGI-2 (Fluid Intelligence):")
                 print(f"    Solved: {result['n_solved']}/{result['n_total']} "
                       f"({result['pass_rate']:.1%})")
             elif bench_name == "neocoder":
-                print(f"\n  NeoCoder (Creative Code Generation):")
+                print("\n  NeoCoder (Creative Code Generation):")
                 print(f"    NeoGauge: {result['avg_neogauge']:.3f}")
                 print(f"    Convergent: {result['avg_convergent']:.3f} (correctness)")
                 print(f"    Divergent: {result['avg_divergent']:.3f} (creativity)")
             elif bench_name == "finereason":
-                print(f"\n  FineReason (Deliberate Reasoning):")
+                print("\n  FineReason (Deliberate Reasoning):")
                 print(f"    Correct: {result['n_correct']}/{result['n_total']} "
                       f"({result['pass_rate']:.1%})")
                 print(f"    Avg reasoning steps: {result['avg_reasoning_steps']:.1f}")
             elif bench_name == "thinkbench":
-                print(f"\n  ThinkBench (OOD Reasoning):")
+                print("\n  ThinkBench (OOD Reasoning):")
                 print(f"    Correct: {result['n_correct']}/{result['n_total']} "
                       f"({result['pass_rate']:.1%})")
 
@@ -1253,13 +1255,13 @@ def main():
     # Load model
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print(f"\n[1] Loading model ({args.config})...")
     cfg = get_config(args.config, device="cuda")
     model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint)
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Determine benchmarks
     if args.benchmarks == "all":

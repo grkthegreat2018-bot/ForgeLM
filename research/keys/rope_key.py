@@ -7,6 +7,7 @@ No learned weights. The key IS the formula. Data doesn't change it.
 Classification: Bi (exact, no weights — it's a fixed rotation)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

@@ -30,22 +30,25 @@ Usage:
     key.apply(model)  # patch FFN layers with sparse computation
     key.calibrate(model, sample_input)  # set per-layer thresholds
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
-class WiSparseExpert(nn.Module):
-    """Wraps an Expert with weight-aware activation sparsity.
+class WiSparseExpert:
+    """Plain Python state holder for weight-aware activation sparsity.
+
+    NOT an nn.Module — avoids PyTorch auto-registering the wrapped expert as
+    a child module, which would double VRAM. Stored via expert._wisparse_state.
 
     Skips computation for neurons where |activation| * |weight| < threshold.
-    This reduces FLOPs by ~21% on average while retaining 97% quality.
     """
 
-    def __init__(self, expert: nn.Module, target_sparsity: float = 0.5):
-        super().__init__()
+    def __init__(self, expert, target_sparsity: float = 0.03):
         self.expert = expert
         self.target_sparsity = target_sparsity
         self.calibrated = False
@@ -54,9 +57,10 @@ class WiSparseExpert(nn.Module):
         self._weight_norms = None
         self._threshold = None
 
-        # Stats
+        # Stats (async — no GPU sync during forward)
         self._total_tokens = 0
         self._total_skipped = 0
+        self._skip_count_buffer = None  # GPU tensor accumulator (no sync)
 
     def _compute_weight_norms(self):
         """Precompute the L2 norm of each output neuron's weights.
@@ -134,37 +138,40 @@ class WiSparseExpert(nn.Module):
             # Compute gate activations (cheap — just w1 and w3)
             gate = F.silu(self.expert.w1(x)) * self.expert.w3(x)  # (N, d_ff)
 
-            # Contribution scores
-            scores = gate.abs() * self._weight_norms.unsqueeze(0)  # (N, d_ff)
-
-            # Mask: keep neurons above threshold
-            mask = scores > self._threshold  # (N, d_ff)
-
-            # For efficiency, we need to zero out non-contributing neurons
-            # and only compute w2 for the masked subset
-            # In practice, this is done with sparse matrix multiplication
-            # Here we use the dense path with masking (still saves w2 FLOPs for zeros)
-
-            # Apply mask to gate
-            gate_sparse = gate * mask.to(gate.dtype)
-
-            # Stats
-            self._total_tokens += x.shape[0]
-            self._total_skipped += (~mask).sum().item()
+            # Fused Triton kernel: threshold + mask in one pass (no GPU→CPU sync)
+            try:
+                from .wisparse_triton import wisparse_fused
+                gate_sparse = wisparse_fused(
+                    gate, self._weight_norms, self._threshold)
+                # Stats: count nonzeros async (one GPU op, no sync in hot path)
+                self._total_tokens += x.shape[0]
+                n_kept = gate_sparse.count_nonzero()
+                self._async_skipped = getattr(self, '_async_skipped', 0) + (gate.shape[1] * x.shape[0] - n_kept)
+            except (ImportError, RuntimeError):
+                # Fallback: PyTorch ops if Triton unavailable
+                scores = gate.abs() * self._weight_norms.unsqueeze(0)
+                mask = scores > self._threshold
+                gate_sparse = gate * mask.to(gate.dtype)
+                self._total_tokens += x.shape[0]
+                self._total_skipped += (~mask).sum().item()
 
         # Compute output with sparse gate (w2 only multiplies non-zero columns)
         output = self.expert.w2(gate_sparse)
         return output
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         if self._total_tokens == 0:
             return {"sparsity": 0, "tokens": 0}
-        avg_sparsity = self._total_skipped / (self._total_tokens * self._weight_norms.shape[0])
+        # Sync GPU skip count only when stats are requested (not during forward)
+        total_skipped = self._total_skipped
+        if self._skip_count_buffer is not None:
+            total_skipped += self._skip_count_buffer.item()
+        avg_sparsity = total_skipped / (self._total_tokens * self._weight_norms.shape[0])
         return {
             "sparsity": avg_sparsity,
             "tokens": self._total_tokens,
-            "skipped": self._total_skipped,
-            "compute_saved": avg_sparsity,  # fraction of FLOPs saved
+            "skipped": total_skipped,
+            "compute_saved": avg_sparsity,
         }
 
 
@@ -177,9 +184,9 @@ class WiSparseKey(Key):
     Key class: TRIVIAL — runtime sparsity, no weight changes.
     """
 
-    def __init__(self, target_sparsity: float = 0.5):
+    def __init__(self, target_sparsity: float = 0.03):
         self.target_sparsity = target_sparsity
-        self._patched_experts: List[WiSparseExpert] = []
+        self._patched_experts: list[WiSparseExpert] = []
 
     @property
     def name(self) -> str:
@@ -193,7 +200,7 @@ class WiSparseKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """WiSparse is a runtime key — state dict is unchanged."""
         state = dict(data.get("state", data))
         return KeyResult(
@@ -209,7 +216,12 @@ class WiSparseKey(Key):
         )
 
     def apply(self, model: nn.Module) -> int:
-        """Patch all MoE expert layers with WiSparse wrappers.
+        """Patch all MoE expert layers with WiSparse (closure patch, no wrapper module).
+
+        Uses closures instead of module wrappers to avoid:
+        - nn.Module.__call__ dispatch overhead (hooks, etc.)
+        - VRAM duplication from wrapper submodules
+        - Extra Python function call layer
 
         Args:
             model: the model with MoE layers
@@ -220,22 +232,50 @@ class WiSparseKey(Key):
         self._patched_experts = []
         count = 0
 
+        # Try to import Triton kernel at apply time (not per-forward)
+        _triton_fn = None
+        try:
+            from .wisparse_triton import wisparse_fused as _triton_fn
+        except (ImportError, RuntimeError) as e:
+            import warnings
+            warnings.warn(f"wisparse triton fallback: {e}", RuntimeWarning, stacklevel=2)
+
         for name, module in model.named_modules():
             if hasattr(module, 'experts') and isinstance(module.experts, nn.ModuleList):
-                # Wrap each expert with WiSparse
-                new_experts = nn.ModuleList()
                 for expert in module.experts:
-                    if isinstance(expert, WiSparseExpert):
-                        new_experts.append(expert)
-                    else:
-                        wrapped = WiSparseExpert(expert, self.target_sparsity)
-                        new_experts.append(wrapped)
-                        self._patched_experts.append(wrapped)
-                        count += 1
-                module.experts = new_experts
+                    if hasattr(expert, '_wisparse_state'):
+                        continue  # already patched
+
+                    # Create state object (not a module — no VRAM overhead)
+                    state = WiSparseExpert(expert, self.target_sparsity)
+                    state._triton_fn = _triton_fn  # cache import
+                    # Bypass nn.Module.__setattr__ to avoid auto-registering as child
+                    object.__setattr__(expert, '_wisparse_state', state)
+                    expert._original_forward = expert.forward
+
+                    # Closure: captures state and expert, no module wrapper
+                    def _make_forward(_state=state, _expert=expert, _triton=_triton_fn,
+                                      _orig=expert.forward):
+                        def _wisparse_forward(x):
+                            if not _state.calibrated or _state._weight_norms is None:
+                                return _orig(x)  # dense fallback (zero overhead vs baseline)
+                            # No torch.no_grad() — model is in eval mode, saves context manager overhead
+                            gate = F.silu(_expert.w1(x)) * _expert.w3(x)
+                            if _triton is not None:
+                                gate_sparse = _triton(gate, _state._weight_norms, _state._threshold)
+                            else:
+                                scores = gate.abs() * _state._weight_norms.unsqueeze(0)
+                                mask = scores > _state._threshold
+                                gate_sparse = gate * mask.to(gate.dtype)
+                            return _expert.w2(gate_sparse)
+                        return _wisparse_forward
+
+                    expert.forward = _make_forward()
+                    self._patched_experts.append(state)
+                    count += 1
 
         print(f"  [WiSparse] Patched {count} experts "
-              f"(target_sparsity={self.target_sparsity})")
+              f"(target_sparsity={self.target_sparsity}, triton={'on' if _triton_fn else 'off'})")
         return count
 
     def calibrate(self, model: nn.Module, sample_input: torch.Tensor):
@@ -280,7 +320,7 @@ class WiSparseKey(Key):
               f"tokens={total_tokens}, skipped={total_skipped}, "
               f"compute_saved={avg_sparsity:.1%}")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """WiSparse is runtime-only — state dict is unchanged."""
         return KeyResult(success=True, weights=weights,
                         metadata={"note": "WiSparse is runtime-only, no reversal needed"})

@@ -4,10 +4,10 @@ Exports:
     TESTS_G2: dict mapping func_name -> list of test dicts.
 """
 
-from typing import Any, List, Dict
 import math
+from typing import Any, Dict, List
 
-TESTS_G2: Dict[str, List[Dict[str, Any]]] = {
+TESTS_G2: dict[str, list[dict[str, Any]]] = {
     # ----------------------------------------------------------------- #
     # find_* functions
     # ----------------------------------------------------------------- #

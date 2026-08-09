@@ -16,25 +16,29 @@ Usage:
     # Add QK-Norm to model
     apply_qk_norm(model)
 """
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict
+import torch.nn.functional as F
+
 from .base import Key, KeyClass, KeyResult
 
 
 class QKNorm(nn.Module):
-    """RMSNorm for Q/K vectors. Identity at init (weight=1)."""
+    """RMSNorm for Q/K vectors. Identity at init (weight=1).
+
+    Uses F.rms_norm for a single fused kernel instead of 3 separate ops.
+    """
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
+        self.normalized_shape = [dim]
 
     def forward(self, x):
-        # RMSNorm: x / sqrt(mean(x^2) + eps) * weight
-        rms = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(rms + self.eps)
-        return x * self.weight
+        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
 
 class QKNormKey(Key):
@@ -47,11 +51,11 @@ class QKNormKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL  # Identity init, no weight transform
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """QK-Norm adds new parameters (identity init), doesn't transform existing."""
         return KeyResult(success=True, weights={}, metadata={"note": "QK-Norm is identity init"})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data={}, metadata={"note": "QK-Norm is identity init"})
 
 
@@ -85,8 +89,8 @@ def apply_qk_norm(model):
     return n_added
 
 
-def apply_qk_norm_to_state(state: Dict[str, torch.Tensor], n_layers: int,
-                           n_heads: int, head_dim: int) -> Dict[str, torch.Tensor]:
+def apply_qk_norm_to_state(state: dict[str, torch.Tensor], n_layers: int,
+                           n_heads: int, head_dim: int) -> dict[str, torch.Tensor]:
     """Add QK-Norm weights to a state dict (identity init).
 
     Adds q_norm.weight and k_norm.weight (all ones) to each layer.

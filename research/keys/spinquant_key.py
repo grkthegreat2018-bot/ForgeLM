@@ -6,6 +6,7 @@ with a deterministic Hadamard matrix, making it a TRIVIAL key (fixed formula,
 no data needed).
 """
 from typing import Dict
+
 import torch
 import torch.nn as nn
 
@@ -65,7 +66,7 @@ class SpinQuantHadamardKey(Key):
 
     # -- forward: data -> weights -------------------------------------------
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Rotate a weight tensor with a fixed Hadamard matrix.
 
         Expected input:  {"weight": tensor, "dim": int}
@@ -97,7 +98,7 @@ class SpinQuantHadamardKey(Key):
 
     # -- reverse: weights -> data -------------------------------------------
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Invert the Hadamard rotation.
 
         Expected input:  {"weight_rotated": tensor, "rotation": tensor}

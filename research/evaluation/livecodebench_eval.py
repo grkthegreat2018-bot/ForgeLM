@@ -24,34 +24,35 @@ Usage:
     # Or via CLI:
     # python -m research.livecodebench_eval --start-date 2024-09-01 --n-problems 50
 """
-import os
-import sys
 import json
-import time
+import os
 import re
 import subprocess
+import sys
 import tempfile
-import torch
-from pathlib import Path
+import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
 
+from research.json_compat import dumps, loads
+from research.paths import HF_CACHE_DIR, LCB_EVAL_DIR, TMP_DIR, as_str
 
 # ─── LiveCodeBench data loading ──────────────────────────────────────
 
 LCB_DATASET_ID = "livecodebench/code_generation_lite"
-LCB_CACHE_DIR = "D:/windsurf/ForgeAI/.devin/hf_cache"
+LCB_CACHE_DIR = as_str(HF_CACHE_DIR)
 # Qwen2.5-Coder was released Sept 2024 with training data "before 2024"
 # Using Sept 1, 2024 as a conservative cutoff
 DEFAULT_CUTOFF = "2024-09-01"
 
 
 def load_livecodebench(start_date: str = DEFAULT_CUTOFF,
-                       max_problems: Optional[int] = None,
+                       max_problems: int | None = None,
                        cache_dir: str = LCB_CACHE_DIR,
-                       release_version: str = "v6") -> List[Dict]:
+                       release_version: str = "v6") -> list[dict]:
     """Load LiveCodeBench problems released after the cutoff date.
 
     Downloads JSONL files directly from HuggingFace (bypasses the deprecated
@@ -91,14 +92,14 @@ def load_livecodebench(start_date: str = DEFAULT_CUTOFF,
     filtered = []
     total = 0
 
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             total += 1
             try:
-                row = json.loads(line)
+                row = loads(line)
             except json.JSONDecodeError:
                 continue
 
@@ -126,17 +127,12 @@ def load_livecodebench(start_date: str = DEFAULT_CUTOFF,
 
 def extract_code_blocks(text: str) -> str:
     """Extract Python code from markdown fences or raw text."""
-    # Try markdown code blocks first
-    pattern = r"```(?:python)?\s*\n(.*?)```"
-    matches = re.findall(pattern, text, re.DOTALL)
-    if matches:
-        # Return the last (most complete) code block
-        return matches[-1].strip()
-    return text.strip()
+    from research.evaluation.code_extract import extract_code
+    return extract_code(text)
 
 
-def run_test_cases(code: str, test_cases: List[Dict],
-                   timeout_s: float = 10.0) -> Tuple[bool, str, int]:
+def run_test_cases(code: str, test_cases: list[dict],
+                   timeout_s: float = 10.0) -> tuple[bool, str, int]:
     """Run generated code against test cases.
 
     LCB problems use stdin/stdout format: the solution reads from stdin,
@@ -154,7 +150,7 @@ def run_test_cases(code: str, test_cases: List[Dict],
     code = extract_code_blocks(code)
 
     # Write solution to temp file
-    temp_dir = "D:/windsurf/ForgeAI/.devin/tmp"
+    temp_dir = as_str(TMP_DIR)
     os.makedirs(temp_dir, exist_ok=True)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
@@ -197,8 +193,9 @@ def run_test_cases(code: str, test_cases: List[Dict],
     # Cleanup
     try:
         os.unlink(code_path)
-    except OSError:
-        pass
+    except OSError as e:
+        import warnings
+        warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
 
     all_passed = (n_passed == n_total) and n_total > 0
     return all_passed, error_msg, n_passed
@@ -206,7 +203,7 @@ def run_test_cases(code: str, test_cases: List[Dict],
 
 # ─── ForgeLM inference for LCB ────────────────────────────────────────
 
-def build_lcb_prompt(problem: Dict) -> str:
+def build_lcb_prompt(problem: dict) -> str:
     """Build a prompt for ForgeLM from a LiveCodeBench problem.
 
     Uses a simple format that works with base/instruct models.
@@ -224,7 +221,7 @@ def build_lcb_prompt(problem: Dict) -> str:
 
 
 def generate_solution(model, tokenizer, prompt: str, device: str = "cuda",
-                      max_tokens: int = 512, temperature: float = 0.0) -> Tuple[str, Dict]:
+                      max_tokens: int = 512, temperature: float = 0.0) -> tuple[str, dict]:
     """Generate a solution using ForgeLM.
 
     Returns (generated_code, telemetry).
@@ -291,7 +288,7 @@ class LiveCodeBenchEvaluator:
     """
 
     def __init__(self, model, tokenizer, device: str = "cuda",
-                 log_dir: str = "D:/windsurf/ForgeAI/research/data/lcb_eval"):
+                 log_dir: str = as_str(LCB_EVAL_DIR)):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -299,10 +296,10 @@ class LiveCodeBenchEvaluator:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self, start_date: str = DEFAULT_CUTOFF,
-            n_problems: Optional[int] = None,
+            n_problems: int | None = None,
             max_tokens: int = 512,
             temperature: float = 0.0,
-            timeout_s: float = 10.0) -> Dict:
+            timeout_s: float = 10.0) -> dict:
         """Run LiveCodeBench evaluation.
 
         Args:
@@ -402,7 +399,7 @@ class LiveCodeBenchEvaluator:
 
         return summary
 
-    def _detect_platform(self, problem: Dict) -> str:
+    def _detect_platform(self, problem: dict) -> str:
         """Detect which platform a problem came from."""
         # LCB data has a 'platform' field directly
         platform = problem.get("platform", "")
@@ -421,7 +418,7 @@ class LiveCodeBenchEvaluator:
             return "CodeForces"
         return "Unknown"
 
-    def _parse_test_cases(self, problem: Dict) -> List[Dict]:
+    def _parse_test_cases(self, problem: dict) -> list[dict]:
         """Parse test cases from a LiveCodeBench problem.
 
         LCB stores test cases as JSON strings in public_test_cases / private_test_cases.
@@ -436,7 +433,7 @@ class LiveCodeBenchEvaluator:
                 continue
             if isinstance(raw, str):
                 try:
-                    raw = json.loads(raw)
+                    raw = loads(raw)
                 except json.JSONDecodeError:
                     continue
             if isinstance(raw, list):
@@ -446,7 +443,7 @@ class LiveCodeBenchEvaluator:
 
         return test_cases
 
-    def _build_summary(self, results: List[Dict], start_date: str) -> Dict:
+    def _build_summary(self, results: list[dict], start_date: str) -> dict:
         """Build per-category summary for sore spot identification."""
         categories = {}
 
@@ -475,7 +472,7 @@ class LiveCodeBenchEvaluator:
 
         return {"categories": categories}
 
-    def print_sore_spots(self, summary: Dict):
+    def print_sore_spots(self, summary: dict):
         """Print per-category breakdown to identify sore spots."""
         categories = summary.get("categories", {})
         if not categories:
@@ -489,7 +486,7 @@ class LiveCodeBenchEvaluator:
               f"({summary.get('pass_rate', 0):.1%})")
 
         # Platform breakdown
-        print(f"\n  By Platform:")
+        print("\n  By Platform:")
         platforms = {k: v for k, v in categories.items() if k.startswith("platform_")}
         for key in sorted(platforms.keys()):
             v = platforms[key]
@@ -499,7 +496,7 @@ class LiveCodeBenchEvaluator:
                   f"({v['pass_rate']:5.1%}) {bar}")
 
         # Difficulty breakdown
-        print(f"\n  By Difficulty:")
+        print("\n  By Difficulty:")
         diffs = {k: v for k, v in categories.items() if k.startswith("difficulty_")}
         for key in sorted(diffs.keys()):
             v = diffs[key]
@@ -509,7 +506,7 @@ class LiveCodeBenchEvaluator:
                   f"({v['pass_rate']:5.1%}) {bar}")
 
         # Sore spots (lowest pass rate categories with >=3 problems)
-        print(f"\n  Sore Spots (lowest pass rate, >=3 problems):")
+        print("\n  Sore Spots (lowest pass rate, >=3 problems):")
         sore = [(k, v) for k, v in categories.items() if v["total"] >= 3]
         sore.sort(key=lambda x: x[1]["pass_rate"])
         for key, v in sore[:5]:
@@ -547,16 +544,16 @@ def main():
     # Load model
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print(f"\n[1] Loading model ({args.config})...")
     cfg = get_config(args.config, device="cuda")
     model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint)
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Run evaluation
-    print(f"\n[2] Running LiveCodeBench evaluation...")
+    print("\n[2] Running LiveCodeBench evaluation...")
     evaluator = LiveCodeBenchEvaluator(model, tokenizer, device="cuda")
     results = evaluator.run(
         start_date=args.start_date,

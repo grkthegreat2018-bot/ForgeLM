@@ -5,6 +5,7 @@ Architecture: logits = hidden @ embed.weight^T  (head.weight = embed.weight)
 Classification: Bi (trivial — direct copy)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

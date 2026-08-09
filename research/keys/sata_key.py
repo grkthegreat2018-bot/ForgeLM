@@ -1,4 +1,4 @@
-"""SATA — Symmetry-Aware Taylor Attention (mathematical O(1) per token).
+r"""SATA — Symmetry-Aware Taylor Attention (mathematical O(1) per token).
 
 Research basis: CONTEXT_INDEPENDENT_COMPUTE.md Strategy 5, arxiv 2602.00294
   - PROVES softmax attention is computable in O(1) per token at arbitrary precision
@@ -44,17 +44,19 @@ Usage:
     key = SATAKey(p_order=4)
     result = key.forward({"state": state, "n_layers": 28})
 """
+import math
+from itertools import combinations_with_replacement
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from itertools import combinations_with_replacement
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
 def _symmetric_tensor_power(x: torch.Tensor, p: int) -> torch.Tensor:
-    """Compute the p-th symmetric tensor power of a vector.
+    r"""Compute the p-th symmetric tensor power of a vector.
 
     For a vector x of dimension d, the p-th symmetric tensor power is:
       x^{\otimes p} restricted to symmetric indices = C(d+p-1, p) elements
@@ -102,7 +104,7 @@ def _symmetric_tensor_dim(d: int, p: int) -> int:
 
 
 class SATAAttention(nn.Module):
-    """SATA — Symmetry-Aware Taylor Attention with O(1) per-token cost.
+    r"""SATA — Symmetry-Aware Taylor Attention with O(1) per-token cost.
 
     Replaces softmax(QK^T / sqrt(d)) V with a Taylor expansion that uses
     a FIXED hidden state. The state is updated per token in O(1) and never
@@ -116,7 +118,7 @@ class SATAAttention(nn.Module):
     """
 
     def __init__(self, d_model: int = 768, n_heads: int = 12,
-                 p_order: int = 4, head_dim: Optional[int] = None):
+                 p_order: int = 4, head_dim: int | None = None):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -169,7 +171,7 @@ class SATAAttention(nn.Module):
         self._states_Z = None
 
     def forward(self, x: torch.Tensor, past_key_value=None,
-                use_cache: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                use_cache: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass with O(1) per-token cost.
 
         Args:
@@ -275,7 +277,7 @@ class SATAKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Mark layers for SATA conversion."""
         try:
             state = dict(data.get("state", data))
@@ -325,6 +327,6 @@ class SATAKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=False,
                         error="SATAKey.reverse not supported: architecture change.")

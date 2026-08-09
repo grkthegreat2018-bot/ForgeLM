@@ -21,16 +21,20 @@ Usage:
     engine.activate(kv_cache="hadamard_int4", decoding="mtp_selfspec")
     output = engine.generate("def fibonacci(n):", max_new_tokens=50)
 """
-import torch
 import time
-from typing import Optional, Dict, List
 from pathlib import Path
+from typing import Dict, List, Optional
 
-from research.inference.kv_backend import build_kv_cache, KVCacheStrategy
-from research.inference.decoding import build_decoding, DecodingStrategy, StandardDecoding
+import torch
+
+from research.inference.decoding import DecodingStrategy, StandardDecoding, build_decoding
 from research.inference.innovations import (
-    MRLAdaptiveContext, QuaRotKV, V0WarmStart, ProgressiveKV,
+    MRLAdaptiveContext,
+    ProgressiveKV,
+    QuaRotKV,
+    V0WarmStart,
 )
+from research.inference.kv_backend import KVCacheStrategy, build_kv_cache
 
 
 class ForgeEngine:
@@ -41,26 +45,26 @@ class ForgeEngine:
     """
 
     def __init__(self, model, tokenizer, device="cuda",
-                 checkpoint_path: Optional[str] = None):
+                 checkpoint_path: str | None = None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = torch.device(device)
         self.checkpoint_path = checkpoint_path
 
         # Strategy slots
-        self.kv_cache: Optional[KVCacheStrategy] = None
+        self.kv_cache: KVCacheStrategy | None = None
         self.decoding: DecodingStrategy = StandardDecoding()
-        self.quantize: Optional[str] = None
-        self.acceleration: Optional[str] = None
+        self.quantize: str | None = None
+        self.acceleration: str | None = None
 
         # Innovation slots
-        self.mrl_adapter: Optional[MRLAdaptiveContext] = None
-        self.quarot_kv: Optional[QuaRotKV] = None
-        self.v0_warm: Optional[V0WarmStart] = None
-        self.progressive_kv: Optional[ProgressiveKV] = None
+        self.mrl_adapter: MRLAdaptiveContext | None = None
+        self.quarot_kv: QuaRotKV | None = None
+        self.v0_warm: V0WarmStart | None = None
+        self.progressive_kv: ProgressiveKV | None = None
 
         # Detected KeyStack features
-        self.keystack_features: List[str] = []
+        self.keystack_features: list[str] = []
 
         # Stats
         self.generation_count = 0
@@ -81,22 +85,22 @@ class ForgeEngine:
 
     @classmethod
     def from_checkpoint(cls, checkpoint: str, config_name: str = "qwen25_coder_1.5b",
-                        tokenizer_path: Optional[str] = None,
+                        tokenizer_path: str | None = None,
                         device: str = "cuda", **kwargs):
         """Build engine from a KeyStack checkpoint.
 
         Auto-checks VRAM capacity. If the model fits, loads normally.
         If not, sets up AirLLM layer-streaming (meta device + shard loading).
         """
+        from safetensors import safe_open
+
         from research.config import get_config
         from research.model_loader import ModelLoader
-        from transformers import AutoTokenizer
-        from safetensors import safe_open
-        from pathlib import Path
+        from research.tokenizer_cache import get_tokenizer
 
         cfg = get_config(config_name, device=device)
         tok_path = tokenizer_path or "research/checkpoints/qwen_hf"
-        tokenizer = AutoTokenizer.from_pretrained(tok_path)
+        tokenizer = get_tokenizer(tok_path)
 
         # Check checkpoint size on disk
         ckpt_size = Path(checkpoint).stat().st_size
@@ -119,7 +123,7 @@ class ForgeEngine:
         else:
             # Slow path: build on meta, set up streaming
             print(f"  [AirLLM-Smart] Checkpoint {ckpt_size/1e9:.2f} GB > VRAM free {vram_free/1e9:.2f} GB")
-            print(f"  [AirLLM-Smart] Building model on meta device (zero VRAM)...")
+            print("  [AirLLM-Smart] Building model on meta device (zero VRAM)...")
             model = ModelLoader.build_model(cfg, checkpoint_path=None)
             # Don't move to device — keep on meta/CPU
             model.eval()
@@ -152,9 +156,9 @@ class ForgeEngine:
 
     def activate(self, kv_cache: str = "standard",
                  decoding: str = "standard",
-                 quantize: Optional[str] = None,
-                 acceleration: Optional[str] = None,
-                 mrl_keep_ratio: Optional[float] = None,
+                 quantize: str | None = None,
+                 acceleration: str | None = None,
+                 mrl_keep_ratio: float | None = None,
                  kv_bits: int = 4,
                  use_v0_warm: bool = False,
                  use_progressive_kv: bool = False,
@@ -200,7 +204,7 @@ class ForgeEngine:
             if self.v0_warm:
                 print(f"  [ForgeEngine] V0-WarmStart active: {self.v0_warm.info()}")
             else:
-                print(f"  [ForgeEngine] V0-WarmStart: no V_0 found in checkpoint")
+                print("  [ForgeEngine] V0-WarmStart: no V_0 found in checkpoint")
 
         # 5. Progressive KV
         if use_progressive_kv:
@@ -235,7 +239,7 @@ class ForgeEngine:
                 device=str(self.device), use_cache=True)
             self._graph_runner.capture()
             self.acceleration = "cuda_graph"
-            print(f"  [ForgeEngine] CUDA graphs: active")
+            print("  [ForgeEngine] CUDA graphs: active")
         elif acceleration == "airllm_streaming":
             self._setup_airllm_smart()
         else:
@@ -246,21 +250,21 @@ class ForgeEngine:
         if use_compile and self.device.type == "cuda":
             try:
                 self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
-                print(f"  [ForgeEngine] torch.compile: active (reduce-overhead)")
+                print("  [ForgeEngine] torch.compile: active (reduce-overhead)")
             except Exception as e:
                 print(f"  [ForgeEngine] torch.compile: failed ({e})")
 
         # 10. Prefix caching
         self._prefix_cache = {} if use_prefix_cache else None
         if use_prefix_cache:
-            print(f"  [ForgeEngine] Prefix caching: active")
+            print("  [ForgeEngine] Prefix caching: active")
 
         # 11. L1 Speculative Attention (lossless, 57% attn compute cut)
         if use_spec_attn:
             from research.keys.speculative_keys import SpeculativeAttentionKey
             self._spec_attn_key = SpeculativeAttentionKey(draft_rank=32)
             self._spec_attn_key.apply(self.model)
-            print(f"  [ForgeEngine] L1 Speculative Attention: active (lossless, 57% attn cut)")
+            print("  [ForgeEngine] L1 Speculative Attention: active (lossless, 57% attn cut)")
 
     def _setup_airllm_smart(self):
         """Smart AirLLM: only stream layers if VRAM can't hold the full model.
@@ -276,7 +280,7 @@ class ForgeEngine:
             if first_param is not None and first_param.device.type == "cuda":
                 self._graph_runner = None
                 self.acceleration = "none"
-                print(f"  [AirLLM-Smart] Model already in VRAM — streaming not needed (fast path)")
+                print("  [AirLLM-Smart] Model already in VRAM — streaming not needed (fast path)")
                 return
 
         # Calculate model size in bytes (params * dtype size)
@@ -320,13 +324,13 @@ class ForgeEngine:
             # Fast path: model fits in VRAM, no streaming needed
             self._graph_runner = None
             self.acceleration = "none"
-            print(f"  [AirLLM-Smart] Model fits in VRAM — loading normally (fast path)")
+            print("  [AirLLM-Smart] Model fits in VRAM — loading normally (fast path)")
         else:
             # Slow path: model too large, use layer streaming
-            print(f"  [AirLLM-Smart] Model exceeds VRAM — enabling layer streaming")
+            print("  [AirLLM-Smart] Model exceeds VRAM — enabling layer streaming")
             shard_dir = Path(self.checkpoint_path).parent / "xp_shards"
             if not shard_dir.exists() or not any(shard_dir.glob("shard_*.safetensors")):
-                print(f"  [AirLLM-Smart] Splitting checkpoint into shards...")
+                print("  [AirLLM-Smart] Splitting checkpoint into shards...")
                 from research.keys.airllm_key import AirLLMKey
                 key = AirLLMKey()
                 key.forward({
@@ -446,6 +450,8 @@ class ForgeEngine:
                         temperature, top_p, extra_budget=32):
         """Continue generation until a natural stopping point or extra_budget."""
         stop_tokens = self._get_stop_tokens()
+        stop_tensor = torch.tensor(list(stop_tokens), device=output_ids.device)
+        token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
         eos_set = {151643, 151645}
 
         # Use the decoding strategy to extend, checking each new token
@@ -476,7 +482,9 @@ class ForgeEngine:
             extra += 1
 
             # Check if we hit a stop token
-            if next_token.item() in stop_tokens:
+            is_stop = (next_token == stop_tensor).any()
+            token_pinned.copy_(next_token, non_blocking=True)
+            if is_stop.item():
                 break
 
             # Continue with KV cache
@@ -523,15 +531,17 @@ class ForgeEngine:
                 x = self.model.ln_f(x)
                 logits = self.model.head(x)
 
-            next_token = logits[0, -1].argmax().item()
-            if eos and next_token == eos:
-                break
-            ids = torch.cat([ids, torch.tensor([[next_token]], device=self.device)], dim=-1)
+            next_token_gpu = logits[0, -1].argmax(keepdim=True).unsqueeze(0)  # (1, 1) GPU
+            if eos:
+                is_eos = (next_token_gpu == eos).any()
+                if is_eos.item():
+                    break
+            ids = torch.cat([ids, next_token_gpu], dim=-1)
 
         return ids
 
     def benchmark(self, prompt: str, max_new_tokens: int = 50,
-                  n_runs: int = 3) -> Dict:
+                  n_runs: int = 3) -> dict:
         """Benchmark generation speed."""
         self.generate(prompt, max_new_tokens=10)  # warmup
         times = []
@@ -548,7 +558,7 @@ class ForgeEngine:
         return {"tokens_per_sec": tps, "latency_ms": avg * 1000,
                 "tokens": max_new_tokens, "runs": n_runs}
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         """Get engine statistics."""
         return {
             "generation_count": self.generation_count,
@@ -564,7 +574,7 @@ class ForgeEngine:
             "progressive_kv": self.progressive_kv.info() if self.progressive_kv else None,
         }
 
-    def compare_strategies(self, prompt: str, max_new_tokens: int = 30) -> Dict:
+    def compare_strategies(self, prompt: str, max_new_tokens: int = 30) -> dict:
         """Compare different strategy combinations on the same prompt."""
         results = {}
         configs = [

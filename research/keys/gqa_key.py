@@ -21,9 +21,11 @@ SOFTMAX BARRIER ANALYSIS (2026-07):
 
 GQA structure: MHA→GQA by averaging KV heads (lossy), GQA→MHA by duplicating (lossless).
 """
+import math
+
 import torch
 import torch.nn.functional as F
-import math
+
 from .base import Key, KeyClass, KeyResult
 
 

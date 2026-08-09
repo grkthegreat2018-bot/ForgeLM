@@ -15,8 +15,11 @@ Pipeline:
 
 Key class: PARTIAL — closed-form SAE encode/decode, no training.
 """
+from collections.abc import Callable
+from typing import Dict, Optional, Tuple
+
 import torch
-from typing import Dict, Tuple, Optional, Callable
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -28,14 +31,14 @@ class SAEPack:
     """
 
     def __init__(self, top_k: int = 128):
-        self.packs: Dict[Tuple[int, int], float] = {}
-        self.steering_vectors: Dict[int, torch.Tensor] = {}
+        self.packs: dict[tuple[int, int], float] = {}
+        self.steering_vectors: dict[int, torch.Tensor] = {}
         self.top_k = top_k
 
     def extract(
         self,
-        base_activations: Dict[int, torch.Tensor],
-        domain_activations: Dict[int, torch.Tensor],
+        base_activations: dict[int, torch.Tensor],
+        domain_activations: dict[int, torch.Tensor],
         sae_encoder: Callable[[torch.Tensor], torch.Tensor],
         sae_decoder: Callable[[torch.Tensor], torch.Tensor],
     ) -> None:
@@ -75,8 +78,8 @@ class SAEPack:
             steering = _decode(sparse_delta.unsqueeze(0), sae_decoder).squeeze(0)
             self.steering_vectors[layer] = steering
 
-    def apply_steering(self, hidden_states: Dict[int, torch.Tensor],
-                       scale: float = 1.0) -> Dict[int, torch.Tensor]:
+    def apply_steering(self, hidden_states: dict[int, torch.Tensor],
+                       scale: float = 1.0) -> dict[int, torch.Tensor]:
         """Add steering vectors to hidden states at each layer.
 
         Args:
@@ -114,7 +117,7 @@ class SAEPackKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Extract SAE feature deltas and return as a steering pack.
 
         Args:
@@ -143,7 +146,7 @@ class SAEPackKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Reconstruct steering vectors from a stored pack."""
         try:
             steering = weights.get("sae_pack_steering")

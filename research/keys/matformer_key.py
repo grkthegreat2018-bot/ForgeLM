@@ -17,6 +17,7 @@ boundaries.
 Reference: MatFormer, arxiv 2310.07707
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

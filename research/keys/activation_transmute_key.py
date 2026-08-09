@@ -51,9 +51,11 @@ Usage:
     state = apply_activation_transmute(state, model, calib_tokens, n_layers=28,
                                         target="reglu")
 """
+from typing import Dict, List, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -99,7 +101,7 @@ class ActivationTransmuteKey(Key):
         """SwiGLU's gate activation: silu(x) = x * sigmoid(x)."""
         return F.silu(x)
 
-    def solve_per_channel(self, g: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def solve_per_channel(self, g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Find per-channel (α, β) to match source → target activation.
 
         Minimizes: |target(α*g + β) - source(g)|² per channel.
@@ -145,7 +147,7 @@ class ActivationTransmuteKey(Key):
         alpha = best_alpha
         return alpha, beta
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Apply transmutation using pre-computed (alpha, beta) per channel.
 
         Args:
@@ -194,17 +196,17 @@ class ActivationTransmuteKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": False})
 
 
-def apply_activation_transmute(state: Dict[str, torch.Tensor],
+def apply_activation_transmute(state: dict[str, torch.Tensor],
                                 model: torch.nn.Module,
                                 calib_tokens: torch.Tensor,
                                 n_layers: int,
                                 target: str = "reglu",
-                                device: str = "cuda") -> Dict[str, torch.Tensor]:
+                                device: str = "cuda") -> dict[str, torch.Tensor]:
     """Transmute SwiGLU → target activation via weight scaling.
 
     Args:

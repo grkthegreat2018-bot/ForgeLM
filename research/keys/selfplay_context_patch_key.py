@@ -21,8 +21,10 @@ Usage:
     )
     state = apply_selfplay_patches(state, model, tokenizer, solutions, alpha=1.0)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -36,7 +38,7 @@ class SelfPlayContextPatchKey(Key):
     Key class: PARTIAL — modifies weights, approximate.
     """
 
-    def __init__(self, alpha: float = 1.0, layers: Optional[List[int]] = None):
+    def __init__(self, alpha: float = 1.0, layers: list[int] | None = None):
         self.alpha = alpha
         self.layers = layers
 
@@ -51,7 +53,7 @@ class SelfPlayContextPatchKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Apply rank-1 patches from self-play solutions to MLP weights.
 
         Args:
@@ -76,14 +78,14 @@ class SelfPlayContextPatchKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not supported — patches modify weights, cannot extract original data."""
         return KeyResult(success=False,
                          error="reverse not supported: patches modify weights permanently")
 
 
 def extract_patch(model, tokenizer, prompt: str, solution: str,
-                  device: str = "cuda") -> Tuple[torch.Tensor, torch.Tensor]:
+                  device: str = "cuda") -> tuple[torch.Tensor, torch.Tensor]:
     """Extract a rank-1 patch (u, v) from a self-play (prompt, solution) pair.
 
     Forward pass with prompt → get input direction u (hidden state at last token).
@@ -123,10 +125,10 @@ def extract_patch(model, tokenizer, prompt: str, solution: str,
     return u, v
 
 
-def apply_selfplay_patches(state: Dict[str, torch.Tensor], model, tokenizer,
-                           solutions: List[dict], alpha: float = 1.0,
-                           layers: Optional[List[int]] = None,
-                           device: str = "cuda") -> Dict[str, torch.Tensor]:
+def apply_selfplay_patches(state: dict[str, torch.Tensor], model, tokenizer,
+                           solutions: list[dict], alpha: float = 1.0,
+                           layers: list[int] | None = None,
+                           device: str = "cuda") -> dict[str, torch.Tensor]:
     """Apply rank-1 weight patches from self-play solutions.
 
     Args:

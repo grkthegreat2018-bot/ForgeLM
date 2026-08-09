@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 try:
-    from safetensors.torch import save_file, load_file
+    from safetensors.torch import load_file, save_file
     _HAS_SAFETENSORS = True
 except Exception:
     _HAS_SAFETENSORS = False
@@ -37,7 +37,35 @@ def _is_safetensors_path(path: str) -> bool:
     return str(path).endswith(".safetensors")
 
 
-def save_checkpoint(state: Dict[str, Any], path: str) -> str:
+def cleanup_orphaned_tmp(checkpoint_dir: str = None) -> int:
+    """Remove orphaned .tmp files left by crashed checkpoint saves.
+
+    Call this at startup to clean up any .tmp files from previous runs
+    that were interrupted before the atomic rename.
+
+    Args:
+        checkpoint_dir: directory to scan (default: research/checkpoints/)
+
+    Returns:
+        Number of orphaned .tmp files removed.
+    """
+    if checkpoint_dir is None:
+        from research.paths import CHECKPOINTS_DIR, as_str
+        checkpoint_dir = as_str(CHECKPOINTS_DIR)
+
+    removed = 0
+    for pattern in ["*.safetensors.tmp", "*.pt.tmp", "*.meta.json.tmp"]:
+        for tmp_path in glob.glob(os.path.join(checkpoint_dir, "**", pattern),
+                                  recursive=True):
+            try:
+                os.remove(tmp_path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def save_checkpoint(state: dict[str, Any], path: str) -> str:
     """Save a checkpoint dict atomically with readback verification.
 
     If path ends in .safetensors, tensors are written via safetensors and any
@@ -52,13 +80,26 @@ def save_checkpoint(state: Dict[str, Any], path: str) -> str:
     Returns the path written.
     """
     path = str(path)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    parent = Path(path).parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # Disk space check — estimate checkpoint size and verify enough free space
+    import shutil
+    total_bytes = sum(
+        v.numel() * v.element_size() for v in state.values()
+        if isinstance(v, torch.Tensor)
+    )
+    free_bytes = shutil.disk_usage(str(parent)).free
+    if total_bytes > free_bytes * 0.9:  # require 10% headroom
+        raise OSError(
+            f"Insufficient disk space for checkpoint: need ~{total_bytes / 1e9:.1f} GB, "
+            f"only {free_bytes / 1e9:.1f} GB free in {parent}")
 
     if _is_safetensors_path(path):
         if not _HAS_SAFETENSORS:
             raise RuntimeError("safetensors not installed; cannot write .safetensors checkpoint.")
         tensors = {}
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
                 # safetensors requires contiguous tensors and does not allow
@@ -66,21 +107,40 @@ def save_checkpoint(state: Dict[str, Any], path: str) -> str:
                 tensors[k] = v.detach().cpu().contiguous().clone()
             else:
                 meta[k] = v
-        # Atomic write: save to .tmp, verify by reading back, then rename.
+        # Atomic write: save to .tmp, verify metadata, then rename.
         tmp_path = path + ".tmp"
         save_file(tensors, tmp_path, metadata={"format": "pt"})
-        # Readback verification: reload and confirm every key/shape/dtype matches.
+        # Metadata-only verification: check safetensors header for shapes/dtypes
+        # without loading the full tensor data (saves 3.6GB read per save).
         try:
-            verified = load_file(tmp_path)
-            if len(verified) != len(tensors):
-                raise RuntimeError(f"tensor count mismatch: {len(verified)} != {len(tensors)}")
-            for k, t in tensors.items():
-                vt = verified[k]
-                if vt.shape != t.shape:
-                    raise RuntimeError(f"shape mismatch for '{k}': {tuple(vt.shape)} != {tuple(t.shape)}")
-                if vt.dtype != t.dtype:
-                    raise RuntimeError(f"dtype mismatch for '{k}': {vt.dtype} != {t.dtype}")
-            del verified
+            from safetensors import safe_open
+            with safe_open(tmp_path, framework="pt", device="cpu") as f:
+                verified_keys = list(f.keys())
+                if len(verified_keys) != len(tensors):
+                    raise RuntimeError(f"tensor count mismatch: {len(verified_keys)} != {len(tensors)}")
+                for k, t in tensors.items():
+                    if k not in verified_keys:
+                        raise RuntimeError(f"missing tensor '{k}' in saved checkpoint")
+                    # Access metadata via get_slice (no data load, just shape/dtype).
+                    sl = f.get_slice(k)
+                    if tuple(sl.get_shape()) != tuple(t.shape):
+                        raise RuntimeError(
+                            f"shape mismatch for '{k}': {sl.get_shape()} != {tuple(t.shape)}")
+                    # safetensors uses short dtype names (F32, BF16, I64, etc.)
+                    # while torch uses full names (torch.float32, torch.bfloat16).
+                    # Compare via the torch dtype string mapping.
+                    st_dtype = str(sl.get_dtype())
+                    torch_dtype = str(t.dtype).replace("torch.", "")
+                    # Map safetensors short names to torch short names.
+                    _DTYPE_MAP = {"F32": "float32", "F64": "float64",
+                                  "BF16": "bfloat16", "F16": "float16",
+                                  "I64": "int64", "I32": "int32",
+                                  "I16": "int16", "I8": "int8",
+                                  "U8": "uint8", "BOOL": "bool"}
+                    st_normalized = _DTYPE_MAP.get(st_dtype, st_dtype)
+                    if st_normalized != torch_dtype:
+                        raise RuntimeError(
+                            f"dtype mismatch for '{k}': {st_dtype} != {t.dtype}")
         except Exception as e:
             try:
                 os.remove(tmp_path)
@@ -105,7 +165,7 @@ def save_checkpoint(state: Dict[str, Any], path: str) -> str:
     return path
 
 
-def load_checkpoint(path: str, map_location=None) -> Dict[str, Any]:
+def load_checkpoint(path: str, map_location=None) -> dict[str, Any]:
     """Load a checkpoint dict written by save_checkpoint.
 
     For .safetensors, merges the sidecar meta JSON back into the result.
@@ -114,6 +174,10 @@ def load_checkpoint(path: str, map_location=None) -> Dict[str, Any]:
     For .pt, uses torch.load (weights_only=True when possible).
     """
     path = str(path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}\n"
+            f"Directory contents: {os.listdir(os.path.dirname(path) or '.')}")
     if _is_safetensors_path(path):
         if not _HAS_SAFETENSORS:
             raise RuntimeError("safetensors not installed; cannot read .safetensors checkpoint.")
@@ -125,10 +189,10 @@ def load_checkpoint(path: str, map_location=None) -> Dict[str, Any]:
             try:
                 loader = SafeTensorsFileLoader()
                 tensors = loader.load(path, map_location=device_str)
-                result: Dict[str, Any] = {k: v for k, v in tensors.items()}
+                result: dict[str, Any] = {k: v for k, v in tensors.items()}
                 meta_path = path + ".meta.json"
                 if os.path.exists(meta_path):
-                    with open(meta_path, "r", encoding="utf-8") as f:
+                    with open(meta_path, encoding="utf-8") as f:
                         result.update(json.load(f))
                 print(f"Loaded safetensors (fast) from {path} ({len(tensors)} tensors)")
                 return result
@@ -138,19 +202,29 @@ def load_checkpoint(path: str, map_location=None) -> Dict[str, Any]:
 
         tensors = load_file(path, device=device_str)
         # Convert to torch.Tensor (safetensors returns torch tensors already on torch>=2).
-        result: Dict[str, Any] = {k: v for k, v in tensors.items()}
+        result: dict[str, Any] = {k: v for k, v in tensors.items()}
         meta_path = path + ".meta.json"
         if os.path.exists(meta_path):
-            with open(meta_path, "r", encoding="utf-8") as f:
+            with open(meta_path, encoding="utf-8") as f:
                 result.update(json.load(f))
         print(f"Loaded safetensors checkpoint from {path} ({len(tensors)} tensors)")
         return result
 
-    # Legacy .pt path. Try weights_only=True first (safer), fall back if it
-    # fails (e.g. checkpoint contains non-tensor objects that need pickle).
+    # Legacy .pt path. Try weights_only=True first (safer).
+    # If it fails, warn the user before falling back to unsafe pickle,
+    # since weights_only=False enables arbitrary code execution.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
-    except Exception:
+    except Exception as e:
+        import warnings
+        warnings.warn(
+            f"Could not load {path} with weights_only=True ({e}). "
+            f"Falling back to weights_only=False (UNSAFE — enables arbitrary "
+            f"code execution from the checkpoint file). Only proceed if you "
+            f"trust the source of this checkpoint.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return torch.load(path, map_location=map_location, weights_only=False)
 
 
@@ -170,12 +244,80 @@ def load_checkpoint(path: str, map_location=None) -> Dict[str, Any]:
 _STEP_RE = re.compile(r"step(\d+)\.")
 
 
+def verify_checkpoint(path: str) -> dict[str, Any]:
+    """Verify a checkpoint's integrity without loading it into memory.
+
+    Checks:
+    - File exists and is non-empty
+    - For .safetensors: header is valid JSON, tensor count matches
+    - For .pt: file can be opened with weights_only=True
+    - Sidecar meta JSON exists and is valid (safetensors only)
+
+    Returns:
+        Dict with keys: 'valid' (bool), 'format' (str), 'n_tensors' (int),
+        'size_mb' (float), 'has_meta' (bool), 'errors' (list[str])
+    """
+    path = str(path)
+    result = {
+        "valid": False, "format": "unknown", "n_tensors": 0,
+        "size_mb": 0.0, "has_meta": False, "errors": [],
+    }
+
+    if not os.path.exists(path):
+        result["errors"].append(f"File not found: {path}")
+        return result
+
+    size = os.path.getsize(path)
+    result["size_mb"] = size / 1e6
+    if size == 0:
+        result["errors"].append("File is empty (0 bytes)")
+        return result
+
+    if _is_safetensors_path(path):
+        result["format"] = "safetensors"
+        try:
+            from safetensors import safe_open
+            with safe_open(path, framework="pt", device="cpu") as f:
+                keys = list(f.keys())
+                result["n_tensors"] = len(keys)
+                # Check for NaN/Inf in first few tensors
+                for k in keys[:5]:
+                    t = f.get_tensor(k)
+                    if torch.isnan(t).any():
+                        result["errors"].append(f"NaN in tensor '{k}'")
+                    if torch.isinf(t).any():
+                        result["errors"].append(f"Inf in tensor '{k}'")
+        except Exception as e:
+            result["errors"].append(f"safetensors read error: {e}")
+            return result
+
+        meta_path = path + ".meta.json"
+        if os.path.exists(meta_path):
+            result["has_meta"] = True
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    json.load(f)
+            except Exception as e:
+                result["errors"].append(f"Meta JSON parse error: {e}")
+    else:
+        result["format"] = "pt"
+        try:
+            torch.load(path, map_location="cpu", weights_only=True)
+            result["n_tensors"] = 1  # can't count without full load
+        except Exception as e:
+            result["errors"].append(f"torch.load error: {e}")
+            return result
+
+    result["valid"] = len(result["errors"]) == 0
+    return result
+
+
 def _train_state_path(path: str) -> str:
     return str(path) + ".train.pt"
 
 
-def _capture_rng_state() -> Dict[str, Any]:
-    state: Dict[str, Any] = {
+def _capture_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch": torch.get_rng_state(),
@@ -185,7 +327,7 @@ def _capture_rng_state() -> Dict[str, Any]:
     return state
 
 
-def _restore_rng_state(state: Dict[str, Any]) -> None:
+def _restore_rng_state(state: dict[str, Any]) -> None:
     try:
         random.setstate(state["python"])
         np.random.set_state(state["numpy"])
@@ -200,9 +342,9 @@ def save_training_checkpoint(
     model,
     path: str,
     optimizer=None,
-    ema_state: Optional[Dict[str, torch.Tensor]] = None,
-    step: Optional[int] = None,
-    meta: Optional[Dict[str, Any]] = None,
+    ema_state: dict[str, torch.Tensor] | None = None,
+    step: int | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> str:
     """Save model weights + full training state atomically.
 
@@ -211,14 +353,14 @@ def save_training_checkpoint(
     atomic via tmp + rename). `step` and `meta` are recorded in the sidecar
     JSON so any checkpoint self-documents its training progress.
     """
-    state: Dict[str, Any] = dict(model.state_dict())
+    state: dict[str, Any] = dict(model.state_dict())
     if step is not None:
         state["step"] = int(step)
     if meta:
         state.update(meta)
     save_checkpoint(state, path)
 
-    train_state: Dict[str, Any] = {"rng": _capture_rng_state()}
+    train_state: dict[str, Any] = {"rng": _capture_rng_state()}
     if optimizer is not None:
         train_state["optimizer"] = optimizer.state_dict()
     if ema_state is not None:
@@ -229,18 +371,18 @@ def save_training_checkpoint(
     return path
 
 
-def load_training_state(path: str, optimizer=None, restore_rng: bool = True) -> Dict[str, Any]:
+def load_training_state(path: str, optimizer=None, restore_rng: bool = True) -> dict[str, Any]:
     """Load the training-state sidecar for a checkpoint.
 
     Returns {"step": int|None, "ema": dict|None, "has_optimizer": bool}.
     If `optimizer` is given and a saved optimizer state exists, it is loaded.
     Weights themselves are loaded separately (ModelLoader / load_checkpoint).
     """
-    result: Dict[str, Any] = {"step": None, "ema": None, "has_optimizer": False}
+    result: dict[str, Any] = {"step": None, "ema": None, "has_optimizer": False}
     # Step comes from the safetensors meta sidecar (or the .pt payload).
     meta_path = str(path) + ".meta.json"
     if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(meta_path, encoding="utf-8") as f:
             result["step"] = json.load(f).get("step")
     if result["step"] is None:
         result["step"] = parse_step_from_path(str(path))
@@ -265,7 +407,7 @@ def load_training_state(path: str, optimizer=None, restore_rng: bool = True) -> 
     return result
 
 
-def parse_step_from_path(path: str) -> Optional[int]:
+def parse_step_from_path(path: str) -> int | None:
     """Extract the step number from a periodic checkpoint filename."""
     m = _STEP_RE.search(str(path))
     return int(m.group(1)) if m else None
@@ -299,7 +441,7 @@ def cleanup_step_checkpoints(base_path: str, keep: int) -> None:
             print(f"Warning: could not delete {p}: {e}")
 
 
-def emergency_save(model, base_path: str, kind: str, step: int, optimizer=None, ema_state=None) -> Optional[str]:
+def emergency_save(model, base_path: str, kind: str, step: int, optimizer=None, ema_state=None) -> str | None:
     """Best-effort crash/interrupt save: `model.interrupt_step500.safetensors`.
 
     Never raises — used inside exception handlers where the run is dying.

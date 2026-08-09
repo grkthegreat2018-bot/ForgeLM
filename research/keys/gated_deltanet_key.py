@@ -35,10 +35,12 @@ Usage:
     from research.keys.gated_deltanet_key import GatedDeltaNet2Layer
     layer = GatedDeltaNet2Layer(d_model=768, n_heads=12)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -53,7 +55,7 @@ class GatedDeltaNet2Layer(nn.Module):
     """
 
     def __init__(self, d_model: int = 768, n_heads: int = 12,
-                 head_dim: Optional[int] = None):
+                 head_dim: int | None = None):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -96,7 +98,7 @@ class GatedDeltaNet2Layer(nn.Module):
         self._state_z = None
 
     def forward(self, x: torch.Tensor, past_key_value=None,
-                use_cache: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                use_cache: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass with fixed-size recurrent state.
 
         Args:
@@ -201,7 +203,7 @@ class GatedDeltaNet2Key(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Mark layers for Gated DeltaNet-2 conversion.
 
         This key marks which layers should use GDN-2. The actual layer replacement
@@ -259,7 +261,7 @@ class GatedDeltaNet2Key(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not supported — architecture change is irreversible."""
         return KeyResult(
             success=False,

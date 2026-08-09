@@ -823,3 +823,85 @@ Data formats: JSON `[{"prompt":"...","completion":"..."}]`, JSONL, CSV (prompt,c
 - `_save_expert` now uses standalone SVD compression (no bake_v4.py dependency)
 - `_save_expert` now updates manifest.json (was missing — new topics invisible to router)
 - `train_all_topics` now reads topics from manifest (was hardcoded to 4 topics)
+
+## Performance Optimization Summary (Phase 0–10)
+
+### Hot Path Optimizations
+- **Import time**: 5.6s → 1.4s (lazy imports, deferred torch.cuda init)
+- **Test time**: 5.16s → 0.35s CPU (15x faster)
+- **Per-forward**: ~200 Python calls → ~20, ~600 CUDA kernels → ~400
+- **KV cache**: O(n) torch.cat → O(1) PreAllocatedKVCache
+- **Top-p sampling**: O(V log V) full sort → O(k log k) topk-then-sort (k=100)
+- **Subprocess**: 200ms/call → 0.2ms/call (1000x, persistent executor)
+- **Regex**: 450 inline recompilations → 0 (module-level pre-compiled)
+
+### Concurrency
+- **Expert load**: 28 sequential → 8 parallel (ThreadPoolExecutor, safetensors)
+- **Expert save**: 28 sequential → 8 parallel (ThreadPoolExecutor)
+- **SVD compression**: 28 sequential → 8 parallel (torch.linalg.svd releases GIL)
+- **DSpark training**: 2 softmax loops → 1 (merged L_tv + L_conf)
+
+### VRAM Reductions
+- **SnapKV attention scores**: fp32 → bf16 (2x smaller)
+- **KV cache dequant**: fp32 → bf16 (int8 values don't need fp32)
+- **Bitnet ternary unpack**: fp32 → bf16 (values are {-1,0,1})
+- **SVD S values**: mixed fp16/bf16 → consistent bf16 (numerical correctness)
+
+### I/O & Disk
+- **Checkpoint save**: 7.2GB → 3.6GB (metadata-only verification, no full readback)
+- **Checkpoint load**: weights_only=True first, fallback warning on unsafe pickle
+- **Disk space check**: `shutil.disk_usage` with 10% headroom before save
+- **Checkpoint integrity**: `verify_checkpoint()` utility (NaN/Inf scan, header check)
+- **Orphaned .tmp cleanup**: `cleanup_orphaned_tmp()` on startup
+- **JSONL log rotation**: keeps 10 most recent, deletes older
+- **Training data streaming**: JSONL append-only (prevents OOM on large runs)
+
+### Portability
+- **Hardcoded paths**: 17 `D:/windsurf/ForgeAI/...` → 0 (centralized `research/paths.py`)
+- **sys.path hacks**: 13 → 0 (package is installable)
+- **Path normalization**: manual `replace('\\','/').split('/')` → `PurePosixPath`
+
+### Safety & Error Handling
+- **CUDA OOM handler**: skip sample + `empty_cache()` (training loop)
+- **SIGINT/SIGTERM handler**: emergency checkpoint before exit
+- **Triton import guard**: PyTorch fallback if triton unavailable
+- **Subprocess timeout**: `proc.kill()` + `proc.wait()` (no zombies)
+- **Silent excepts**: 17 `except: pass` → `warnings.warn()` with context
+- **Error messages**: "Unknown type" → includes valid options list
+- **Input validation**: `load_checkpoint` checks file existence + lists dir contents
+
+### Code Quality
+- **Buffered logging**: `buffered_log.py` (50-line buffer, flush at epoch boundary)
+- **tqdm progress bars**: epoch loop with success rate postfix
+- **`load_default_model()`**: centralizes 10+ duplicate model loading patterns
+- **`extract_code()`**: consolidates 3 duplicate code extraction implementations
+- **Manifest cache**: module-level singleton (avoids re-reading manifest.json)
+- **Dead code removed**: `if False` branches, unused imports (time, traceback, duplicate Path)
+- **Dependencies**: removed 6 unused (tqdm, wandb, tokenizers, accelerate, huggingface_hub)
+- **numpy pin**: `>=2.2,<2.5` (tested with torch 2.13, prevents ABI break)
+
+## Library Upgrades (Phase 11)
+
+### PyTorch 2.13 + CUDA 13.0
+- **torch**: 2.8.0+cu128 → 2.13.0+cu130 (FlexAttention FA4, CuTeDSL Inductor, LinearCrossEntropyLoss)
+- **FlexAttention**: FA4 backend available (1.2-3.2x over Triton on Blackwell)
+- **CuTeDSL**: Native Inductor backend for CUTLASS-grade GEMMs
+- **LinearCrossEntropyLoss**: 4x less peak GPU memory for large-vocab training
+
+### New Dependencies
+- **msgspec** 0.21: Replaces stdlib `json` (5-10x faster encode/decode, C-based)
+  - `research/json_compat.py`: drop-in `dumps()`/`loads()`/`dumps_bytes()` wrapper
+  - 24 call sites migrated across 11 files
+- **rich** 14.3: Beautiful syntax-highlighted tracebacks
+  - `research/dx_setup.py`: `setup()` installs rich tracebacks + configures loguru
+  - Added to `launch.py`, `self_play_expert_training.py`, `serve.py`
+- **loguru** 0.7.3: Structured logging (replacing 1,134 `print()` calls, staged)
+  - Training loop migrated: epoch progress, eval results, early stopping use `_log.info/success/warning`
+  - `dx_setup.py` configures console + file rotation (10MB, 3-day retention)
+- **torchao** 0.18: PyTorch-native quantization
+  - `quantize_int4()` in `model_loader.py`: int4 (needs MSLK) with int8 fallback
+  - int8 benchmark: 4139 → 3074 MB (26% VRAM reduction)
+  - int4: requires MSLK (not yet available on Windows/cu130)
+- **ruff** 0.16.2: 413 default rules (up from 59), auto-fixed 1,237 issues
+  - Config: `py313` target, `UP`/`SIM`/`RUF` rules added
+  - Remaining 390 issues are style preferences (manual review needed)

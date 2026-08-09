@@ -62,8 +62,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     def _safe_path(self, rel):
         if not rel:
             rel = ''
+        # Use pathlib for cross-platform path normalization
+        from pathlib import PurePosixPath
         rel = rel.strip('/')
-        parts = rel.replace('\\', '/').split('/')
+        parts = PurePosixPath(rel.replace('\\', '/')).parts
         safe = []
         for p in parts:
             if p == '..' or p.startswith('..'):
@@ -361,4 +363,6 @@ def run():
 
 
 if __name__ == '__main__':
+    from research.dx_setup import setup
+    setup()
     run()

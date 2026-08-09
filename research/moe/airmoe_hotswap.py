@@ -23,14 +23,14 @@ Usage:
     # Now model has the knowledge for this topic injected
     result = thinker.generate_with_thinking("Check if 17 is prime")
 """
-import os
-import sys
 import json
+import os
 import time
-import torch
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from collections import OrderedDict
+
+import torch
 
 
 class TopicRouter:
@@ -89,7 +89,7 @@ class TopicRouter:
             index_path: path to airmoe_modules/index.json
         """
         self.index_path = index_path
-        with open(index_path, "r", encoding="utf-8") as f:
+        with open(index_path, encoding="utf-8") as f:
             self.index = json.load(f)
         self.available_topics = set(self.index.get("topics", {}).keys())
 
@@ -117,7 +117,7 @@ class TopicRouter:
             return next(iter(self.available_topics))
         return "general"
 
-    def list_topics(self) -> List[str]:
+    def list_topics(self) -> list[str]:
         """List all available topic modules."""
         return sorted(self.available_topics)
 
@@ -146,7 +146,7 @@ class AirMoEHotswapLoader:
 
         # LRU cache: topic → knowledge text
         self.cache: OrderedDict[str, str] = OrderedDict()
-        self.current_topic: Optional[str] = None
+        self.current_topic: str | None = None
         self.current_knowledge: str = ""
 
         # Stats
@@ -193,7 +193,8 @@ class AirMoEHotswapLoader:
     def _load_from_disk(self, topic: str, modules_base: str = "") -> str:
         """Load knowledge text for a topic from disk."""
         if not modules_base:
-            modules_base = "D:/windsurf/ForgeAI/research/checkpoints/airmoe_modules"
+            from research.paths import AIRMOE_MODULES_DIR, as_str
+            modules_base = as_str(AIRMOE_MODULES_DIR)
 
         # Try knowledge.txt first (pre-concatenated)
         knowledge_path = Path(modules_base) / topic / "knowledge.txt"
@@ -204,7 +205,7 @@ class AirMoEHotswapLoader:
         # Fallback: build from knowledge.json
         json_path = Path(modules_base) / topic / "knowledge.json"
         if json_path.exists():
-            with open(json_path, "r", encoding="utf-8") as f:
+            with open(json_path, encoding="utf-8") as f:
                 chunks = json.load(f)
             text = "\n\n---\n\n".join(c["text"] for c in chunks[:20])
             return text[:self.max_knowledge_chars]
@@ -222,7 +223,7 @@ class AirMoEHotswapLoader:
             return ""
         return f"# Reference knowledge:\n{self.current_knowledge}\n\n"
 
-    def inject_kv_cache(self, input_ids: torch.Tensor) -> Optional[torch.Tensor]:
+    def inject_kv_cache(self, input_ids: torch.Tensor) -> torch.Tensor | None:
         """Inject knowledge via KV cache (zero-token injection).
 
         This uses the KnowledgePack key to pre-compute KV caches from
@@ -247,7 +248,7 @@ class AirMoEHotswapLoader:
             print(f"    [AirMoE] KV cache injection failed: {e}, using context")
             return None
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get hotswap statistics."""
         return {
             "loads": self.load_count,
@@ -261,7 +262,7 @@ class AirMoEHotswapLoader:
     def print_stats(self):
         s = self.get_stats()
         print(f"\n{'='*70}")
-        print(f"AirMoE Hotswap Statistics")
+        print("AirMoE Hotswap Statistics")
         print(f"{'='*70}")
         print(f"  Topic loads:     {s['loads']}")
         print(f"  Cache hits:      {s['cache_hits']}")
@@ -273,11 +274,9 @@ class AirMoEHotswapLoader:
 
 def main():
     """Test the AirMoE hotswap loader."""
-    sys.path.insert(0, '.')
-
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print("=" * 70)
     print("AirMoE Hotswap Loader Test")
@@ -289,14 +288,15 @@ def main():
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Create router and loader
-    index_path = "D:/windsurf/ForgeAI/research/checkpoints/airmoe_modules/index.json"
+    from research.paths import AIRMOE_MODULES_DIR, as_str
+    index_path = as_str(AIRMOE_MODULES_DIR / "index.json")
 
     if not os.path.exists(index_path):
         print(f"\n  ERROR: Index not found at {index_path}")
-        print(f"  Run: python -m research.training_packs_airmoe")
+        print("  Run: python -m research.training_packs_airmoe")
         return
 
     router = TopicRouter(index_path)
@@ -314,7 +314,7 @@ def main():
         "Prove that the sum of two even numbers is even",
     ]
 
-    print(f"\n[3] Testing routing + hotswap...")
+    print("\n[3] Testing routing + hotswap...")
     for query in test_queries:
         topic = router.classify(query)
         print(f"\n  Query: {query[:50]}")

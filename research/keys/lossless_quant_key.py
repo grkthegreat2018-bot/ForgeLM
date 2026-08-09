@@ -26,8 +26,10 @@ Usage:
     from research.keys.lossless_quant_key import LosslessQuantKey, apply_lossless_quant
     state = apply_lossless_quant(state, n_layers=28, d_model=1536, bits=4)
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -57,7 +59,7 @@ class LosslessQuantKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Apply the full quantization chain.
 
         Args:
@@ -131,14 +133,14 @@ class LosslessQuantKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=False, error="Quantization is not reversible")
 
 
-def apply_lossless_quant(state: Dict[str, torch.Tensor], n_layers: int,
+def apply_lossless_quant(state: dict[str, torch.Tensor], n_layers: int,
                           d_model: int, bits: int = 4,
                           group_size: int = 128,
-                          rotate: bool = True) -> Dict[str, torch.Tensor]:
+                          rotate: bool = True) -> dict[str, torch.Tensor]:
     """Apply lossless quantization chain to model state.
 
     Args:

@@ -8,9 +8,11 @@ kept subspace.
 
 Key class: FULL — pure math (PCA + slice), no training needed.
 """
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -59,7 +61,7 @@ class SliceGPTKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights. Computes PCA transform and slices weight matrices.
 
         Expected data: residual_activations (n_tokens, d_model),
@@ -74,7 +76,7 @@ class SliceGPTKey(Key):
 
         Q, keep, new_d = compute_pca_transform(acts, sparsity)
         d = Q.shape[0]
-        sliced: Dict[str, torch.Tensor] = {}
+        sliced: dict[str, torch.Tensor] = {}
         for name, W in weights.items():
             if not isinstance(W, torch.Tensor) or W.dim() < 2:
                 sliced[name] = W
@@ -88,7 +90,7 @@ class SliceGPTKey(Key):
                       "sparsity": sparsity, "keep_indices": keep},
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """weights -> data. Pads sliced weights with zeros, applies inverse Q."""
         try:
             Q = weights["transform"]
@@ -98,7 +100,7 @@ class SliceGPTKey(Key):
         d = Q.shape[0]
         new_d = weights.get("new_d_model", d)
         Q_inv = Q.T
-        restored: Dict[str, torch.Tensor] = {}
+        restored: dict[str, torch.Tensor] = {}
         for name, Ws in sliced.items():
             if not isinstance(Ws, torch.Tensor) or Ws.dim() < 2:
                 restored[name] = Ws

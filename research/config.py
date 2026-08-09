@@ -15,8 +15,8 @@ class ModelConfig:
     attn_type: str = "mla"           # "diff", "mla", "standard", "gqa"
     ffn_type: str = "swiglu"         # "swiglu", "standard"
     norm_type: str = "layernorm"     # "layernorm", "rmsnorm"
-    n_kv_heads: Optional[int] = None  # KV heads for GQA (None = MHA)
-    intermediate_size: Optional[int] = None  # FFN hidden dim (None = 8*d/3)
+    n_kv_heads: int | None = None  # KV heads for GQA (None = MHA)
+    intermediate_size: int | None = None  # FFN hidden dim (None = 8*d/3)
     attn_bias: bool = False  # Add bias to q/k/v projections (Qwen2 style)
     enable_draft_head: bool = False
     kv_compression_dim: int = 128
@@ -24,9 +24,9 @@ class ModelConfig:
     # YaRN RoPE scaling for context extension. None = no scaling.
     # Dict form: {"type":"yarn", "factor":4.0, "original_max_position_embeddings":1024,
     #             "attention_factor":1.0, "beta_fast":32.0, "beta_slow":1.0}
-    rope_scaling: Optional[dict] = None
+    rope_scaling: dict | None = None
     dropout: float = 0.0
-    device: str = "cuda" if __import__("torch", fromlist=["cuda"]).cuda.is_available() else "cpu"
+    device: str = "cpu"  # Default to CPU; set to "cuda" explicitly when needed.
     dtype: str = "bfloat16"
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data"
@@ -261,7 +261,7 @@ MODEL_CONFIGS = {
 }
 
 
-def get_config(name: Optional[str] = None, **overrides) -> ModelConfig:
+def get_config(name: str | None = None, **overrides) -> ModelConfig:
     """Fetch a named config and apply optional overrides."""
     if name is None:
         base = ModelConfig()

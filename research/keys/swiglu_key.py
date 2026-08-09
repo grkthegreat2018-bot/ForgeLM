@@ -9,6 +9,7 @@ W_gate: silu is nonlinear → Partial key (approximate via linearization)
 """
 import torch
 import torch.nn.functional as F
+
 from .base import Key, KeyClass, KeyResult
 
 

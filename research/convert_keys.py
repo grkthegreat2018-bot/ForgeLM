@@ -13,13 +13,13 @@ Key #5: Mamba/SSM — 2-stage distillation bridge (future)
 import argparse
 import os
 import re
+
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file, load_file
+from safetensors.torch import load_file, save_file
 
 from research.config import get_config
 from research.model_loader import ModelLoader
-
 
 # ============================================================================
 # Key #1: BitNet b1.58 — ternary weight quantization
@@ -63,7 +63,7 @@ def _should_quantize(name: str, shape: torch.Size) -> bool:
         return False  # Keep norm scales bf16
     if "bias" in name:
         return False  # Keep biases bf16 (small, and they're additive not multiplicative)
-    if "router" in name or "gate.weight" in name and "ffn" not in name:
+    if "router" in name or ("gate.weight" in name and "ffn" not in name):
         return False  # Keep router/gate weights bf16 (small, critical for routing)
     if "noise" in name:
         return False  # Keep MoE noise weights bf16
@@ -80,7 +80,7 @@ def key_bitnet(src_path: str, out_path: str, config_name: str = "qwen25_coder_1.
     Effective bits/weight: ~8 (int8) for now. True 1.58-bit packing is a future
     optimization (pack 5 ternary values per byte).
     """
-    print(f"Key #1: BitNet b1.58 ternary quantization")
+    print("Key #1: BitNet b1.58 ternary quantization")
     print(f"  Source: {src_path}")
     print(f"  Output: {out_path}")
 
@@ -220,7 +220,7 @@ def verify_bitnet(ckpt_path: str, config_name: str = "qwen25_coder_1.5b"):
             hf_p = torch.softmax(hf_logits, dim=-1)[hf_top5.indices[i]].item()
             bn_p = torch.softmax(bn_logits, dim=-1)[bn_top5.indices[i]].item()
             match = "OK" if hf_top5.indices[i].item() == bn_top5.indices[i].item() else "DIFF"
-            print(f"{i+1:<6} {repr(hf_tok):<15} {hf_p:<12.6f} {repr(bn_tok):<15} {bn_p:<12.6f} {match}")
+            print(f"{i+1:<6} {hf_tok!r:<15} {hf_p:<12.6f} {bn_tok!r:<15} {bn_p:<12.6f} {match}")
 
 
 # ============================================================================
@@ -249,7 +249,7 @@ def key_gqa_to_mla(src_path: str, out_path: str, source_config_name: str = "qwen
     The SVD captures the most important shared subspace between K and V.
     Energy retained = sum(S[:d_c]) / sum(S).
     """
-    print(f"Key #3: GQA → MLA (low-rank KV compression)")
+    print("Key #3: GQA → MLA (low-rank KV compression)")
     print(f"  Source: {src_path} ({source_config_name})")
     print(f"  Target: {out_path} ({target_config_name})")
 

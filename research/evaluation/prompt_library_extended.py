@@ -20,14 +20,14 @@ from typing import List, Tuple
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _f(name: str, docstring: str, args: str = "", difficulty: str = "easy") -> Tuple[str, str]:
+def _f(name: str, docstring: str, args: str = "", difficulty: str = "easy") -> tuple[str, str]:
     """Build a (function_prompt, difficulty) tuple."""
     if args:
         return (f'def {name}({args}):\n    """{docstring}"""\n    ', difficulty)
     return (f'def {name}():\n    """{docstring}"""\n    ', difficulty)
 
 
-def _cls(name: str, docstring: str, init_args: str = "", difficulty: str = "medium") -> Tuple[str, str]:
+def _cls(name: str, docstring: str, init_args: str = "", difficulty: str = "medium") -> tuple[str, str]:
     """Build a (class_prompt, difficulty) tuple."""
     return (
         f'class {name}:\n    """{docstring}"""\n    def __init__(self{", " + init_args if init_args else ""}):\n        ',
@@ -38,9 +38,9 @@ def _cls(name: str, docstring: str, init_args: str = "", difficulty: str = "medi
 # ---------------------------------------------------------------------------
 # python_algorithms  (target 500: 200 easy, 200 medium, 100 hard)
 # ---------------------------------------------------------------------------
-def expanded_algorithms() -> List[Tuple[str, str]]:
+def expanded_algorithms() -> list[tuple[str, str]]:
     """Return ~500 algorithm prompts across easy/medium/hard tiers."""
-    prompts: List[Tuple[str, str]] = []
+    prompts: list[tuple[str, str]] = []
 
     E = "easy"
     M = "medium"
@@ -560,9 +560,9 @@ def expanded_algorithms() -> List[Tuple[str, str]]:
 # ---------------------------------------------------------------------------
 # python_general  (target 250: 125 easy, 90 medium, 35 hard)
 # ---------------------------------------------------------------------------
-def expanded_general() -> List[Tuple[str, str]]:
+def expanded_general() -> list[tuple[str, str]]:
     """Return ~250 general Python prompts across easy/medium/hard tiers."""
-    prompts: List[Tuple[str, str]] = []
+    prompts: list[tuple[str, str]] = []
 
     E = "easy"
     M = "medium"

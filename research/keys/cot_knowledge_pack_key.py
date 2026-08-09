@@ -17,10 +17,12 @@ Usage:
     packs = build_cot_packs_from_selfplay("logs/selfplay", model, tokenizer)
     packs[0].inject(model, kv_cache, alpha=1.0)
 """
-import os
 import json
-import torch
+import os
 from typing import Dict, List, Optional, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -44,13 +46,13 @@ class CoTKnowledgePackKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> KV cache (CoT reasoning trace encoded as prefix)."""
         return KeyResult(success=True, weights=data,
                          metadata={"runtime": True, "zero_token": True,
                                    "lossless": True})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not applicable — no weight changes to reverse."""
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": True,
@@ -68,9 +70,9 @@ class CoTKnowledgePack:
     runtime injection only.
     """
 
-    def __init__(self, kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    def __init__(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
                  reasoning_text: str = "", task_prompt: str = "",
-                 metadata: Optional[dict] = None):
+                 metadata: dict | None = None):
         self.kv_caches = kv_caches  # per-layer (K, V) tuples
         self.reasoning_text = reasoning_text
         self.task_prompt = task_prompt
@@ -116,8 +118,8 @@ class CoTKnowledgePack:
         return cls(kv_caches, reasoning_text=reasoning_text, task_prompt=task_prompt,
                    metadata={"n_tokens": input_ids.shape[1], "n_layers": len(kv_caches)})
 
-    def inject(self, model, kv_cache: List, alpha: float = 1.0,
-               device: str = "cuda") -> List:
+    def inject(self, model, kv_cache: list, alpha: float = 1.0,
+               device: str = "cuda") -> list:
         """Inject this CoT Knowledge Pack at inference time.
 
         Prepends the reasoning KV entries to the existing cache so the model
@@ -169,7 +171,7 @@ class CoTKnowledgePack:
 
 def build_cot_packs_from_selfplay(log_dir: str, model, tokenizer,
                                    min_quality: float = 0.7,
-                                   device: str = "cuda") -> List[CoTKnowledgePack]:
+                                   device: str = "cuda") -> list[CoTKnowledgePack]:
     """Build CoT Knowledge Packs from self-play logs.
 
     Reads self-play logs, extracts reasoning traces from successful attempts,
@@ -179,7 +181,7 @@ def build_cot_packs_from_selfplay(log_dir: str, model, tokenizer,
     for fname in sorted(os.listdir(log_dir)):
         if not fname.endswith(".json"):
             continue
-        with open(os.path.join(log_dir, fname), "r") as f:
+        with open(os.path.join(log_dir, fname)) as f:
             entries = json.load(f)
         if isinstance(entries, dict):
             entries = [entries]

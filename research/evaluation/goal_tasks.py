@@ -32,9 +32,9 @@ Usage:
 """
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional, Callable
-
+from typing import Any, Dict, List, Optional, Tuple
 
 # ─── GoalTask ─────────────────────────────────────────────────────────
 
@@ -47,9 +47,9 @@ class GoalTask:
     description: str                     # human-readable goal (shown to model)
     input_signature: str                 # e.g. "(n: int) -> int"
     solve_name: str = "solve"            # function name the model must define
-    test_cases: List[Dict[str, Any]] = field(default_factory=list)
+    test_cases: list[dict[str, Any]] = field(default_factory=list)
     # each: {"args": (...,), "expected": ...}
-    stress_index: Optional[int] = None   # which test case is the stress input
+    stress_index: int | None = None   # which test case is the stress input
     archetype: str = ""                  # which archetype generated this
 
 
@@ -79,10 +79,10 @@ def _ref_gcd(a: int, b: int) -> int:
 def _ref_reverse_string(s: str) -> str:
     return s[::-1]
 
-def _ref_sum_list(lst: List[int]) -> int:
+def _ref_sum_list(lst: list[int]) -> int:
     return sum(lst)
 
-def _ref_sort_list(lst: List[int]) -> List[int]:
+def _ref_sort_list(lst: list[int]) -> list[int]:
     return sorted(lst)
 
 def _ref_count_vowels(s: str) -> int:
@@ -109,10 +109,10 @@ def _ref_collatz_steps(n: int) -> int:
 def _ref_word_count(s: str) -> int:
     return len(s.split())
 
-def _ref_max_element(lst: List[int]) -> int:
+def _ref_max_element(lst: list[int]) -> int:
     return max(lst) if lst else 0
 
-def _ref_linear_search(lst: List[int], target: int) -> int:
+def _ref_linear_search(lst: list[int], target: int) -> int:
     for i, v in enumerate(lst):
         if v == target:
             return i
@@ -123,7 +123,7 @@ def _ref_linear_search(lst: List[int], target: int) -> int:
 # Each archetype: name, domain, description, signature, ref func,
 # input generator (difficulty -> list of arg tuples), edge cases
 
-def _gen_fibonacci_inputs(difficulty: str) -> List[Tuple]:
+def _gen_fibonacci_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(0,), (1,), (5,), (10,)]
     elif difficulty == "medium":
@@ -131,7 +131,7 @@ def _gen_fibonacci_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(0,), (1,), (10,), (30,), (45,)]
 
-def _gen_factorial_inputs(difficulty: str) -> List[Tuple]:
+def _gen_factorial_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(0,), (1,), (5,)]
     elif difficulty == "medium":
@@ -139,7 +139,7 @@ def _gen_factorial_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(0,), (1,), (10,), (15,)]
 
-def _gen_is_prime_inputs(difficulty: str) -> List[Tuple]:
+def _gen_is_prime_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(2,), (7,), (10,), (1,)]
     elif difficulty == "medium":
@@ -147,7 +147,7 @@ def _gen_is_prime_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(2,), (1,), (97,), (997,), (7919,)]
 
-def _gen_gcd_inputs(difficulty: str) -> List[Tuple]:
+def _gen_gcd_inputs(difficulty: str) -> list[tuple]:
     rng = random.Random(42)
     if difficulty == "easy":
         return [(12, 8,), (7, 3,), (0, 5,)]
@@ -156,7 +156,7 @@ def _gen_gcd_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(12, 8,), (0, 5,), (48, 36,), (1071, 462,)]
 
-def _gen_reverse_string_inputs(difficulty: str) -> List[Tuple]:
+def _gen_reverse_string_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [("hello",), ("a",), ("",)]
     elif difficulty == "medium":
@@ -164,7 +164,7 @@ def _gen_reverse_string_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [("hello",), ("",), ("racecar",), ("a" * 100,)]
 
-def _gen_sum_list_inputs(difficulty: str) -> List[Tuple]:
+def _gen_sum_list_inputs(difficulty: str) -> list[tuple]:
     rng = random.Random(42)
     if difficulty == "easy":
         return [([1, 2, 3],), ([],), ([5],)]
@@ -173,7 +173,7 @@ def _gen_sum_list_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [([1, 2, 3],), ([],), ([-1, 0, 1],), (list(range(1000)),)]
 
-def _gen_sort_list_inputs(difficulty: str) -> List[Tuple]:
+def _gen_sort_list_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [([3, 1, 2],), ([],), ([5],)]
     elif difficulty == "medium":
@@ -181,7 +181,7 @@ def _gen_sort_list_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [([3, 1, 2],), ([],), ([5, 4, 3, 2, 1],), (list(range(100, 0, -1)),)]
 
-def _gen_count_vowels_inputs(difficulty: str) -> List[Tuple]:
+def _gen_count_vowels_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [("hello",), ("",), ("aeiou",)]
     elif difficulty == "medium":
@@ -189,7 +189,7 @@ def _gen_count_vowels_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [("hello",), ("",), ("HELLO",), ("a" * 200,)]
 
-def _gen_is_palindrome_inputs(difficulty: str) -> List[Tuple]:
+def _gen_is_palindrome_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [("racecar",), ("hello",), ("",)]
     elif difficulty == "medium":
@@ -197,7 +197,7 @@ def _gen_is_palindrome_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [("racecar",), ("hello",), ("a",), ("A man a plan a canal Panama"[::1],)]
 
-def _gen_power_inputs(difficulty: str) -> List[Tuple]:
+def _gen_power_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(2, 3,), (5, 0,), (1, 10,)]
     elif difficulty == "medium":
@@ -205,7 +205,7 @@ def _gen_power_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(2, 3,), (5, 0,), (3, 5,), (2, 20,)]
 
-def _gen_digit_sum_inputs(difficulty: str) -> List[Tuple]:
+def _gen_digit_sum_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(123,), (0,), (9,)]
     elif difficulty == "medium":
@@ -213,7 +213,7 @@ def _gen_digit_sum_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(123,), (0,), (-456,), (10**18,)]
 
-def _gen_collatz_inputs(difficulty: str) -> List[Tuple]:
+def _gen_collatz_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [(1,), (2,), (6,)]
     elif difficulty == "medium":
@@ -221,7 +221,7 @@ def _gen_collatz_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [(1,), (6,), (27,), (97,)]
 
-def _gen_word_count_inputs(difficulty: str) -> List[Tuple]:
+def _gen_word_count_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [("hello world",), ("",), ("one",)]
     elif difficulty == "medium":
@@ -229,7 +229,7 @@ def _gen_word_count_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [("hello world",), ("",), ("the quick brown fox",), (" ".join(["word"] * 100),)]
 
-def _gen_max_element_inputs(difficulty: str) -> List[Tuple]:
+def _gen_max_element_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [([1, 3, 2],), ([5],), ([0, -1, -3],)]
     elif difficulty == "medium":
@@ -237,7 +237,7 @@ def _gen_max_element_inputs(difficulty: str) -> List[Tuple]:
     else:
         return [([1, 3, 2],), ([5],), ([100, 50, 200, 25],), (list(range(10000)),)]
 
-def _gen_linear_search_inputs(difficulty: str) -> List[Tuple]:
+def _gen_linear_search_inputs(difficulty: str) -> list[tuple]:
     if difficulty == "easy":
         return [([1, 3, 5], 3,), ([1, 3, 5], 7,), ([], 1,)]
     elif difficulty == "medium":
@@ -246,7 +246,7 @@ def _gen_linear_search_inputs(difficulty: str) -> List[Tuple]:
         return [([1, 3, 5], 7,), ([], 1,), ([10, 20, 30], 30,), (list(range(10000)), 9999,)]
 
 
-ARCHETYPES: Dict[str, Dict] = {
+ARCHETYPES: dict[str, dict] = {
     "fibonacci": {
         "domain": "algorithms", "signature": "(n: int) -> int",
         "description": "Compute the n-th Fibonacci number (fib(0)=0, fib(1)=1)",
@@ -340,8 +340,8 @@ class AdaptiveDifficulty:
     WINDOW_SIZE = 20
 
     def __init__(self):
-        self._results: Dict[str, List[bool]] = {}  # domain -> [success, ...]
-        self._level: Dict[str, int] = {}            # domain -> level index
+        self._results: dict[str, list[bool]] = {}  # domain -> [success, ...]
+        self._level: dict[str, int] = {}            # domain -> level index
 
     def record(self, domain: str, success: bool):
         results = self._results.setdefault(domain, [])
@@ -380,11 +380,11 @@ class GoalTaskGenerator:
         self.rng = random.Random(seed)
         self.difficulty_ctrl = AdaptiveDifficulty()
         self._task_counter = 0
-        self._recent_archetypes: List[str] = []  # novelty filter (ANCORA)
+        self._recent_archetypes: list[str] = []  # novelty filter (ANCORA)
 
-    def generate(self, domain: Optional[str] = None,
-                 difficulty: Optional[str] = None,
-                 archetype: Optional[str] = None) -> GoalTask:
+    def generate(self, domain: str | None = None,
+                 difficulty: str | None = None,
+                 archetype: str | None = None) -> GoalTask:
         """Generate a single GoalTask.
 
         Args:
@@ -444,7 +444,7 @@ class GoalTaskGenerator:
             archetype=arch_name,
         )
 
-    def generate_batch(self, n: int, domain: Optional[str] = None) -> List[GoalTask]:
+    def generate_batch(self, n: int, domain: str | None = None) -> list[GoalTask]:
         """Generate n tasks, distributing across archetypes for diversity."""
         tasks = []
         for _ in range(n):
@@ -465,7 +465,7 @@ def build_goal_prompt(task: GoalTask) -> str:
     lines = [
         f"# Goal: {task.description}",
         f"# Define a function `{task.solve_name}{task.input_signature}`.",
-        f"# It must produce the correct output for ALL of these test inputs:",
+        "# It must produce the correct output for ALL of these test inputs:",
         "",
     ]
     for i, tc in enumerate(task.test_cases):
@@ -475,7 +475,7 @@ def build_goal_prompt(task: GoalTask) -> str:
         lines.append(f"#   {task.solve_name}({args_str}) == {expected!r}{marker}")
     lines.append("")
     lines.append(f"# Implement {task.solve_name} any way you choose.")
-    lines.append(f"# The function must return (not print) the result.")
+    lines.append("# The function must return (not print) the result.")
     lines.append(f"def {task.solve_name}{task.input_signature.split(' -> ')[0]}:")
     lines.append(f'    """{task.description}"""')
     lines.append("    ")

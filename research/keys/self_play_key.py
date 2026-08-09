@@ -27,8 +27,10 @@ Usage:
     state = run_self_play(model, tokenizer, state, n_rounds=10,
                           domain="science", n_facts=100)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -60,18 +62,18 @@ class SelfPlayKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Self-play requires generation — use run_self_play instead."""
         return KeyResult(success=True, weights=data,
                          metadata={"note": "Use run_self_play for actual self-play"})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": False})
 
 
 def generate_questions(model, tokenizer, domain: str, n_questions: int,
-                       device: str = "cuda", max_tokens: int = 64) -> List[str]:
+                       device: str = "cuda", max_tokens: int = 64) -> list[str]:
     """Generate questions about a domain via self-play.
 
     Prompts the model to generate questions, then extracts them.
@@ -96,7 +98,7 @@ def generate_questions(model, tokenizer, domain: str, n_questions: int,
 
 
 def generate_answer(model, tokenizer, question: str, device: str = "cuda",
-                    max_tokens: int = 100) -> Tuple[str, float]:
+                    max_tokens: int = 100) -> tuple[str, float]:
     """Generate an answer to a question and return confidence score.
 
     Returns (answer_text, confidence) where confidence is the mean
@@ -123,12 +125,12 @@ def generate_answer(model, tokenizer, question: str, device: str = "cuda",
     return answer.strip(), confidence
 
 
-def run_self_play(model, tokenizer, state: Dict[str, torch.Tensor],
+def run_self_play(model, tokenizer, state: dict[str, torch.Tensor],
                   n_layers: int, d_model: int, d_ff: int = 8960,
                   domain: str = "general", n_rounds: int = 10,
                   n_facts_per_round: int = 10,
                   confidence_threshold: float = 0.8,
-                  device: str = "cuda") -> Dict[str, torch.Tensor]:
+                  device: str = "cuda") -> dict[str, torch.Tensor]:
     """Run self-play knowledge injection.
 
     Pipeline:
@@ -154,7 +156,7 @@ def run_self_play(model, tokenizer, state: Dict[str, torch.Tensor],
     Returns:
         modified state dict with injected knowledge
     """
-    from .fact_injection_key import inject_facts, create_fact_from_text
+    from .fact_injection_key import create_fact_from_text, inject_facts
 
     total_facts_injected = 0
 
@@ -191,8 +193,8 @@ def run_self_play(model, tokenizer, state: Dict[str, torch.Tensor],
 
         # Reload model with updated weights for next round
         # (so the model can build on its new knowledge)
-        from research.model_loader import ModelLoader
         from research.config import get_config
+        from research.model_loader import ModelLoader
         cfg = get_config("forgelm_v2", device=device)
         # Update model weights in-place
         model.load_state_dict(state, strict=False)

@@ -30,8 +30,10 @@ Usage:
     # Absorb QK-Norm into projections (lossless with identity init)
     state = apply_fold_qknorm_mla(state, n_layers=28, head_dim=128)
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -57,7 +59,7 @@ class FoldQKNormMLAKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Absorb QK-Norm weights into MLA projections.
 
         Args:
@@ -130,7 +132,7 @@ class FoldQKNormMLAKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Extract QK-Norm scales from absorbed projections.
 
         Un-absorb γ from q_proj and k_up_proj by computing row norms.
@@ -156,8 +158,8 @@ class FoldQKNormMLAKey(Key):
         )
 
 
-def apply_fold_qknorm_mla(state: Dict[str, torch.Tensor],
-                          n_layers: int, head_dim: int) -> Dict[str, torch.Tensor]:
+def apply_fold_qknorm_mla(state: dict[str, torch.Tensor],
+                          n_layers: int, head_dim: int) -> dict[str, torch.Tensor]:
     """Absorb QK-Norm weights into MLA projections in-place.
 
     For each layer:

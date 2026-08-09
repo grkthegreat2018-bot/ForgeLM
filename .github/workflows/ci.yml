@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check tests/
+      - run: ruff format --check tests/
+
+  test-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install safetensors transformers
+          pip install -e ".[dev]" --no-deps
+          pip install pytest
+      - name: Run CPU tests
+        run: pytest tests/ -v -m "not gpu" --tb=short
+
+  test-gpu:
+    # GPU tests — only run on self-hosted runner with CUDA
+    runs-on: self-hosted
+    if: false  # Disabled until self-hosted GPU runner is configured
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]" --no-deps
+      - name: Run GPU tests
+        run: pytest tests/ -v -m "gpu" --tb=short

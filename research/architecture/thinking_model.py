@@ -26,12 +26,11 @@ Usage:
     result = thinker.generate_with_thinking("Check if 17 is prime")
     # result = {"reasoning": "...", "answer": "...", "code": "..."}
 """
-import os
-import sys
 import re
 import time
-import torch
 from typing import Dict, List, Optional, Tuple
+
+import torch
 
 
 class ThinkingModel:
@@ -70,7 +69,7 @@ class ThinkingModel:
         self.newline_id = nl[0] if nl else 198
 
         # Track reasoning history
-        self.reasoning_history: List[Dict] = []
+        self.reasoning_history: list[dict] = []
 
     def _build_thinking_prompt(self, task: str,
                                 context: str = "",
@@ -135,8 +134,8 @@ class ThinkingModel:
 
     def _generate_tokens(self, input_ids: torch.Tensor,
                           max_tokens: int,
-                          stop_token_ids: Optional[List[int]] = None,
-                          stop_on_double_newline: bool = False) -> Tuple[torch.Tensor, List[float], int]:
+                          stop_token_ids: list[int] | None = None,
+                          stop_on_double_newline: bool = False) -> tuple[torch.Tensor, list[float], int]:
         """Generate tokens with optional stop conditions.
 
         Returns:
@@ -157,13 +156,13 @@ class ThinkingModel:
                 else:
                     next_token = next_logits.argmax()
 
-                lp = torch.log_softmax(next_logits, dim=-1)[next_token].item()
-                log_probs.append(lp)
+                # Batch sync: single .tolist() for log prob + token id.
+                lp = torch.log_softmax(next_logits, dim=-1)[next_token]
+                lp_val, next_id = torch.stack([lp, next_token]).tolist()
+                log_probs.append(lp_val)
 
                 cur_ids = torch.cat(
                     [cur_ids, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
-
-                next_id = next_token.item()
 
                 # Check stop tokens
                 if stop_token_ids and next_id in stop_token_ids:
@@ -187,7 +186,7 @@ class ThinkingModel:
 
     def generate_with_thinking(self, task: str,
                                 context: str = "",
-                                code_prefix: str = "") -> Dict:
+                                code_prefix: str = "") -> dict:
         """Generate a response with thinking + answer.
 
         Two-phase generation:
@@ -291,7 +290,7 @@ class ThinkingModel:
     def generate_fix_with_thinking(self, task: str,
                                     broken_code: str,
                                     error: str,
-                                    round_num: int) -> Dict:
+                                    round_num: int) -> dict:
         """Generate a fix with thinking — used in recursive self-play retry loop.
 
         The model:
@@ -392,7 +391,7 @@ class ThinkingModel:
         avg_confidence = sum(r["confidence"] for r in self.reasoning_history) / n
 
         print(f"\n{'='*70}")
-        print(f"Thinking Model Statistics")
+        print("Thinking Model Statistics")
         print(f"{'='*70}")
         print(f"  Total reasoning traces: {n}")
         print(f"  Avg thinking tokens:    {avg_think_tokens:.1f}")
@@ -403,11 +402,9 @@ class ThinkingModel:
 
 def main():
     """Quick test of the thinking model."""
-    sys.path.insert(0, '.')
-
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print("=" * 70)
     print("Thinking Model Test — ForgeLM V2")
@@ -419,7 +416,7 @@ def main():
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Create thinking model
     print("\n[2] Creating thinking model wrapper...")
@@ -451,7 +448,7 @@ def main():
               f"{result['answer_time_ms']:.0f}ms) ---")
         print(result["answer"][:300])
 
-        print(f"\n--- Extracted Code ---")
+        print("\n--- Extracted Code ---")
         print(result["code"][:200])
 
         print(f"\nConfidence: {result['confidence']:.3f}")

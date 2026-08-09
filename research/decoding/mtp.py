@@ -22,10 +22,11 @@ Usage:
     trainer = MTPTrainer(model, head, n_predict=4, curriculum=True)
     loss = trainer.compute_loss(input_ids)
 """
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class MTPHead(nn.Module):
@@ -43,7 +44,7 @@ class MTPHead(nn.Module):
     """
 
     def __init__(self, d_model, vocab_size, n_predict=4, leap=False,
-                 share_embedding: Optional[nn.Embedding] = None):
+                 share_embedding: nn.Embedding | None = None):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size

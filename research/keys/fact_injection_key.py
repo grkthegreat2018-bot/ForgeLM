@@ -34,9 +34,11 @@ Usage:
                                         ("Einstein", "physicist")],
                          n_layers=28, d_model=1536, d_ff=8960)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -64,7 +66,7 @@ class FactInjectionKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Inject facts into MLP weights.
 
         Args:
@@ -148,15 +150,15 @@ class FactInjectionKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": False})
 
 
-def inject_facts(state: Dict[str, torch.Tensor],
-                 facts: List[Tuple[torch.Tensor, torch.Tensor]],
+def inject_facts(state: dict[str, torch.Tensor],
+                 facts: list[tuple[torch.Tensor, torch.Tensor]],
                  n_layers: int, d_model: int, d_ff: int = 8960,
-                 layer_idx: int = -1) -> Dict[str, torch.Tensor]:
+                 layer_idx: int = -1) -> dict[str, torch.Tensor]:
     """Inject facts into model MLP weights via closed-form solution.
 
     Args:
@@ -190,7 +192,7 @@ def inject_facts(state: Dict[str, torch.Tensor],
 
 def create_fact_from_text(model, tokenizer, input_text: str,
                           output_text: str, device: str = "cuda"
-                          ) -> Tuple[torch.Tensor, torch.Tensor]:
+                          ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create a fact pair from text using the model's embeddings.
 
     Args:

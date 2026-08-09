@@ -28,9 +28,11 @@ Usage:
     from research.keys.hybrid_linear_key import HybridLinearKey, convert_to_hybrid_attention
     state, linear_layers = convert_to_hybrid_attention(state, n_layers=28, linear_ratio=0.75)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -60,7 +62,7 @@ class HybridLinearKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Convert full attention weights to linear attention for specified layers.
 
         Args:
@@ -93,7 +95,7 @@ class HybridLinearKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Not supported — architecture change is irreversible."""
         return KeyResult(
             success=False,
@@ -103,10 +105,10 @@ class HybridLinearKey(Key):
 
 
 def convert_to_hybrid_attention(
-    state: Dict[str, torch.Tensor],
+    state: dict[str, torch.Tensor],
     n_layers: int,
     linear_ratio: float = 0.75,
-) -> Tuple[Dict[str, torch.Tensor], List[bool]]:
+) -> tuple[dict[str, torch.Tensor], list[bool]]:
     """Mark top `linear_ratio` of layers as linear attention, bottom stays full.
 
     Linear attention layers use phi(Q) @ (phi(K)^T V) with elu+1 feature map,
@@ -132,8 +134,7 @@ def convert_to_hybrid_attention(
         # Discard softmax temperature / scale params (linear attn has no softmax)
         for soft_key in [f"{prefix}temperature", f"{prefix}scale",
                          f"{prefix}softmax_bias"]:
-            if soft_key in state:
-                del state[soft_key]
+            state.pop(soft_key, None)
 
         # Mark Q/K projections as linear (add a flag tensor for inference dispatch)
         flag_key = f"{prefix}linear_attn"

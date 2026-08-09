@@ -18,10 +18,11 @@ Usage:
     # Replace FFN in existing model
     replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=1024)
 """
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class Router(nn.Module):
@@ -175,10 +176,20 @@ class MoELayer(nn.Module):
         # Dense bypass: skip router, run all experts with equal weight.
         # This reproduces the original dense FFN when the router is untrained.
         if self.dense_bypass:
-            weight = 1.0 / self.n_experts
-            output = torch.zeros(N, D, device=x.device, dtype=x.dtype)
-            for expert in self.experts:
-                output = output + expert(x_flat) * weight
+            # Batched: stack all expert weights into batched matmuls instead of
+            # looping over experts (n_experts Python iterations → 1 batched call).
+            # Handle both plain nn.Linear (.weight) and DoRA-wrapped (.base_weight).
+            def _get_weight(mod):
+                return getattr(mod, 'base_weight', getattr(mod, 'weight', None))
+            w1 = torch.stack([_get_weight(e.w1) for e in self.experts])
+            w3 = torch.stack([_get_weight(e.w3) for e in self.experts])
+            w2 = torch.stack([_get_weight(e.w2) for e in self.experts])
+            # x_flat: (N, D) → (n_experts, N, d_ff) via batched matmul
+            x_exp = x_flat.unsqueeze(0).expand(self.n_experts, -1, -1)
+            h1 = torch.bmm(x_exp, w1.transpose(1, 2))
+            h3 = torch.bmm(x_exp, w3.transpose(1, 2))
+            expert_out = torch.bmm(F.silu(h1) * h3, w2.transpose(1, 2))  # (n_experts, N, D)
+            output = expert_out.mean(dim=0)  # equal weight = 1/n_experts → (N, D)
             if self.has_shared:
                 output = output + self.shared(x_flat)
             aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
@@ -250,7 +261,7 @@ def replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=None,
                 d = block.ffn.fc2.out_features
 
         if d is None:
-            print(f"  [MoE] WARNING: could not infer d_model for block, skipping")
+            print("  [MoE] WARNING: could not infer d_model for block, skipping")
             continue
 
         moe = MoELayer(d, n_experts=n_experts, top_k=top_k, d_ff=d_ff,

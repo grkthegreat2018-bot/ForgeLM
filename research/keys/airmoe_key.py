@@ -69,15 +69,17 @@ Usage:
     cache = AirMoECache.from_manifest(manifest, max_resident=2)
     expert = cache.get_expert(layer_idx=0, expert_idx=1)
 """
+import hashlib
+import json
 import os
 import sys
 import time
-import json
-import hashlib
-import torch
-from typing import Dict, List, Optional, Tuple, Any
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -97,14 +99,14 @@ class AirMoEManifest:
         self.n_experts = n_experts
         self.expert_dim = expert_dim
         self.compressed = compressed
-        self.experts: List[Dict] = []
-        self.bundles: List[Dict] = []
-        self.topics_map: Dict[str, Any] = {}  # V4 format: topic -> metadata
+        self.experts: list[dict] = []
+        self.bundles: list[dict] = []
+        self.topics_map: dict[str, Any] = {}  # V4 format: topic -> metadata
         self.created = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def add_expert(self, layer: int, expert_idx: int, file_path: str,
                    size_bytes: int, sha256: str = "", topic: str = "",
-                   compressed: bool = False, svd_rank: int = 0) -> Dict:
+                   compressed: bool = False, svd_rank: int = 0) -> dict:
         """Register an expert file in the manifest."""
         entry = {
             "id": f"l{layer}_e{expert_idx}",
@@ -120,8 +122,8 @@ class AirMoEManifest:
         self.experts.append(entry)
         return entry
 
-    def add_bundle(self, name: str, file_path: str, expert_ids: List[str],
-                   size_bytes: int) -> Dict:
+    def add_bundle(self, name: str, file_path: str, expert_ids: list[str],
+                   size_bytes: int) -> dict:
         """Register a topic bundle (multiple experts in one file)."""
         entry = {
             "name": name,
@@ -132,7 +134,7 @@ class AirMoEManifest:
         self.bundles.append(entry)
         return entry
 
-    def get_expert_file(self, layer: int, expert_idx: int) -> Optional[str]:
+    def get_expert_file(self, layer: int, expert_idx: int) -> str | None:
         """Get the file path for a specific expert.
 
         Handles both v2 (expert_idx) and v4 (topic-based, no expert_idx) formats.
@@ -148,11 +150,11 @@ class AirMoEManifest:
             return layer_experts[expert_idx]["file"]
         return None
 
-    def get_experts_by_topic(self, topic: str) -> List[Dict]:
+    def get_experts_by_topic(self, topic: str) -> list[dict]:
         """Get all experts for a given topic."""
         return [e for e in self.experts if e.get("topic") == topic]
 
-    def get_topics(self) -> List[str]:
+    def get_topics(self) -> list[str]:
         """Get all unique topic names."""
         return list(set(e.get("topic", "") for e in self.experts if e.get("topic")))
 
@@ -183,7 +185,7 @@ class AirMoEManifest:
         Handles both the original AirMoE format and the V4 format
         (which uses different field names and topic-based experts).
         """
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             data = json.load(f)
         # V4 format uses 'name'/'base_model_file' instead of 'model_name'/'base_model'
         m = cls(
@@ -229,7 +231,7 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()[:16]
 
 
-def _compress_expert_svd(w: torch.Tensor, energy: float = 0.9) -> Dict[str, torch.Tensor]:
+def _compress_expert_svd(w: torch.Tensor, energy: float = 0.9) -> dict[str, torch.Tensor]:
     """Compress a weight matrix via SVD low-rank approximation."""
     U, S, Vh = torch.linalg.svd(w.float(), full_matrices=False)
     cumsum = (S ** 2).cumsum(0)
@@ -237,13 +239,13 @@ def _compress_expert_svd(w: torch.Tensor, energy: float = 0.9) -> Dict[str, torc
     k = max(1, (cumsum < energy * total).sum().item() + 1)
     return {
         "U": U[:, :k].to(torch.bfloat16),
-        "S": S[:k].to(torch.float16),
+        "S": S[:k].to(torch.bfloat16),
         "Vh": Vh[:k, :].to(torch.bfloat16),
         "rank": torch.tensor([k], dtype=torch.int32),
     }
 
 
-def _decompress_expert_svd(state: Dict[str, torch.Tensor],
+def _decompress_expert_svd(state: dict[str, torch.Tensor],
                             part: str, device: str) -> torch.Tensor:
     """Reconstruct a weight matrix from SVD components."""
     U = state[f"{part}_U"].float().to(device)
@@ -276,21 +278,21 @@ class AirMoEKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, weights=data,
                          metadata={"runtime": True, "max_resident": self.max_resident_experts})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights)
 
 
-def build_airmoe_module(state: Dict[str, torch.Tensor],
+def build_airmoe_module(state: dict[str, torch.Tensor],
                          n_layers: int, n_experts: int,
                          output_dir: str,
                          model_name: str = "ForgeLM-airmoe",
                          compress: bool = True,
                          svd_energy: float = 0.9,
-                         topics: Optional[Dict[int, str]] = None,
+                         topics: dict[int, str] | None = None,
                          base_filename: str = "base_model.safetensors") -> AirMoEManifest:
     """Build a modular AirMoE module from a full model state dict.
 
@@ -348,7 +350,7 @@ def build_airmoe_module(state: Dict[str, torch.Tensor],
                         total = cumsum[-1]
                         k_rank = max(1, (cumsum < svd_energy * total).sum().item() + 1)
                         expert_state[f"{part}_U"] = U[:, :k_rank].to(torch.bfloat16)
-                        expert_state[f"{part}_S"] = S[:k_rank].to(torch.float16)
+                        expert_state[f"{part}_S"] = S[:k_rank].to(torch.bfloat16)
                         expert_state[f"{part}_Vh"] = Vh[:k_rank, :].to(torch.bfloat16)
                         expert_state[f"{part}_rank"] = torch.tensor([k_rank], dtype=torch.int32)
                         svd_rank = k_rank
@@ -400,15 +402,15 @@ def build_airmoe_module(state: Dict[str, torch.Tensor],
             exps = manifest.get_experts_by_topic(t)
             tsize = sum(e["size_bytes"] for e in exps)
             print(f"    {t}: {len(exps)} files, {tsize/1e6:.1f} MB")
-    print(f"  [AirMoE] Manifest: manifest.json")
+    print("  [AirMoE] Manifest: manifest.json")
     print(f"  [AirMoE] Total module: {(base_size + total_expert_size)/1e6:.0f} MB")
-    print(f"  [AirMoE] Selective download: users pick which experts they need")
+    print("  [AirMoE] Selective download: users pick which experts they need")
 
     return manifest
 
 
 def build_topic_bundle(manifest: AirMoEManifest, topic: str,
-                        output_dir: str) -> Optional[Dict]:
+                        output_dir: str) -> dict | None:
     """Bundle all experts for a topic into a single file.
 
     This allows users to download one file per topic instead of
@@ -466,14 +468,14 @@ class AirMoECache:
     """
 
     def __init__(self, cache_dir: str, max_resident: int = 2,
-                 device: str = "cuda", manifest: Optional[AirMoEManifest] = None,
+                 device: str = "cuda", manifest: AirMoEManifest | None = None,
                  base_dir: str = ""):
         self.cache_dir = cache_dir
         self.max_resident = max_resident
         self.device = device
         self.manifest = manifest
         self.base_dir = base_dir
-        self.cache: OrderedDict[Tuple[int, int], Dict[str, torch.Tensor]] = OrderedDict()
+        self.cache: OrderedDict[tuple[int, int], dict[str, torch.Tensor]] = OrderedDict()
         self.hit_count = 0
         self.miss_count = 0
         self.total_load_time = 0.0
@@ -516,7 +518,7 @@ class AirMoECache:
         # No match found — return the index-based path (will fail with clear error)
         return idx_path
 
-    def get_expert_by_topic(self, layer_idx: int, topic: str) -> Dict[str, torch.Tensor]:
+    def get_expert_by_topic(self, layer_idx: int, topic: str) -> dict[str, torch.Tensor]:
         """Get expert weights by topic name (e.g., 'math_algebra', 'python_strings').
 
         This is the preferred method for v4 checkpoints where experts
@@ -557,9 +559,12 @@ class AirMoECache:
             while len(self.cache) > self.max_resident:
                 self.cache.popitem(last=False)
             return expert_state
-        raise FileNotFoundError(f"Expert file not found: {topic_path}")
+        available = self.list_topics() if hasattr(self, 'list_topics') else []
+        raise FileNotFoundError(
+            f"Expert file not found for topic '{topic}': {topic_path}\n"
+            f"Available topics: {available}")
 
-    def list_topics(self) -> List[str]:
+    def list_topics(self) -> list[str]:
         """List all available expert topics (v4 format)."""
         if self.manifest:
             return list(set(e.get("topic", "") for e in self.manifest.experts if e.get("topic")))
@@ -572,7 +577,7 @@ class AirMoECache:
                     topics.add(m.group(1))
         return sorted(topics)
 
-    def get_experts_for_topic(self, topic: str) -> List[Dict[str, torch.Tensor]]:
+    def get_experts_for_topic(self, topic: str) -> list[dict[str, torch.Tensor]]:
         """Get all expert weights for a given topic across all layers.
 
         Returns a list of dicts, one per layer.
@@ -587,7 +592,7 @@ class AirMoECache:
                 break
         return experts
 
-    def get_expert(self, layer_idx: int, expert_idx: int) -> Dict[str, torch.Tensor]:
+    def get_expert(self, layer_idx: int, expert_idx: int) -> dict[str, torch.Tensor]:
         """Get expert weights, loading from disk if not cached."""
         key = (layer_idx, expert_idx)
 
@@ -637,7 +642,7 @@ class AirMoECache:
         path = self._get_expert_path(layer_idx, expert_idx)
         return os.path.exists(path)
 
-    def list_available_experts(self) -> List[Tuple[int, int]]:
+    def list_available_experts(self) -> list[tuple[int, int]]:
         """List all experts that have files on disk."""
         if self.manifest:
             return [(e["layer"], e["expert_idx"]) for e in self.manifest.experts
@@ -651,7 +656,7 @@ class AirMoECache:
                 available.append((int(m.group(1)), int(m.group(2))))
         return sorted(available)
 
-    def list_missing_experts(self) -> List[Tuple[int, int]]:
+    def list_missing_experts(self) -> list[tuple[int, int]]:
         """List experts that are in the manifest but not on disk."""
         if not self.manifest:
             return []
@@ -659,15 +664,16 @@ class AirMoECache:
         all_experts = {(e["layer"], e["expert_idx"]) for e in self.manifest.experts}
         return sorted(all_experts - available)
 
-    def prefetch(self, layer_idx: int, expert_indices: List[int]):
+    def prefetch(self, layer_idx: int, expert_indices: list[int]):
         """Prefetch experts for the next layer (async-friendly)."""
         for ei in expert_indices:
             key = (layer_idx, ei)
             if key not in self.cache:
                 try:
                     self.get_expert(layer_idx, ei)
-                except FileNotFoundError:
-                    pass
+                except FileNotFoundError as e:
+                    import warnings
+                    warnings.warn(f"expert file loading: {e}", RuntimeWarning, stacklevel=2)
 
     def stats(self) -> dict:
         """Return cache statistics."""
@@ -685,9 +691,9 @@ class AirMoECache:
 
 
 # Backward compatibility
-def apply_airmoe(state: Dict[str, torch.Tensor], n_layers: int,
+def apply_airmoe(state: dict[str, torch.Tensor], n_layers: int,
                  n_experts: int, cache_dir: str,
-                 compress: bool = True) -> Dict[str, torch.Tensor]:
+                 compress: bool = True) -> dict[str, torch.Tensor]:
     """Legacy API — use build_airmoe_module() for modular distribution."""
     manifest = build_airmoe_module(
         state, n_layers, n_experts, cache_dir, compress=compress)
@@ -697,7 +703,7 @@ def apply_airmoe(state: Dict[str, torch.Tensor], n_layers: int,
 if __name__ == "__main__":
     key = AirMoEKey(max_resident_experts=2)
     print(f"Key: {key.name}, class: {key.key_class().value}")
-    print(f"  Modular expert distribution: base + individual expert files")
-    print(f"  Selective download: users pick which experts they need")
-    print(f"  Topic bundles: group experts by specialization")
+    print("  Modular expert distribution: base + individual expert files")
+    print("  Selective download: users pick which experts they need")
+    print("  Topic bundles: group experts by specialization")
     print("  AirMoE key verified ✓")

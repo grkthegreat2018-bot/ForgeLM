@@ -24,8 +24,10 @@ Usage:
     temp = sampler.get_temperature(query_score=0.85)
 """
 import math
-import torch
 from typing import Dict, List, Optional
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -40,10 +42,10 @@ class ConformalSampler:
     def __init__(self, base_temp: float = 1.0, eps: float = 1e-6):
         self.base_temp = base_temp
         self.eps = eps
-        self.threshold: Optional[float] = None
+        self.threshold: float | None = None
         self.alpha: float = 0.1
 
-    def calibrate(self, held_out_scores: List[float], alpha: float = 0.1) -> float:
+    def calibrate(self, held_out_scores: list[float], alpha: float = 0.1) -> float:
         """Conformal calibration: find threshold q at the (1-alpha) quantile.
 
         Args:
@@ -104,7 +106,7 @@ class ConformalSamplerKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Calibrate the conformal sampler from held-out scores.
 
         Args:
@@ -115,7 +117,7 @@ class ConformalSamplerKey(Key):
         Returns:
             KeyResult with data = {"threshold": float, "alpha": float}
         """
-        scores: List[float] = data["held_out_scores"]
+        scores: list[float] = data["held_out_scores"]
         alpha: float = data.get("alpha", 0.1)
 
         sampler = ConformalSampler()
@@ -130,7 +132,7 @@ class ConformalSamplerKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op — TRIVIAL key has no weights to reverse."""
         return KeyResult(success=True, data={})
 

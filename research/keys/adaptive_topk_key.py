@@ -33,11 +33,13 @@ Usage:
     # ... generate ...
     key.revert(model)  # restore fixed top-k
 """
+import math
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
-import math
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -205,7 +207,7 @@ class AdaptiveMoELayer(nn.Module):
         self.moe._last_aux_loss = aux_loss
         return output.view(B, T, D), aux_loss
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         if self._total_tokens == 0:
             return {"tokens": 0}
         avg_k = self._total_expert_calls / max(self._total_tokens, 1)
@@ -245,7 +247,7 @@ class AdaTopKKey(Key):
         self.max_k = max_k
         self.lo_entropy = lo_entropy
         self.hi_entropy = hi_entropy
-        self._original_ffns: Dict[int, nn.Module] = {}
+        self._original_ffns: dict[int, nn.Module] = {}
         self._applied = False
 
     @property
@@ -261,7 +263,7 @@ class AdaTopKKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """AdaTopK is a runtime key â€” state dict is unchanged."""
         state = dict(data.get("state", data))
         return KeyResult(
@@ -276,7 +278,7 @@ class AdaTopKKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op â€” AdaTopK doesn't modify weights."""
         return KeyResult(success=True, weights=weights)
 
@@ -319,9 +321,9 @@ class AdaTopKKey(Key):
             model.blocks[i].ffn = original
         self._original_ffns.clear()
         self._applied = False
-        print(f"  [AdaTopK] Reverted to fixed top-k routing")
+        print("  [AdaTopK] Reverted to fixed top-k routing")
 
-    def get_stats(self, model: nn.Module) -> Dict:
+    def get_stats(self, model: nn.Module) -> dict:
         """Get adaptive routing statistics from all patched layers."""
         stats_list = []
         for block in model.blocks:

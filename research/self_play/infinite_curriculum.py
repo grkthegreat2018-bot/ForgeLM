@@ -31,24 +31,38 @@ Usage:
         result = curriculum.solve_task(task)
         curriculum.record_result(task, result["success"])
 """
-import os
-import sys
-import re
+import ast
 import json
-import time
+import os
 import random
-import tempfile
+import re
 import subprocess
-import torch
-from pathlib import Path
-from datetime import datetime
+import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import torch
+
+from research.inference.async_d2h import AsyncTokenReader
+from research.json_compat import dumps, loads
+
+# Pre-compiled regex patterns (avoids 450+ recompilations per session).
+_RE_PYTHON_BLOCK = re.compile(r'```python\s*\n(.*?)```', re.DOTALL)
+_RE_TASK_DESC = re.compile(r'#\s*Task:\s*(.+?)(?:\n|$)')
+_RE_QUOTED = re.compile(r'["\'](.+?)["\']')
+_RE_SOLVE_SIG = re.compile(r'def\s+solve\s*(\(.*?\))')
+_RE_SOLVE_TEST = re.compile(r'#\s*solve\s*\((.+?)\)\s*==\s*(.+?)(?:\n|$)')
+_RE_ASSERT_TEST = re.compile(r'#?\s*assert\s+solve\s*\((.+?)\)\s*==\s*(.+?)(?:,\s*["\']|\n|$)')
+_RE_SOLVE_IMPL = re.compile(r'(def\s+solve\s*\(.*?\):.*?)(?:\nassert|\n#|\n\ndef|\Z)', re.DOTALL)
+_RE_RETURN = re.compile(r'return\s+(.+)')
+_RE_CODEBLOCK_OPEN = re.compile(r'```python\s*\n?')
+_RE_CODEBLOCK_CLOSE = re.compile(r'```\s*$', re.MULTILINE)
 
 from research.evaluation.goal_tasks import GoalTask
-
 
 # ─── Data structures ──────────────────────────────────────────────────
 
@@ -61,9 +75,9 @@ class ProposedTask:
     description: str                     # what the function should do
     signature: str                       # e.g. "(n: int) -> int"
     solve_name: str = "solve"
-    test_cases: List[Dict[str, Any]] = field(default_factory=list)
+    test_cases: list[dict[str, Any]] = field(default_factory=list)
     # each: {"args": (...,), "expected": ...}
-    stress_index: Optional[int] = None
+    stress_index: int | None = None
     proposer_confidence: float = 0.0     # model's own confidence
     validated: bool = False              # passed self-consistency check
     archetype: str = "model_proposed"    # marks this as model-generated
@@ -79,7 +93,7 @@ class CurriculumStats:
     total_solved: int = 0          # solver succeeded
     total_failed: int = 0          # solver failed
     # Per-domain rolling success rate (for Goldilocks difficulty)
-    domain_results: Dict[str, List[bool]] = field(default_factory=dict)
+    domain_results: dict[str, list[bool]] = field(default_factory=dict)
 
     @property
     def validation_rate(self) -> float:
@@ -183,7 +197,7 @@ class InfiniteCurriculum:
                  temperature: float = 0.8,
                  top_k: int = 50,
                  top_p: float = 0.95,
-                 task_queue_dir: str = "D:/windsurf/ForgeAI/research/data/curriculum"):
+                 task_queue_dir: str = None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -191,6 +205,9 @@ class InfiniteCurriculum:
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
+        if task_queue_dir is None:
+            from research.paths import CURRICULUM_DIR
+            task_queue_dir = CURRICULUM_DIR
         self.task_queue_dir = Path(task_queue_dir)
         self.task_queue_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,7 +216,7 @@ class InfiniteCurriculum:
         self.rng = random.Random(42)
 
         # Task queue: validated tasks ready for training
-        self._task_queue: List[ProposedTask] = []
+        self._task_queue: list[ProposedTask] = []
         # Failed/rejected tasks (for diversity — don't re-propose similar)
         self._rejected_signatures: set = set()
 
@@ -221,58 +238,262 @@ class InfiniteCurriculum:
 
     def propose_tasks(self, domain: str = "algorithms",
                       n: int = 5,
-                      difficulty: Optional[str] = None,
-                      mode: str = "induction") -> List[ProposedTask]:
+                      difficulty: str | None = None,
+                      mode: str = "induction",
+                      batch_size: int = 8) -> list[ProposedTask]:
         """Generate n tasks via the model, validate them, return valid ones.
+
+        Uses batched generation: multiple prompts are generated in parallel
+        in a single forward pass (batch_size at a time). This gives
+        batch_size× speedup on GPU since batch=1 underutilizes compute.
 
         Args:
             domain: target domain (algorithms, math, strings, etc.)
             n: number of tasks to attempt (may return fewer if validation fails)
             difficulty: override adaptive difficulty (None = auto)
             mode: induction / abduction / deduction
+            batch_size: number of prompts to generate in parallel (8 = good default)
         """
         if difficulty is None:
             difficulty = self._adaptive_difficulty(domain)
 
         valid_tasks = []
-        for i in range(n):
-            task = self._propose_one(domain, difficulty, mode)
-            if task is None:
+        proposed = 0
+
+        while proposed < n:
+            # Generate a batch of prompts
+            current_batch = min(batch_size, n - proposed)
+            prompts = []
+            for _ in range(current_batch):
+                sig_hint = self._random_signature(domain)
+                t_args, t_expected = self._example_test_cases(domain, sig_hint)
+                desc_hints = {
+                    "algorithms": [
+                        "Find the k-th smallest element using partitioning (not sorted())",
+                        "Detect if a list contains a cycle using Floyd's algorithm",
+                        "Merge two sorted lists into one sorted list (not using sorted())",
+                        "Find the longest increasing subsequence length",
+                        "Compute the running median of a stream",
+                        "Rotate a matrix 90 degrees in-place",
+                        "Find all pairs that sum to a target (no nested loops if possible)",
+                        "Implement binary search on a rotated sorted array",
+                        "Count inversions in a list using merge sort",
+                        "Find the majority element (appears > n/2 times) in O(n) space",
+                    ],
+                    "math": [
+                        "Compute the n-th prime number using the Sieve of Eratosthenes",
+                        "Find all prime factors of n (not just check if prime)",
+                        "Compute the digital root of n (recursive sum until single digit)",
+                        "Check if n is a perfect number (sum of proper divisors equals n)",
+                        "Compute the n-th Catalan number",
+                        "Find the GCD of a list of numbers (not just two)",
+                        "Compute the Euler totient function phi(n)",
+                        "Check if n is a power of 2 using bit manipulation",
+                        "Compute the continued fraction representation of sqrt(n)",
+                        "Find the modular inverse of a mod m using extended Euclidean",
+                    ],
+                    "strings": [
+                        "Find the longest palindromic substring (not just check palindrome)",
+                        "Compress a string using run-length encoding",
+                        "Check if two strings are anagrams without sorting",
+                        "Find the first non-repeating character in a string",
+                        "Implement string matching using KMP algorithm",
+                        "Convert a string to title case handling edge cases",
+                        "Find the minimum window in s that contains all chars of t",
+                        "Validate if a string is a valid IPv4 address",
+                        "Count distinct palindromic substrings",
+                    ],
+                    "logic": [
+                        "Evaluate a boolean expression string with AND/OR/NOT",
+                        "Check if a number is a valid Luhn checksum",
+                        "Determine if a Sudoku row/column is valid",
+                        "Check if parentheses/brackets are balanced",
+                        "Evaluate a simple arithmetic expression string (no eval)",
+                    ],
+                    "data_structures": [
+                        "Implement a min-stack (push/pop/min in O(1))",
+                        "Evaluate reverse polish notation",
+                        "Implement a circular queue with wraparound",
+                        "Flatten a nested list (arbitrary depth) iteratively",
+                        "Detect if a binary tree is a valid BST",
+                    ],
+                }
+                desc_hint = self.rng.choice(desc_hints.get(domain, desc_hints["algorithms"]))
+                prompt = INDUCTION_PROMPT.format(
+                    domain=domain, difficulty=difficulty,
+                    signature=sig_hint, desc_hint=desc_hint,
+                )
+                prompts.append(prompt)
+
+            # Batched generation — all prompts in one forward pass sequence
+            completions = self._generate_batch(prompts)
+
+            # Parse and validate each completion
+            for j, completion in enumerate(completions):
+                proposed += 1
+                full_code = prompts[j] + completion
+                task = self._parse_proposal(full_code, domain, difficulty, mode)
+                if task is not None:
+                    task.raw_output = full_code
+
+                if task is None:
+                    try:
+                        print(f"  [Curriculum] Task {proposed}/{n}: PARSE FAILED")
+                    except OSError:
+                        pass
+                    continue
+
+                self.stats.total_proposed += 1
+                safe_desc = task.description[:40].encode('ascii', 'replace').decode('ascii')
                 try:
-                    print(f"  [Curriculum] Task {i+1}/{n}: PARSE FAILED")
+                    print(f"  [Curriculum] Task {proposed}/{n}: sig={task.signature}, "
+                          f"tests={len(task.test_cases)}, desc={safe_desc}")
                 except OSError:
                     pass
-                continue
 
-            self.stats.total_proposed += 1
-            safe_desc = task.description[:40].encode('ascii', 'replace').decode('ascii')
-            try:
-                print(f"  [Curriculum] Task {i+1}/{n}: sig={task.signature}, "
-                      f"tests={len(task.test_cases)}, desc={safe_desc}")
-            except OSError:
-                pass
+                # Complexity filter: reject trivial tasks (push-limits mode)
+                if not self._is_complex_enough(task):
+                    print("    -> REJECTED (too simple)")
+                    continue
 
-            # Complexity filter: reject trivial tasks (push-limits mode)
-            if not self._is_complex_enough(task):
-                print(f"    -> REJECTED (too simple)")
-                continue
-
-            # Validate: run proposer's reference solution against test cases
-            if self._validate_task(task):
-                task.validated = True
-                self.stats.total_validated += 1
-                valid_tasks.append(task)
-                self._task_queue.append(task)
-                self._save_task(task)
-                print(f"    -> VALIDATED (conf={task.proposer_confidence})")
-            else:
-                self._rejected_signatures.add(task.signature)
-                print(f"    -> REJECTED (validation failed)")
+                # Validate: run proposer's reference solution against test cases
+                if self._validate_task(task):
+                    task.validated = True
+                    self.stats.total_validated += 1
+                    valid_tasks.append(task)
+                    self._task_queue.append(task)
+                    self._save_task(task)
+                    print(f"    -> VALIDATED (conf={task.proposer_confidence})")
+                else:
+                    self._rejected_signatures.add(task.signature)
+                    print("    -> REJECTED (validation failed)")
 
         return valid_tasks
 
+    def _generate_batch(self, prompts: list[str]) -> list[str]:
+        """Generate completions for multiple prompts in a single batched pass.
+
+        Uses left-padding with proper attention_mask and position_ids to ensure
+        pad tokens don't corrupt generation. Each sequence generates independently,
+        stopping on EOS.
+
+        Args:
+            prompts: list of prompt strings (1-16 typically)
+
+        Returns:
+            list of completion strings (same length as prompts)
+        """
+        if len(prompts) == 1:
+            return [self._generate(prompts[0])]
+
+        B = len(prompts)
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id or eos_id or 0
+
+        # Tokenize all prompts
+        all_ids = []
+        for prompt in prompts:
+            enc = self.tokenizer(prompt, return_tensors="pt",
+                                 truncation=True, max_length=512)
+            all_ids.append(enc.input_ids[0])  # (T_i,)
+
+        # Left-pad to max prompt length (left pad so generation positions align)
+        max_prompt_len = max(ids.shape[0] for ids in all_ids)
+        padded = torch.full((B, max_prompt_len), pad_id, dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros(B, max_prompt_len, dtype=torch.long, device=self.device)
+        for i, ids in enumerate(all_ids):
+            t = ids.shape[0]
+            padded[i, max_prompt_len - t:] = ids.to(self.device)
+            attention_mask[i, max_prompt_len - t:] = 1
+
+        # Generate
+        with torch.no_grad():
+            # Prefill: process all prompts at once with attention_mask
+            logits, _, past_kvs = self.model(
+                padded, past_key_values=None, use_cache=True, attention_mask=attention_mask)
+            next_logits = logits[:, -1]  # (B, vocab)
+            next_tokens = self._sample_batch(next_logits)  # (B,)
+
+            # Async D2H: issue non-blocking copy for all B tokens.
+            reader = AsyncTokenReader(B, next_logits.shape[-1], self.device)
+            reader.issue(next_tokens, next_logits)
+
+            gen_ids = [[] for _ in range(B)]
+            # Sync for first token.
+            token_list = reader.get_tokens()
+            finished = [False] * B
+            for b in range(B):
+                gen_ids[b].append(token_list[b])
+                if token_list[b] == eos_id:
+                    finished[b] = True
+
+            # Decode loop: all sequences continue in parallel
+            # Pre-allocate mask buffer to avoid torch.cat per step (CPU spike fix).
+            max_total = max_prompt_len + self.max_gen_tokens
+            mask_buf = torch.zeros(B, max_total, dtype=torch.long, device=self.device)
+            mask_buf[:, :max_prompt_len] = attention_mask
+            step = 0
+            while step < self.max_gen_tokens and not all(finished):
+                cur = next_tokens.unsqueeze(-1)  # (B, 1)
+                mask_buf[:, max_prompt_len + step] = 1
+                # Launch forward (GPU starts working).
+                logits, _, past_kvs = self.model(
+                    cur, past_key_values=past_kvs, use_cache=True,
+                    attention_mask=mask_buf[:, :max_prompt_len + step + 1])
+                next_logits = logits[:, -1]  # (B, vocab)
+                next_tokens = self._sample_batch(next_logits)  # (B,)
+
+                # Async D2H: non-blocking copy of tokens.
+                reader.issue(next_tokens, next_logits)
+
+                # Sync to get tokens (GPU finished copy by now — near-free).
+                token_list = reader.get_tokens()
+                for b in range(B):
+                    if not finished[b]:
+                        gen_ids[b].append(token_list[b])
+                        if token_list[b] == eos_id:
+                            finished[b] = True
+
+                step += 1
+
+            del past_kvs
+
+        # Decode each sequence
+        completions = []
+        for b in range(B):
+            text = self.tokenizer.decode(
+                torch.tensor(gen_ids[b]), skip_special_tokens=True)
+            completions.append(text)
+        return completions
+
+    def _sample_batch(self, logits: torch.Tensor) -> torch.Tensor:
+        """Sample next tokens for a batch. logits: (B, vocab) -> (B,)."""
+        if self.temperature <= 0.0:
+            return logits.argmax(dim=-1)
+
+        scaled = logits / self.temperature
+        probs = torch.softmax(scaled, dim=-1)
+
+        if self.top_k > 0 and self.top_k < probs.shape[-1]:
+            topk_vals, _ = torch.topk(probs, self.top_k, dim=-1)
+            mask = probs < topk_vals[:, -1:]
+            probs = probs.masked_fill(mask, 0.0)
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+
+        if 0.0 < self.top_p < 1.0:
+            # Per-row top-p filtering
+            sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+            cumsum = sorted_probs.cumsum(dim=-1)
+            keep = cumsum <= self.top_p
+            keep[..., 0] = True  # always keep at least one
+            probs = torch.zeros_like(probs, dtype=probs.dtype)
+            probs.scatter_(-1, sorted_idx, (sorted_probs * keep.to(probs.dtype)))
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
     def _propose_one(self, domain: str, difficulty: str,
-                     mode: str = "induction") -> Optional[ProposedTask]:
+                     mode: str = "induction") -> ProposedTask | None:
         """Generate one task via the model and parse it."""
         # Pick a random signature pattern to guide the model
         sig_hint = self._random_signature(domain)
@@ -374,7 +595,7 @@ class InfiniteCurriculum:
         }
         return self.rng.choice(sigs.get(domain, sigs["algorithms"]))
 
-    def _example_test_cases(self, domain: str, signature: str) -> Tuple[List[str], List[str]]:
+    def _example_test_cases(self, domain: str, signature: str) -> tuple[list[str], list[str]]:
         """Generate example test case strings for the prompt template.
 
         These are PLACEHOLDER examples that show the format — the model
@@ -400,7 +621,11 @@ class InfiniteCurriculum:
         return args, expected
 
     def _generate(self, prompt: str) -> str:
-        """Generate text from the model using KV cache (O(n) not O(n²))."""
+        """Generate text from the model using KV cache (O(n) not O(n²)).
+
+        Uses async D2H (pinned memory + non-blocking copy) to eliminate
+        CPU spikes from .item() host-device synchronization.
+        """
         enc = self.tokenizer(prompt, return_tensors="pt",
                              truncation=True, max_length=512)
         input_ids = enc.input_ids.to(self.device)
@@ -408,24 +633,44 @@ class InfiniteCurriculum:
         with torch.no_grad():
             past_kvs = None
             gen_ids = []
+            eos_id = self.tokenizer.eos_token_id
 
             # Initial pass on full prompt
             logits, _, past_kvs = self.model(
                 input_ids, past_key_values=past_kvs, use_cache=True)
             next_logits = logits[0, -1]
-            next_token = self._sample(next_logits)
+            next_token_gpu = self._sample_gpu(next_logits)
 
+            # Async D2H: issue non-blocking copy instead of blocking .item().
+            reader = AsyncTokenReader(1, next_logits.shape[-1], self.device)
+            reader.issue(next_token_gpu.unsqueeze(0), next_logits.unsqueeze(0))
+
+            # Pre-allocate single-token buffer.
+            cur_token = torch.zeros(1, 1, dtype=input_ids.dtype, device=self.device)
+
+            # Sync for first token.
+            token_list = reader.get_tokens()
+            next_token = token_list[0]
             gen_ids.append(next_token)
 
-            # Subsequent tokens: feed only new token, reuse KV cache
+            # Subsequent tokens: feed only new token, reuse KV cache.
+            # Async D2H pattern: issue copy, launch forward, sync for previous result.
             while len(gen_ids) < self.max_gen_tokens:
-                if next_token == self.tokenizer.eos_token_id:
+                if next_token == eos_id:
                     break
-                cur = torch.tensor([[next_token]], device=self.device)
+                cur_token[0, 0] = next_token_gpu
+                # Launch forward (GPU starts working).
                 logits, _, past_kvs = self.model(
-                    cur, past_key_values=past_kvs, use_cache=True)
+                    cur_token, past_key_values=past_kvs, use_cache=True)
                 next_logits = logits[0, -1]
-                next_token = self._sample(next_logits)
+                next_token_gpu = self._sample_gpu(next_logits)
+
+                # Issue async D2H (non-blocking).
+                reader.issue(next_token_gpu.unsqueeze(0), next_logits.unsqueeze(0))
+
+                # Sync to get token (GPU finished copy by now — near-free).
+                token_list = reader.get_tokens()
+                next_token = token_list[0]
                 gen_ids.append(next_token)
 
             del past_kvs
@@ -433,6 +678,34 @@ class InfiniteCurriculum:
         text = self.tokenizer.decode(
             torch.tensor(gen_ids), skip_special_tokens=True)
         return text
+
+    def _sample_gpu(self, logits: torch.Tensor) -> torch.Tensor:
+        """Sample next token, keeping result on GPU (no .item() sync).
+
+        Unlike _sample() which returns an int (forcing D2H sync), this returns
+        a GPU tensor for use with async D2H transfer.
+        """
+        if self.temperature <= 0.0:
+            return logits.argmax()
+
+        scaled = logits / self.temperature
+        probs = torch.softmax(scaled, dim=-1)
+
+        if self.top_k > 0 and self.top_k < probs.shape[0]:
+            topk_vals, _ = torch.topk(probs, self.top_k)
+            mask = probs < topk_vals[-1]
+            probs = probs.masked_fill(mask, 0.0)
+            probs = probs / probs.sum()
+
+        if 0.0 < self.top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+            cumsum = sorted_probs.cumsum(0)
+            cutoff = (cumsum > self.top_p).float().cumsum(0)
+            sorted_probs = sorted_probs * (cutoff == 0).float()
+            sorted_probs = sorted_probs / sorted_probs.sum()
+            probs = torch.zeros_like(probs).scatter(0, sorted_idx, sorted_probs)
+
+        return torch.multinomial(probs, 1)
 
     def _sample(self, logits: torch.Tensor) -> int:
         """Sample next token with temperature/top-k/top-p."""
@@ -449,18 +722,13 @@ class InfiniteCurriculum:
             probs = probs / probs.sum()
 
         if 0.0 < self.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumsum = torch.cumsum(sorted_probs, dim=-1)
-            cutoff = cumsum > self.top_p
-            cutoff[0] = False
-            sorted_probs[cutoff] = 0.0
-            probs = torch.zeros_like(probs).scatter_(0, sorted_idx, sorted_probs)
-            probs = probs / probs.sum()
+            from research.sampling_utils import top_p_sample_probs
+            probs = top_p_sample_probs(probs, self.top_p)
 
         return torch.multinomial(probs, num_samples=1).squeeze().item()
 
     def _parse_proposal(self, raw: str, domain: str, difficulty: str,
-                        mode: str) -> Optional[ProposedTask]:
+                        mode: str) -> ProposedTask | None:
         """Parse model output into a ProposedTask.
 
         Expected format:
@@ -471,18 +739,18 @@ class InfiniteCurriculum:
           # solve(args2) == expected2
         """
         # Extract code block if wrapped in ```python ... ```
-        code_match = re.search(r'```python\s*\n(.*?)```', raw, re.DOTALL)
+        code_match = _RE_PYTHON_BLOCK.search(raw)
         code = code_match.group(1) if code_match else raw
 
         # Extract task description — try "# Task:" or quoted description
-        desc_match = re.search(r'#\s*Task:\s*(.+?)(?:\n|$)', code)
+        desc_match = _RE_TASK_DESC.search(code)
         if not desc_match:
             # Try quoted: "Given a list..." or 'Given a list...'
-            desc_match = re.search(r'["\'](.+?)["\']', code)
+            desc_match = _RE_QUOTED.search(code)
         description = desc_match.group(1).strip() if desc_match else "Model-proposed task"
 
         # Extract function signature — if no def solve found, infer from test cases
-        sig_match = re.search(r'def\s+solve\s*(\(.*?\))', code)
+        sig_match = _RE_SOLVE_SIG.search(code)
         if sig_match:
             signature = sig_match.group(1)
         else:
@@ -496,23 +764,23 @@ class InfiniteCurriculum:
         #   Format 3: # assert solve(args) == expected  (commented assert)
         test_cases = []
         # Pattern 1: comment-style # solve(args) == expected
-        for m in re.finditer(r'#\s*solve\s*\((.+?)\)\s*==\s*(.+?)(?:\n|$)', code):
+        for m in _RE_SOLVE_TEST.finditer(code):
             args_str = m.group(1).strip()
             expected_str = m.group(2).strip().rstrip(',')
             try:
-                args = eval(f"({args_str},)", {"__builtins__": {}}, {})
-                expected = eval(expected_str, {"__builtins__": {}}, {})
+                args = ast.literal_eval(f"({args_str},)")
+                expected = ast.literal_eval(expected_str)
                 test_cases.append({"args": args, "expected": expected})
             except Exception:
                 continue
         # Pattern 2: assert-style (active or commented)
         if not test_cases:
-            for m in re.finditer(r'#?\s*assert\s+solve\s*\((.+?)\)\s*==\s*(.+?)(?:,\s*["\']|\n|$)', code):
+            for m in _RE_ASSERT_TEST.finditer(code):
                 args_str = m.group(1).strip()
                 expected_str = m.group(2).strip().rstrip(',')
                 try:
-                    args = eval(f"({args_str},)", {"__builtins__": {}}, {})
-                    expected = eval(expected_str, {"__builtins__": {}}, {})
+                    args = ast.literal_eval(f"({args_str},)")
+                    expected = ast.literal_eval(expected_str)
                     test_cases.append({"args": args, "expected": expected})
                 except Exception:
                     continue
@@ -554,8 +822,7 @@ class InfiniteCurriculum:
 
         # Extract the reference implementation (for validation)
         # Match from `def solve(...)` to the next assert/#/def or end
-        impl_match = re.search(r'(def\s+solve\s*\(.*?\):.*?)(?:\nassert|\n#|\n\ndef|\Z)',
-                               code, re.DOTALL)
+        impl_match = _RE_SOLVE_IMPL.search(code)
         ref_code = impl_match.group(1) if impl_match else ""
 
         self._task_counter += 1
@@ -658,7 +925,7 @@ class InfiniteCurriculum:
                 # Check if it's a single-line return of a builtin
                 single_line = " ".join(body_lines)
                 # Extract what's being returned
-                ret_match = re.search(r'return\s+(.+)', single_line)
+                ret_match = _RE_RETURN.search(single_line)
                 if ret_match:
                     ret_expr = ret_match.group(1).strip()
                     # Check if it's just a builtin call: builtin(args)
@@ -683,18 +950,16 @@ class InfiniteCurriculum:
     def _extract_reference_code(self, raw: str) -> str:
         """Extract the def solve(...) implementation from raw model output."""
         # Remove code block markers
-        code = re.sub(r'```python\s*\n?', '', raw)
-        code = re.sub(r'```\s*$', '', code, flags=re.MULTILINE)
+        code = _RE_CODEBLOCK_OPEN.sub('', raw)
+        code = _RE_CODEBLOCK_CLOSE.sub('', code)
 
         # Find the function definition — stop at assert/#/def or end
-        match = re.search(
-            r'(def\s+solve\s*\(.*?\):.*?)(?:\nassert|\n#|\n\ndef|\nprint|\Z)',
-            code, re.DOTALL)
+        match = _RE_SOLVE_IMPL.search(code)
         if match:
             return match.group(1).strip()
         return ""
 
-    def _execute_sandbox(self, code: str, timeout_s: float = 3.0) -> Dict:
+    def _execute_sandbox(self, code: str, timeout_s: float = 3.0) -> dict:
         """Execute Python code in a subprocess sandbox."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
                                           delete=False, encoding='utf-8') as f:
@@ -721,13 +986,14 @@ class InfiniteCurriculum:
         finally:
             try:
                 os.unlink(temp_path)
-            except OSError:
-                pass
+            except OSError as e:
+                import warnings
+                warnings.warn(f"log rotation cleanup: {e}", RuntimeWarning, stacklevel=2)
 
     # ─── Solving ───────────────────────────────────────────────────
 
     def solve_task(self, task: ProposedTask,
-                   engine: Optional[Any] = None) -> Dict:
+                   engine: Any | None = None) -> dict:
         """Solve a proposed task using the model.
 
         Can use the existing RecursiveSelfPlay engine, or generate directly.
@@ -754,7 +1020,7 @@ class InfiniteCurriculum:
             # Direct generation (simpler, no retry loop)
             return self._solve_direct(goal_task)
 
-    def _solve_direct(self, task: GoalTask) -> Dict:
+    def _solve_direct(self, task: GoalTask) -> dict:
         """Solve a task with self-modeling retry (D5).
 
         On low confidence, retry with higher temperature.
@@ -776,7 +1042,7 @@ class InfiniteCurriculum:
             self.temperature = old_temp  # restore
 
             # Extract code block if present
-            code_match = re.search(r'```python\s*\n(.*?)```', completion, re.DOTALL)
+            code_match = _RE_PYTHON_BLOCK.search(completion)
             solution_body = code_match.group(1) if code_match else completion
 
             # Build full solution: prompt (has def solve) + completion (has body)
@@ -856,8 +1122,8 @@ class InfiniteCurriculum:
     # ─── Task Queue Management ─────────────────────────────────────
 
     def get_training_batch(self, n: int,
-                           domain: Optional[str] = None,
-                           difficulty: Optional[str] = None) -> List[ProposedTask]:
+                           domain: str | None = None,
+                           difficulty: str | None = None) -> list[ProposedTask]:
         """Get n validated tasks from the queue for training.
 
         Returns tasks sorted by difficulty (easy first = curriculum order).
@@ -873,7 +1139,7 @@ class InfiniteCurriculum:
 
         return candidates[:n]
 
-    def queue_size(self, domain: Optional[str] = None) -> int:
+    def queue_size(self, domain: str | None = None) -> int:
         """Number of validated tasks in the queue."""
         if domain is None:
             return len(self._task_queue)
@@ -904,7 +1170,7 @@ class InfiniteCurriculum:
         files = sorted(self.task_queue_dir.glob("*.json"))[:max_tasks]
         for f in files:
             try:
-                data = json.loads(f.read_text())
+                data = loads(f.read_text())
                 task = ProposedTask(
                     id=data["id"],
                     domain=data["domain"],
@@ -927,7 +1193,7 @@ class InfiniteCurriculum:
 
     # ─── Convert to GoalTask (for existing training pipeline) ──────
 
-    def to_goal_tasks(self, tasks: List[ProposedTask]) -> List[GoalTask]:
+    def to_goal_tasks(self, tasks: list[ProposedTask]) -> list[GoalTask]:
         """Convert ProposedTasks to GoalTasks for the existing training pipeline."""
         return [GoalTask(
             id=t.id,
@@ -946,7 +1212,7 @@ class InfiniteCurriculum:
     def print_stats(self):
         """Print curriculum health metrics."""
         try:
-            print(f"\n  [Curriculum] Stats:")
+            print("\n  [Curriculum] Stats:")
             print(f"    Proposed: {self.stats.total_proposed}")
             print(f"    Validated: {self.stats.total_validated} "
                   f"({self.stats.validation_rate:.1%})")

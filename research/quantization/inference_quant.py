@@ -13,10 +13,11 @@ Usage:
     # INT4 weight-only quantization (3x speedup, ~1-2% quality loss)
     quantize_model_int4(model)
 """
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class QuantizedLinear(nn.Module):
@@ -31,31 +32,31 @@ class QuantizedLinear(nn.Module):
         group_size: quantization group size (smaller = more accurate, more overhead)
                     None = per-channel (one scale per output row)
     """
-    
-    def __init__(self, original: nn.Linear, bits: int = 8, group_size: Optional[int] = None):
+
+    def __init__(self, original: nn.Linear, bits: int = 8, group_size: int | None = None):
         super().__init__()
         self.in_features = original.in_features
         self.out_features = original.out_features
         self.bits = bits
         self.group_size = group_size
         self.bias = original.bias
-        
+
         # Quantize weights.
         W = original.weight.data.float()  # (out, in)
-        
+
         if group_size is None:
             # Per-channel quantization (one scale per output row).
             scales, q_w = self._quantize_per_channel(W, bits)
         else:
             # Group-wise quantization.
             scales, q_w = self._quantize_grouped(W, bits, group_size)
-        
+
         # Store as registered buffers (move with model.to()).
         self.register_buffer('q_weight', q_w)
         self.register_buffer('scales', scales)
         if self.bias is not None:
             self.register_buffer('bias_weight', self.bias.data)
-    
+
     def _quantize_per_channel(self, W: torch.Tensor, bits: int):
         """Per-channel quantization: one scale per output row."""
         max_val = W.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
@@ -63,7 +64,7 @@ class QuantizedLinear(nn.Module):
         scales = max_val / qmax
         q_w = torch.round(W / scales).clamp(-qmax, qmax).to(torch.int8 if bits == 8 else torch.float16)
         return scales.squeeze(1), q_w
-    
+
     def _quantize_grouped(self, W: torch.Tensor, bits: int, group_size: int):
         """Group-wise quantization along input dimension."""
         out_f, in_f = W.shape
@@ -72,15 +73,15 @@ class QuantizedLinear(nn.Module):
         if pad > 0:
             W = F.pad(W, (0, pad))
         n_groups = W.shape[1] // group_size
-        
+
         W_grouped = W.view(out_f, n_groups, group_size)
         max_val = W_grouped.abs().amax(dim=2, keepdim=True).clamp(min=1e-8)
         qmax = (2 ** (bits - 1)) - 1
         scales = max_val / qmax  # (out, n_groups, 1)
         q_w = torch.round(W_grouped / scales).clamp(-qmax, qmax)
-        
+
         return scales.view(out_f, n_groups), q_w.view(out_f, -1).to(torch.float16)
-    
+
     def _dequantize(self) -> torch.Tensor:
         """Dequantize weights to float16/bfloat16 (not float32 to save memory)."""
         if self.group_size is None:
@@ -109,7 +110,7 @@ class QuantizedLinear(nn.Module):
         else:
             weight = self._dequantize().to(x.dtype)
         return F.linear(x, weight, self.bias_weight if self.bias is not None else None)
-    
+
     def __repr__(self):
         return f"QuantizedLinear(in={self.in_features}, out={self.out_features}, bits={self.bits})"
 
@@ -130,7 +131,7 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
         target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj',
                          'w1', 'w2', 'w3', 'fc1', 'fc2', 'qkv_proj', 'out_proj',
                          'kv_down_proj', 'k_up_proj', 'v_up_proj']
-    
+
     n_quantized = 0
     for name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
@@ -142,7 +143,7 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
                 quantized = QuantizedLinear(module, bits=8)
                 setattr(parent, child_name, quantized)
                 n_quantized += 1
-    
+
     if verbose:
         # Estimate memory savings.
         total_params = 0
@@ -178,7 +179,7 @@ def quantize_model_int4(model, target_modules=None, group_size=128, verbose=True
         target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj',
                          'w1', 'w2', 'w3', 'fc1', 'fc2', 'qkv_proj', 'out_proj',
                          'kv_down_proj', 'k_up_proj', 'v_up_proj']
-    
+
     n_quantized = 0
     for name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
@@ -189,7 +190,7 @@ def quantize_model_int4(model, target_modules=None, group_size=128, verbose=True
                 quantized = QuantizedLinear(module, bits=4, group_size=group_size)
                 setattr(parent, child_name, quantized)
                 n_quantized += 1
-    
+
     if verbose:
         print(f"  [InferQuant] INT4 (group={group_size}): {n_quantized} layers quantized")
     return n_quantized
@@ -201,7 +202,7 @@ def benchmark_quantization(model, tokenizer, prompts, device="cuda"):
     Returns dict with tokens/sec for both configurations.
     """
     import time
-    
+
     # Baseline (BF16).
     model.eval()
     total_tokens = 0
@@ -218,7 +219,7 @@ def benchmark_quantization(model, tokenizer, prompts, device="cuda"):
     if device.type == "cuda":
         torch.cuda.synchronize()
     baseline_tps = total_tokens / (time.time() - t0)
-    
+
     # INT8.
     quantize_model_int8(model, verbose=False)
     total_tokens = 0
@@ -235,7 +236,7 @@ def benchmark_quantization(model, tokenizer, prompts, device="cuda"):
     if device.type == "cuda":
         torch.cuda.synchronize()
     int8_tps = total_tokens / (time.time() - t0)
-    
+
     speedup = int8_tps / baseline_tps
     print(f"  [InferQuant] BF16: {baseline_tps:.0f} tok/s | INT8: {int8_tps:.0f} tok/s | {speedup:.2f}x speedup")
     return {"baseline_tps": baseline_tps, "int8_tps": int8_tps, "speedup": speedup}

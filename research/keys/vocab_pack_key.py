@@ -27,9 +27,11 @@ Usage:
     # Inject into a different base model
     reconstructed = key.reverse(result.weights)
 """
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -58,7 +60,7 @@ class VocabPackKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Extract a vocabulary pack from (base, domain) embeddings.
 
         Args:
@@ -72,7 +74,7 @@ class VocabPackKey(Key):
         """
         base_embed = data["base_embed"]
         domain_embed = data["domain_embed"]
-        token_ids: List[int] = data["domain_token_ids"]
+        token_ids: list[int] = data["domain_token_ids"]
 
         # Accept nn.Embedding or raw weight tensors
         if isinstance(base_embed, nn.Embedding):
@@ -104,7 +106,7 @@ class VocabPackKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Reconstruct domain embeddings from a vocabulary pack.
 
         Requires the caller to supply base embeddings alongside the pack.

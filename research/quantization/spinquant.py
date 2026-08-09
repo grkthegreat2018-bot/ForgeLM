@@ -20,10 +20,11 @@ Usage:
 Reference: SpinQuant (ICLR 2025, facebookresearch/SpinQuant)
 """
 import math
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 def random_orthogonal(d, device="cuda"):

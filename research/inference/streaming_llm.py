@@ -14,8 +14,9 @@ Usage:
     from research.inference.streaming_llm import StreamingKVCache
     cache = StreamingKVCache(n_sinks=4, window_size=512)
 """
+from typing import Dict, Optional, Tuple
+
 import torch
-from typing import Optional, Tuple, Dict
 
 
 class StreamingKVCache:
@@ -91,7 +92,7 @@ class StreamingKVCache:
                 else:
                     self.positions.append(pos)
 
-    def get(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get current KV cache and position indices.
 
         Returns:
@@ -105,7 +106,7 @@ class StreamingKVCache:
         pos = torch.tensor(self.positions[:current_size], device=self.device)
         return k, v, pos
 
-    def get_past_kv(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    def get_past_kv(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Get KV as (k, v) tuple for model's past_key_value format."""
         if self.k_cache is None or self.seq_len == 0:
             return None
@@ -119,7 +120,7 @@ class StreamingKVCache:
         self.positions = []
         self.seq_len = 0
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         current_size = min(self.seq_len, self.max_capacity)
         return {
             "type": "streaming_llm",

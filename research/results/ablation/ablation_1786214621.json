@@ -1,0 +1,16 @@
+[
+  {
+    "key": "baseline",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 16.40258863464453,
+    "ms_per_token": 60.96598666675467,
+    "vram_mb": 3503,
+    "vram_peak_mb": 3507,
+    "cosine_sim": 1.0,
+    "overhead_ms": 0.0
+  },
+  {
+    "key": "wisparse",
+    "error": "maximum recursion depth exceeded while calling a Python object"
+  }
+]

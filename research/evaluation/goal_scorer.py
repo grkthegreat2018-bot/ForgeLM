@@ -30,12 +30,11 @@ Usage:
 import ast
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple
-
+from typing import Any, Dict, List, Optional, Tuple
 
 # ─── AST fingerprint ──────────────────────────────────────────────────
 
-def extract_ast_fingerprint(code: str) -> Dict[str, int]:
+def extract_ast_fingerprint(code: str) -> dict[str, int]:
     """Extract AST node-type multiset from Python code.
 
     Returns a dict mapping node type names to counts.
@@ -49,7 +48,7 @@ def extract_ast_fingerprint(code: str) -> Dict[str, int]:
     except SyntaxError:
         return {}
 
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for node in ast.walk(tree):
         name = type(node).__name__
         counts[name] = counts.get(name, 0) + 1
@@ -62,7 +61,7 @@ def count_ast_nodes(code: str) -> int:
     return sum(fp.values())
 
 
-def dice_coefficient(fp_a: Dict[str, int], fp_b: Dict[str, int]) -> float:
+def dice_coefficient(fp_a: dict[str, int], fp_b: dict[str, int]) -> float:
     """Dice's coefficient on two AST fingerprint multisets.
 
     Dice = 2 * |A ∩ B| / (|A| + |B|)
@@ -81,8 +80,8 @@ def dice_coefficient(fp_a: Dict[str, int], fp_b: Dict[str, int]) -> float:
     return 2.0 * intersection / (size_a + size_b)
 
 
-def max_similarity_to_seen(fingerprint: Dict[str, int],
-                           seen: List[Dict[str, int]]) -> float:
+def max_similarity_to_seen(fingerprint: dict[str, int],
+                           seen: list[dict[str, int]]) -> float:
     """Max Dice similarity of this fingerprint vs all seen fingerprints."""
     if not seen:
         return 0.0
@@ -98,9 +97,9 @@ class ScoreResult:
     correct: bool                         # passed all I/O test cases
     accepted: bool                        # correct AND not redundant
     rejected_reason: str = ""             # why rejected (if not accepted)
-    scores: Dict[str, float] = field(default_factory=dict)
+    scores: dict[str, float] = field(default_factory=dict)
     # individual dimension scores: minimalism, efficiency, diversity, etc.
-    fingerprint: Dict[str, int] = field(default_factory=dict)
+    fingerprint: dict[str, int] = field(default_factory=dict)
     ast_node_count: int = 0
     exec_time_ms: float = 0.0
     max_similarity: float = 0.0           # max Dice sim to seen solutions
@@ -139,13 +138,13 @@ class GoalScorer:
 
     def __init__(self):
         # Per-goal accepted fingerprints for diversity tracking
-        self._seen: Dict[str, List[Dict[str, int]]] = {}
+        self._seen: dict[str, list[dict[str, int]]] = {}
 
-    def record_fingerprint(self, goal_id: str, fingerprint: Dict[str, int]):
+    def record_fingerprint(self, goal_id: str, fingerprint: dict[str, int]):
         """Record an accepted solution's fingerprint for future diversity scoring."""
         self._seen.setdefault(goal_id, []).append(fingerprint)
 
-    def get_seen(self, goal_id: str) -> List[Dict[str, int]]:
+    def get_seen(self, goal_id: str) -> list[dict[str, int]]:
         return self._seen.get(goal_id, [])
 
     def clear_goal(self, goal_id: str):
@@ -200,7 +199,7 @@ class GoalScorer:
               tokens_generated: int = 0,
               k_samples: int = 1,
               n_agreeing: int = 1,
-              stress_exec_ms: Optional[float] = None) -> ScoreResult:
+              stress_exec_ms: float | None = None) -> ScoreResult:
         """Score a solution attempt.
 
         Args:

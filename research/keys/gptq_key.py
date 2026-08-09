@@ -14,10 +14,12 @@ Usage:
     # Quantize model weights to INT4
     quantized_state = quantize_gptq(state, group_size=128)
 """
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Dict, List, Tuple, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -35,16 +37,16 @@ class GPTQKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL  # Lossy quantization
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Not used — GPTQ operates on full model with calibration."""
         return KeyResult(success=False, error="GPTQ operates on full model with calibration")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=False, error="GPTQ is not reversible (lossy)")
 
 
-def quantize_gptq(state: Dict[str, torch.Tensor], group_size: int = 128,
-                  bits: int = 4) -> Dict[str, torch.Tensor]:
+def quantize_gptq(state: dict[str, torch.Tensor], group_size: int = 128,
+                  bits: int = 4) -> dict[str, torch.Tensor]:
     """Apply GPTQ-style 4-bit quantization to all 2D weight tensors.
 
     Simplified GPTQ: per-group symmetric quantization with scale compensation.
@@ -91,7 +93,7 @@ def quantize_gptq(state: Dict[str, torch.Tensor], group_size: int = 128,
 
 
 def _quantize_tensor_gptq(tensor: torch.Tensor, group_size: int = 128,
-                           bits: int = 4) -> Tuple[torch.Tensor, torch.Tensor]:
+                           bits: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a 2D tensor to INT4 with per-group scales.
 
     Args:
@@ -130,7 +132,7 @@ def _quantize_tensor_gptq(tensor: torch.Tensor, group_size: int = 128,
     return q, scales
 
 
-def dequantize_gptq(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def dequantize_gptq(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Dequantize GPTQ state dict back to bf16.
 
     Args:

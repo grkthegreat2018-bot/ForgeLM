@@ -6,6 +6,7 @@ before softmax. It constrains what tokens can attend to what.
 Classification: Trivial (no weights)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

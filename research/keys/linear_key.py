@@ -10,6 +10,7 @@ Reverse key: Y = X @ W^T                (forward pass)
 Classification: Partial (forward exact, reverse limited by dimensionality)
 """
 import torch
+
 from .base import Key, KeyClass, KeyResult
 
 

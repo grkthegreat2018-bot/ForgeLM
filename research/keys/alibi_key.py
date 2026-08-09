@@ -15,7 +15,9 @@ ALiBi enables training on short sequences and extrapolating to longer ones.
 Reference: ALiBi, arxiv 2108.12409
 """
 import math
+
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

@@ -16,8 +16,9 @@ This preserves the most important directions in the residual stream consistently
 Based on "Weight Subcloning" (2023) which showed 4x faster training with this approach.
 """
 import re
+
 import torch
-from safetensors.torch import save_file, load_file
+from safetensors.torch import load_file, save_file
 
 from research.config import get_config
 from research.model_loader import ModelLoader
@@ -78,7 +79,7 @@ def key_svd_resize(src_path: str, out_path: str, target_config_name: str,
     Computes a single projection from the embedding's SVD, then applies it
     consistently to all weight matrices to reduce d_model.
     """
-    print(f"Key #2: SVD resize (shared projection)")
+    print("Key #2: SVD resize (shared projection)")
     print(f"  Source: {src_path} ({source_config_name})")
     print(f"  Target: {out_path} ({target_config_name})")
 

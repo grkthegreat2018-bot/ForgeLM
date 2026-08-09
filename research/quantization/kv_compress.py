@@ -16,10 +16,11 @@ Usage:
     cache.append(new_k, new_v, token_positions)
     k, v = cache.get()  # returns compressed, evicted KV for attention
 """
-import torch
-import torch.nn as nn
 from collections import deque
 from typing import Optional, Tuple
+
+import torch
+import torch.nn as nn
 
 
 class KVQuantCache:
@@ -60,8 +61,12 @@ class KVQuantCache:
         return v_quant, scale
 
     def dequantize(self, kv_quant, scale):
-        """Dequantize back to float for attention computation."""
-        return kv_quant.to(torch.float32) * scale
+        """Dequantize back to float for attention computation.
+
+        Uses bf16 instead of fp32 to save VRAM — the quantized values are
+        int8 (max 127), so bf16 has more than enough precision.
+        """
+        return kv_quant.to(torch.bfloat16) * scale.to(torch.bfloat16)
 
 
 class H2OCache:
@@ -142,10 +147,10 @@ class CompressedKVCache:
         self.h2o = H2OCache(max_tokens=max_tokens, keep_ratio=h2o_keep_ratio)
 
         # Storage for quantized KV (grows as tokens are added).
-        self.k_quant: Optional[torch.Tensor] = None  # (1, n_heads, T, head_dim) int8
-        self.v_quant: Optional[torch.Tensor] = None
-        self.k_scale: Optional[torch.Tensor] = None
-        self.v_scale: Optional[torch.Tensor] = None
+        self.k_quant: torch.Tensor | None = None  # (1, n_heads, T, head_dim) int8
+        self.v_quant: torch.Tensor | None = None
+        self.k_scale: torch.Tensor | None = None
+        self.v_scale: torch.Tensor | None = None
         self.current_length = 0
 
     def append(self, new_k, new_v):
@@ -154,7 +159,7 @@ class CompressedKVCache:
         new_k, new_v: (B, n_heads, T_new, head_dim) float
         """
         B, H, T_new, D = new_k.shape
-        assert H == self.n_heads and D == self.head_dim
+        assert self.n_heads == H and self.head_dim == D
 
         # Quantize new tokens.
         new_k_quant, new_k_scale = self.quantizer.quantize_keys(new_k)

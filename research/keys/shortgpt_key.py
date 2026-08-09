@@ -16,10 +16,12 @@ Usage:
     # Measure similarity and prune
     pruned_state = prune_layers(state, model, n_remove=4)
 """
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Dict, List, Optional, Tuple
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -36,15 +38,15 @@ class ShortGPTKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL  # Lossy — removed layers can't be recovered
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Not used — ShortGPT operates on the full model, not per-tensor."""
         return KeyResult(success=False, error="ShortGPT operates on full model, not per-tensor")
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=False, error="ShortGPT is not reversible (lossy)")
 
 
-def compute_layer_similarity(model, input_ids: torch.Tensor) -> List[float]:
+def compute_layer_similarity(model, input_ids: torch.Tensor) -> list[float]:
     """Compute cosine similarity between consecutive layer outputs.
 
     High similarity → layer is nearly identity → candidate for removal.
@@ -81,8 +83,8 @@ def compute_layer_similarity(model, input_ids: torch.Tensor) -> List[float]:
     return similarities
 
 
-def prune_layers(state: Dict[str, torch.Tensor], model, input_ids: torch.Tensor,
-                 n_remove: int = 4) -> Tuple[Dict[str, torch.Tensor], List[int]]:
+def prune_layers(state: dict[str, torch.Tensor], model, input_ids: torch.Tensor,
+                 n_remove: int = 4) -> tuple[dict[str, torch.Tensor], list[int]]:
     """Prune the least important layers from a checkpoint.
 
     Args:
@@ -94,10 +96,10 @@ def prune_layers(state: Dict[str, torch.Tensor], model, input_ids: torch.Tensor,
     Returns:
         (pruned_state, removed_layer_indices)
     """
-    print(f"  [ShortGPT] Computing layer similarities...")
+    print("  [ShortGPT] Computing layer similarities...")
     sims = compute_layer_similarity(model, input_ids)
 
-    print(f"  [ShortGPT] Layer similarities:")
+    print("  [ShortGPT] Layer similarities:")
     for i, s in enumerate(sims):
         marker = " ← REMOVE" if s > sorted(sims, reverse=True)[-n_remove:][0] else ""
         print(f"    Layer {i:2d}: {s:.4f}{marker}")

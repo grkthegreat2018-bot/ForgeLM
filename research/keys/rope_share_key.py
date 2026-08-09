@@ -18,9 +18,11 @@ Usage:
     from research.keys.rope_share_key import RoPEShareKey, apply_rope_sharing
     apply_rope_sharing(model)
 """
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -47,7 +49,7 @@ class RoPEShareKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """No weight transformation — this is a runtime optimization."""
         return KeyResult(
             success=True,
@@ -55,7 +57,7 @@ class RoPEShareKey(Key):
             metadata={"note": "Runtime optimization — use apply_rope_sharing(model) instead"},
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights)
 
 
@@ -104,4 +106,4 @@ if __name__ == "__main__":
     key = RoPEShareKey()
     print(f"Key: {key.name}, class: {key.key_class().value}")
     print(f"  Description: {key.description}")
-    print(f"  Note: apply_rope_sharing(model) shares RoPE buffers at runtime")
+    print("  Note: apply_rope_sharing(model) shares RoPE buffers at runtime")

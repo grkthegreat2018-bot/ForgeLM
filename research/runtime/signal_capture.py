@@ -25,6 +25,8 @@ import time
 import uuid
 from pathlib import Path
 
+from research.json_compat import dumps, loads
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 
@@ -42,10 +44,9 @@ class SignalLogger:
         if not self.enabled:
             return
         record["timestamp"] = time.time()
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with self._lock:
-            with open(self.filepath, "a", encoding="utf-8") as f:
-                f.write(line)
+        line = dumps(record, ensure_ascii=False) + "\n"
+        with self._lock, open(self.filepath, "a", encoding="utf-8") as f:
+            f.write(line)
 
     def log_interaction(self, messages, response, temperature=0.7, max_tokens=512):
         """Log a (messages, response) pair. Returns interaction_id for linking feedback."""
@@ -133,13 +134,13 @@ def load_signals(filepath):
         return {}
 
     interactions = {}
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                record = json.loads(line)
+                record = loads(line)
             except json.JSONDecodeError:
                 continue
 

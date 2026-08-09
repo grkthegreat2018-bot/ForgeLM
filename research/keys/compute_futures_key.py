@@ -23,8 +23,10 @@ Usage:
     flags = cf.should_verify([0.95, 0.97, 0.92, 0.85, 0.99])
     # flags = [False, False, False, True, False]  -- skip confident, verify uncertain
 """
-import torch
 from typing import Dict, List, Optional
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -39,7 +41,7 @@ class ComputeFutures:
         self.threshold = confidence_threshold
         self.max_skip = max_skip
 
-    def should_verify(self, draft_confidences: List[float]) -> List[bool]:
+    def should_verify(self, draft_confidences: list[float]) -> list[bool]:
         """Decide verification flags for a sequence of draft positions.
 
         Args:
@@ -48,7 +50,7 @@ class ComputeFutures:
         Returns:
             List of booleans — True means run verification, False means skip.
         """
-        flags: List[bool] = []
+        flags: list[bool] = []
         consecutive_skips = 0
         for conf in draft_confidences:
             # Force verify if we've hit the max consecutive skip limit
@@ -65,7 +67,7 @@ class ComputeFutures:
                 consecutive_skips = 0
         return flags
 
-    def skip_ratio(self, draft_confidences: List[float]) -> float:
+    def skip_ratio(self, draft_confidences: list[float]) -> float:
         """Fraction of positions where verification is skipped (0..1)."""
         if not draft_confidences:
             return 0.0
@@ -94,7 +96,7 @@ class ComputeFuturesKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Compute verification flags for a sequence of draft confidences.
 
         Args:
@@ -106,7 +108,7 @@ class ComputeFuturesKey(Key):
         Returns:
             KeyResult with data = {"verify_flags": list[bool]}
         """
-        confidences: List[float] = data["draft_confidences"]
+        confidences: list[float] = data["draft_confidences"]
         threshold: float = data.get("threshold", 0.9)
         max_skip: int = data.get("max_skip", 3)
 
@@ -127,7 +129,7 @@ class ComputeFuturesKey(Key):
             },
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """No-op — TRIVIAL key has no weights to reverse."""
         return KeyResult(success=True, data={})
 

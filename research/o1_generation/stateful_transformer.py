@@ -33,10 +33,11 @@ Usage:
     session.ingest_async(context_text)  # background processing
     output = session.query(prompt)      # O(|prompt|) latency
 """
-import torch
 import threading
-from typing import Dict, List, Optional, Tuple, Any
 from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
 
 
 class StatefulSession:
@@ -96,20 +97,19 @@ class StatefulSession:
                                 truncation=True, max_length=2048)
             input_ids = enc.input_ids.to(self.device)
 
-            with torch.no_grad():
-                with self._lock:
-                    # Model returns (logits, new_kv)
-                    result = self.model(
-                        input_ids,
-                        past_key_values=self._past_kvs,
-                        use_cache=True)
-                    new_kvs = result[1] if len(result) > 1 else None
+            with torch.no_grad(), self._lock:
+                # Model returns (logits, new_kv)
+                result = self.model(
+                    input_ids,
+                    past_key_values=self._past_kvs,
+                    use_cache=True)
+                new_kvs = result[1] if len(result) > 1 else None
 
-                    if new_kvs is not None:
-                        self._past_kvs = new_kvs
+                if new_kvs is not None:
+                    self._past_kvs = new_kvs
 
-                    self._context_len += input_ids.shape[1]
-                    self._stats["tokens_ingested"] += input_ids.shape[1]
+                self._context_len += input_ids.shape[1]
+                self._stats["tokens_ingested"] += input_ids.shape[1]
 
             t1 = time.perf_counter()
             self._stats["ingest_time_ms"] += (t1 - t0) * 1000
@@ -149,36 +149,43 @@ class StatefulSession:
         enc = self.tokenizer(prompt, return_tensors="pt")
         input_ids = enc.input_ids.to(self.device)
 
-        with torch.no_grad():
-            with self._lock:
-                # Forward pass with pre-computed context KV
-                # Only the prompt tokens need computation — context is cached
+        with torch.no_grad(), self._lock:
+            # Forward pass with pre-computed context KV
+            # Only the prompt tokens need computation — context is cached
+            result = self.model(
+                input_ids,
+                past_key_values=self._past_kvs,
+                use_cache=True)
+            logits = result[0]
+            past_kvs = result[1] if len(result) > 1 else None
+
+            next_token_gpu = logits[0, -1].argmax(keepdim=True)
+            eos_id = self.tokenizer.eos_token_id
+            # Pinned memory for async D2H.
+            token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
+            token_pinned.copy_(next_token_gpu, non_blocking=True)
+            next_token = token_pinned.item()
+            generated = [next_token]
+
+            # Generate tokens
+            for _ in range(max_tokens - 1):
+                if next_token == eos_id:
+                    break
+                cur = torch.tensor([[next_token]], device=self.device)
                 result = self.model(
-                    input_ids,
-                    past_key_values=self._past_kvs,
-                    use_cache=True)
+                    cur, past_key_values=past_kvs, use_cache=True)
                 logits = result[0]
                 past_kvs = result[1] if len(result) > 1 else None
 
-                next_token = logits[0, -1].argmax().item()
-                generated = [next_token]
-
-                # Generate tokens
-                for _ in range(max_tokens - 1):
-                    if next_token == self.tokenizer.eos_token_id:
-                        break
-                    cur = torch.tensor([[next_token]], device=self.device)
-                    result = self.model(
-                        cur, past_key_values=past_kvs, use_cache=True)
-                    logits = result[0]
-                    past_kvs = result[1] if len(result) > 1 else None
-
-                    if temperature > 0:
-                        probs = torch.softmax(logits[0, -1] / temperature, dim=-1)
-                        next_token = torch.multinomial(probs, 1).item()
-                    else:
-                        next_token = logits[0, -1].argmax().item()
-                    generated.append(next_token)
+                if temperature > 0:
+                    probs = torch.softmax(logits[0, -1] / temperature, dim=-1)
+                    next_token_gpu = torch.multinomial(probs, 1)
+                else:
+                    next_token_gpu = logits[0, -1].argmax(keepdim=True)
+                # Async D2H via pinned memory.
+                token_pinned.copy_(next_token_gpu, non_blocking=True)
+                next_token = token_pinned.item()
+                generated.append(next_token)
 
         t1 = time.perf_counter()
         self._stats["queries_made"] += 1
@@ -198,7 +205,7 @@ class StatefulSession:
         """Number of tokens ingested so far."""
         return self._context_len
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         """Return session stats."""
         avg_query = (self._stats["query_time_ms"] / max(self._stats["queries_made"], 1))
         return {

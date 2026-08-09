@@ -39,9 +39,10 @@ Usage:
 """
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
 
 from .base import Key, KeyClass, KeyResult
 
@@ -70,11 +71,11 @@ class NormGatedMoDKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL  # runtime only, no weights
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """No weights to produce — this key is a runtime patch."""
         return KeyResult(success=True, weights={}, metadata={"type": "runtime_patch"})
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Nothing to extract — no weights exist."""
         return KeyResult(success=True, data={})
 
@@ -98,9 +99,10 @@ def _make_gated_forward(original_forward):
     def gated_forward(
         self,
         x: torch.Tensor,
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        **kwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # --- Activation checkpointing path (training only) ----------------
         if (
             self.training
@@ -108,14 +110,14 @@ def _make_gated_forward(original_forward):
             and getattr(self, "_gradient_checkpointing", False)
         ):
             # During training we never skip — just delegate to the original.
-            return original_forward(self, x, past_key_value, use_cache)
+            return original_forward(self, x, past_key_value, use_cache, **kwargs)
 
         # --- Inference path with norm-gate --------------------------------
         threshold = self.skip_threshold
 
         # Fast path: threshold == 0 → never skip → identical to original.
         if threshold <= 0.0:
-            return original_forward(self, x, past_key_value, use_cache)
+            return original_forward(self, x, past_key_value, use_cache, **kwargs)
 
         # Compute attention (always needed for KV cache consistency).
         attn_out, present = self.attn(
@@ -217,7 +219,7 @@ def calibrate(
     data: torch.Tensor,
     percentile: float = 50.0,
     batch_size: int = 4,
-) -> Dict[int, float]:
+) -> dict[int, float]:
     """Run a calibration pass and set per-layer skip thresholds.
 
     Feeds ``data`` through the model, measures the residual-delta norm
@@ -261,7 +263,7 @@ def calibrate(
     data = data.to(device)
 
     # Accumulate delta norms per layer.
-    delta_norms: List[List[float]] = [[] for _ in range(n_layers)]
+    delta_norms: list[list[float]] = [[] for _ in range(n_layers)]
 
     # Temporarily set thresholds to 0 so nothing is skipped during calibration.
     original_thresholds = [blk.skip_threshold for blk in blocks]
@@ -281,7 +283,7 @@ def calibrate(
         blk.skip_threshold = original_thresholds[i]
 
     # Compute per-layer thresholds.
-    thresholds: Dict[int, float] = {}
+    thresholds: dict[int, float] = {}
     for i, norms in enumerate(delta_norms):
         if len(norms) == 0:
             thresholds[i] = 0.0
@@ -305,7 +307,7 @@ def _calibration_forward(
     model,
     batch: torch.Tensor,
     blocks: nn.ModuleList,
-    delta_norms: List[List[float]],
+    delta_norms: list[list[float]],
 ) -> None:
     """Run one forward batch and record per-layer residual-delta norms.
 
@@ -329,7 +331,7 @@ def _calibration_forward(
 # ---------------------------------------------------------------------------
 # Profiling / introspection
 # ---------------------------------------------------------------------------
-def get_skip_stats(model) -> Dict[int, Dict[str, int]]:
+def get_skip_stats(model) -> dict[int, dict[str, int]]:
     """Return per-layer skip statistics after inference.
 
     Returns
@@ -341,7 +343,7 @@ def get_skip_stats(model) -> Dict[int, Dict[str, int]]:
     if blocks is None:
         raise ValueError("Model has no 'blocks' attribute.")
 
-    stats: Dict[int, Dict[str, int]] = {}
+    stats: dict[int, dict[str, int]] = {}
     for i, blk in enumerate(blocks):
         stats[i] = {
             "skips": getattr(blk, "_norm_gated_skip_count", 0),

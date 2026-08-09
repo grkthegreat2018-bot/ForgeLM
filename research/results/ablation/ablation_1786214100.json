@@ -1,0 +1,84 @@
+[
+  {
+    "key": "baseline",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 29.83594407823034,
+    "ms_per_token": 33.516619999621376,
+    "vram_mb": 3503,
+    "vram_peak_mb": 3507,
+    "cosine_sim": 1.0,
+    "overhead_ms": 0.0
+  },
+  {
+    "key": "rope_share",
+    "error": "'RoPEShareKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "wisparse",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 9.018775286382134,
+    "ms_per_token": 110.87980000011157,
+    "vram_mb": 7092,
+    "vram_peak_mb": 7096,
+    "cosine_sim": 1.0,
+    "overhead_ms": 77.36318000049019,
+    "ppl_change_pct": 0.0,
+    "speed_change_pct": -69.77211358643535
+  },
+  {
+    "key": "per_query_temp",
+    "error": "'PerQueryTempKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "norm_gated_mod",
+    "error": "'NormGatedMoDKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "learned_sink",
+    "error": "'LearnedSinkKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "gluon_attn",
+    "error": "'GluonAttentionKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "matformer",
+    "error": "'MatFormerKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "logit_cap",
+    "error": "'LogitCapKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "swiglu_clamp",
+    "error": "'SwiGLUClampKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "value_residual",
+    "error": "'ValueResidualKey' object has no attribute 'apply'"
+  },
+  {
+    "key": "mac_attn",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 6.3630207702868296,
+    "ms_per_token": 157.15806000031685,
+    "vram_mb": 7087,
+    "vram_peak_mb": 7091,
+    "cosine_sim": 1.0,
+    "overhead_ms": 123.64144000069547,
+    "ppl_change_pct": 0.0,
+    "speed_change_pct": -78.67330507925982
+  },
+  {
+    "key": "spec_attn",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 6.604678965913511,
+    "ms_per_token": 151.40781333369281,
+    "vram_mb": 7959,
+    "vram_peak_mb": 7963,
+    "cosine_sim": 1.0,
+    "overhead_ms": 117.89119333407143,
+    "ppl_change_pct": 0.0,
+    "speed_change_pct": -77.86334848799846
+  }
+]

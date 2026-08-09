@@ -10,8 +10,10 @@ Building a KeyStack:
   3. Use dummy data to verify the stitching works
   4. The stack can then process real data/weights end-to-end
 """
+from typing import Any, Dict, List, Optional
+
 import torch
-from typing import List, Dict, Any, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -24,8 +26,8 @@ class KeyStack:
 
     def __init__(self, name: str = "unnamed"):
         self.name = name
-        self.keys: List[Key] = []
-        self.stitching: Dict[str, str] = {}  # output_name -> input_name mapping
+        self.keys: list[Key] = []
+        self.stitching: dict[str, str] = {}  # output_name -> input_name mapping
 
     def add(self, key: Key) -> 'KeyStack':
         """Add a key to the stack."""
@@ -45,7 +47,7 @@ class KeyStack:
         lines.append(f"  Full Bi KeyStack: {'YES' if all_bi else 'NO (has Partial keys)'}")
         return "\n".join(lines)
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights for ALL components in the stack.
 
         Calls each key's forward() with the relevant subset of data.
@@ -74,7 +76,7 @@ class KeyStack:
                      'errors': errors if errors else None}
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """weights -> data for ALL components."""
         all_data = {}
         all_metadata = {}
@@ -96,7 +98,7 @@ class KeyStack:
                      'errors': errors if errors else None}
         )
 
-    def cross_arch(self, weights_a: Dict[str, torch.Tensor],
+    def cross_arch(self, weights_a: dict[str, torch.Tensor],
                    stack_b: 'KeyStack') -> KeyResult:
         """weights(A) -> data -> weights(B) using two KeyStacks."""
         # Decode A
@@ -125,13 +127,13 @@ def build_qwen2_keystack() -> KeyStack:
 
     Qwen2 = Embedding + RMSNorm + RoPE + GQA + SwiGLU + Causal + LM Head
     """
+    from .causal_mask_key import CausalMaskKey
     from .embedding_key import EmbeddingKey
+    from .gqa_key import GQAKey
+    from .lm_head_tied_key import LMHeadTiedKey
     from .rmsnorm_key import RMSNormKey
     from .rope_key import RoPEKey
-    from .gqa_key import GQAKey
     from .swiglu_key import SwiGLUKey
-    from .causal_mask_key import CausalMaskKey
-    from .lm_head_tied_key import LMHeadTiedKey
 
     stack = KeyStack("qwen2")
     stack.add(EmbeddingKey())
@@ -162,51 +164,52 @@ def build_xp_keystack() -> KeyStack:
       - PARTIAL (9): GQA→MQA, Wanda, DSpark, MoE Router, SSA, GateSkip, Liquid Conv,
                       SparDA, PartialRoPE
     """
+    from .activation_transmute_key import ActivationTransmuteKey
+    from .airllm_key import AirLLMKey
+    from .airmoe_key import AirMoEKey
+
+    # --- New keys (Bonsai-27B inspired + self-play pipeline) ---
+    from .binary_g128_key import BinaryG128Key  # LOSSY: binary {±1} g128, 14.2x compression
+    from .causal_mask_key import CausalMaskKey
+    from .context_patch_key import ContextPatchKey
+    from .cot_knowledge_pack_key import CoTKnowledgePackKey  # LOSSLESS: CoT KV cache injection
+    from .denseformer_key import DenseFormerKey
+    from .dspark_key import DSparkKey
     from .embedding_key import EmbeddingKey
+    from .expert_consolidation_key import ExpertConsolidationKey
+    from .fact_injection_key import FactInjectionKey
+    from .gateskip_key import GateSkipKey
+    from .gqa_to_mqa_key import GQAToMQAKey
+    from .grail_key import GRAILKey
+    from .hybrid_linear_key import HybridLinearKey  # LOSSY: 75% linear / 25% full attention
+    from .knowledge_pack_key import KnowledgePackKey
+    from .kv4bit_key import KV4BitKey  # LOSSY: 4-bit KV cache with scale absorption
+    from .liquid_conv_key import LiquidConvKey
+    from .lm_head_tied_key import LMHeadTiedKey
+    from .logit_cap_key import LogitCapKey
+    from .lossless_quant_key import LosslessQuantKey
+    from .moe_router_key import MoERouterKey
+    from .mrl_key import MRLKey
+    from .mtp_key import MTPKey
+    from .norm_folding_key import NormFoldingKey
+    from .partial_rope_key import PartialRoPEKey
+    from .qk_norm_mla_key import QKNormMLAKey
+    from .quarot_key import QuaRotR2Key
     from .rmsnorm_key import RMSNormKey
     from .rope_key import RoPEKey
-    from .causal_mask_key import CausalMaskKey
-    from .lm_head_tied_key import LMHeadTiedKey
-    from .mtp_key import MTPKey
-    from .value_residual_key import ValueResidualKey
-    from .slicegpt_key import SliceGPTKey
-    from .mrl_key import MRLKey
     from .rotorquant_key import RotorQuantKey
-    from .spinquant_key import SpinQuantHadamardKey
-    from .quarot_key import QuaRotR2Key
-    from .gqa_to_mqa_key import GQAToMQAKey
-    from .wanda_key import WandaKey
-    from .dspark_key import DSparkKey
-    from .moe_router_key import MoERouterKey
-    from .ssa_key import SSAKey
-    from .gateskip_key import GateSkipKey
-    from .liquid_conv_key import LiquidConvKey
-    from .sparda_key import SparDAKey
-    from .partial_rope_key import PartialRoPEKey
-    from .airllm_key import AirLLMKey
-    from .qk_norm_mla_key import QKNormMLAKey
-    from .wq_elim_key import WQElimKey
-    from .denseformer_key import DenseFormerKey
-    from .logit_cap_key import LogitCapKey
-    from .swiglu_clamp_key import SwiGLUClampKey
     from .sandwich_norm_key import SandwichNormKey
-    from .norm_folding_key import NormFoldingKey
-    from .expert_consolidation_key import ExpertConsolidationKey
-    from .grail_key import GRAILKey
-    from .activation_transmute_key import ActivationTransmuteKey
-    from .lossless_quant_key import LosslessQuantKey
-    from .airmoe_key import AirMoEKey
-    from .knowledge_pack_key import KnowledgePackKey
-    from .fact_injection_key import FactInjectionKey
-    from .context_patch_key import ContextPatchKey
     from .self_play_key import SelfPlayKey
-    # --- New keys (Bonsai-27B inspired + self-play pipeline) ---
-    from .binary_g128_key import BinaryG128Key          # LOSSY: binary {±1} g128, 14.2x compression
-    from .kv4bit_key import KV4BitKey                    # LOSSY: 4-bit KV cache with scale absorption
-    from .hybrid_linear_key import HybridLinearKey       # LOSSY: 75% linear / 25% full attention
-    from .test_gated_injection_key import TestGatedFactInjectionKey  # LOSSLESS: test-verified fact injection
-    from .cot_knowledge_pack_key import CoTKnowledgePackKey          # LOSSLESS: CoT KV cache injection
     from .selfplay_context_patch_key import SelfPlayContextPatchKey  # LOSSLESS: self-play rank-1 patches
+    from .slicegpt_key import SliceGPTKey
+    from .sparda_key import SparDAKey
+    from .spinquant_key import SpinQuantHadamardKey
+    from .ssa_key import SSAKey
+    from .swiglu_clamp_key import SwiGLUClampKey
+    from .test_gated_injection_key import TestGatedFactInjectionKey  # LOSSLESS: test-verified fact injection
+    from .value_residual_key import ValueResidualKey
+    from .wanda_key import WandaKey
+    from .wq_elim_key import WQElimKey
 
     stack = KeyStack("xp_model")
     # FULL — reversible + data→weight + composable (all 3 criteria)
@@ -260,10 +263,10 @@ def build_xp_keystack() -> KeyStack:
     stack.add(KnowledgePackKey())   # zero-token knowledge via KV cache injection (2026)
     stack.add(CoTKnowledgePackKey())  # CoT reasoning traces as KV packs (self-play + 2026)
     # --- Boot-time + storage optimization keys (lossless, 2026-08-08) ---
-    from .tensor_dedup_key import TensorDedupKey
     from .attn_scale_fold_key import AttnScaleFoldKey
     from .dead_weight_key import DeadWeightKey
     from .rope_share_key import RoPEShareKey
+    from .tensor_dedup_key import TensorDedupKey
     stack.add(TensorDedupKey())      # dedup exact-same tensors (467 MB save on V2)
     stack.add(AttnScaleFoldKey())    # fold 1/sqrt(d_k) into q/k_proj (compute save)
     stack.add(DeadWeightKey())       # prune all-zero tensors (dead weight from init keys)

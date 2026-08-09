@@ -14,6 +14,7 @@ or TRIVIAL if using weight-norm-based heuristic.
 Reference: MRL, arxiv 2205.13147
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

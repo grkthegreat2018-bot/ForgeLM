@@ -11,6 +11,7 @@ Key class: FULL for parallel backbone (via MTP key), PARTIAL for RNN
 """
 import torch
 import torch.nn as nn
+
 from research.keys.base import Key, KeyClass, KeyResult
 from research.keys.mtp_key import MTPKey
 

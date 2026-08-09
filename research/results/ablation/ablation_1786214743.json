@@ -1,0 +1,24 @@
+[
+  {
+    "key": "baseline",
+    "perplexity": 120.30136108398438,
+    "tokens_per_sec": 35.065203746371175,
+    "ms_per_token": 28.51829999999609,
+    "vram_mb": 3503,
+    "vram_peak_mb": 3507,
+    "cosine_sim": 1.0,
+    "overhead_ms": 0.0
+  },
+  {
+    "key": "wisparse",
+    "perplexity": 126.46936798095703,
+    "tokens_per_sec": 7.085399947692513,
+    "ms_per_token": 141.13529333311212,
+    "vram_mb": 7092,
+    "vram_peak_mb": 7096,
+    "cosine_sim": 0.9997335225343704,
+    "overhead_ms": 112.61699333311603,
+    "ppl_change_pct": 5.127129769268919,
+    "speed_change_pct": -79.79364386717484
+  }
+]

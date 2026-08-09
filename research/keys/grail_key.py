@@ -26,9 +26,11 @@ Usage:
     state = apply_grail_compensation(state, model_orig, model_transformed,
                                       calib_data, n_layers=28)
 """
+from typing import Dict, Optional
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, Optional
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -58,14 +60,14 @@ class GRAILKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """GRAIL requires calibration data — use apply_grail_compensation instead."""
         return KeyResult(
             success=True, weights=data,
             metadata={"note": "Use apply_grail_compensation for actual healing"},
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(success=True, data=weights,
                          metadata={"reversible": False})
 
@@ -96,8 +98,8 @@ class GRAILKey(Key):
         R = torch.linalg.solve(XtX, XtXo)  # (d, d)
         return R
 
-    def absorb_into_downstream(self, state: Dict[str, torch.Tensor],
-                               R: torch.Tensor, layer_idx: int) -> Dict[str, torch.Tensor]:
+    def absorb_into_downstream(self, state: dict[str, torch.Tensor],
+                               R: torch.Tensor, layer_idx: int) -> dict[str, torch.Tensor]:
         """Absorb reconstruction map R into downstream layer weights.
 
         If the downstream layer is W (reads from the residual stream),
@@ -150,13 +152,13 @@ class GRAILKey(Key):
         return state
 
 
-def apply_grail_compensation(state: Dict[str, torch.Tensor],
+def apply_grail_compensation(state: dict[str, torch.Tensor],
                               model_orig: torch.nn.Module,
                               model_transformed: torch.nn.Module,
                               calib_tokens: torch.Tensor,
                               n_layers: int,
                               device: str = "cuda",
-                              ridge_lambda: float = 1e-4) -> Dict[str, torch.Tensor]:
+                              ridge_lambda: float = 1e-4) -> dict[str, torch.Tensor]:
     """Apply GRAIL compensation to heal a lossy transform.
 
     Args:

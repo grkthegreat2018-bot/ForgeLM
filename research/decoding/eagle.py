@@ -28,10 +28,11 @@ Usage:
     # Inference (replaces speculative_generate)
     output = eagle_speculative_generate(target_model, head, tokenizer, prompt)
 """
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
 
 
 class EAGLEHead(nn.Module):
@@ -78,11 +79,11 @@ class EAGLEHead(nn.Module):
             "ln2": nn.LayerNorm(d_model),
             "ffn_up": nn.Linear(d_model, d_model * 4),
             "ffn_down": nn.Linear(d_model * 4, d_model),
-            "n_heads": nn.ConstantPad1d((0, 0), n_heads) if False else nn.Identity(),
+            "n_heads": nn.Identity(),
         })
 
     def forward(self, target_hidden: torch.Tensor, token_embeds: torch.Tensor,
-                past_kv: Optional[list] = None) -> Tuple[torch.Tensor, list]:
+                past_kv: list | None = None) -> tuple[torch.Tensor, list]:
         """Forward pass of EAGLE head.
 
         Args:
@@ -297,6 +298,7 @@ def eagle_speculative_generate(target_model, eagle_head, tokenizer,
     """
     target_model.eval()
     eagle_head.eval()
+    eos_id = tokenizer.eos_token_id
 
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     generated = input_ids
@@ -338,15 +340,10 @@ def eagle_speculative_generate(target_model, eagle_head, tokenizer,
                 verify_logits = verify_out
 
         # 4. Accept tokens that match (greedy verification).
-        n_accepted = 0
-        for i in range(k):
-            draft_token = draft_tokens[0, i].item()
-            # Target's prediction at this position.
-            target_pred = verify_logits[0, generated.shape[1] + i - 1, :].argmax().item()
-            if draft_token == target_pred:
-                n_accepted += 1
-            else:
-                break
+        start_pos = generated.shape[1] - 1
+        target_preds = verify_logits[0, start_pos:start_pos + k, :].argmax(-1)
+        matches = (draft_tokens[0, :k] == target_preds)
+        n_accepted = matches.cumprod(dim=-1).sum().item()
 
         # 5. Append accepted tokens + 1 target token.
         if n_accepted > 0:
@@ -360,8 +357,10 @@ def eagle_speculative_generate(target_model, eagle_head, tokenizer,
             break
 
         # Check EOS.
-        if next_token.item() == tokenizer.eos_token_id:
-            break
+        if eos_id is not None:
+            is_eos = (next_token == eos_id).reshape(-1).any()
+            if is_eos.item():
+                break
 
     # Decode.
     new_tokens = generated[0, input_ids.shape[1]:]

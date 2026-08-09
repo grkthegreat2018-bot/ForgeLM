@@ -12,8 +12,10 @@ LOSSLESS: RMSNorm(x) = (x / rms(x)) * γ
 
 Key class: FULL — reversible (un-fold to recover γ), composable.
 """
-import torch
 from typing import Dict
+
+import torch
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -37,7 +39,7 @@ class NormFoldingV2Key(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Fold norm weights into adjacent linear weights, set norms to 1.0."""
         try:
             state = dict(data)
@@ -133,7 +135,7 @@ class NormFoldingV2Key(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Cannot un-fold without original γ values (they were overwritten)."""
         return KeyResult(
             success=True,
@@ -142,7 +144,7 @@ class NormFoldingV2Key(Key):
         )
 
 
-def apply_norm_folding_v2(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def apply_norm_folding_v2(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Apply norm folding to state dict (lossless)."""
     key = NormFoldingV2Key()
     result = key.forward(state)

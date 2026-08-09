@@ -26,9 +26,11 @@ Usage:
     python -m research.forge_pipeline --skip-moe --skip-bitnet
 """
 import argparse
-import torch
 from pathlib import Path
-from research.convert_keys import key_gqa_to_mla, key_dense_to_moe, key_bitnet
+
+import torch
+
+from research.convert_keys import key_bitnet, key_dense_to_moe, key_gqa_to_mla
 
 CHECKPOINTS = Path("research/checkpoints")
 
@@ -73,7 +75,7 @@ def run_phase1(src: str, config: str = "qwen25_coder_1.5b",
         current = out
 
     print(f"\n{'='*60}")
-    print(f"PHASE 1 COMPLETE")
+    print("PHASE 1 COMPLETE")
     print(f"  Final output: {current}")
     print(f"  Steps executed: {step}")
     print(f"{'='*60}")
@@ -93,10 +95,10 @@ def run_phase2(src: str, config: str = "qwen25_coder_1.5b",
     """
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from research.moe import replace_ffn_with_moe, collect_aux_loss
+    from research.moe import collect_aux_loss, replace_ffn_with_moe
 
     print(f"\n{'='*60}")
-    print(f"PHASE 2: Architecture additions + fine-tuning")
+    print("PHASE 2: Architecture additions + fine-tuning")
     print(f"{'='*60}")
 
     cfg = get_config(config)
@@ -140,7 +142,7 @@ def run_phase2(src: str, config: str = "qwen25_coder_1.5b",
             d_model=cfg.d_model, vocab_size=cfg.vocab_size,
             n_predict=2,  # predict 2 future tokens
         ).to(device)
-        print(f"    MTP head: predicts 2 future tokens")
+        print("    MTP head: predicts 2 future tokens")
 
     # SpinQuant: rotate weights for better quantization
     if use_spinquant:

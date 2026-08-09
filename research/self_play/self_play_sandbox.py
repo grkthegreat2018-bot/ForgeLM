@@ -39,17 +39,27 @@ Usage:
     sandbox = SelfPlaySandbox(model, tokenizer, log_dir="research/data/self_play")
     sandbox.run_task("Compute fibonacci(10) in Python", expected_output="55")
 """
-import os
-import sys
-import time
 import json
+import os
+import re
 import subprocess
+import sys
 import tempfile
-import traceback
-import torch
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+
+from research.inference.async_d2h import AsyncTokenReader, StreamedGenerator
+from research.json_compat import dumps, loads
+
+# Pre-compiled regex patterns (avoids recompilation per task).
+_RE_DEF_FUNC = re.compile(r'def (\w+)')
+_RE_DEF_CLASS = re.compile(r'class (\w+)')
+_RE_FUNC_SIG = re.compile(r'def\s+(\w+)\s*\(([^)]*)\)')
+_RE_DIGITS = re.compile(r'\d+')
 
 # resource is Unix-only; on Windows we skip memory limits
 try:
@@ -57,9 +67,6 @@ try:
     HAS_RESOURCE = True
 except ImportError:
     HAS_RESOURCE = False
-
-# Add project root to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 class SandboxExecutor:
@@ -70,13 +77,25 @@ class SandboxExecutor:
       - Memory limit (default 256MB)
       - No network access (no imports of socket/urllib at OS level)
       - Captures stdout, stderr, return code, peak memory, file size
+
+    Uses PersistentCodeExecutor by default (avoids 200ms Python startup per
+    execution on Windows). Falls back to subprocess.Popen if persistent fails.
     """
 
-    def __init__(self, timeout_s: float = 5.0, memory_limit_mb: int = 256):
+    def __init__(self, timeout_s: float = 5.0, memory_limit_mb: int = 256,
+                 use_persistent: bool = True):
         self.timeout_s = timeout_s
         self.memory_limit_mb = memory_limit_mb
+        self._persistent = None
+        if use_persistent:
+            try:
+                from research.persistent_executor import PersistentCodeExecutor
+                self._persistent = PersistentCodeExecutor(
+                    timeout_s=timeout_s, memory_limit_mb=memory_limit_mb)
+            except Exception:
+                self._persistent = None
 
-    def execute(self, code: str, expected_output: Optional[str] = None) -> Dict:
+    def execute(self, code: str, expected_output: str | None = None) -> dict:
         """Execute Python code and return full telemetry.
 
         Args:
@@ -86,6 +105,11 @@ class SandboxExecutor:
         Returns:
             Telemetry dict with execution results
         """
+        # Fast path: use persistent executor (avoids 200ms startup per call).
+        if self._persistent is not None:
+            return self._persistent.execute(code, expected_output)
+
+        # Fallback: subprocess per execution (original slow path).
         # Write code to temp file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
                                           delete=False, encoding='utf-8') as f:
@@ -102,7 +126,7 @@ class SandboxExecutor:
 
         wrapper = f'''
 import sys, os, time
-{f"import resource" if HAS_RESOURCE else ""}
+{"import resource" if HAS_RESOURCE else ""}
 
 # Set memory limit (Unix only)
 {mem_limit_code}
@@ -174,14 +198,16 @@ exec(open(r"{temp_path}", encoding='utf-8').read())
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait(timeout=5)
-            except Exception:
-                pass
+            except Exception as e:
+                import warnings
+                warnings.warn(f"subprocess cleanup: {e}", RuntimeWarning, stacklevel=2)
             # Cleanup
             try:
                 os.unlink(temp_path)
                 os.unlink(wrapper_path)
-            except OSError:
-                pass
+            except OSError as e:
+                import warnings
+                warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
 
         return result
 
@@ -242,7 +268,7 @@ class SelfPlaySandbox:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.executor = SandboxExecutor()
-        self.packets: List[Dict] = []
+        self.packets: list[dict] = []
         # Forward cache for repeated prompts (C2 — 20-40% fewer forward passes)
         from research.runtime.forward_cache import ForwardCache
         self.fwd_cache = ForwardCache(max_entries=500, device=device)
@@ -253,13 +279,15 @@ class SelfPlaySandbox:
         # Self-modeling: confidence-based retry (D5)
         from research.runtime.self_model import ConfidenceScorer
         self.confidence_scorer = ConfidenceScorer()
+        # Async D2H generator for single-sequence decode (reduces CPU spikes).
+        self._streamed_gen = StreamedGenerator(model, device=device)
         self.stats = {
             "total_tasks": 0, "successful": 0, "failed": 0,
             "timed_out": 0, "correct": 0, "total_gen_time_ms": 0,
             "total_exec_time_ms": 0, "total_tokens_generated": 0,
         }
 
-    def calibrate_conformal(self, calibration_prompts: List[str] = None,
+    def calibrate_conformal(self, calibration_prompts: list[str] = None,
                             alpha: float = 0.1) -> None:
         """Calibrate conformal sampler on held-out prompts.
 
@@ -341,17 +369,12 @@ class SelfPlaySandbox:
             probs = probs / probs.sum()
 
         if 0.0 < self.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumsum = torch.cumsum(sorted_probs, dim=-1)
-            cutoff = cumsum > self.top_p
-            cutoff[0] = False
-            sorted_probs[cutoff] = 0.0
-            probs = torch.zeros_like(probs).scatter_(0, sorted_idx, sorted_probs)
-            probs = probs / probs.sum()
+            from research.sampling_utils import top_p_sample_probs
+            probs = top_p_sample_probs(probs, self.top_p)
 
         return torch.multinomial(probs, num_samples=1).squeeze()
 
-    def generate_code(self, prompt: str) -> Tuple[str, Dict]:
+    def generate_code(self, prompt: str) -> tuple[str, dict]:
         """Generate code from a prompt using the model.
 
         Uses KV cache for O(n) generation instead of O(n²) reprocessing.
@@ -383,10 +406,22 @@ class SelfPlaySandbox:
         with torch.inference_mode():
             past_kvs = None
             generated_ids = []
+            eos_id = self.tokenizer.eos_token_id
+
+            # Pre-allocate KV cache for O(1) append per token.
+            from research.model_loader import PreAllocatedKVCache
+            cfg = self.model.config
+            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
+            head_dim = cfg.d_model // cfg.n_heads
+            dtype = next(self.model.parameters()).dtype
+            cache = PreAllocatedKVCache(
+                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
+                max_seq_len=min(cfg.max_seq_len, input_ids.shape[1] + self.max_gen_tokens),
+                head_dim=head_dim, dtype=dtype, device=self.device,
+            )
 
             # Initial forward pass on the full prompt
-            logits, _, past_kvs = self.model(
-                input_ids, past_key_values=past_kvs, use_cache=True)
+            logits, _ = self.model(input_ids, preallocated_cache=cache)
             next_logits = logits[0, -1]
 
             # Conformal sampler: per-query temperature from first-token confidence
@@ -394,13 +429,24 @@ class SelfPlaySandbox:
 
             next_token = self._sample_next_token(next_logits, temperature=query_temp)
 
-            lp = torch.log_softmax(next_logits, dim=-1)[next_token].item()
-            log_probs.append(lp)
-            generated_ids.append(next_token.item())
+            # Async D2H: issue non-blocking copy instead of blocking .item().
+            # The copy runs on the DMA engine while the GPU starts the next forward.
+            reader = AsyncTokenReader(1, next_logits.shape[-1], self.device)
+            reader.issue(next_token.unsqueeze(0), next_logits.unsqueeze(0))
+
+            # Pre-allocate a single-token buffer to avoid per-step tensor creation.
+            cur_token = torch.zeros(1, 1, dtype=input_ids.dtype, device=self.device)
+
+            # Sync once to get the first token (needed for EOS check + first output).
+            token_list = reader.get_tokens()
+            lp_list = reader.get_logprobs()
+            token_id = token_list[0]
+            log_probs.append(lp_list[0])
+            generated_ids.append(token_id)
 
             # Stop on EOS or [stop] after first token
             stop = False
-            if next_token.item() == self.tokenizer.eos_token_id:
+            if token_id == eos_id:
                 stop = True
             else:
                 gen_text = self.tokenizer.decode(
@@ -408,19 +454,27 @@ class SelfPlaySandbox:
                 if stop_str in gen_text:
                     stop = True
 
-            # Subsequent tokens: feed only the last token, reuse KV cache
+            # Subsequent tokens: feed only the last token, reuse pre-allocated KV cache.
+            # Async D2H pattern: issue copy for step N, launch forward for step N+1,
+            # then sync to get step N's result. The GPU works while the copy runs.
             while not stop and len(generated_ids) < self.max_gen_tokens:
-                cur_token = torch.tensor([[next_token.item()]], device=self.device)
-                logits, _, past_kvs = self.model(
-                    cur_token, past_key_values=past_kvs, use_cache=True)
+                cur_token[0, 0] = next_token
+                # Launch forward (GPU starts working immediately).
+                logits, _ = self.model(cur_token, preallocated_cache=cache)
                 next_logits = logits[0, -1]
                 next_token = self._sample_next_token(next_logits, temperature=query_temp)
 
-                lp = torch.log_softmax(next_logits, dim=-1)[next_token].item()
-                log_probs.append(lp)
-                generated_ids.append(next_token.item())
+                # Issue async D2H for this step's token + log-prob (non-blocking).
+                reader.issue(next_token.unsqueeze(0), next_logits.unsqueeze(0))
 
-                if next_token.item() == self.tokenizer.eos_token_id:
+                # Sync to get the token (by now GPU has finished the copy — near-free).
+                token_list = reader.get_tokens()
+                lp_list = reader.get_logprobs()
+                token_id = token_list[0]
+                log_probs.append(lp_list[0])
+                generated_ids.append(token_id)
+
+                if token_id == eos_id:
                     break
 
                 # Check for [stop] every few tokens (cheaper than every token)
@@ -431,7 +485,7 @@ class SelfPlaySandbox:
                         break
 
             # Free KV cache
-            del past_kvs
+            del cache
 
         gen_time_ms = (time.time() - t0) * 1000
         tokens_generated = len(generated_ids)
@@ -470,6 +524,173 @@ class SelfPlaySandbox:
 
         return code, telemetry
 
+    def generate_code_batch(self, prompts: list[str]) -> list[tuple[str, dict]]:
+        """Generate code for multiple prompts in a single batched forward pass.
+
+        Uses left-padding with proper attention_mask and position_ids to ensure
+        pad tokens don't corrupt generation. Each sequence generates independently,
+        stopping on EOS or [stop].
+
+        Returns: list of (code, telemetry) tuples, same length as prompts.
+        """
+        if len(prompts) == 1:
+            return [self.generate_code(prompts[0])]
+
+        B = len(prompts)
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id or eos_id or 0
+        stop_str = "[stop]"
+
+        # Build full prompts (same logic as generate_code)
+        full_prompts = []
+        for prompt in prompts:
+            if any(kw in prompt for kw in ["def ", "class ", "import ", "from "]):
+                full_prompts.append(prompt + "# Write concise, efficient code. End with [stop]\n    ")
+            else:
+                full_prompts.append(f'"""{prompt}"""\n')
+
+        # Tokenize all prompts
+        all_ids = []
+        for fp in full_prompts:
+            enc = self.tokenizer(fp, return_tensors="pt", truncation=True, max_length=512)
+            all_ids.append(enc.input_ids[0])
+
+        # Left-pad to max prompt length
+        max_prompt_len = max(ids.shape[0] for ids in all_ids)
+        padded = torch.full((B, max_prompt_len), pad_id, dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros(B, max_prompt_len, dtype=torch.long, device=self.device)
+        for i, ids in enumerate(all_ids):
+            t = ids.shape[0]
+            padded[i, max_prompt_len - t:] = ids.to(self.device)
+            attention_mask[i, max_prompt_len - t:] = 1
+
+        t0 = time.time()
+        all_generated = [[] for _ in range(B)]
+        all_log_probs = [[] for _ in range(B)]
+
+        with torch.inference_mode():
+            # Prefill: all prompts at once, with attention_mask + position_ids
+            logits, _, past_kvs = self.model(
+                padded, past_key_values=None, use_cache=True, attention_mask=attention_mask)
+            next_logits = logits[:, -1]  # (B, vocab)
+
+            # Sample first token for each sequence
+            next_tokens = self._sample_next_token_batch(next_logits)  # (B,)
+
+            # Async D2H: issue non-blocking copy for all B tokens at once.
+            reader = AsyncTokenReader(B, next_logits.shape[-1], self.device)
+            reader.issue(next_tokens, next_logits)
+
+            # Sync once for first token (needed for EOS check).
+            token_list = reader.get_tokens()
+            lp_list = reader.get_logprobs()
+            for b in range(B):
+                all_log_probs[b].append(lp_list[b])
+                all_generated[b].append(token_list[b])
+
+            # Decode loop
+            finished = [tid == eos_id for tid in token_list]
+            step = 0
+            # Pre-allocate attention_mask buffer to avoid torch.cat per step (CPU spike fix).
+            max_total = max_prompt_len + self.max_gen_tokens
+            mask_buf = torch.zeros(B, max_total, dtype=torch.long, device=self.device)
+            mask_buf[:, :max_prompt_len] = attention_mask
+            while step < self.max_gen_tokens and not all(finished):
+                cur = next_tokens.unsqueeze(-1)  # (B, 1)
+                # Update mask buffer in-place (O(1) write vs O(n) torch.cat).
+                mask_buf[:, max_prompt_len + step] = 1
+                # Launch forward (GPU starts working immediately).
+                logits, _, past_kvs = self.model(
+                    cur, past_key_values=past_kvs, use_cache=True,
+                    attention_mask=mask_buf[:, :max_prompt_len + step + 1])
+                next_logits = logits[:, -1]
+                next_tokens = self._sample_next_token_batch(next_logits)
+
+                # Async D2H: non-blocking copy of tokens + log-probs.
+                reader.issue(next_tokens, next_logits)
+
+                # Sync to get tokens (GPU has finished copy by now — near-free).
+                token_list = reader.get_tokens()
+                lp_list = reader.get_logprobs()
+                for b in range(B):
+                    if not finished[b]:
+                        all_log_probs[b].append(lp_list[b])
+                        all_generated[b].append(token_list[b])
+                        if token_list[b] == eos_id:
+                            finished[b] = True
+
+                # Check for [stop] every 4 tokens
+                if step % 4 == 3:
+                    for b in range(B):
+                        if not finished[b]:
+                            gen_text = self.tokenizer.decode(
+                                torch.tensor(all_generated[b]), skip_special_tokens=True)
+                            if stop_str in gen_text:
+                                finished[b] = True
+
+                step += 1
+
+            del past_kvs
+
+        gen_time_ms = (time.time() - t0) * 1000
+
+        # Decode and post-process each sequence
+        results = []
+        for b in range(B):
+            tokens_generated = len(all_generated[b])
+            generated_text = self.tokenizer.decode(
+                torch.tensor(all_generated[b]), skip_special_tokens=True)
+            code = generated_text.strip()
+            if stop_str in code:
+                code = code[:code.index(stop_str)].strip()
+            code = code.replace("# Write concise, efficient code. End with [stop]\n", "")
+            if code.startswith("```"):
+                lines = code.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                code = "\n".join(lines)
+
+            lps = all_log_probs[b]
+            telemetry = {
+                "gen_time_ms": gen_time_ms / B,  # amortized
+                "tokens_generated": tokens_generated,
+                "tokens_per_second": tokens_generated / (gen_time_ms / 1000) if gen_time_ms > 0 else 0,
+                "mean_logprob": sum(lps) / max(len(lps), 1),
+                "confidence": pow(2.71828, sum(lps) / max(len(lps), 1)),
+                "query_temperature": self.temperature,
+                "conformal": False,
+            }
+            results.append((code, telemetry))
+
+        return results
+
+    def _sample_next_token_batch(self, logits: torch.Tensor) -> torch.Tensor:
+        """Sample next tokens for a batch. logits: (B, vocab) -> (B,)."""
+        if self.temperature <= 0.0:
+            return logits.argmax(dim=-1)
+
+        scaled = logits / self.temperature
+        probs = torch.softmax(scaled, dim=-1)
+
+        if self.top_k > 0 and self.top_k < probs.shape[-1]:
+            topk_vals, _ = torch.topk(probs, self.top_k, dim=-1)
+            mask = probs < topk_vals[:, -1:]
+            probs = probs.masked_fill(mask, 0.0)
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+
+        if 0.0 < self.top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+            cumsum = sorted_probs.cumsum(dim=-1)
+            keep = cumsum <= self.top_p
+            keep[..., 0] = True
+            probs = torch.zeros_like(probs, dtype=probs.dtype)
+            probs.scatter_(-1, sorted_idx, sorted_probs * keep.to(probs.dtype))
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
     def generate_reasoning(self, prompt: str) -> str:
         """Generate chain-of-thought reasoning before code.
 
@@ -477,10 +698,9 @@ class SelfPlaySandbox:
         producing a reasoning trace that improves code quality.
         """
         # Extract function name from prompt
-        import re
-        match = re.search(r'def (\w+)', prompt)
+        match = _RE_DEF_FUNC.search(prompt)
         func_name = match.group(1) if match else "this function"
-        match_cls = re.search(r'class (\w+)', prompt)
+        match_cls = _RE_DEF_CLASS.search(prompt)
         cls_name = match_cls.group(1) if match_cls else None
         target = cls_name or func_name
 
@@ -494,21 +714,45 @@ class SelfPlaySandbox:
         ids = self.tokenizer(reasoning_prompt, return_tensors="pt").input_ids.to(self.device)
 
         with torch.inference_mode():
-            past_kvs = None
             gen_ids = []
-            # Initial pass on full prompt
-            logits, _, past_kvs = self.model(ids, past_key_values=past_kvs, use_cache=True)
-            nxt = self._sample_next_token(logits[0, -1])
-            gen_ids.append(nxt.item())
+            eos_id = self.tokenizer.eos_token_id
 
+            # Pre-allocated KV cache
+            from research.model_loader import PreAllocatedKVCache
+            cfg = self.model.config
+            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
+            head_dim = cfg.d_model // cfg.n_heads
+            dtype = next(self.model.parameters()).dtype
+            cache = PreAllocatedKVCache(
+                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
+                max_seq_len=min(cfg.max_seq_len, ids.shape[1] + 60),
+                head_dim=head_dim, dtype=dtype, device=self.device,
+            )
+
+            # Initial pass on full prompt
+            logits, _ = self.model(ids, preallocated_cache=cache)
+            nxt = self._sample_next_token(logits[0, -1])
+
+            # Async D2H for reasoning generation.
+            reader = AsyncTokenReader(1, logits.shape[-1], self.device)
+            reader.issue(nxt.unsqueeze(0), logits[0, -1].unsqueeze(0))
+            token_list = reader.get_tokens()
+            token_id = token_list[0]
+            gen_ids.append(token_id)
+
+            cur_tok = torch.zeros(1, 1, dtype=ids.dtype, device=self.device)
             for step in range(60):  # short reasoning
-                if nxt.item() == self.tokenizer.eos_token_id:
+                if token_id == eos_id:
                     break
                 # Feed only the new token with cached KV
-                cur_tok = torch.tensor([[nxt.item()]], device=self.device)
-                logits, _, past_kvs = self.model(cur_tok, past_key_values=past_kvs, use_cache=True)
+                cur_tok[0, 0] = nxt
+                logits, _ = self.model(cur_tok, preallocated_cache=cache)
                 nxt = self._sample_next_token(logits[0, -1])
-                gen_ids.append(nxt.item())
+                # Async D2H (non-blocking).
+                reader.issue(nxt.unsqueeze(0), logits[0, -1].unsqueeze(0))
+                token_list = reader.get_tokens()
+                token_id = token_list[0]
+                gen_ids.append(token_id)
                 # Stop at double newline (end of reasoning)
                 if step > 10 and step % 4 == 0:
                     decoded = self.tokenizer.decode(
@@ -516,7 +760,7 @@ class SelfPlaySandbox:
                     if "\n\n" in decoded:
                         break
 
-            del past_kvs
+            del cache
 
         reasoning = self.tokenizer.decode(
             torch.tensor(gen_ids), skip_special_tokens=True).strip()
@@ -525,7 +769,7 @@ class SelfPlaySandbox:
         reasoning_lines = [l for l in lines if l.strip().startswith("#") or l.strip() == ""]
         return "\n".join(reasoning_lines).strip()
 
-    def generate_with_reasoning(self, prompt: str) -> Tuple[str, str, Dict]:
+    def generate_with_reasoning(self, prompt: str) -> tuple[str, str, dict]:
         """Generate reasoning + code. Returns (reasoning, code, telemetry)."""
         reasoning = self.generate_reasoning(prompt)
         # Prepend reasoning as comments to the code prompt
@@ -536,13 +780,12 @@ class SelfPlaySandbox:
         code, telemetry = self.generate_code(enhanced_prompt)
         return reasoning, code, telemetry
 
-    def self_critique(self, code: str, prompt: str) -> Tuple[str, List[Dict]]:
+    def self_critique(self, code: str, prompt: str) -> tuple[str, list[dict]]:
         """Self-critique loop: generate edge case tests, run them, fix bugs.
 
         Returns (improved_code, test_results).
         """
-        import re
-        match = re.search(r'def (\w+)', prompt)
+        match = _RE_DEF_FUNC.search(prompt)
         func_name = match.group(1) if match else None
 
         if not func_name:
@@ -587,10 +830,10 @@ class SelfPlaySandbox:
 
         return code, test_results
 
-    def run_task(self, task_prompt: str, expected_output: Optional[str] = None,
+    def run_task(self, task_prompt: str, expected_output: str | None = None,
                  task_type: str = "python", task_name: str = "",
-                 reference_code: Optional[str] = None,
-                 code_prefix: str = "") -> Dict:
+                 reference_code: str | None = None,
+                 code_prefix: str = "") -> dict:
         """Run a single self-play task: generate → execute → log.
 
         Args:
@@ -621,14 +864,13 @@ class SelfPlaySandbox:
         # (base models often write functions without calling them)
         if "def " in code and "print(" not in code and expected_output is not None:
             # Try to extract function name and call it
-            import re
-            func_match = re.search(r'def\s+(\w+)\s*\(([^)]*)\)', code)
+            func_match = _RE_FUNC_SIG.search(code)
             if func_match:
                 func_name = func_match.group(1)
                 args = func_match.group(2)
                 # Try to call with values from the prompt
                 # Extract numbers from the prompt
-                numbers = re.findall(r'\d+', task_prompt)
+                numbers = _RE_DIGITS.findall(task_prompt)
                 if numbers:
                     call_args = ", ".join(numbers[:len(args.split(',')) if args else 0])
                     code += f"\nprint({func_name}({call_args}))"
@@ -682,7 +924,7 @@ class SelfPlaySandbox:
         self.packets.append(packet)
         return packet
 
-    def _score_packet(self, packet: Dict) -> float:
+    def _score_packet(self, packet: dict) -> float:
         """Score a data packet on a 0-1 scale.
 
         Factors:
@@ -728,7 +970,7 @@ class SelfPlaySandbox:
 
         return round(score, 4)
 
-    def run_domain(self, domain: str, n_tasks: int = 10) -> List[Dict]:
+    def run_domain(self, domain: str, n_tasks: int = 10) -> list[dict]:
         """Run multiple tasks from a domain (python_basics, math, algorithms, etc.).
 
         Generates task parameters randomly and runs each through the sandbox.
@@ -771,8 +1013,9 @@ class SelfPlaySandbox:
                     ref_result = self.executor.execute(ref_code)
                     if ref_result["returncode"] == 0:
                         expected = ref_result["stdout"].strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"confidence scoring: {e}", RuntimeWarning, stacklevel=2)
 
             print(f"\n  [{domain} {i+1}/{n_tasks}] {prompt[:60]}")
 
@@ -802,20 +1045,40 @@ class SelfPlaySandbox:
 
         return packets
 
-    def save_packets(self, filename: str = None) -> str:
-        """Save all data packets to a JSONL file for later knowledge injection."""
+    def save_packets(self, filename: str = None, max_logs: int = 10) -> str:
+        """Save all data packets to a JSONL file for later knowledge injection.
+
+        Implements log rotation: keeps only the `max_logs` most recent JSONL
+        files in the log directory, deleting older ones.
+
+        Args:
+            filename: custom filename (default: timestamped)
+            max_logs: maximum number of JSONL files to retain (default 10)
+        """
         if filename is None:
             filename = f"self_play_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         path = self.log_dir / filename
 
         with open(path, 'w', encoding='utf-8') as f:
             for packet in self.packets:
-                f.write(json.dumps(packet, ensure_ascii=False) + "\n")
+                f.write(dumps(packet, ensure_ascii=False) + "\n")
+
+        # Log rotation: remove oldest JSONL files beyond max_logs
+        try:
+            jsonl_files = sorted(
+                self.log_dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old_file in jsonl_files[max_logs:]:
+                old_file.unlink()
+        except Exception:
+            pass  # rotation is best-effort
 
         print(f"\n  Saved {len(self.packets)} packets to {path}")
         return str(path)
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Return summary statistics."""
         s = self.stats
         s["success_rate"] = s["successful"] / max(s["total_tasks"], 1)
@@ -831,7 +1094,7 @@ class SelfPlaySandbox:
         """Print summary statistics."""
         s = self.get_stats()
         print(f"\n{'='*60}")
-        print(f"Self-Play Sandbox Statistics")
+        print("Self-Play Sandbox Statistics")
         print(f"{'='*60}")
         print(f"  Total tasks:      {s['total_tasks']}")
         print(f"  Successful runs:  {s['successful']} ({s['success_rate']:.1%})")
@@ -847,11 +1110,9 @@ class SelfPlaySandbox:
 
 def main():
     """Run self-play sandbox with ForgeLM."""
-    sys.path.insert(0, '.')
-
     from research.config import get_config
     from research.model_loader import ModelLoader
-    from transformers import AutoTokenizer
+    from research.tokenizer_cache import get_tokenizer
 
     print("=" * 60)
     print("Self-Play Sandbox — ForgeLM")
@@ -863,7 +1124,7 @@ def main():
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
     model.to("cuda").eval()
-    tokenizer = AutoTokenizer.from_pretrained("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 
     # Create sandbox
     print("\n[2] Creating sandbox...")
@@ -894,7 +1155,7 @@ def main():
     sandbox.print_stats()
 
     print(f"\n  Data packet file: {path}")
-    print(f"  Ready for knowledge injection via fact_injection_key or knowledge_pack_key")
+    print("  Ready for knowledge injection via fact_injection_key or knowledge_pack_key")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ This is a TRIVIAL key — identity init, no data or training.
 Reference: DenseFormer, arxiv 2402.02622
 """
 import torch
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 

@@ -13,8 +13,9 @@ learns optimal mixing on the Birkhoff polytope via Sinkhorn-Knopp projection.
 
 Key class: TRIVIAL — identity init, no data or training needed.
 """
-import torch
 from typing import Dict
+
+import torch
 
 from .base import Key, KeyClass, KeyResult
 
@@ -65,7 +66,7 @@ class MHCKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.TRIVIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights.  Expects {"d_model": int, "expansion": int (default 1)}."""
         try:
             d_model = int(data["d_model"])
@@ -81,7 +82,7 @@ class MHCKey(Key):
         except Exception as exc:
             return KeyResult(success=False, error=str(exc))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """weights -> data.  Identity is its own inverse — passthrough."""
         try:
             d_model = weights["H_res"].shape[0]

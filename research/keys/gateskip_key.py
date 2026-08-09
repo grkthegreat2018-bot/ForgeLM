@@ -7,8 +7,9 @@ layer (gate → 1), tokens that barely change can skip (gate → 0).
 
 Key class: PARTIAL — forward only (gate weights are not invertible).
 """
-import torch
 from typing import Dict
+
+import torch
 
 from .base import Key, KeyClass, KeyResult
 
@@ -29,7 +30,7 @@ class GateSkipKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> gate weights.
 
         Args:
@@ -63,7 +64,7 @@ class GateSkipKey(Key):
             metadata={"n_tokens": inputs.shape[0], "d_model": inputs.shape[1]},
         )
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Gate weights are not invertible — passthrough."""
         return KeyResult(
             success=True, data=weights,

@@ -5,9 +5,11 @@ LM head predicts token at t+1 from hidden at t. So:
   - Head 1 = LM head (exact, same task)
   - Head 2+ ≈ LM head (approximate, Markov assumption)
 """
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from typing import Dict
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -28,7 +30,7 @@ class MTPKey(Key):
         # Head 1 is an exact copy of LM head (same task: predict t+1 from h_t).
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """data -> weights. Steals LM head weights for all MTP heads.
 
         Expected data: {"lm_head_weight": (vocab, d_model), "n_predict": int,
@@ -50,7 +52,7 @@ class MTPKey(Key):
             "mtp_heads": mtp_heads, "shared_trunk": shared_trunk,
         })
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """weights -> data. Extract LM head from MTP head 1 (exact)."""
         heads = weights["mtp_heads"]
         if not heads:

@@ -3,14 +3,14 @@ import inspect
 import json
 import math
 import os
+import random
 import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from collections import deque
-import random
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -252,12 +252,13 @@ def patch_triton_cache_for_windows():
         if not os.environ.get("TORCHINDUCTOR_AUTOGRAD_CACHE"):
             os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
 
-        import triton.runtime.cache as tc
         import uuid
+
+        import triton.runtime.cache as tc
 
         src = inspect.getsourcefile(tc.FileCacheManager)
         if src and os.path.exists(src):
-            with open(src, "r") as f:
+            with open(src) as f:
                 text = f.read()
             new_text = text
             new_text = new_text.replace("rnd_id = str(uuid.uuid4())", "rnd_id = str(uuid.uuid4())[:8]")

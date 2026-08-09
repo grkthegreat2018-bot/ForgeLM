@@ -20,8 +20,10 @@ Usage:
     # dedup_map: {alias_key: canonical_key} — use at load to restore aliases
 """
 import hashlib
+from typing import Dict, List, Tuple
+
 import torch
-from typing import Dict, Tuple, List
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -52,7 +54,7 @@ class TensorDedupKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.FULL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Deduplicate tensors — keep canonical, record aliases.
 
         Args:
@@ -64,7 +66,7 @@ class TensorDedupKey(Key):
         """
         try:
             state = dict(data)
-            hash_map: Dict[str, List[str]] = {}
+            hash_map: dict[str, list[str]] = {}
 
             for key, tensor in state.items():
                 if tensor.dim() == 0:
@@ -76,7 +78,7 @@ class TensorDedupKey(Key):
 
             # Build dedup map: for each group with >1 tensor, pick canonical (first)
             # and alias the rest
-            dedup_map: Dict[str, str] = {}
+            dedup_map: dict[str, str] = {}
             saved_bytes = 0
             for h, keys in hash_map.items():
                 if len(keys) <= 1:
@@ -111,7 +113,7 @@ class TensorDedupKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Restore aliases from dedup map.
 
         Args:
@@ -126,7 +128,7 @@ class TensorDedupKey(Key):
         )
 
 
-def apply_tensor_dedup(state: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, str]]:
+def apply_tensor_dedup(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     """Apply tensor deduplication to a state dict.
 
     Returns:
@@ -147,7 +149,7 @@ def apply_tensor_dedup(state: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.
     return result.weights, dedup_map
 
 
-def restore_aliases(state: Dict[str, torch.Tensor], dedup_map: Dict[str, str]) -> Dict[str, torch.Tensor]:
+def restore_aliases(state: dict[str, torch.Tensor], dedup_map: dict[str, str]) -> dict[str, torch.Tensor]:
     """Restore deduplicated tensors at load time.
 
     For each alias in dedup_map, create a reference to the canonical tensor.
@@ -162,7 +164,7 @@ def restore_aliases(state: Dict[str, torch.Tensor], dedup_map: Dict[str, str]) -
 
 
 def save_deduped_checkpoint(input_path: str, output_path: str,
-                            meta_path: str = None) -> Dict[str, str]:
+                            meta_path: str = None) -> dict[str, str]:
     """Load a checkpoint, deduplicate, and save the smaller version.
 
     Saves the dedup_map as a sidecar JSON file for restoration at load time.
@@ -171,6 +173,7 @@ def save_deduped_checkpoint(input_path: str, output_path: str,
         dedup_map: {alias_key: canonical_key}
     """
     import json
+
     from safetensors.torch import load_file, save_file
 
     print(f"  [TensorDedup] Loading {input_path}...")

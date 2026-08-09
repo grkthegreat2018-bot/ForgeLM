@@ -24,9 +24,10 @@ Usage:
         # regenerate with higher temperature
         ...
 """
-import torch
 import math
 from typing import Dict, Optional
+
+import torch
 
 
 class ConfidenceScorer:

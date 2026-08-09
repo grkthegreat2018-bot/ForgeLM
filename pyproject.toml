@@ -1,0 +1,124 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forgeai"
+version = "0.1.0"
+description = "ForgeAI research — model architecture, training, and inference"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Core runtime dependencies (not re-listed from requirements.txt —
+# this section is for `pip install -e .` metadata only).
+# Full pinned versions are in requirements.txt.
+dependencies = [
+    "torch>=2.5",
+    "numpy>=2.0",
+    "transformers>=4.40",
+    "safetensors>=0.4",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Heavy optional deps — install via: pip install -e ".[gpu]"
+gpu = [
+    "bitsandbytes>=0.43",
+    "triton-windows>=3.0",
+    "fastsafetensors",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+serving = [
+    "gradio>=4.0",
+]
+data = [
+    "datasets>=4.0",
+    "gigatoken>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["research*"]
+exclude = ["tests*", ".devin*", "docs*"]
+
+# ── Ruff: lint + format in one tool ──────────────────────────────────────────
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = [
+    ".devin",
+    "docs",
+    "research/evaluation/prompt_tests_auto.py",  # auto-generated, 1467 lines
+]
+
+[tool.ruff.lint]
+# v0.16: 413 rules by default. We extend with explicit selects for clarity.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names, etc.)
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear (likely bugs)
+    "C4",   # flake8-comprehensions
+    "I",    # isort (import sorting)
+    "UP",   # pyupgrade (modernize syntax for py313)
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (we use 120, ruff will flag >120)
+    "E402",   # module level import not at top (sys.path hacks need this)
+    "B008",   # function call in default argument (dataclass patterns)
+    "B904",   # raise without from (existing pattern, fix gradually)
+    "F401",   # unused import (too many in existing code, fix gradually)
+    "F841",   # unused variable (fix gradually)
+    "RUF001", # ambiguous unicode character (existing code has these)
+    "RUF002", # ambiguous unicode character in docstring
+    "RUF003", # ambiguous unicode character in comment
+    "SIM108", # use ternary instead of if-else (readability preference)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["research"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ── Pytest ───────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require CUDA (deselect with '-m \"not gpu\"')",
+    "integration: marks integration tests",
+]
+
+# ── Coverage ─────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["research"]
+omit = [
+    "research/evaluation/prompt_tests_auto.py",
+    "research/serving/*",
+    "research/o1_generation/*",
+    "*/__main__",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

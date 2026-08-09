@@ -13,7 +13,7 @@ Adds 300 prompts per topic (120 easy, 120 medium, 60 hard) as
 from typing import List, Tuple
 
 
-def _f(name: str, docstring: str, args: str = "", difficulty: str = "easy") -> Tuple[str, str]:
+def _f(name: str, docstring: str, args: str = "", difficulty: str = "easy") -> tuple[str, str]:
     """Build a (function_prompt, difficulty) tuple."""
     if args:
         return (f'def {name}({args}):\n    """{docstring}"""\n    ', difficulty)
@@ -29,7 +29,7 @@ _SUFFIX_BANKS = [
 ]
 
 
-def _arg_variants(args: str, count: int) -> List[str]:
+def _arg_variants(args: str, count: int) -> list[str]:
     """Return `count` renamed variants of a comma-separated arg string."""
     if not args:
         return [""] * count
@@ -338,19 +338,19 @@ _HARD_STRINGS = [
 ]
 
 
-def expanded_math() -> List[Tuple[str, str]]:
+def expanded_math() -> list[tuple[str, str]]:
     """Return 300 (prompt, difficulty) tuples for python_math."""
-    easy: List[Tuple[str, str]] = []
+    easy: list[tuple[str, str]] = []
     for name, doc, args in _EASY_MATH:
         for va in _arg_variants(args, 4):
             easy.append(_f(name, doc, va, "easy"))
 
-    medium: List[Tuple[str, str]] = []
+    medium: list[tuple[str, str]] = []
     for name, doc, args in _MEDIUM_MATH:
         for va in _arg_variants(args, 3):
             medium.append(_f(name, doc, va, "medium"))
 
-    hard: List[Tuple[str, str]] = []
+    hard: list[tuple[str, str]] = []
     for name, doc, args in _HARD_MATH:
         for va in _arg_variants(args, 2):
             hard.append(_f(name, doc, va, "hard"))
@@ -358,19 +358,19 @@ def expanded_math() -> List[Tuple[str, str]]:
     return easy[:120] + medium[:120] + hard[:60]
 
 
-def expanded_strings() -> List[Tuple[str, str]]:
+def expanded_strings() -> list[tuple[str, str]]:
     """Return 300 (prompt, difficulty) tuples for python_strings."""
-    easy: List[Tuple[str, str]] = []
+    easy: list[tuple[str, str]] = []
     for name, doc, args in _EASY_STRINGS:
         for va in _arg_variants(args, 3):
             easy.append(_f(name, doc, va, "easy"))
 
-    medium: List[Tuple[str, str]] = []
+    medium: list[tuple[str, str]] = []
     for name, doc, args in _MEDIUM_STRINGS:
         for va in _arg_variants(args, 3):
             medium.append(_f(name, doc, va, "medium"))
 
-    hard: List[Tuple[str, str]] = []
+    hard: list[tuple[str, str]] = []
     for name, doc, args in _HARD_STRINGS:
         for va in _arg_variants(args, 2):
             hard.append(_f(name, doc, va, "hard"))

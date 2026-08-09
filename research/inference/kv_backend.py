@@ -14,10 +14,11 @@ All implement the KVCacheStrategy interface:
   clear()
   info() -> dict
 """
+from abc import ABC, abstractmethod
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict
-from abc import ABC, abstractmethod
 
 
 class KVCacheStrategy(ABC):
@@ -34,7 +35,7 @@ class KVCacheStrategy(ABC):
         pass
 
     @abstractmethod
-    def get(self, positions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Retrieve K/V for given positions. Returns [B, n_kv, T, head_dim]."""
         pass
 
@@ -43,7 +44,7 @@ class KVCacheStrategy(ABC):
         pass
 
     @abstractmethod
-    def info(self) -> Dict:
+    def info(self) -> dict:
         """Return cache stats (size, compression ratio, etc.)."""
         pass
 

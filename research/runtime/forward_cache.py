@@ -17,9 +17,10 @@ Usage:
     cache = ForwardCache(max_entries=1000)
     logits, hidden = cache.forward(model, input_ids)
 """
-import torch
-from typing import Optional, Tuple, Dict
 from collections import OrderedDict
+from typing import Dict, Optional, Tuple
+
+import torch
 
 
 class ForwardCache:
@@ -36,7 +37,7 @@ class ForwardCache:
     def __init__(self, max_entries: int = 1000, device: str = "cuda"):
         self.max_entries = max_entries
         self.device = device
-        self._cache: OrderedDict[int, Tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._cache: OrderedDict[int, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
         self._hits = 0
         self._misses = 0
 
@@ -45,7 +46,7 @@ class ForwardCache:
         return hash(tuple(input_ids[0].cpu().tolist()))
 
     def forward(self, model, input_ids: torch.Tensor,
-                use_cache: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                use_cache: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass with caching.
 
         Args:
@@ -103,7 +104,7 @@ class ForwardCache:
     def size(self) -> int:
         return len(self._cache)
 
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         return {
             "hits": self._hits,
             "misses": self._misses,

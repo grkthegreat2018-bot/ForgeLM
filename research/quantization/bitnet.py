@@ -31,6 +31,7 @@ References:
     - BitNet b1.58 2B4T: microsoft/bitnet-b1.58-2B-4T
 """
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -197,8 +198,12 @@ def pack_ternary_to_int8(weight):
 
 
 def unpack_int8_to_ternary(packed):
-    """Unpack int8 storage back to ternary float tensor."""
-    return packed.to(torch.float32)
+    """Unpack int8 storage back to ternary float tensor.
+
+    Uses bf16 instead of fp32 — values are only {-1, 0, 1}, so bf16
+    has more than enough precision and saves 2x VRAM.
+    """
+    return packed.to(torch.bfloat16)
 
 
 def freeze_ternary(model):

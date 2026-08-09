@@ -8,9 +8,11 @@ softmax). The threshold is stored as a per-layer scalar — no weight training.
 Key class: PARTIAL — needs calibration data (a few hundred tokens).
 Reference: arXiv:2511.20102 (SSA: Sparse Sparse Attention)
 """
+from typing import Dict, List
+
 import torch
 import torch.nn as nn
-from typing import Dict, List
+
 from research.keys.base import Key, KeyClass, KeyResult
 
 
@@ -45,8 +47,8 @@ class SSAKey(Key):
             retention = data.get("retention", 0.99)
             layer_scores = scores if isinstance(scores, list) else [
                 scores[i] for i in range(scores.shape[0])]
-            sparsity_k: List[int] = []
-            thresholds: List[float] = []
+            sparsity_k: list[int] = []
+            thresholds: list[float] = []
             for ls in layer_scores:
                 if ls.dim() == 4:
                     ls = ls.mean(0)  # average over batch -> (n_heads, seq, seq)
@@ -80,7 +82,7 @@ def compute_sparsity_from_model(model, input_ids, retention=0.99):
     then finds the k that retains `retention` fraction of attention mass.
     Returns dict of {layer_idx: {"k": int, "threshold": float}}.
     """
-    captured: Dict[int, torch.Tensor] = {}
+    captured: dict[int, torch.Tensor] = {}
     hooks = []
     def _make_hook(idx):
         def hook(module, inputs, outputs):

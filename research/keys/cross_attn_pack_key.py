@@ -17,9 +17,12 @@ Pipeline:
 
 Key class: PARTIAL — extract adapter weights and KV, no training.
 """
+from collections.abc import Callable
+from typing import Dict, Optional
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, Optional, Callable
+
 from .base import Key, KeyClass, KeyResult
 
 
@@ -32,14 +35,14 @@ class CrossAttnPack:
     """
 
     def __init__(self):
-        self.adapter_weights: Dict[int, Dict[str, torch.Tensor]] = {}
-        self.knowledge_kv: Dict[int, Dict[str, torch.Tensor]] = {}
+        self.adapter_weights: dict[int, dict[str, torch.Tensor]] = {}
+        self.knowledge_kv: dict[int, dict[str, torch.Tensor]] = {}
 
     def extract(
         self,
         domain_model: Callable,
         knowledge_tokens: torch.Tensor,
-        layers: Optional[list] = None,
+        layers: list | None = None,
     ) -> None:
         """Extract adapter weights and knowledge KV from a domain model.
 
@@ -60,8 +63,8 @@ class CrossAttnPack:
                     k: v.clone().cpu() for k, v in kv_dict[layer].items()
                 }
 
-    def inject(self, base_hidden: Dict[int, torch.Tensor],
-               scale: float = 1.0) -> Dict[int, torch.Tensor]:
+    def inject(self, base_hidden: dict[int, torch.Tensor],
+               scale: float = 1.0) -> dict[int, torch.Tensor]:
         """Apply cross-attention from knowledge KV to base model hidden states.
 
         h_new = h + scale * W_o(softmax(h W_q @ K^T / sqrt(d)) @ V)
@@ -107,7 +110,7 @@ class CrossAttnPackKey(Key):
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> KeyResult:
+    def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """Store adapter weights and knowledge KV as a portable pack.
 
         Args:
@@ -131,7 +134,7 @@ class CrossAttnPackKey(Key):
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def reverse(self, weights: Dict[str, torch.Tensor]) -> KeyResult:
+    def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Reconstruct adapter weights and knowledge KV from a stored pack."""
         try:
             adapter_weights, knowledge_kv = {}, {}

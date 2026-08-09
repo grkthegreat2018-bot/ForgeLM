@@ -195,7 +195,7 @@ class CudaGraphGenerator:
             if self.captured and self.decode_runner:
                 # Use graphed decode.
                 # Need to pad to max_batch_size.
-                if B < self.max_batch_size:
+                if self.max_batch_size > B:
                     pad = torch.full(
                         (self.max_batch_size - B, 1), 0,
                         dtype=torch.long, device=self.device

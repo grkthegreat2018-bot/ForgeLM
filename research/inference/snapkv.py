@@ -15,8 +15,9 @@ Usage:
     from research.inference.snapkv import SnapKVCache
     cache = SnapKVCache(observation_window=128, budget=512)
 """
+from typing import Dict, List, Optional, Tuple
+
 import torch
-from typing import Optional, Tuple, Dict, List
 
 
 class SnapKVCache:
@@ -47,8 +48,13 @@ class SnapKVCache:
         self.seq_len = 0
         self.max_capacity = budget + observation_window
 
+    def bf16_or_dtype(self):
+        """Return bf16 if using bf16 dtype (saves 2x VRAM for attention scores),
+        otherwise return the configured dtype."""
+        return torch.bfloat16 if self.dtype == torch.bfloat16 else self.dtype
+
     def append(self, k: torch.Tensor, v: torch.Tensor, position: int,
-               attention_weights: Optional[torch.Tensor] = None):
+               attention_weights: torch.Tensor | None = None):
         """Append K/V and optionally update importance scores.
 
         Args:
@@ -64,7 +70,7 @@ class SnapKVCache:
             self.v_cache = v.clone()
             self.seq_len = T
             self.attention_scores = torch.zeros(B, self.n_kv, T,
-                                                device=self.device, dtype=torch.float32)
+                                                device=self.device, dtype=self.bf16_or_dtype())
             return
 
         # Update attention scores from observation window
@@ -90,7 +96,7 @@ class SnapKVCache:
         self.k_cache = torch.cat([self.k_cache, k], dim=2)
         self.v_cache = torch.cat([self.v_cache, v], dim=2)
         new_scores = torch.zeros(B, self.n_kv, T,
-                                 device=self.device, dtype=torch.float32)
+                                 device=self.device, dtype=self.bf16_or_dtype())
         self.attention_scores = torch.cat([self.attention_scores, new_scores], dim=-1)
         self.seq_len = self.k_cache.shape[2]
 
@@ -125,11 +131,11 @@ class SnapKVCache:
         self.attention_scores = self.attention_scores[:, :, keep]
         self.seq_len = self.k_cache.shape[2]
 
-    def get(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Get current KV cache."""
         return self.k_cache, self.v_cache
 
-    def get_past_kv(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    def get_past_kv(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         if self.k_cache is None or self.seq_len == 0:
             return None
         return (self.k_cache, self.v_cache)
@@ -140,7 +146,7 @@ class SnapKVCache:
         self.attention_scores = None
         self.seq_len = 0
 
-    def info(self) -> Dict:
+    def info(self) -> dict:
         current_size = self.k_cache.shape[2] if self.k_cache is not None else 0
         return {
             "type": "snapkv",

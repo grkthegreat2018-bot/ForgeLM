@@ -11,11 +11,12 @@ from urllib.parse import urlparse
 sys.stdout.reconfigure(encoding="utf-8")
 
 import torch
-from transformers import AutoTokenizer
 
 from research.config import get_config
+from research.json_compat import dumps, dumps_bytes, loads
 from research.model_loader import ModelLoader
 from research.runtime.signal_capture import SignalLogger
+from research.tokenizer_cache import get_tokenizer
 
 
 def build_prompt(tokenizer, messages, tools=None, add_generation_prompt=True):
@@ -50,13 +51,13 @@ def parse_tool_calls(text):
         inner = remaining[start + len("<functioncall>") : end - len("</functioncall>")].strip()
         remaining = remaining[:start] + remaining[end:]
         try:
-            obj = json.loads(inner)
+            obj = loads(inner)
             tool_calls.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
                 "function": {
                     "name": obj.get("name", ""),
-                    "arguments": json.dumps(obj.get("arguments", obj.get("parameters", {}))),
+                    "arguments": dumps(obj.get("arguments", obj.get("parameters", {}))),
                 },
             })
         except Exception:
@@ -73,7 +74,7 @@ class OpenAICompatHandler(BaseHTTPRequestHandler):
     default_max_tokens = 512
 
     def _send_json(self, status, data):
-        body = json.dumps(data).encode("utf-8")
+        body = dumps_bytes(data)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(body))
@@ -82,7 +83,7 @@ class OpenAICompatHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_sse(self, chunk_dict):
-        line = f"data: {json.dumps(chunk_dict)}\n\n".encode("utf-8")
+        line = f"data: {dumps(chunk_dict)}\n\n".encode()
         self.wfile.write(line)
         self.wfile.flush()
 
@@ -120,7 +121,7 @@ class OpenAICompatHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length).decode("utf-8")
         try:
-            return json.loads(raw)
+            return loads(raw)
         except Exception:
             return {}
 
@@ -131,21 +132,25 @@ class OpenAICompatHandler(BaseHTTPRequestHandler):
         past_key_values = None
 
         for _ in range(max_new_tokens):
-            with torch.no_grad():
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                    if past_key_values is None:
-                        idx_cond = idx[:, -self.config.max_seq_len :]
-                        logits, _, past_key_values = model(idx_cond, use_cache=True)
-                    else:
-                        logits, _, past_key_values = model(idx[:, -1:], past_key_values=past_key_values, use_cache=True)
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                if past_key_values is None:
+                    idx_cond = idx[:, -self.config.max_seq_len :]
+                    logits, _, past_key_values = model(idx_cond, use_cache=True)
+                else:
+                    logits, _, past_key_values = model(idx[:, -1:], past_key_values=past_key_values, use_cache=True)
             logits = logits[:, -1, :] / max(temperature, 1e-5)
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
-            token_id = next_token.item()
-            if token_id == eos_id:
+            is_eos = (next_token == eos_id).any() if eos_id is not None else torch.tensor(False, device=next_token.device)
+            token_pinned = getattr(self, '_token_pinned', None)
+            if token_pinned is None:
+                token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
+                self._token_pinned = token_pinned
+            token_pinned.copy_(next_token, non_blocking=True)
+            if is_eos.item():
                 break
             idx = torch.cat((idx, next_token), dim=1)
-            yield token_id
+            yield token_pinned.item()
 
     def _handle_chat_completions(self):
         body = self._read_body()
@@ -281,7 +286,7 @@ def main():
     print(f"Loading model {args.config}...")
     model = ModelLoader.build_model(cfg, checkpoint_path=checkpoint, compile=args.compile)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B", trust_remote_code=True)
+    tokenizer = get_tokenizer("Qwen/Qwen2.5-0.5B")
 
     # Apply inference quantization (INT8 = 4-8x speedup, default).
     if args.quantize == "int8":
@@ -315,4 +320,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from research.dx_setup import setup
+    setup(log_file="logs/serve.log")
     main()
