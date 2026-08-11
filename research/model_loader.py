@@ -1,6 +1,7 @@
 """Modular model factory and inference engine for ForgeAI research."""
 import math
 import os
+from collections import OrderedDict
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -538,6 +539,133 @@ class GroupedQueryAttention(nn.Module):
         return self.out_proj(out), new_kv
 
 
+class DoubleGatedConvLayer(nn.Module):
+    """LFM2-style double-gated short convolution layer.
+
+    Matches LiquidAI LFM2 architecture exactly:
+      BCx = in_proj(x)       # Linear(d → 3d), split into B, C, x
+      Bx = B * x             # input gate (raw multiply, NO sigmoid)
+      conv_out = conv(Bx)    # short depthwise causal conv
+      out = C * conv_out     # output gate (raw multiply, NO sigmoid)
+      out = out_proj(out)    # Linear(d → d)
+
+    Key difference from our earlier (broken) version:
+      - NO sigmoid gates (sigmoid squashes to [0,1], killing residual stream norm)
+      - Conv applied to GATED input (B*x), not raw input
+      - in_proj projects to 3*d_model (more capacity, matches LFM2)
+
+    The conv state is a fixed-size buffer (kernel_size-1 past tokens) enabling
+    O(1) per-token generation — no growing KV cache for conv layers.
+    """
+
+    def __init__(self, d_model: int, kernel_size: int = 3, bias: bool = False):
+        super().__init__()
+        self.d_model = d_model
+        self.kernel_size = kernel_size
+        # Input projection: d_model → 3*d_model (splits into B, C, x)
+        self.in_proj = nn.Linear(d_model, 3 * d_model, bias=bias)
+        # Depthwise causal conv: (d_model, 1, kernel_size), groups=d_model
+        self.conv = nn.Conv1d(
+            d_model, d_model, kernel_size,
+            groups=d_model, bias=bias, padding=0,
+        )
+        # Output projection (like attention out_proj)
+        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+        # Conv state buffer for incremental generation: (B, d_model, kernel_size-1)
+        self._conv_state = None
+
+    def _init_conv_state(self, batch: int, device: torch.device, dtype: torch.dtype):
+        """Initialize conv state buffer for incremental decoding."""
+        state = torch.zeros(
+            batch, self.d_model, self.kernel_size - 1,
+            device=device, dtype=dtype,
+        )
+        self._conv_state = state
+
+    def _causal_conv(self, x: torch.Tensor) -> torch.Tensor:
+        """Causal depthwise conv via left-padding + Conv1d.
+
+        Args:
+            x: (B, T, d_model)
+        Returns:
+            (B, T, d_model)
+        """
+        # Transpose to (B, d_model, T) for Conv1d
+        x_t = x.transpose(1, 2)  # (B, d_model, T)
+        # Left-pad with (kernel_size - 1) zeros for causal conv
+        pad = (self.kernel_size - 1, 0)
+        x_padded = F.pad(x_t, pad)  # (B, d_model, T + k - 1)
+        out = self.conv(x_padded)   # (B, d_model, T)
+        return out.transpose(1, 2)  # (B, T, d_model)
+
+    def _incremental_conv(self, x: torch.Tensor) -> torch.Tensor:
+        """Single-token conv using state buffer (O(1) per token).
+
+        Args:
+            x: (B, 1, d_model) — one token at a time
+        Returns:
+            (B, 1, d_model)
+        """
+        B, T, D = x.shape
+        assert T == 1, f"incremental_conv expects T=1, got T={T}"
+        x_t = x.transpose(1, 2)  # (B, d_model, 1)
+
+        if self._conv_state is None:
+            self._init_conv_state(B, x.device, x.dtype)
+
+        # Concatenate state + new token: (B, d_model, kernel_size)
+        window = torch.cat([self._conv_state, x_t], dim=-1)
+        # Apply conv (no padding needed — window is exactly kernel_size)
+        out = self.conv(window)  # (B, d_model, 1)
+        # Update state: shift window, drop oldest
+        self._conv_state = window[:, :, 1:].clone()
+
+        return out.transpose(1, 2)  # (B, 1, d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_key_value: KVCache | None = None,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> tuple[torch.Tensor, KVCache | None]:
+        """LFM2-style forward: in_proj → gate → conv → gate → out_proj.
+
+        For prefill (T > 1): full causal conv.
+        For decode (T == 1): incremental conv with state buffer.
+        """
+        B, T, D = x.shape
+
+        # Project to 3*d_model and split into B (input gate), C (output gate), x_proj
+        BCx = self.in_proj(x)  # (B, T, 3*D)
+        B_gate, C_gate, x_proj = BCx.chunk(3, dim=-1)  # each (B, T, D)
+
+        # Input gate: raw multiply (NO sigmoid — LFM2 uses multiplicative gates)
+        Bx = B_gate * x_proj  # (B, T, D)
+
+        if T == 1 and self._conv_state is not None:
+            conv_out = self._incremental_conv(Bx)
+        else:
+            # Prefill or no state: full causal conv
+            conv_out = self._causal_conv(Bx)
+            # Initialize state from last (kernel_size - 1) tokens of GATED input
+            if use_cache:
+                self._init_conv_state(B, x.device, x.dtype)
+                if T >= self.kernel_size - 1:
+                    self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()
+                else:
+                    pad_len = self.kernel_size - 1 - T
+                    pad = torch.zeros(B, pad_len, D, device=x.device, dtype=x.dtype)
+                    self._conv_state = torch.cat([pad, Bx], dim=1).transpose(1, 2).clone()
+
+        # Output gate: raw multiply (NO sigmoid)
+        gated = C_gate * conv_out  # (B, T, D)
+
+        out = self.out_proj(gated)
+        # Conv layers don't produce KV cache entries
+        return out, None
+
+
 class SwiGLUFFN(nn.Module):
     """SwiGLU feed-forward network."""
 
@@ -556,15 +684,28 @@ class SwiGLUFFN(nn.Module):
 class ModularBlock(nn.Module):
     """One transformer block with swappable attention and FFN types."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_idx: int = 0):
         super().__init__()
+        self.layer_idx = layer_idx
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         self.ln1 = norm(config.d_model)
-        self.attn = build_attention(config)
+        # Determine layer type: conv or attention
+        layer_types = getattr(config, 'layer_types', None)
+        if layer_types is not None and layer_idx < len(layer_types):
+            ltype = layer_types[layer_idx].lower()
+        else:
+            ltype = "attention"
+        self.layer_type = ltype
+        if ltype in ("conv", "liquid"):
+            ksize = getattr(config, 'conv_kernel_size', 3)
+            self.attn = DoubleGatedConvLayer(config.d_model, kernel_size=ksize)
+        else:
+            self.attn = build_attention(config)
         self.ln2 = norm(config.d_model)
         self.ffn = build_ffn(config)
         # Cache whether attn supports pre-allocated KV cache (avoids inspect.signature per forward).
         self._supports_prealloc_cache = isinstance(self.attn, (MultiHeadLatentAttention, GroupedQueryAttention))
+        self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
         self._gradient_checkpointing = False
 
     def forward(
@@ -673,7 +814,7 @@ class ConfigurableResearchLLM(nn.Module):
         super().__init__()
         self.config = config
         self.embed = nn.Embedding(config.vocab_size, config.d_model)
-        self.blocks = nn.ModuleList([ModularBlock(config) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         self.ln_f = norm(config.d_model)
         self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -876,7 +1017,8 @@ class ModelLoader:
     @staticmethod
     def _config_signature(config: ModelConfig) -> str:
         """A stable hashable signature for caching blank models."""
-        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}"
+        layer_types_sig = tuple(getattr(config, 'layer_types', None) or [])
+        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}"
 
     @staticmethod
     def blank_state_dict(config: ModelConfig) -> dict:
@@ -895,8 +1037,42 @@ class ModelLoader:
         # Return zero-filled tensors with correct shapes (cheap — no big allocs)
         return {k: torch.zeros(s, dtype=torch.bfloat16) for k, s in ModelLoader._blank_cache[sig].items()}
 
-    # Cache of built model architectures (on CPU) for fast cloning
-    _model_cache: dict = {}
+    # Cache of built model architectures (on CPU) for fast cloning.
+    # Bounded LRU (max 4 entries) — each entry holds a full model in RAM,
+    # so an unbounded cache would grow without limit across many configs.
+    _model_cache: OrderedDict = OrderedDict()
+    _MODEL_CACHE_MAXSIZE = 4
+
+    @staticmethod
+    def clear_cache():
+        """Clear the architecture cache and blank state-dict cache."""
+        ModelLoader._model_cache.clear()
+        ModelLoader._blank_cache.clear()
+
+    @staticmethod
+    def _detect_moe_config(state: dict) -> tuple[int, bool, int | None] | None:
+        """Single-pass scan of checkpoint keys for MoE architecture info.
+
+        Returns (n_experts, has_shared, d_ff) if the checkpoint contains MoE
+        expert weights, else None. Replaces the previous repeated full-dict
+        scans (any() + set comprehension + next()).
+        """
+        expert_ids: set = set()
+        has_shared = False
+        w1_key = None
+        for k in state:
+            if "ffn.shared." in k:
+                has_shared = True
+            idx = k.find("ffn.experts.")
+            if idx < 0:
+                continue
+            expert_ids.add(k[idx + len("ffn.experts."):].split(".")[0])
+            if w1_key is None and "ffn.experts.0.w1.weight" in k:
+                w1_key = k
+        if not expert_ids:
+            return None
+        d_ff = state[w1_key].shape[0] if w1_key else None
+        return len(expert_ids), has_shared, d_ff
 
     @staticmethod
     def build_model_fast(config: ModelConfig, checkpoint_path: str | None = None,
@@ -923,12 +1099,17 @@ class ModelLoader:
             model = ConfigurableResearchLLM(config).to(device)
             # Cache on CPU to avoid VRAM duplication on deepcopy
             ModelLoader._model_cache[sig] = model.cpu()
+            ModelLoader._model_cache.move_to_end(sig)
+            # LRU eviction: keep at most _MODEL_CACHE_MAXSIZE architectures.
+            while len(ModelLoader._model_cache) > ModelLoader._MODEL_CACHE_MAXSIZE:
+                ModelLoader._model_cache.popitem(last=False)
             model = model.to(device)
             t_arch = time.time() - t_arch
             print(f"  [FastBuild] Architecture built in {t_arch:.1f}s (cached)")
         else:
             t_clone = time.time()
             cached = ModelLoader._model_cache[sig]
+            ModelLoader._model_cache.move_to_end(sig)  # mark as recently used
             # Deep copy the cached model (CPU — no VRAM overhead)
             import copy
             model = copy.deepcopy(cached).to(device)
@@ -949,13 +1130,11 @@ class ModelLoader:
             state = load_checkpoint(checkpoint_path, map_location="cpu")
             if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
                 state = state["model_state"]
-            # Auto-detect MoE
-            if any("ffn.experts." in k for k in state):
+            # Auto-detect MoE (single-pass key scan)
+            moe_info = ModelLoader._detect_moe_config(state)
+            if moe_info is not None:
                 from research.moe import replace_ffn_with_moe
-                n_experts = len(set(k.split("ffn.experts.")[1].split(".")[0] for k in state if "ffn.experts." in k))
-                has_shared = any("ffn.shared." in k for k in state)
-                w1_key = next((k for k in state if "ffn.experts.0.w1.weight" in k), None)
-                d_ff = state[w1_key].shape[0] if w1_key else None
+                n_experts, has_shared, d_ff = moe_info
                 effective_top_k = moe_top_k if moe_top_k else n_experts
                 # Use dense_bypass when moe_top_k=0 (skip router, run all experts).
                 # This reproduces dense FFN output when router is untrained.
@@ -1020,17 +1199,15 @@ class ModelLoader:
             if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
                 state = state["model_state"]
             # Auto-detect MoE checkpoint and replace FFN layers before loading
-            if any("ffn.experts." in k for k in state):
+            # (single-pass key scan; also infers d_ff from expert weight shape)
+            moe_info = ModelLoader._detect_moe_config(state)
+            if moe_info is not None:
                 from research.moe import replace_ffn_with_moe
                 # Infer MoE config from checkpoint keys
-                expert_keys = [k for k in state if "ffn.experts.0." in k]
-                n_experts = len(set(k.split("ffn.experts.")[1].split(".")[0] for k in state if "ffn.experts." in k))
-                has_shared = any("ffn.shared." in k for k in state)
-                # Infer d_ff from expert weight shape
-                w1_key = next((k for k in state if "ffn.experts.0.w1.weight" in k), None)
-                d_ff = state[w1_key].shape[0] if w1_key else None
-                effective_top_k = moe_top_k if moe_top_k else n_experts
-                replace_ffn_with_moe(model, n_experts=n_experts, top_k=effective_top_k,
+                n_experts, has_shared, d_ff = moe_info
+                # build_model has no moe_top_k parameter — run all experts
+                # (dense behaviour) when auto-detecting from a checkpoint.
+                replace_ffn_with_moe(model, n_experts=n_experts, top_k=n_experts,
                                      d_model=config.d_model,
                                      shared_expert=has_shared, d_ff=d_ff)
                 model = model.to(device)
@@ -1063,8 +1240,13 @@ class ModelLoader:
         """
         model.eval()
         device = next(model.parameters()).device
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        prompt_ids = inputs.input_ids
+        inputs = tokenizer(prompt, return_tensors="pt")
+        # Handle both HF BatchEncoding (.to()) and plain dict (gigatoken)
+        if hasattr(inputs, 'to'):
+            inputs = inputs.to(device)
+        else:
+            inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+        prompt_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs.input_ids
         B, prompt_len = prompt_ids.shape
         eos_id = tokenizer.eos_token_id
 
@@ -1079,10 +1261,23 @@ class ModelLoader:
         head_dim = cfg.d_model // cfg.n_heads
         dtype = next(model.parameters()).dtype
 
+        # For hybrid conv/attention models (v4+): conv layers don't use KV cache.
+        # Allocate 0 heads for conv layers to save VRAM (22 layers × ~3MB each).
+        layer_types = getattr(cfg, 'layer_types', None)
+        if layer_types is not None:
+            n_kv_heads_per_layer = [
+                n_kv_heads if (i < len(layer_types) and layer_types[i] in ("attention", "attn"))
+                else 0
+                for i in range(cfg.n_layers)
+            ]
+        else:
+            n_kv_heads_per_layer = None
+
         cache = PreAllocatedKVCache(
             n_layers=cfg.n_layers, batch=B, n_kv_heads=n_kv_heads,
             max_seq_len=min(cfg.max_seq_len, max_total),
             head_dim=head_dim, dtype=dtype, device=device,
+            n_kv_heads_per_layer=n_kv_heads_per_layer,
         )
 
         with torch.no_grad():
@@ -1090,12 +1285,16 @@ class ModelLoader:
                 pos = prompt_len + step
                 if step == 0:
                     # Prefill: feed the full prompt.
+                    # use_cache=True so conv layers initialize their state buffer.
                     idx_cond = out_ids[:, :prompt_len]
-                    logits, _ = model(idx_cond, preallocated_cache=cache)
+                    out = model(idx_cond, preallocated_cache=cache, use_cache=True)
+                    logits = out[0]
                 else:
                     # Decode: feed only the last generated token.
+                    # use_cache=True so conv layers use incremental conv with state.
                     idx_cond = out_ids[:, pos - 1:pos]
-                    logits, _ = model(idx_cond, preallocated_cache=cache)
+                    out = model(idx_cond, preallocated_cache=cache, use_cache=True)
+                    logits = out[0]
 
                 logits = logits[:, -1, :] / max(temperature, 1e-5)
 

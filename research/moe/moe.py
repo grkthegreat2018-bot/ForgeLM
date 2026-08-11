@@ -87,7 +87,7 @@ class Router(nn.Module):
             expert_idx = top_k_indices[:, k]  # (N,)
             weight = top_k_weights[:, k]  # (N,)
             dispatch_mask.scatter_(1, expert_idx.unsqueeze(1), 1.0)
-            gating_weights.scatter_(1, expert_idx.unsqueeze(1), weight.unsqueeze(1))
+            gating_weights.scatter_(1, expert_idx.unsqueeze(1), weight.unsqueeze(1).to(gating_weights.dtype))
 
         # Load balancing loss (encourages uniform expert utilization).
         # Following Switch Transformer: loss = n_experts * sum(mean_gate * mean_dispatch)

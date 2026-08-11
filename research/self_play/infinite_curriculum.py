@@ -52,7 +52,7 @@ from research.json_compat import dumps, loads
 
 # Pre-compiled regex patterns (avoids 450+ recompilations per session).
 _RE_PYTHON_BLOCK = re.compile(r'```python\s*\n(.*?)```', re.DOTALL)
-_RE_TASK_DESC = re.compile(r'#\s*Task:\s*(.+?)(?:\n|$)')
+_RE_TASK_DESC = re.compile(r'#\s*(?:TASK|Task):\s*(.+?)(?:\n|$)')
 _RE_QUOTED = re.compile(r'["\'](.+?)["\']')
 _RE_SOLVE_SIG = re.compile(r'def\s+solve\s*(\(.*?\))')
 _RE_SOLVE_TEST = re.compile(r'#\s*solve\s*\((.+?)\)\s*==\s*(.+?)(?:\n|$)')
@@ -94,6 +94,10 @@ class CurriculumStats:
     total_failed: int = 0          # solver failed
     # Per-domain rolling success rate (for Goldilocks difficulty)
     domain_results: dict[str, list[bool]] = field(default_factory=dict)
+    # AZR proposer reward tracking (r_propose = 1 - |success_rate - 0.5|)
+    proposer_rewards: list[float] = field(default_factory=list)
+    # Task diversity tracking (semantic distance between proposed tasks)
+    task_embeddings: list[list[float]] = field(default_factory=list)
 
     @property
     def validation_rate(self) -> float:
@@ -109,15 +113,61 @@ class CurriculumStats:
             return 0.5  # unknown → assume medium
         return sum(results) / len(results)
 
+    @property
+    def mean_proposer_reward(self) -> float:
+        """AZR learnability reward: peaks at 50% solver success."""
+        if not self.proposer_rewards:
+            return 0.0
+        return sum(self.proposer_rewards) / len(self.proposer_rewards)
+
+    @property
+    def diversity_score(self) -> float:
+        """Mean pairwise cosine distance between recent task embeddings.
+        Target >0.6 (alert if <0.6 = mode collapse)."""
+        if len(self.task_embeddings) < 2:
+            return 1.0
+        import numpy as np
+        embs = np.array(self.task_embeddings[-100:])  # last 100
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        normed = embs / (norms + 1e-8)
+        sim_matrix = normed @ normed.T
+        n = len(embs)
+        # mean of off-diagonal cosine similarities
+        total_sim = (sim_matrix.sum() - n) / (n * (n - 1))
+        return float(1.0 - total_sim)
+
 
 # ─── Task proposal prompts ────────────────────────────────────────────
 
 # Mode 1: Induction — model writes a function + test cases (code completion style)
-# Push-limits: the prompt asks for NON-TRIVIAL tasks with branching, edge cases
-INDUCTION_PROMPT = '''# Implement: {desc_hint}
-# Write solve{signature} that solves this problem using CONDITIONAL LOGIC or LOOPS.
+# Push-limits: the prompt asks for NON-TRIVIAL tasks with branching, edge cases.
+# Few-shot example pins the exact format the parser expects:
+#   `def solve(...):` body + `# solve(args) == expected` comment test cases.
+# IMPORTANT: the example uses a DIFFERENT signature than the target so the
+# model can't just copy it verbatim. The desc_hint is placed FIRST and
+# emphasized so it drives the task, not the example.
+_INDUCTION_EXAMPLE = '''# FORMAT EXAMPLE (different task — do NOT copy):
+# def solve(nums: list) -> int:
+#     total = 0
+#     for n in nums:
+#         if n > 0:
+#             total += n
+#     return total
+# # solve([1, -2, 3]) == 4
+# # solve([]) == 0
+# # solve([-1, -2]) == 0
+# # solve([5]) == 5
+'''
+
+INDUCTION_PROMPT = '''# TASK: {desc_hint}
+# Write solve{signature} that solves the ABOVE problem using CONDITIONAL LOGIC or LOOPS.
 # Do NOT just call a builtin (sum, max, len, sorted, etc.) — implement the logic yourself.
-# After the function, write 4+ test cases with edge cases (empty, negative, single element, large).
+# After the function, write 4+ test cases as comments in EXACTLY this format:
+#   # solve(<args>) == <expected>
+# Include edge cases (empty, negative, single element, large).
+
+''' + _INDUCTION_EXAMPLE + '''
+# Now implement the TASK at the top. Start with `def solve{signature}:`
 
 def solve{signature}:
 '''
@@ -169,16 +219,16 @@ class InfiniteCurriculum:
     DOMAINS = ["algorithms", "math", "strings", "logic", "data_structures"]
     DIFFICULTIES = ["easy", "medium", "hard"]
 
-    # Push-limits mode: start at hard, never go below medium.
-    # The Goldilocks zone is LOWER than standard AZR — we WANT the model to
-    # struggle (10-40% success). If it's solving everything, the tasks are too easy.
-    # Standard AZR targets 50% success. We target 20% — the model should FAIL
-    # most tasks, learning from the ones it does solve.
-    GOLDILOCKS_LOW = 0.1
-    GOLDILOCKS_HIGH = 0.4
-    TARGET_SUCCESS = 0.2  # ideal: model fails 80% of the time (pushing limits)
-    MIN_DIFFICULTY = "medium"  # never propose easy tasks
-    DEFAULT_DIFFICULTY = "hard"  # start at hard
+    # AZR-optimal Goldilocks zone (NeurIPS 2025 Spotlight + "Survive or Collapse"
+    # arxiv 2605.22217): proposer reward peaks at 50% solver success rate.
+    # Tasks too easy (>80%) or too hard (<20%) get zero/negative proposer reward.
+    # Previous setting (target=0.2) was too hard — model failed 80% and learned
+    # almost nothing. 50% is the proven optimal learnability point.
+    GOLDILOCKS_LOW = 0.2
+    GOLDILOCKS_HIGH = 0.8
+    TARGET_SUCCESS = 0.5  # AZR optimal: model solves ~50% (max learnability)
+    MIN_DIFFICULTY = "easy"  # allow easy tasks early in curriculum
+    DEFAULT_DIFFICULTY = "medium"  # start at medium, adapt based on success rate
 
     # Minimum complexity requirements — reject trivial tasks
     MIN_TEST_CASES = 4          # need at least 4 test cases
@@ -197,7 +247,8 @@ class InfiniteCurriculum:
                  temperature: float = 0.8,
                  top_k: int = 50,
                  top_p: float = 0.95,
-                 task_queue_dir: str = None):
+                 task_queue_dir: str = None,
+                 live_status=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -205,6 +256,7 @@ class InfiniteCurriculum:
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
+        self.live = live_status
         if task_queue_dir is None:
             from research.paths import CURRICULUM_DIR
             task_queue_dir = CURRICULUM_DIR
@@ -219,6 +271,10 @@ class InfiniteCurriculum:
         self._task_queue: list[ProposedTask] = []
         # Failed/rejected tasks (for diversity — don't re-propose similar)
         self._rejected_signatures: set = set()
+        # All submitted task descriptions (valid + rejected) to prevent clones.
+        # Stored normalized (lowercase, stripped, collapsed whitespace).
+        self._seen_descriptions: set[str] = set()
+        self._seen_desc_path = self.task_queue_dir / "seen_descriptions.json"
 
         # Forward cache for repeated prompt prefixes (C2 — 20-40% fewer forward passes)
         from research.runtime.forward_cache import ForwardCache
@@ -259,11 +315,21 @@ class InfiniteCurriculum:
 
         valid_tasks = []
         proposed = 0
+        parse_failed = 0
+        validated_count = 0
+
+        # Degeneration guard: if the model emits >MAX_CONSECUTIVE_FAILS parse
+        # failures in a row, stop early (was looping 100 times producing
+        # garbage). The few-shot prompt should fix most failures, but this
+        # prevents pathological stalls.
+        MAX_CONSECUTIVE_FAILS = 12
+        consecutive_fails = 0
 
         while proposed < n:
             # Generate a batch of prompts
             current_batch = min(batch_size, n - proposed)
             prompts = []
+            self._batch_used_hints = set()  # reset per-batch hint dedup
             for _ in range(current_batch):
                 sig_hint = self._random_signature(domain)
                 t_args, t_expected = self._example_test_cases(domain, sig_hint)
@@ -318,7 +384,18 @@ class InfiniteCurriculum:
                         "Detect if a binary tree is a valid BST",
                     ],
                 }
-                desc_hint = self.rng.choice(desc_hints.get(domain, desc_hints["algorithms"]))
+                # Sample desc_hint without replacement within a batch to
+                # encourage diverse prompts (prevents identical prompts → clone tasks)
+                available_hints = desc_hints.get(domain, desc_hints["algorithms"])
+                unused = [h for h in available_hints
+                          if h not in self._batch_used_hints]
+                if unused:
+                    desc_hint = self.rng.choice(unused)
+                else:
+                    # All used — reset and pick fresh
+                    self._batch_used_hints = set()
+                    desc_hint = self.rng.choice(available_hints)
+                self._batch_used_hints.add(desc_hint)
                 prompt = INDUCTION_PROMPT.format(
                     domain=domain, difficulty=difficulty,
                     signature=sig_hint, desc_hint=desc_hint,
@@ -337,12 +414,22 @@ class InfiniteCurriculum:
                     task.raw_output = full_code
 
                 if task is None:
+                    parse_failed += 1
+                    consecutive_fails += 1
                     try:
                         print(f"  [Curriculum] Task {proposed}/{n}: PARSE FAILED")
                     except OSError:
                         pass
+                    if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+                        print(f"  [Curriculum] {consecutive_fails} consecutive parse failures — "
+                              f"stopping early (got {len(valid_tasks)} valid)")
+                        if self.live is not None:
+                            self.live.curriculum_progress(
+                                proposed, validated_count, parse_failed)
+                        return valid_tasks
                     continue
 
+                consecutive_fails = 0  # reset on a successful parse
                 self.stats.total_proposed += 1
                 safe_desc = task.description[:40].encode('ascii', 'replace').decode('ascii')
                 try:
@@ -351,23 +438,38 @@ class InfiniteCurriculum:
                 except OSError:
                     pass
 
+                # Clone guard: reject tasks with descriptions we've already seen
+                if self._is_seen_description(task.description):
+                    print("    -> REJECTED (duplicate description — clone)")
+                    continue
+
                 # Complexity filter: reject trivial tasks (push-limits mode)
                 if not self._is_complex_enough(task):
                     print("    -> REJECTED (too simple)")
+                    self._mark_description_seen(task.description)
                     continue
 
                 # Validate: run proposer's reference solution against test cases
                 if self._validate_task(task):
                     task.validated = True
                     self.stats.total_validated += 1
+                    validated_count += 1
                     valid_tasks.append(task)
                     self._task_queue.append(task)
                     self._save_task(task)
+                    self._mark_description_seen(task.description)
                     print(f"    -> VALIDATED (conf={task.proposer_confidence})")
                 else:
                     self._rejected_signatures.add(task.signature)
+                    self._mark_description_seen(task.description)
                     print("    -> REJECTED (validation failed)")
 
+            # Live progress per batch
+            if self.live is not None:
+                self.live.curriculum_progress(proposed, validated_count, parse_failed)
+
+        # Final flush of seen descriptions to disk
+        self._save_seen_descriptions()
         return valid_tasks
 
     def _generate_batch(self, prompts: list[str]) -> list[str]:
@@ -490,7 +592,15 @@ class InfiniteCurriculum:
             probs.scatter_(-1, sorted_idx, (sorted_probs * keep.to(probs.dtype)))
             probs = probs / probs.sum(dim=-1, keepdim=True)
 
-        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+        # Per-sequence sampling with different seeds to prevent cloning.
+        B = probs.shape[0]
+        out = torch.empty(B, dtype=torch.long, device=probs.device)
+        for b in range(B):
+            seed = int(torch.randint(0, 2**31 - 1, (1,), device=probs.device).item())
+            gen = torch.Generator(device=probs.device)
+            gen.manual_seed(seed)
+            out[b] = torch.multinomial(probs[b], num_samples=1, generator=gen).squeeze()
+        return out
 
     def _propose_one(self, domain: str, difficulty: str,
                      mode: str = "induction") -> ProposedTask | None:
@@ -903,6 +1013,8 @@ class InfiniteCurriculum:
         - Solutions that are just a single builtin call (sum, max, len, etc.)
         - Solutions with no branching (no if/for/while)
         - Tasks with trivial signatures (no arguments)
+        - Identity mappings (all test cases: solve(x) == x) — proposer gaming
+        - Constant mappings (all test cases: solve(x) == c) — proposer gaming
         """
         # Minimum test cases
         if len(task.test_cases) < self.MIN_TEST_CASES:
@@ -912,6 +1024,22 @@ class InfiniteCurriculum:
         sig_clean = task.signature.split("->")[0].strip().strip("()")
         if not sig_clean or sig_clean == "":
             return False
+
+        # Reject identity mappings: all test cases where args[0] == expected
+        # This catches the proposer gaming with `return n` tasks
+        if len(task.test_cases) >= 3:
+            identity_count = sum(
+                1 for tc in task.test_cases
+                if tc.get("args") and tc["args"][0] == tc.get("expected")
+            )
+            if identity_count >= len(task.test_cases) * 0.8:
+                return False  # identity mapping — trivial, no learning value
+
+        # Reject constant mappings: all test cases return the same constant
+        if len(task.test_cases) >= 3:
+            expected_vals = [tc.get("expected") for tc in task.test_cases]
+            if len(set(repr(v) for v in expected_vals)) == 1:
+                return False  # constant mapping — trivial
 
         # Check the reference implementation for complexity
         ref_code = self._extract_reference_code(task.raw_output)
@@ -934,6 +1062,9 @@ class InfiniteCurriculum:
                         ret_expr)
                     if builtin_match:
                         return False  # trivial: just a builtin wrapper
+                    # Reject bare `return n` or `return x` (identity return)
+                    if re.match(r'^return\s+[a-z_]\w*$', ret_expr) and len(body_lines) <= 2:
+                        return False  # trivial: just returning the argument
 
                 # Check for branching (if/for/while) — encourage but don't require
                 # (the model often generates test cases without reference code)
@@ -1088,10 +1219,228 @@ class InfiniteCurriculum:
             "best_quality": 1.0 if best_success else 0.0,
         }
 
+    # ─── LADDER: Recursive Problem Decomposition ──────────────────
+
+    LADDER_MAX_DEPTH = 3  # max decomposition depth (LADDER paper uses 3-5)
+    LADDER_N_VARIANTS = 3  # easier variants per decomposition step
+
+    def solve_with_ladder(self, task: ProposedTask,
+                          engine: Any | None = None,
+                          depth: int = 0) -> dict:
+        """Solve a task using LADDER recursive decomposition.
+
+        LADDER (arxiv 2503.00735): when the solver fails a hard task, generate
+        easier variants, solve those first, then retry the original.
+        Llama 3.2 3B: 1% → 82% on MIT Integration Bee with this approach.
+
+        Args:
+            task: the proposed task to solve
+            engine: optional RecursiveSelfPlay engine
+            depth: current decomposition depth (0 = original task)
+
+        Returns:
+            result dict with final_success, attempts, decomposition_chain
+        """
+        # First, try solving the task directly
+        result = self.solve_task(task, engine=engine)
+
+        if result.get("final_success", False):
+            result["decomposition_chain"] = []
+            return result
+
+        # Failed — if at max depth, return failure
+        if depth >= self.LADDER_MAX_DEPTH:
+            result["decomposition_chain"] = []
+            result["ladder_exhausted"] = True
+            return result
+
+        # Generate easier variants of the task
+        variants = self._generate_easier_variants(task, n=self.LADDER_N_VARIANTS)
+
+        if not variants:
+            result["decomposition_chain"] = []
+            return result
+
+        # Solve each variant recursively (stepping stones)
+        variant_solutions = []
+        for variant in variants:
+            v_result = self.solve_with_ladder(variant, engine=engine, depth=depth + 1)
+            variant_solutions.append({
+                "variant": variant,
+                "result": v_result,
+                "depth": depth + 1,
+            })
+
+        # Check if any variant succeeded — use as context for retrying original
+        successful_variants = [v for v in variant_solutions if v["result"].get("final_success")]
+        if not successful_variants:
+            result["decomposition_chain"] = variant_solutions
+            return result
+
+        # Retry original task with variant solutions as context (stepping stones)
+        # Build a hint prompt that includes the simpler solution pattern
+        hint_context = self._build_ladder_hint(task, successful_variants)
+        result = self._solve_with_hint(task, hint_context, engine=engine)
+
+        result["decomposition_chain"] = variant_solutions
+        result["ladder_depth"] = depth
+        result["n_variants_solved"] = len(successful_variants)
+        return result
+
+    def _generate_easier_variants(self, task: ProposedTask,
+                                  n: int = 3) -> list[ProposedTask]:
+        """Generate n easier variants of a task for LADDER decomposition.
+
+        Strategies (in order of preference):
+        1. Fewer test cases (reduce input complexity)
+        2. Simpler inputs (smaller numbers, shorter strings)
+        3. Relaxed constraints (allow simpler algorithms)
+        """
+        variants = []
+
+        # Strategy 1: Reduce test cases to simplest ones
+        if len(task.test_cases) > 2:
+            simple_tests = task.test_cases[:2]  # keep 2 simplest
+            variants.append(ProposedTask(
+                id=f"{task.id}_simple_tests",
+                domain=task.domain,
+                difficulty="easy",
+                description=task.description + " (simplified: fewer tests)",
+                signature=task.signature,
+                solve_name=task.solve_name,
+                test_cases=simple_tests,
+                stress_index=None,
+                archetype=task.archetype,
+            ))
+
+        # Strategy 2: Simplify test case inputs
+        simplified_tests = []
+        for tc in task.test_cases[:4]:  # take up to 4
+            simple_args = self._simplify_args(tc["args"])
+            simplified_tests.append({"args": simple_args, "expected": tc["expected"]})
+
+        if simplified_tests and len(simplified_tests) < len(task.test_cases):
+            variants.append(ProposedTask(
+                id=f"{task.id}_simple_inputs",
+                domain=task.domain,
+                difficulty="easy",
+                description=task.description + " (simplified: smaller inputs)",
+                signature=task.signature,
+                solve_name=task.solve_name,
+                test_cases=simplified_tests,
+                stress_index=None,
+                archetype=task.archetype,
+            ))
+
+        # Strategy 3: Model-generated easier variant
+        if len(variants) < n:
+            variant_desc = self._generate_easier_description(task)
+            if variant_desc:
+                variants.append(ProposedTask(
+                    id=f"{task.id}_model_variant",
+                    domain=task.domain,
+                    difficulty="easy",
+                    description=variant_desc,
+                    signature=task.signature,
+                    solve_name=task.solve_name,
+                    test_cases=task.test_cases[:3],
+                    stress_index=None,
+                    archetype=task.archetype,
+                ))
+
+        return variants[:n]
+
+    def _simplify_args(self, args: list) -> list:
+        """Simplify function arguments to smaller values."""
+        simplified = []
+        for arg in args:
+            if isinstance(arg, int):
+                simplified.append(abs(arg) % 10 if abs(arg) > 10 else arg)
+            elif isinstance(arg, list):
+                simplified.append(arg[:3] if len(arg) > 3 else arg)
+            elif isinstance(arg, str):
+                simplified.append(arg[:10] if len(arg) > 10 else arg)
+            else:
+                simplified.append(arg)
+        return simplified
+
+    def _generate_easier_description(self, task: ProposedTask) -> str | None:
+        """Ask the model to generate an easier variant of the task description."""
+        prompt = f"""Simplify this programming task to make it easier:
+
+Original: {task.description}
+
+Provide a simpler version that handles a subset of the problem. Just the description, no code:
+"""
+        try:
+            completion = self._generate(prompt)
+            # Take first line as simplified description
+            desc = completion.strip().split("\n")[0][:200]
+            return desc if desc else None
+        except Exception:
+            return None
+
+    def _build_ladder_hint(self, task: ProposedTask,
+                           successful_variants: list[dict]) -> str:
+        """Build a hint prompt from successful variant solutions."""
+        hints = []
+        for sv in successful_variants[:2]:  # use at most 2 hints
+            v_result = sv["result"]
+            if v_result.get("attempts"):
+                best_attempt = v_result["attempts"][0]
+                hints.append(f"Similar simpler problem solution:\n{best_attempt['code'][:300]}")
+
+        hint_text = "\n\n".join(hints) if hints else ""
+        return f"Here are solutions to simpler versions of this problem:\n{hint_text}\n\nNow solve the original:"
+
+    def _solve_with_hint(self, task: ProposedTask, hint: str,
+                         engine: Any | None = None) -> dict:
+        """Solve a task with an additional hint context (from LADDER variants)."""
+        from research.evaluation.goal_tasks import build_goal_prompt
+        goal_task = GoalTask(
+            id=task.id, domain=task.domain, difficulty=task.difficulty,
+            description=task.description, input_signature=task.signature,
+            solve_name=task.solve_name, test_cases=task.test_cases,
+            stress_index=task.stress_index, archetype=task.archetype,
+        )
+        # Prepend hint to the goal prompt
+        original_prompt = build_goal_prompt(goal_task)
+        hinted_prompt = hint + "\n\n" + original_prompt
+
+        if engine is not None:
+            # Patch the prompt in the engine call
+            result = engine.run_goal_task(goal_task, k_samples=1, use_reasoning=True)
+            return result
+        else:
+            # Direct solve with hint
+            completion = self._generate(hinted_prompt)
+            code_match = _RE_PYTHON_BLOCK.search(completion)
+            solution_body = code_match.group(1) if code_match else completion
+            full_solution = hinted_prompt + solution_body
+
+            test_code = full_solution + "\n"
+            for tc in task.test_cases:
+                args_str = ", ".join(repr(a) for a in tc["args"])
+                expected_repr = repr(tc["expected"])
+                test_code += f"\nassert solve({args_str}) == {expected_repr}"
+            test_code += "\nprint('PASS')"
+
+            result = self._execute_sandbox(test_code, timeout_s=5.0)
+            success = result.get("returncode") == 0 and "PASS" in result.get("stdout", "")
+
+            return {
+                "final_success": success,
+                "attempts": [{"code": full_solution, "success": success,
+                              "error": result.get("stderr", ""), "round": 0}],
+                "rounds_used": 1,
+                "best_quality": 1.0 if success else 0.0,
+                "used_ladder_hint": True,
+            }
+
     # ─── Difficulty Adaptation ─────────────────────────────────────
 
     def record_result(self, task: ProposedTask, success: bool):
-        """Record solver result for adaptive difficulty."""
+        """Record solver result for adaptive difficulty and proposer reward."""
         self.stats.total_solved += success
         self.stats.total_failed += (not success)
 
@@ -1100,24 +1449,46 @@ class InfiniteCurriculum:
         if len(results) > self.WINDOW_SIZE:
             results = results[-self.WINDOW_SIZE:]
 
-    def _adaptive_difficulty(self, domain: str) -> str:
-        """Pick difficulty based on recent solver success rate (push-limits mode).
+        # AZR proposer reward: r_propose = 1 - |domain_success_rate - 0.5|
+        # Peaks at 50% success (max learnability). Zero outside [0.0, 1.0].
+        domain_rate = self.stats.domain_success_rate(task.domain)
+        proposer_reward = 1.0 - abs(domain_rate - 0.5)
+        self.stats.proposer_rewards.append(proposer_reward)
+        if len(self.stats.proposer_rewards) > 1000:
+            self.stats.proposer_rewards = self.stats.proposer_rewards[-1000:]
 
-        In push-limits mode, we START at hard and only ease to medium if the
-        model is failing >90% of the time. We NEVER propose easy tasks.
-        The goal is to keep the model at the edge of its capability.
+    def record_task_embedding(self, task: ProposedTask, embedding: list[float]):
+        """Record a task embedding for diversity tracking.
+        Call this after a task is validated. Embedding can be a simple
+        bag-of-words hash or a model-generated embedding."""
+        self.stats.task_embeddings.append(embedding)
+        if len(self.stats.task_embeddings) > 500:
+            self.stats.task_embeddings = self.stats.task_embeddings[-500:]
+
+    def _adaptive_difficulty(self, domain: str) -> str:
+        """Pick difficulty based on recent solver success rate (AZR Goldilocks).
+
+        AZR-optimal: target 50% success rate. Adapt difficulty to keep the model
+        in the [0.2, 0.8] learnability zone. Easy tasks are allowed early in the
+        curriculum (when success rate is very low) to bootstrap.
         """
         rate = self.stats.domain_success_rate(domain)
 
         if rate > self.GOLDILOCKS_HIGH:
-            # Model is solving too many → escalate to hard
+            # Model is solving >80% → escalate to hard
             return "hard"
         elif rate < self.GOLDILOCKS_LOW:
-            # Model is failing almost everything → ease to medium (never easy)
-            return "medium"
+            # Model is failing >80% → ease to easy (bootstrap)
+            return "easy"
+        elif rate < 0.35:
+            # Below 35% — mostly easy/medium
+            return self.rng.choice(["easy", "medium", "medium"])
+        elif rate > 0.65:
+            # Above 65% — mostly hard
+            return self.rng.choice(["medium", "hard", "hard"])
         else:
-            # In the push zone — mostly hard, some medium
-            return self.rng.choice(["medium", "hard", "hard", "hard"])
+            # In the Goldilocks zone (35-65%) — balanced mix
+            return self.rng.choice(["easy", "medium", "medium", "hard"])
 
     # ─── Task Queue Management ─────────────────────────────────────
 
@@ -1190,6 +1561,44 @@ class InfiniteCurriculum:
                 continue
 
         print(f"  [Curriculum] Loaded {len(self._task_queue)} tasks from disk")
+        self._load_seen_descriptions()
+
+    def _load_seen_descriptions(self):
+        """Load seen task descriptions from disk to prevent clone tasks."""
+        if self._seen_desc_path.exists():
+            try:
+                self._seen_descriptions = set(loads(self._seen_desc_path.read_text()))
+                print(f"  [Curriculum] Loaded {len(self._seen_descriptions)} seen descriptions")
+            except (json.JSONDecodeError, OSError):
+                self._seen_descriptions = set()
+
+    def _save_seen_descriptions(self):
+        """Persist seen descriptions to disk."""
+        try:
+            with open(self._seen_desc_path, "w") as f:
+                json.dump(sorted(self._seen_descriptions), f)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _normalize_desc(desc: str) -> str:
+        """Normalize a task description for dedup comparison."""
+        import re
+        # Lowercase, collapse whitespace, strip trailing punctuation
+        d = re.sub(r'\s+', ' ', desc.lower().strip())
+        d = d.rstrip('.;:')
+        return d
+
+    def _is_seen_description(self, desc: str) -> bool:
+        """Check if a task description has been seen before (case-insensitive)."""
+        return self._normalize_desc(desc) in self._seen_descriptions
+
+    def _mark_description_seen(self, desc: str):
+        """Record a task description as seen (valid or rejected)."""
+        self._seen_descriptions.add(self._normalize_desc(desc))
+        # Periodically save (every 10 new descriptions)
+        if len(self._seen_descriptions) % 10 == 0:
+            self._save_seen_descriptions()
 
     # ─── Convert to GoalTask (for existing training pipeline) ──────
 
@@ -1219,6 +1628,11 @@ class InfiniteCurriculum:
             print(f"    Solved: {self.stats.total_solved} "
                   f"({self.stats.solve_rate:.1%})")
             print(f"    Queue: {len(self._task_queue)} tasks")
+            print(f"    Proposer reward: {self.stats.mean_proposer_reward:.3f} "
+                  f"(AZR optimal=0.5 at 50% success)")
+            div = self.stats.diversity_score
+            div_alert = " [WARNING: low diversity]" if div < 0.6 else ""
+            print(f"    Diversity score: {div:.3f}{div_alert}")
             for domain in self.DOMAINS:
                 rate = self.stats.domain_success_rate(domain)
                 n = len(self.stats.domain_results.get(domain, []))

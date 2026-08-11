@@ -45,17 +45,17 @@ def load_model():
     print("=" * 60)
 
     # 1. Load ForgeEngine
-    print("\n[1/3] Loading ForgeLM v1...")
+    print("\n[1/3] Loading ForgeLM v2...")
     engine = ForgeEngine.from_checkpoint(
-        checkpoint="research/checkpoints/forgelm_v1.safetensors",
-        config_name="forgelm_v1",
+        checkpoint="research/checkpoints/forgelm_v2.safetensors",
+        config_name="forgelm_v2",
         tokenizer_path="research/checkpoints/qwen_hf",
         device="cuda",
     )
 
     # 2. Load DSpark head
     print("\n[2/3] Loading DSpark head...")
-    dspark_path = "research/checkpoints/dspark_forgelm_v1.safetensors"
+    dspark_path = "research/checkpoints/dspark_forgelm_v2.safetensors"
     if os.path.exists(dspark_path):
         state = load_file(dspark_path)
         clean_state = {k.replace("dspark.", "", 1): v for k, v in state.items()}

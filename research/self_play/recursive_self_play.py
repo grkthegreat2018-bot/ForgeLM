@@ -68,18 +68,26 @@ class RecursiveSelfPlay(SelfPlaySandbox):
       - Learnings extraction (what worked vs what didn't)
     """
 
-    def __init__(self, model, tokenizer, log_dir: str = "research/data/recursive_self_play",
+    def __init__(self, model, tokenizer, log_dir: str = None,
                  device: str = "cuda", max_gen_tokens: int = 150,
                  max_rounds: int = 5, temp_dir: str = None,
                  temperature: float = 0.0, top_k: int = 0, top_p: float = 0.0,
-                 vram_manager=None):
-        super().__init__(model, tokenizer, log_dir, device, max_gen_tokens)
-        self.max_rounds = max_rounds
+                 vram_manager=None, verify_workers: int = 4,
+                 live_status=None, kv_int8: bool = False):
+        if log_dir is None:
+            log_dir = os.getenv("FORGE_RECURSIVE_SELF_PLAY_DIR",
+                                "research/data/recursive_self_play")
         if temp_dir is None:
             from research.paths import TMP_DIR, as_str
             temp_dir = as_str(TMP_DIR)
         self.temp_dir = temp_dir
-        os.makedirs(temp_dir, exist_ok=True)
+        # Base class wires the executor (with temp_dir) and the persistent
+        # fast path — previously lost because DDriveSandboxExecutor.execute
+        # overrode it with a subprocess-only implementation.
+        super().__init__(model, tokenizer, log_dir, device, max_gen_tokens,
+                         temp_dir=temp_dir, verify_workers=verify_workers,
+                         kv_int8=kv_int8)
+        self.max_rounds = max_rounds
         # Sampling params: temperature=0 (greedy) for reproducibility,
         # temperature>0 for diverse solutions across epochs (anti-overfitting)
         self.temperature = temperature
@@ -87,9 +95,9 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         self.top_p = top_p
         # VRAM manager for dynamic memory monitoring during generation
         self.vram = vram_manager
-
-        # Override executor to use D: temp dir
-        self.executor = DDriveSandboxExecutor(temp_dir=self.temp_dir)
+        # Live status writer (research.self_play.live_status.LiveStatusWriter)
+        # — emits per-task events + heartbeat for the GUI. Optional.
+        self.live = live_status
 
         # Track reasoning improvement
         self.reasoning_history: list[dict] = []
@@ -200,8 +208,10 @@ class RecursiveSelfPlay(SelfPlaySandbox):
             newline_count = 0
             eos_id = self.tokenizer.eos_token_id
             for step in range(self.max_gen_tokens):
-                # VRAM check: abort generation if approaching OOM
-                if self.vram and step > 0 and step % 32 == 0:
+                # VRAM check: abort generation if approaching OOM.
+                # Every 16 tokens (was 32) — at ~150-token generations the old
+                # cadence only checked 4-5 times, risking OOM between checks.
+                if self.vram and step > 0 and step % 16 == 0:
                     if not self.vram.check_during_generation(
                             step, self.max_gen_tokens, label="gen_loop"):
                         break
@@ -261,6 +271,259 @@ class RecursiveSelfPlay(SelfPlaySandbox):
             "mean_logprob": sum(log_probs) / max(len(log_probs), 1),
             "confidence": pow(2.71828, sum(log_probs) / max(len(log_probs), 1)),
             "round": round_num,
+        }
+
+        return code, telemetry
+
+    def generate_fix_batch(self, fixes: list[tuple[str, str, str, int]],
+                           prev_computes: list[dict | None] | None = None
+                           ) -> list[tuple[str, dict]]:
+        """Batched fix generation — N broken-code fixes in one forward pass.
+
+        Args:
+            fixes: list of (original_code, error, task_prompt, round_num)
+            prev_computes: optional per-fix compute hints (gen_tokens/gen_ms/...)
+
+        Returns: list of (fixed_code, telemetry) tuples, same length as fixes.
+        Each fixed_code is the *full* code (context preserved) ready to execute.
+        """
+        if not fixes:
+            return []
+        if len(fixes) == 1:
+            pc = prev_computes[0] if prev_computes else None
+            fc, ft = self.generate_fix(*fixes[0], prev_compute=pc)
+            return [(fc, ft)]
+
+        # Build fix prompts (mirrors generate_fix prompt construction)
+        prompts = []
+        for i, (orig, err, task_desc, rnd) in enumerate(fixes):
+            err_short = (err or "").strip()[:500]
+            code_short = (orig or "").strip()[:800]
+            compute_info = ""
+            if prev_computes and prev_computes[i]:
+                pc = prev_computes[i]
+                compute_info = (
+                    f"# Previous compute: {pc.get('gen_tokens', 0)} tokens, "
+                    f"{pc.get('gen_ms', 0):.0f}ms gen, "
+                    f"{pc.get('exec_ms', 0):.0f}ms exec, "
+                    f"{pc.get('code_len', 0)} chars\n"
+                    f"# Aim for concise, efficient code.\n"
+                )
+            prompts.append(
+                f"# Task: {task_desc}\n"
+                f"{compute_info}"
+                f"# Previous attempt (BROKEN):\n"
+                f"{code_short}\n"
+                f"# Error:\n"
+                f"{err_short}\n"
+                f"# Fixed solution (keep it concise):\n"
+            )
+
+        # Batched generation with raw prompts + extra stop on triple newline
+        # (a fix is "done" when the model emits a blank-line gap after code).
+        results = self.generate_code_batch(
+            prompts, raw=True, stop_markers=["\n\n\n", "# Task:"])
+        out = []
+        for (code, telem) in results:
+            c = code.strip()
+            if c.startswith("```"):
+                lines = c.split("\n")
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                c = "\n".join(lines)
+            telem = dict(telem)
+            telem["round"] = fixes[len(out)][3] if len(out) < len(fixes) else 0
+            out.append((c, telem))
+        return out
+
+    def generate_reflection(self, failed_code: str, error: str,
+                            task_description: str) -> str:
+        """Generate a self-reflection on why a solution failed.
+
+        Reflect-Retry-Reward (2025): self-reflection → second attempt → reward
+        if success. +34.7% math gains at 1.5-7B scale.
+
+        The reflection is a brief analysis of WHY the code failed and WHAT
+        approach might work instead. This is fed into the fix prompt to
+        guide the next attempt.
+
+        Args:
+            failed_code: the code that failed
+            error: the error message from execution
+            task_description: the task being solved
+
+        Returns:
+            reflection text (1-3 sentences)
+        """
+        error_short = error.strip()[:300]
+        code_short = failed_code.strip()[:400]
+
+        reflection_prompt = (
+            f"# Task: {task_description}\n"
+            f"# My previous solution FAILED with this error:\n"
+            f"# {error_short}\n"
+            f"# The broken code:\n"
+            f"# {code_short}\n"
+            f"# Question: Why did this fail, and what approach should work instead?\n"
+            f"# Answer (2-3 sentences, no code):\n"
+        )
+
+        input_ids = self.tokenizer(
+            reflection_prompt, return_tensors="pt").input_ids.to(self.device)
+
+        t0 = time.time()
+        log_probs = []
+
+        with torch.no_grad():
+            # Simple generation (short reflection, max 60 tokens)
+            out_ids = input_ids.clone()
+            prompt_len = input_ids.shape[1]
+            eos_id = self.tokenizer.eos_token_id or 0
+            newline_id = self.tokenizer.encode("\n", add_special_tokens=False)
+            newline_id = newline_id[0] if newline_id else 198
+
+            cache = None
+            for step in range(60):
+                if step == 0:
+                    logits, _ = self.model(out_ids, preallocated_cache=cache) \
+                        if cache is not None else self.model(out_ids)
+                else:
+                    logits, _ = self.model(out_ids[:, -1:], preallocated_cache=cache) \
+                        if cache is not None else self.model(out_ids[:, -1:])
+
+                next_logits = logits[0, -1]
+                next_token = self._sample_next_token(next_logits)
+                lp = torch.log_softmax(next_logits, dim=-1)[next_token]
+                log_probs.append(lp.item())
+
+                new_col = torch.full((1, 1), next_token, dtype=out_ids.dtype,
+                                     device=out_ids.device)
+                out_ids = torch.cat([out_ids, new_col], dim=1)
+
+                if next_token == eos_id:
+                    break
+                if step > 5 and next_token == newline_id:
+                    break
+
+        reflection = self.tokenizer.decode(
+            out_ids[0, prompt_len:], skip_special_tokens=True).strip()
+
+        del out_ids, logits
+        torch.cuda.empty_cache()
+
+        return reflection[:300] if reflection else ""
+
+    def generate_fix_with_reflection(self, original_code: str, error: str,
+                                     task_prompt: str, round_num: int,
+                                     prev_compute: dict | None = None
+                                     ) -> tuple[str, dict]:
+        """Generate a fix using self-reflection (Reflect-Retry-Reward).
+
+        First generates a reflection on why the code failed, then uses that
+        reflection as additional context for the fix generation.
+        +34.7% math gains at 1.5-7B scale vs plain fix-retry.
+        """
+        # Generate reflection
+        reflection = self.generate_reflection(original_code, error, task_prompt)
+
+        # Build fix prompt with reflection context
+        error_short = error.strip()[:500]
+        code_short = original_code.strip()[:800]
+
+        compute_info = ""
+        if prev_compute:
+            compute_info = (
+                f"# Previous compute: {prev_compute.get('gen_tokens', 0)} tokens, "
+                f"{prev_compute.get('gen_ms', 0):.0f}ms gen, "
+                f"{prev_compute.get('exec_ms', 0):.0f}ms exec, "
+                f"{prev_compute.get('code_len', 0)} chars\n"
+                f"# Aim for concise, efficient code.\n"
+            )
+
+        reflection_info = f"# Reflection on failure:\n# {reflection}\n" if reflection else ""
+
+        fix_prompt = (
+            f"# Task: {task_prompt}\n"
+            f"{compute_info}"
+            f"{reflection_info}"
+            f"# Previous attempt (BROKEN):\n"
+            f"{code_short}\n"
+            f"# Error:\n"
+            f"{error_short}\n"
+            f"# Fixed solution (keep it concise):\n"
+        )
+
+        input_ids = self.tokenizer(fix_prompt, return_tensors="pt").input_ids.to(self.device)
+        prompt_len = input_ids.shape[1]
+
+        t0 = time.time()
+        log_probs = []
+
+        newline_token = self.tokenizer.encode("\n", add_special_tokens=False)
+        newline_id = newline_token[0] if newline_token else 198
+        eos_id = self.tokenizer.eos_token_id or 0
+
+        with torch.no_grad():
+            max_tokens = self.max_gen_tokens
+            out_ids = torch.full((1, prompt_len + max_tokens), eos_id,
+                                 dtype=torch.long, device=self.device)
+            out_ids[0, :prompt_len] = input_ids[0]
+
+            cache = None
+            newline_count = 0
+            step = 0
+            for step in range(max_tokens):
+                if step == 0:
+                    logits, _ = self.model(out_ids[:, :prompt_len], preallocated_cache=cache)
+                else:
+                    logits, _ = self.model(out_ids[:, prompt_len + step - 1:prompt_len + step],
+                                           preallocated_cache=cache)
+
+                next_logits = logits[0, -1]
+                next_token = self._sample_next_token(next_logits)
+                lp = torch.log_softmax(next_logits, dim=-1)[next_token]
+                out_ids[0, prompt_len + step] = next_token
+                log_probs.append(lp.item())
+
+                if next_token == eos_id:
+                    break
+                if next_token == newline_id:
+                    newline_count += 1
+                    if newline_count >= 3 and step > 5:
+                        break
+                else:
+                    newline_count = 0
+
+        gen_time_ms = (time.time() - t0) * 1000
+        tokens_generated = step + 1
+
+        generated_text = self.tokenizer.decode(
+            out_ids[0, prompt_len:prompt_len + tokens_generated],
+            skip_special_tokens=True)
+
+        del out_ids, logits, cache
+        torch.cuda.empty_cache()
+
+        code = generated_text.strip()
+        if code.startswith("```"):
+            lines = code.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            code = "\n".join(lines)
+
+        telemetry = {
+            "gen_time_ms": gen_time_ms,
+            "tokens_generated": tokens_generated,
+            "tokens_per_second": tokens_generated / (gen_time_ms / 1000) if gen_time_ms > 0 else 0,
+            "mean_logprob": sum(log_probs) / max(len(log_probs), 1),
+            "confidence": pow(2.71828, sum(log_probs) / max(len(log_probs), 1)),
+            "round": round_num,
+            "used_reflection": bool(reflection),
+            "reflection_text": reflection,
         }
 
         return code, telemetry
@@ -754,7 +1017,8 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
             return False, 0.0, f"Verification parse error: {e}", []
 
     def run_goal_task(self, goal: GoalTask, k_samples: int = 1,
-                      use_reasoning: bool = True) -> dict:
+                      use_reasoning: bool = True,
+                      use_reflection: bool = True) -> dict:
         """Run a goal-oriented task with recursive fix-retry and multi-dim scoring.
 
         The model is given a GOAL (target output for inputs) and must define
@@ -805,9 +1069,16 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
                             "exec_ms": prev_att.get("exec_time_ms", 0),
                             "code_len": len(prev_att.get("code", "")),
                         }
-                    code, model_telem = self.generate_fix(
-                        sample_code, sample_error, goal.description, round_num,
-                        prev_compute=prev_compute)
+                    # Use reflection-based fix (Reflect-Retry-Reward: +34.7% math)
+                    # or plain fix depending on use_reflection flag
+                    if use_reflection:
+                        code, model_telem = self.generate_fix_with_reflection(
+                            sample_code, sample_error, goal.description, round_num,
+                            prev_compute=prev_compute)
+                    else:
+                        code, model_telem = self.generate_fix(
+                            sample_code, sample_error, goal.description, round_num,
+                            prev_compute=prev_compute)
 
                 # Verify I/O
                 all_pass, stress_ms, verify_error, test_results = self._verify_goal_io(
@@ -948,6 +1219,15 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
             if not active_indices:
                 break
 
+            # Live: announce tasks beginning their first round.
+            if self.live is not None and round_iter == 0:
+                for i in active_indices:
+                    g = goals[i]
+                    self.live.task_started(
+                        g.description, i, len(goals),
+                        archetype=getattr(g, "archetype", ""),
+                        difficulty=getattr(g, "difficulty", ""))
+
             # Build prompts for all active tasks
             prompts = []
             prompt_types = []  # "code" or "fix" or "reasoning"
@@ -1002,23 +1282,24 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
                 else:
                     code_results = []
 
-                # Generate fixes (sequential for now — fix generation is complex)
+                # Generate fixes in batch (was sequential — major bottleneck).
+                # Each fix_prompt is (sample_code, sample_error, task_desc, round_num).
                 fix_results = []
-                for fp in fix_prompts:
-                    sample_code, sample_error, task_desc, round_num = fp
-                    prev_att = states[active_indices[chunk_start + fix_indices[len(fix_results)]]]["attempts"][-1] if states[active_indices[chunk_start + fix_indices[len(fix_results)]]]["attempts"] else None
-                    prev_compute = None
-                    if prev_att:
-                        prev_compute = {
-                            "gen_tokens": prev_att.get("tokens_generated", 0),
-                            "gen_ms": prev_att.get("gen_time_ms", 0),
-                            "exec_ms": prev_att.get("exec_time_ms", 0),
-                            "code_len": len(prev_att.get("code", "")),
-                        }
-                    fix_code, fix_telem = self.generate_fix(
-                        sample_code, sample_error, task_desc, round_num,
-                        prev_compute=prev_compute)
-                    fix_results.append((fix_code, fix_telem))
+                if fix_prompts:
+                    fix_prevs = []
+                    for j, fp in enumerate(fix_prompts):
+                        ai = active_indices[chunk_start + fix_indices[j]]
+                        prev_att = states[ai]["attempts"][-1] if states[ai]["attempts"] else None
+                        prev_compute = None
+                        if prev_att:
+                            prev_compute = {
+                                "gen_tokens": prev_att.get("tokens_generated", 0),
+                                "gen_ms": prev_att.get("gen_time_ms", 0),
+                                "exec_ms": prev_att.get("exec_time_ms", 0),
+                                "code_len": len(prev_att.get("code", "")),
+                            }
+                        fix_prevs.append(prev_compute)
+                    fix_results = self.generate_fix_batch(fix_prompts, prev_computes=fix_prevs)
 
                 # Reassemble in order
                 chunk_results = [None] * len(chunk)
@@ -1031,7 +1312,9 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
                     all_codes.append(code)
                     all_telems.append(telem)
 
-            # Verify all generated codes in parallel (subprocess execution)
+            # Verify all generated codes in parallel across the worker pool.
+            # Pool size = SandboxExecutor(workers=N); each worker has its own
+            # pipe lock so threads run genuinely in parallel (was locked to 1).
             def verify_one(idx):
                 i = active_indices[idx]
                 s = states[i]
@@ -1051,7 +1334,9 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
 
                 return i, full_code, model_telem, all_pass, stress_ms, verify_error, test_results
 
-            with ThreadPoolExecutor(max_workers=min(2, len(active_indices))) as executor:
+            n_workers = max(1, min(len(self.executor._pool) if self.executor._pool else 2,
+                                   len(active_indices)))
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 verify_results = list(executor.map(verify_one, range(len(active_indices))))
 
             # Process verification results
@@ -1093,6 +1378,17 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
                     "rejected_reason": score_result.rejected_reason,
                 }
                 s["attempts"].append(attempt)
+
+                # Live event: per-round result for the GUI feed.
+                if self.live is not None:
+                    self.live.round_done(
+                        task_idx=i, round_num=round_num, success=all_pass,
+                        quality=score_result.quality,
+                        gen_ms=model_telem.get("gen_time_ms", 0),
+                        exec_ms=stress_ms,
+                        tokens=model_telem.get("tokens_generated", 0),
+                        error=(verify_error or "")[:200],
+                        round_active=sum(1 for st in states if st["active"]))
 
                 if all_pass:
                     if score_result.accepted:
@@ -1153,113 +1449,32 @@ print(json.dumps({{"all_pass": _all_pass, "stress_ms": _stress_ms, "results": _r
             }
             self.packets.append(packet)
             packets.append(packet)
+            # Live event: task completion (success or exhausted retries).
+            if self.live is not None:
+                self.live.task_done(
+                    task_idx=i, task=goal.description,
+                    success=final_success,
+                    rounds_used=packet["rounds_used"],
+                    best_quality=packet["best_quality"])
 
         return packets
 
 
 class DDriveSandboxExecutor(SandboxExecutor):
-    """SandboxExecutor that uses D: drive for temp files."""
+    """Backward-compatible alias for SandboxExecutor with a custom temp dir.
+
+    The base SandboxExecutor now accepts ``temp_dir`` directly and this
+    subclass no longer overrides ``execute`` — the old override duplicated
+    ~100 lines and, worse, bypassed the PersistentCodeExecutor fast path,
+    forcing a ~200ms subprocess startup per execution.
+    """
 
     def __init__(self, timeout_s: float = 5.0, memory_limit_mb: int = 256,
                  temp_dir: str = None):
-        super().__init__(timeout_s, memory_limit_mb)
         if temp_dir is None:
             from research.paths import TMP_DIR, as_str
             temp_dir = as_str(TMP_DIR)
-        self.temp_dir = temp_dir
-        os.makedirs(temp_dir, exist_ok=True)
-
-    def execute(self, code: str, expected_output: str | None = None) -> dict:
-        """Execute Python code using D: drive temp files."""
-        # Write code to D: temp file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
-                                          delete=False, encoding='utf-8',
-                                          dir=self.temp_dir) as f:
-            f.write(code)
-            temp_path = f.name
-
-        file_size = os.path.getsize(temp_path)
-
-        # Build wrapper (same as parent but with D: path)
-        try:
-            import resource
-            mem_code = f"resource.setrlimit(resource.RLIMIT_AS, ({self.memory_limit_mb * 1024 * 1024}, {self.memory_limit_mb * 1024 * 1024}))"
-        except ImportError:
-            mem_code = "# resource not available on Windows"
-
-        wrapper = f'''
-import sys, os
-{"import resource" if sys.platform != "win32" else ""}
-{mem_code}
-
-import builtins
-_orig_import = builtins.__import__
-def _restricted_import(name, *args, **kwargs):
-    blocked = ['socket', 'urllib', 'requests', 'http', 'subprocess',
-                              'ctypes', 'multiprocessing']
-    top = name.split('.')[0]
-    if top in blocked:
-        raise ImportError(f"Module '{{name}}' is blocked in sandbox")
-    return _orig_import(name, *args, **kwargs)
-builtins.__import__ = _restricted_import
-
-exec(open(r"{temp_path}", encoding='utf-8').read())
-'''
-
-        wrapper_path = temp_path + '_wrapper.py'
-        with open(wrapper_path, 'w', encoding='utf-8') as f:
-            f.write(wrapper)
-
-        t0 = time.time()
-        result = {
-            "stdout": "", "stderr": "", "returncode": -1,
-            "exec_time_ms": 0, "peak_memory_kb": 0,
-            "file_size_bytes": file_size, "timed_out": False,
-            "output_matches_expected": False,
-        }
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, wrapper_path],
-                capture_output=True, text=True,
-                timeout=self.timeout_s,
-                cwd=self.temp_dir,
-                encoding='utf-8', errors='replace',
-            )
-            result["stdout"] = proc.stdout
-            result["stderr"] = proc.stderr
-            result["returncode"] = proc.returncode
-            result["exec_time_ms"] = (time.time() - t0) * 1000
-            result["peak_memory_kb"] = (len(proc.stdout) + len(proc.stderr) +
-                                         file_size) // 1024 + 12000
-
-            if expected_output is not None:
-                result["output_matches_expected"] = (
-                    expected_output.strip() == result["stdout"].strip())
-
-        except subprocess.TimeoutExpired:
-            # Force-kill to prevent zombie processes
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception as e:
-                import warnings
-                warnings.warn(f"subprocess cleanup: {e}", RuntimeWarning, stacklevel=2)
-            result["timed_out"] = True
-            result["stderr"] = f"Execution timed out after {self.timeout_s}s"
-            result["exec_time_ms"] = self.timeout_s * 1000
-        except Exception as e:
-            result["stderr"] = f"Sandbox error: {e}"
-            result["exec_time_ms"] = (time.time() - t0) * 1000
-        finally:
-            try:
-                os.unlink(temp_path)
-                os.unlink(wrapper_path)
-            except OSError as e:
-                import warnings
-                warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
-
-        return result
+        super().__init__(timeout_s, memory_limit_mb, temp_dir=temp_dir)
 
 
 def main():

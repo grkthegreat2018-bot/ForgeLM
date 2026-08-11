@@ -261,7 +261,7 @@ class ForgeEngine:
 
         # 11. L1 Speculative Attention (lossless, 57% attn compute cut)
         if use_spec_attn:
-            from research.keys.speculative_keys import SpeculativeAttentionKey
+            from research.keys.speculative.speculative_keys import SpeculativeAttentionKey
             self._spec_attn_key = SpeculativeAttentionKey(draft_rank=32)
             self._spec_attn_key.apply(self.model)
             print("  [ForgeEngine] L1 Speculative Attention: active (lossless, 57% attn cut)")
@@ -331,7 +331,7 @@ class ForgeEngine:
             shard_dir = Path(self.checkpoint_path).parent / "xp_shards"
             if not shard_dir.exists() or not any(shard_dir.glob("shard_*.safetensors")):
                 print("  [AirLLM-Smart] Splitting checkpoint into shards...")
-                from research.keys.airllm_key import AirLLMKey
+                from research.keys.moe.airllm_key import AirLLMKey
                 key = AirLLMKey()
                 key.forward({
                     "checkpoint_path": self.checkpoint_path,

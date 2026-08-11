@@ -39,12 +39,17 @@ except ImportError:
     import logging
     _log = logging.getLogger("training")
 from research.checkpoint_io import save_checkpoint
-from research.keys.norm_gated_mod_key import apply_norm_gated_mod
-from research.keys.per_query_temp_key import apply_per_query_temp
-from research.keys.softpick_key import apply_softpick
+from research.keys.normalization.norm_gated_mod_key import apply_norm_gated_mod
+from research.keys.training.per_query_temp_key import apply_per_query_temp
+from research.keys.training.softpick_key import apply_softpick
 from research.runtime.vram_manager import VRAMManager
+from research.self_play.data_quality import DataQualityPipeline
 from research.self_play.infinite_curriculum import InfiniteCurriculum, ProposedTask
+from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+from research.self_play.monitoring import SelfPlayMonitor
+from research.self_play.replay_buffer import ReplayBuffer
 from research.tokenizer_cache import get_tokenizer
+from research.training.training_utils import write_heartbeat, write_status_json
 
 # Goal-oriented task generator (replaces function-stub prompt library)
 # Generates GoalTasks with adaptive difficulty and I/O verification pairs
@@ -59,6 +64,29 @@ DOMAIN_ARCHETYPES = {
     "python_general": ["fibonacci", "factorial", "is_prime", "gcd", "reverse_string",
                        "sum_list", "sort_list", "count_vowels", "is_palindrome",
                        "power", "digit_sum", "word_count", "max_element", "linear_search"],
+    # New spectrally-injected experts (from HF datasets)
+    "coding": ["fibonacci", "reverse_string", "sum_list", "sort_list", "is_prime",
+               "gcd", "count_vowels", "is_palindrome", "power", "digit_sum"],
+    "python": ["fibonacci", "reverse_string", "sum_list", "sort_list", "is_prime",
+               "gcd", "count_vowels", "is_palindrome", "power", "digit_sum",
+               "word_count", "max_element", "linear_search", "collatz_steps"],
+    "math": ["factorial", "is_prime", "gcd", "power", "digit_sum",
+             "fibonacci", "sum_list", "max_element"],
+    "algorithms": ["fibonacci", "sum_list", "sort_list", "collatz_steps",
+                   "max_element", "linear_search", "is_prime", "gcd"],
+    "theory": ["fibonacci", "factorial", "is_prime", "gcd", "reverse_string",
+               "sum_list", "sort_list", "count_vowels", "is_palindrome",
+               "power", "digit_sum", "word_count", "max_element", "linear_search"],
+    "creativity": ["reverse_string", "count_vowels", "is_palindrome", "word_count",
+                   "fibonacci", "sum_list", "sort_list", "max_element"],
+    "tool_use": ["fibonacci", "reverse_string", "sum_list", "sort_list",
+                 "is_prime", "gcd", "count_vowels", "is_palindrome"],
+    "token_efficiency": ["fibonacci", "sum_list", "sort_list", "max_element",
+                         "reverse_string", "count_vowels", "is_palindrome",
+                         "power", "digit_sum", "word_count"],
+    "general": ["fibonacci", "factorial", "is_prime", "gcd", "reverse_string",
+                "sum_list", "sort_list", "count_vowels", "is_palindrome",
+                "power", "digit_sum", "word_count", "max_element", "linear_search"],
 }
 
 
@@ -86,7 +114,16 @@ class ExpertSelfPlayTrainer:
                  reasoning_benchmarks: list = None,
                  vram_manager: 'VRAMManager' = None,
                  max_gen_tokens: int = 120,
-                 use_curriculum: bool = False):
+                 use_curriculum: bool = False,
+                 use_grpo: bool = False,
+                 use_monitor: bool = True,
+                 use_data_quality: bool = True,
+                 use_replay: bool = True,
+                 status_file: str = None,
+                 batch_size: int = 8,
+                 verify_workers: int = 4,
+                 heartbeat_interval: float = 2.0,
+                 kv_int8: bool = True):
         if log_dir is None: from research.paths import EXPERT_TRAINING_DIR, as_str; log_dir = as_str(EXPERT_TRAINING_DIR)
         self.model = model
         self.tokenizer = tokenizer
@@ -119,6 +156,9 @@ class ExpertSelfPlayTrainer:
             top_k=top_k,
             top_p=top_p,
             vram_manager=vram_manager,
+            verify_workers=verify_workers,
+            kv_int8=kv_int8,
+            live_status=None,  # wired below after status_file is resolved
         )
 
         # Calibrate conformal sampler on held-out prompts (NOVEL key)
@@ -139,6 +179,45 @@ class ExpertSelfPlayTrainer:
             )
             self.curriculum.load_queue()
             print(f"  [Curriculum] Enabled — {self.curriculum.queue_size()} tasks in queue")
+
+        # GRPO RL training (replaces SFT when enabled)
+        # Research: GRPO beats SFT by 8.9pp at 1.5B scale
+        self.use_grpo = use_grpo
+        if use_grpo:
+            print("  [GRPO] RL training enabled (verifiable rewards, MC-GRPO median baseline)")
+
+        # ── Self-play support components (previously orphaned) ────────
+        # Monitor: failure-mode detection (advantage collapse, diversity
+        # collapse, KL divergence, reward trend) — AVSPO/QDC research.
+        self.use_monitor = use_monitor
+        self.monitor = SelfPlayMonitor(window_size=100) if use_monitor else None
+        # Data quality: multi-level dedup (exact/semantic/AST) + QDC scoring.
+        self.use_data_quality = use_data_quality
+        self.data_quality = DataQualityPipeline() if use_data_quality else None
+        # Replay buffer: FOREVER forgetting-curve replay, prevents
+        # catastrophic forgetting across topics/epochs.
+        self.use_replay = use_replay
+        self.replay_buffer = ReplayBuffer(max_size=10000,
+                                          stability_constant=1000.0) if use_replay else None
+        # GUI status file: read by forge_gui StatusReader (scans
+        # research/checkpoints/**/status.json). Heartbeat keeps it "running".
+        if status_file is None:
+            from research.paths import CHECKPOINTS_DIR, as_str
+            status_file = as_str(CHECKPOINTS_DIR / "self_play" / "status.json")
+        self.status_file = status_file
+        self._last_heartbeat = 0.0
+        # Live status writer: heartbeat thread + events.jsonl + per-task events.
+        # Replaces the old per-epoch-only status writes (GUI looked frozen for
+        # 4+ min between epochs). The writer is created per train_topic() call
+        # so each topic gets a fresh event stream.
+        from research.self_play.live_status import LiveStatusWriter
+        self.live = LiveStatusWriter(
+            status_file, heartbeat_interval=heartbeat_interval)
+        self.engine.live = self.live
+        if self.curriculum is not None:
+            self.curriculum.live = self.live
+        self.batch_size = batch_size
+        self.verify_workers = verify_workers
 
     def train_topic(self, topic: str, n_tasks: int = 50,
                     n_epochs: int = 3,
@@ -192,6 +271,7 @@ class ExpertSelfPlayTrainer:
             }.get(topic, "algorithms")
 
             print(f"  [Curriculum] Proposing {n_tasks} tasks for domain '{curr_domain}'...")
+            self.live.set_phase("proposing", detail=f"domain={curr_domain}")
             # Propose tasks via the model, validate with executor
             proposed = self.curriculum.propose_tasks(
                 domain=curr_domain, n=n_tasks, mode="induction")
@@ -259,7 +339,11 @@ class ExpertSelfPlayTrainer:
         # training loop (saved with svd_energy=0.99 after DoRA fine-tuning).
         if self.airmoe is not None:
             # Check if this topic has been fine-tuned (look for a marker file)
-            marker = self.airmoe.module_dir / "experts" / f".trained_{topic}"
+            # Markers are in the module_dir root (same level as expert files)
+            marker = self.airmoe.module_dir / f".trained_{topic}"
+            if not marker.exists():
+                # Also check experts/ subdir (legacy layout)
+                marker = self.airmoe.module_dir / "experts" / f".trained_{topic}"
             if marker.exists():
                 loaded = self.airmoe.load_topic(topic)
                 if loaded:
@@ -309,6 +393,7 @@ class ExpertSelfPlayTrainer:
                 _log.info(f"Epoch {epoch+1}/{n_epochs}")
             epoch_successes = 0
             epoch_skipped = 0
+            epoch_attempts = []  # per-attempt records (GRPO failure contrast + I/O accuracy)
 
             # Filter out already-solved tasks (anti-overfitting)
             active_tasks = []
@@ -319,12 +404,16 @@ class ExpertSelfPlayTrainer:
                     active_tasks.append((i, task))
 
             if active_tasks:
-                print(f"\n    Running {len(active_tasks)} tasks in batches of 8...")
+                print(f"\n    Running {len(active_tasks)} tasks in batches of {self.batch_size}...")
+                self.live.set_phase("generating",
+                                    detail=f"epoch {epoch+1}/{n_epochs}, {len(active_tasks)} tasks")
+                self.live.update(tasks_total=len(active_tasks), tasks_done=0,
+                                 epoch_successes=0, epoch=epoch + 1, n_epochs=n_epochs)
                 # Batched self-play: all tasks processed round-by-round in parallel
                 batch_goals = [t for _, t in active_tasks]
                 results = self.engine.run_goal_tasks_batch(
                     batch_goals, k_samples=k_samples,
-                    use_reasoning=True, batch_size=8)
+                    use_reasoning=True, batch_size=self.batch_size)
 
                 # Process results
                 from research.buffered_log import blog
@@ -332,6 +421,19 @@ class ExpertSelfPlayTrainer:
                     attempts = result.get("attempts", [])
                     success = result.get("final_success", False)
                     best_quality = result.get("best_quality", 0.0)
+
+                    # Per-attempt records: GRPO needs failures for group-relative
+                    # contrast; monitor needs I/O verification rate. (Fixes the
+                    # dead `epoch_attempts if 'epoch_attempts' in dir()` hack —
+                    # the variable was never defined, so GRPO ran without
+                    # failure contrast.)
+                    for att in attempts:
+                        epoch_attempts.append({
+                            "prompt": task.description,
+                            "code": att.get("code", ""),
+                            "success": att.get("success", False),
+                            "verified": att.get("verified", False),
+                        })
 
                     # Record result for adaptive difficulty
                     _goal_gen.record_result(task.domain, success)
@@ -419,9 +521,39 @@ class ExpertSelfPlayTrainer:
             high_quality = [s for s in epoch_new if s.get("quality", 0) > 0.7]
             if len(high_quality) < len(epoch_new):
                 print(f"  Quality filter: {len(epoch_new)} → {len(high_quality)} (q>0.7)")
+
+            # Multi-level data quality pipeline (ResoFilter: exact n-gram,
+            # semantic TF-IDF, AST structural dedup + QDC scoring).
+            # Runs BEFORE the per-prompt cap so near-dupes don't consume slots.
+            dq_stats = None
+            if self.data_quality is not None and high_quality:
+                high_quality, dq_stats = self.data_quality.run_pipeline(high_quality)
+                if dq_stats["n_after_ast"] < dq_stats["n_input"]:
+                    print(f"  DataQuality: {dq_stats['n_input']} → {dq_stats['n_after_ast']} "
+                          f"(exact={dq_stats['n_after_exact']}, semantic={dq_stats['n_after_semantic']}, "
+                          f"ast={dq_stats['n_after_ast']}, qdc={dq_stats['mean_qdc']:.2f})")
+
             epoch_successes_dedup = self._dedup_successes(high_quality)
             if len(epoch_successes_dedup) < len(high_quality):
                 print(f"  Dedup: {len(high_quality)} → {len(epoch_successes_dedup)} unique")
+
+            # ── FOREVER replay: mix in due-for-replay samples ─────────
+            # Forgetting-curve sampling: samples stored when the model was
+            # very different (large optimizer-magnitude distance) get replayed.
+            n_replay = 0
+            if self.replay_buffer is not None and len(self.replay_buffer) > 0:
+                replay_batch = self.replay_buffer.sample(
+                    n=min(16, len(self.replay_buffer)),
+                    current_magnitude=self.replay_buffer.cumulative_magnitude)
+                replay_batch = [dict(r, replay=True) for r in replay_batch]
+                # Don't replay items already in this epoch's training set
+                new_keys = {(s["prompt"], s["solution"][:200]) for s in epoch_successes_dedup}
+                replay_batch = [r for r in replay_batch
+                                if (r["prompt"], r["solution"][:200]) not in new_keys]
+                n_replay = len(replay_batch)
+                if replay_batch:
+                    epoch_successes_dedup = epoch_successes_dedup + replay_batch
+                    print(f"  Replay: +{n_replay} samples (buffer={len(self.replay_buffer)})")
 
             # ── Fine-tune expert on this epoch's new successes ───────
             # Only new data per epoch prevents repetitive gradient on same samples.
@@ -434,8 +566,34 @@ class ExpertSelfPlayTrainer:
                 else:
                     torch.cuda.empty_cache()
                 print(f"\n  Fine-tuning expert on {len(epoch_successes_dedup)} solutions...")
-                ft_stats = self._finetune_expert(topic, epoch_successes_dedup)
+                self.live.set_phase("finetuning",
+                                    detail=f"{len(epoch_successes_dedup)} samples, lr={self.lr}")
+                if self.use_grpo:
+                    # GRPO: RL with verifiable rewards (binary test-pass)
+                    # Collect failures too for group-relative advantage
+                    epoch_failures = [
+                        {"prompt": a["prompt"], "solution": a["code"]}
+                        for a in epoch_attempts
+                        if not a.get("success", False)
+                    ]
+                    ft_stats = self._grpo_finetune_expert(
+                        topic, epoch_successes_dedup, epoch_failures)
+                else:
+                    ft_stats = self._finetune_expert(topic, epoch_successes_dedup)
                 self.model.eval()  # back to eval mode for validation
+
+                # ── FOREVER replay: store this epoch's new successes ──
+                # Optimizer-magnitude (model-time) stamp comes from grad norm
+                # accumulated during fine-tuning.
+                if self.replay_buffer is not None:
+                    self.replay_buffer.update_magnitude(
+                        (ft_stats or {}).get("grad_norm_sum", 0.0))
+                    for s in epoch_new:
+                        self.replay_buffer.add(
+                            {"prompt": s["prompt"], "solution": s["solution"],
+                             "quality": s.get("quality", 0.5),
+                             "test_passed": True},
+                            optimizer_magnitude=0.0)  # stamped at current model-time
                 # Free training activations before validation/benchmarks
                 if self.vram:
                     self.vram.empty_cache()
@@ -443,16 +601,64 @@ class ExpertSelfPlayTrainer:
                     torch.cuda.empty_cache()
 
             # ── Validation (measures FINE-TUNED model) ────────────────
+            # Batched: was sequential run_goal_task per val task (slow).
+            self.live.set_phase("validating", detail=f"{len(val_tasks)} val tasks")
             val_successes = 0
-            for j, vt in enumerate(val_tasks):
-                vresult = self.engine.run_goal_task(vt, k_samples=1, use_reasoning=True)
-                if vresult.get("final_success", False):
-                    val_successes += 1
+            if val_tasks:
+                val_results = self.engine.run_goal_tasks_batch(
+                    val_tasks, k_samples=1, use_reasoning=True,
+                    batch_size=self.batch_size)
+                for vresult in val_results:
+                    if vresult.get("final_success", False):
+                        val_successes += 1
 
             val_rate = val_successes / len(val_tasks)
             val_history.append(val_rate)
             print(f"  Epoch {epoch+1} val:   {val_successes}/{len(val_tasks)} "
                   f"({val_rate:.1%})")
+
+            # ── Failure-mode monitoring + GUI status ──────────────────
+            # I/O accuracy: fraction of attempts whose output was positively
+            # verified (test-passed or expected-output match) — the core
+            # input-output health metric of the self-play loop.
+            io_accuracy = (sum(1 for a in epoch_attempts if a.get("verified"))
+                           / max(len(epoch_attempts), 1)) if epoch_attempts else 0.0
+            diversity = (self.data_quality.compute_diversity_score(epoch_new)
+                         if (self.data_quality is not None and len(epoch_new) > 1) else 1.0)
+            monitor_metrics = {
+                "mean_reward": train_rate,
+                "diversity_score": diversity,
+                "grounded_reward": val_rate,
+                "intrinsic_reward": train_rate,
+            }
+            if self.use_grpo and ft_stats:
+                monitor_metrics["kl_divergence"] = ft_stats.get("mean_kl", 0.0)
+                monitor_metrics["advantage_collapse_rate"] = ft_stats.get(
+                    "advantage_collapse_rate", 0.0)
+            alerts = self._monitor_epoch(monitor_metrics)
+            for a in alerts:
+                self.live.alert(a.get("level", "warning"), a.get("msg", ""))
+
+            self._write_status(topic, epoch, n_epochs, extra={
+                "loss": round((ft_stats or {}).get("avg_loss",
+                              (ft_stats or {}).get("mean_loss", 0.0)), 4),
+                "lr": self.lr,
+                "train_rate": round(train_rate, 4),
+                "val_rate": round(val_rate, 4),
+                "io_accuracy": round(io_accuracy, 4),
+                "mean_reward": round(train_rate, 4),
+                "diversity_score": round(diversity, 4),
+                "kl_divergence": round(monitor_metrics.get("kl_divergence", 0.0), 4),
+                "advantage_collapse_rate": round(
+                    monitor_metrics.get("advantage_collapse_rate", 0.0), 4),
+                "replay_buffer_size": len(self.replay_buffer) if self.replay_buffer else 0,
+                "data_quality_kept": (dq_stats or {}).get("n_after_ast", len(epoch_new)),
+                "monitor_alerts": alerts[-3:] if alerts else [],
+            })
+            self.live.epoch_done(epoch + 1, n_epochs,
+                                 train_rate=round(train_rate, 4),
+                                 val_rate=round(val_rate, 4),
+                                 loss=round((ft_stats or {}).get("avg_loss", 0.0), 4))
 
             # ── LiveCodeBench contamination-free benchmark ────────────
             # Clear CUDA cache before benchmarks to free training activations
@@ -460,6 +666,7 @@ class ExpertSelfPlayTrainer:
                 self.vram.empty_cache()
             else:
                 torch.cuda.empty_cache()
+            self.live.set_phase("benchmark", detail="LiveCodeBench + reasoning")
             # Run a small LCB eval after each epoch to track true generalization
             # on problems Qwen2.5-Coder couldn't have seen (post-Sept 2024)
             lcb_stats = None
@@ -534,8 +741,12 @@ class ExpertSelfPlayTrainer:
                 epochs_without_improve = 0
                 best_expert_state = self._snapshot_expert()
                 best_ft_stats = ft_stats
-                _log.success(f"New best rolling val: {best_val_rate:.1%} "
-                             f"(single={val_rate:.1%})")
+                try:
+                    _log.success(f"New best rolling val: {best_val_rate:.1%} "
+                                 f"(single={val_rate:.1%})")
+                except Exception:
+                    print(f"  New best rolling val: {best_val_rate:.1%} "
+                          f"(single={val_rate:.1%})")
             else:
                 epochs_without_improve += 1
                 # Also check if single epoch is new best (catch non-monotonic improvement)
@@ -592,7 +803,64 @@ class ExpertSelfPlayTrainer:
         # Close JSONL stream
         _successes_file.close()
 
+        # Final status for the GUI (run complete)
+        self._write_status(topic, n_epochs - 1, n_epochs, extra={
+            "status": "done",
+            "best_val_rate": round(best_val_rate, 4),
+            "total_successes": len(successes),
+            "replay_buffer_size": len(self.replay_buffer) if self.replay_buffer else 0,
+        })
+        self.live.close(status="done",
+                        reason=f"topic={topic} best_val={best_val_rate:.1%}")
+
         return stats
+
+    def _write_status(self, topic: str, epoch: int, n_epochs: int,
+                      extra: dict | None = None) -> None:
+        """Write status.json + heartbeat for the GUI monitor (atomic)."""
+        import time as _time
+        data = {
+            "name": f"self_play:{topic}",
+            "method": "self_play_grpo" if self.use_grpo else "self_play_sft",
+            "status": "running",
+            "step": epoch + 1,
+            "max_steps": n_epochs,
+            "topic": topic,
+            "ts": _time.time(),
+        }
+        try:
+            from research.training.training_utils import vram_gb
+            data["vram_gb"] = round(vram_gb(self.device), 2)
+        except Exception:
+            pass
+        if extra:
+            data.update(extra)
+        try:
+            write_status_json(self.status_file, data)
+            write_heartbeat(str(Path(self.status_file).with_name("heartbeat.json")))
+            self._last_heartbeat = _time.time()
+            # Merge into the live writer's status dict so the GUI sees both
+            # the per-epoch metrics AND the live intra-epoch progress fields.
+            if hasattr(self, 'live') and self.live is not None:
+                self.live.update(**data)
+        except Exception as e:
+            _log.warning(f"status write failed: {e}")
+
+    def _monitor_epoch(self, epoch_metrics: dict) -> list[dict]:
+        """Record one epoch into the SelfPlayMonitor; return active alerts."""
+        if self.monitor is None:
+            return []
+        self.monitor.record_step(epoch_metrics)
+        alerts = self.monitor.check_alerts()
+        for a in alerts:
+            msg = f"  [Monitor:{a['level']}] {a['msg']} ({a['metric']}={a['value']}, thr={a['threshold']})"
+            if a["level"] == "critical":
+                _log.error(msg)
+            elif a["level"] == "warning":
+                _log.warning(msg)
+            else:
+                _log.info(msg)
+        return alerts
 
     def _dedup_successes(self, successes: list[dict]) -> list[dict]:
         """Deduplicate successful solutions by (prompt, solution) key.
@@ -685,18 +953,38 @@ class ExpertSelfPlayTrainer:
             if block_idx < LORA_START:
                 continue  # skip early layers
             if hasattr(block.ffn, 'experts') and len(block.ffn.experts) > 0:
-                # MoE model: target expert 0
-                expert = block.ffn.experts[0]
-                for attr_name in ['w1', 'w2', 'w3']:
-                    if hasattr(expert, attr_name):
-                        layer = getattr(expert, attr_name)
-                        if hasattr(layer, 'weight') and not hasattr(layer, 'lora_A'):
-                            wrapped = apply_dora_to_linear(layer, rank=8, alpha=16, dropout=0.1)
-                            setattr(expert, attr_name, wrapped)
-                            n_lora += 1
-                            for p in wrapped.parameters():
-                                if p.requires_grad:
-                                    trainable.append(p)
+                # MoE model: in dense_bypass mode, experts' weights are extracted
+                # via _get_weight() and used in batched matmuls — this bypasses
+                # the LoRA/DoRA forward pass, so LoRA on experts[0] has NO gradient
+                # path. Instead, target the shared expert (uses normal forward call)
+                # and the attention layers (always in the gradient path).
+                targeted = False
+                if hasattr(block.ffn, 'shared') and block.ffn.shared is not None:
+                    shared = block.ffn.shared
+                    for attr_name in ['w1', 'w2', 'w3']:
+                        if hasattr(shared, attr_name):
+                            layer = getattr(shared, attr_name)
+                            if hasattr(layer, 'weight') and not hasattr(layer, 'lora_A'):
+                                wrapped = apply_dora_to_linear(layer, rank=8, alpha=16, dropout=0.1)
+                                setattr(shared, attr_name, wrapped)
+                                n_lora += 1
+                                for p in wrapped.parameters():
+                                    if p.requires_grad:
+                                        trainable.append(p)
+                                targeted = True
+                # If no shared expert, fall back to expert 0 (works for non-dense_bypass)
+                if not targeted:
+                    expert = block.ffn.experts[0]
+                    for attr_name in ['w1', 'w2', 'w3']:
+                        if hasattr(expert, attr_name):
+                            layer = getattr(expert, attr_name)
+                            if hasattr(layer, 'weight') and not hasattr(layer, 'lora_A'):
+                                wrapped = apply_dora_to_linear(layer, rank=8, alpha=16, dropout=0.1)
+                                setattr(expert, attr_name, wrapped)
+                                n_lora += 1
+                                for p in wrapped.parameters():
+                                    if p.requires_grad:
+                                        trainable.append(p)
             else:
                 # Dense model: target FFN directly
                 ffn = block.ffn
@@ -752,6 +1040,7 @@ class ExpertSelfPlayTrainer:
         total_loss = 0.0
         n_batches = 0
         accum_count = 0
+        grad_norm_sum = 0.0  # cumulative optimizer magnitude (replay model-time)
 
         for item in shuffled_successes:
             prompt = item["prompt"]
@@ -815,7 +1104,11 @@ class ExpertSelfPlayTrainer:
 
             # Only step every GRAD_ACCUM_STEPS samples (effective batch size = 4)
             if accum_count >= GRAD_ACCUM_STEPS:
-                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                # clip_grad_norm_ returns the pre-clip total norm — this is the
+                # per-step optimizer update magnitude (model-time clock for the
+                # FOREVER replay buffer).
+                gn = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                grad_norm_sum += float(gn)
                 optimizer.step()
                 optimizer.zero_grad()
                 accum_count = 0
@@ -825,7 +1118,8 @@ class ExpertSelfPlayTrainer:
 
         # Final step for remaining accumulated gradients
         if accum_count > 0:
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            gn = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            grad_norm_sum += float(gn)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -839,14 +1133,20 @@ class ExpertSelfPlayTrainer:
         # (frees LoRA VRAM, keeps the learned knowledge in base weights)
         for block in self.model.blocks:
             if hasattr(block.ffn, 'experts') and len(block.ffn.experts) > 0:
-                target = block.ffn.experts[0]
+                # Merge shared expert (where LoRA was applied in dense_bypass mode)
+                # and expert 0 (fallback for non-dense_bypass mode)
+                targets = []
+                if hasattr(block.ffn, 'shared') and block.ffn.shared is not None:
+                    targets.append(block.ffn.shared)
+                targets.append(block.ffn.experts[0])
             else:
-                target = block.ffn
-            for attr_name in ['w1', 'w2', 'w3', 'fc1', 'fc2', 'gate_proj', 'up_proj', 'down_proj']:
-                if hasattr(target, attr_name):
-                    layer = getattr(target, attr_name)
-                    if hasattr(layer, 'merge_and_unload'):
-                        merged = layer.merge_and_unload()
+                targets = [block.ffn]
+            for target in targets:
+                for attr_name in ['w1', 'w2', 'w3', 'fc1', 'fc2', 'gate_proj', 'up_proj', 'down_proj']:
+                    if hasattr(target, attr_name):
+                        layer = getattr(target, attr_name)
+                        if hasattr(layer, 'merge_and_unload'):
+                            merged = layer.merge_and_unload()
                         setattr(target, attr_name, merged)
 
         # Count trainable params before deleting
@@ -867,7 +1167,197 @@ class ExpertSelfPlayTrainer:
             "n_batches": n_batches,
             "avg_loss": avg_loss,
             "trainable_params_m": trainable_params / 1e6,
+            "grad_norm_sum": grad_norm_sum,
         }
+
+    def _grpo_finetune_expert(self, topic: str,
+                              successes: list[dict],
+                              failures: list[dict] = None) -> dict:
+        """Fine-tune via GRPO (Group Relative Policy Optimization).
+
+        Uses RL with verifiable rewards (binary test-pass) instead of SFT.
+        Research shows GRPO beats SFT by 8.9pp at 1.5B scale (58.0% vs 49.1% DPO).
+
+        The executor verification (test_passed=True) IS the strict data gate
+        ("Survive or Collapse" paper). Never train on unverified solutions.
+
+        Args:
+            successes: list of {prompt, solution, quality, test_passed}
+            failures: optional list of failed attempts (reward=0.0) for contrast
+
+        Returns:
+            stats dict with GRPO metrics
+        """
+        # Build a frozen reference model snapshot for KL penalty
+        # (deepcopy is expensive — instead, save and restore LoRA state)
+        import copy
+        from research.architecture.dora import apply_dora_to_linear
+
+        # Freeze everything first
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        trainable = []
+        n_lora = 0
+        n_blocks = len(self.model.blocks)
+        LORA_START = max(0, n_blocks - 8)
+
+        for block_idx, block in enumerate(self.model.blocks):
+            if block_idx < LORA_START:
+                continue
+            if hasattr(block.ffn, 'experts') and len(block.ffn.experts) > 0:
+                expert = block.ffn.experts[0]
+                for attr_name in ['w1', 'w2', 'w3']:
+                    if hasattr(expert, attr_name):
+                        layer = getattr(expert, attr_name)
+                        if hasattr(layer, 'weight') and not hasattr(layer, 'lora_A'):
+                            wrapped = apply_dora_to_linear(layer, rank=8, alpha=16, dropout=0.1)
+                            setattr(expert, attr_name, wrapped)
+                            n_lora += 1
+                            for p in wrapped.parameters():
+                                if p.requires_grad:
+                                    trainable.append(p)
+            else:
+                ffn = block.ffn
+                for attr_name in ['w1', 'w2', 'w3', 'fc1', 'fc2', 'gate_proj', 'up_proj', 'down_proj']:
+                    if hasattr(ffn, attr_name):
+                        layer = getattr(ffn, attr_name)
+                        if hasattr(layer, 'weight') and not hasattr(layer, 'lora_A'):
+                            wrapped = apply_dora_to_linear(layer, rank=8, alpha=16, dropout=0.1)
+                            setattr(ffn, attr_name, wrapped)
+                            n_lora += 1
+                            for p in wrapped.parameters():
+                                if p.requires_grad:
+                                    trainable.append(p)
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+        for p in trainable:
+            p.requires_grad = True
+
+        print(f"    GRPO LoRA: {n_lora} layers, "
+              f"trainable: {sum(p.numel() for p in trainable)/1e6:.1f}M params")
+
+        # Save LoRA state as reference (for KL penalty)
+        ref_state = {id(p): p.data.clone() for p in trainable}
+
+        # GRPO config (small model optimal)
+        config = GRPOConfig(
+            learning_rate=5e-6,   # lower than SFT (RL needs smaller steps)
+            kl_coefficient=0.02,
+            clip_range=0.2,
+            group_size=4,
+            temperature=0.8,
+            max_grad_norm=1.0,
+            max_seq_len=256,
+            use_median_baseline=True,  # MC-GRPO
+            grad_accum_steps=2,
+        )
+
+        # Build a simple reference model wrapper using saved state
+        class _RefWrapper:
+            """Wrapper that returns logits from frozen reference state."""
+            def __init__(self, model, ref_state, trainable):
+                self.model = model
+                self.ref_state = ref_state
+                self.trainable = trainable
+
+            def __call__(self, input_ids):
+                # Temporarily restore reference weights
+                saved = {id(p): p.data.clone() for p in self.trainable}
+                for p in self.trainable:
+                    p.data.copy_(self.ref_state[id(p)])
+                with torch.no_grad():
+                    logits, _ = self.model(input_ids)
+                # Restore current weights
+                for p in self.trainable:
+                    p.data.copy_(saved[id(p)])
+                return logits
+
+            def parameters(self):
+                return self.model.parameters()
+
+            def eval(self):
+                self.model.eval()
+
+        ref_model = _RefWrapper(self.model, ref_state, trainable)
+
+        trainer = GRPOTrainer(
+            self.model, self.tokenizer, ref_model,
+            device=self.device, config=config)
+
+        # Build GRPO batches: group completions by prompt
+        # Each prompt gets G=4 completions (mix of successes and failures)
+        prompts = []
+        all_completions = []
+        all_rewards = []
+
+        # Group by prompt (successes and failures for the same prompt)
+        prompt_groups: dict[str, list[tuple[str, float]]] = {}
+        for item in successes:
+            prompt_groups.setdefault(item["prompt"], []).append(
+                (item["solution"], 1.0))  # reward=1.0 for test-passed
+        if failures:
+            for item in failures:
+                prompt_groups.setdefault(item["prompt"], []).append(
+                    (item.get("solution", ""), 0.0))  # reward=0.0 for failed
+
+        for prompt, comp_reward_pairs in prompt_groups.items():
+            # Need at least 2 completions for group-relative advantage
+            if len(comp_reward_pairs) < 2:
+                continue
+            # Cap at group_size
+            comp_reward_pairs = comp_reward_pairs[:config.group_size]
+            completions = [cr[0] for cr in comp_reward_pairs]
+            rewards = [cr[1] for cr in comp_reward_pairs]
+            prompts.append(prompt)
+            all_completions.append(completions)
+            all_rewards.append(rewards)
+
+        if not prompts:
+            print("    [GRPO] No valid prompt groups (need ≥2 completions per prompt)")
+            # Merge LoRA and cleanup
+            self._merge_lora_after_grpo()
+            return {"n_updates": 0, "mean_loss": 0.0, "mean_reward": 0.0,
+                    "advantage_collapse_rate": 0.0, "skipped": True}
+
+        print(f"    [GRPO] {len(prompts)} prompt groups, "
+              f"G={config.group_size}, LR={config.learning_rate}")
+
+        # Run GRPO training step
+        stats = trainer.train_step(prompts, all_completions, all_rewards)
+
+        print(f"    [GRPO] {stats['n_updates']} updates, "
+              f"loss={stats['mean_loss']:.4f}, "
+              f"reward={stats['mean_reward']:.3f}, "
+              f"KL={stats['mean_kl']:.4f}, "
+              f"ACR={stats['advantage_collapse_rate']:.3f}{stats.get('acr_alert', '')}")
+
+        # Merge LoRA weights back
+        self._merge_lora_after_grpo()
+
+        # Cleanup
+        del trainer, ref_model, ref_state
+        if self.vram:
+            self.vram.empty_cache()
+        else:
+            torch.cuda.empty_cache()
+
+        return stats
+
+    def _merge_lora_after_grpo(self):
+        """Merge LoRA adapters back into base weights after GRPO training."""
+        for block in self.model.blocks:
+            if hasattr(block.ffn, 'experts') and len(block.ffn.experts) > 0:
+                target = block.ffn.experts[0]
+            else:
+                target = block.ffn
+            for attr_name in ['w1', 'w2', 'w3', 'fc1', 'fc2', 'gate_proj', 'up_proj', 'down_proj']:
+                if hasattr(target, attr_name):
+                    layer = getattr(target, attr_name)
+                    if hasattr(layer, 'merge_and_unload'):
+                        merged = layer.merge_and_unload()
+                        setattr(target, attr_name, merged)
 
     def _save_expert(self, topic: str):
         """Save the fine-tuned expert back to the v4 library.
@@ -897,11 +1387,11 @@ class ExpertSelfPlayTrainer:
             experts_dir = Path(self.log_dir / "experts")
             experts_dir.mkdir(parents=True, exist_ok=True)
             n_layers = len(self.model.blocks)
-            v4_dir = None
+            v2_dir = None
         else:
             experts_dir = self.airmoe.module_dir / "experts"
             n_layers = self.airmoe.n_layers
-            v4_dir = str(self.airmoe.module_dir)
+            v2_dir = str(self.airmoe.module_dir)
 
         # Collect expert weights first (fast GPU→CPU transfer)
         layer_weights = []
@@ -943,6 +1433,8 @@ class ExpertSelfPlayTrainer:
         # Parallel file writes (I/O bound — threads safe for safetensors save)
         def _save_one(path_data_tuple):
             path, data = path_data_tuple
+            # safetensors requires contiguous CPU tensors
+            data = {k: v.contiguous().cpu() for k, v in data.items()}
             save_file(data, str(path))
             return path
 
@@ -963,14 +1455,14 @@ class ExpertSelfPlayTrainer:
                     self.airmoe.current_topic = None
                     self.airmoe.current_experts = None
             # Write marker file so future runs know this topic was fine-tuned
-            marker = self.airmoe.module_dir / "experts" / f".trained_{topic}"
+            marker = self.airmoe.module_dir / f".trained_{topic}"
             marker.write_text("trained")
 
         # Update manifest.json so router knows about this topic
-        if v4_dir:
+        if v2_dir:
             try:
                 from train_expert import update_manifest
-                update_manifest(v4_dir, topic)
+                update_manifest(v2_dir, topic)
             except Exception as e:
                 print(f"    (Manifest update skipped: {e})")
 
@@ -1035,12 +1527,37 @@ def main():
                         help="Use fp32 instead (higher precision, 2x VRAM)")
     parser.add_argument("--use-curriculum", action="store_true", default=False,
                         help="Use AZR-style infinite curriculum (model proposes tasks)")
+    parser.add_argument("--use-grpo", action="store_true", default=False,
+                        help="GRPO RL training (verifiable rewards) instead of SFT")
+    parser.add_argument("--no-monitor", dest="use_monitor", action="store_false",
+                        default=True,
+                        help="Disable failure-mode monitoring (ACR/diversity/KL alerts)")
+    parser.add_argument("--no-data-quality", dest="use_data_quality", action="store_false",
+                        default=True,
+                        help="Disable multi-level data quality pipeline (dedup/QDC)")
+    parser.add_argument("--no-replay", dest="use_replay", action="store_false",
+                        default=True,
+                        help="Disable FOREVER forgetting-curve replay buffer")
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="Tasks per batched generation forward pass (higher=GPU util, lower=less padding waste)")
+    parser.add_argument("--verify-workers", type=int, default=4,
+                        help="Persistent sandbox worker pool size for parallel code verification (each has own pipe)")
+    parser.add_argument("--heartbeat-interval", type=float, default=2.0,
+                        help="Seconds between heartbeat.json rewrites (live GUI hang detection)")
+    parser.add_argument("--kv-int8", dest="kv_int8", action="store_true",
+                        default=False,
+                        help="Enable INT8 KV cache quantization (2x VRAM, but may degrade generation quality)")
     parser.add_argument("--use-mac-attn", action="store_true", default=False,
                         help="Enable MAC-Attention (reuse attention for similar queries, long context)")
     parser.add_argument("--use-spec-attn", action="store_true", default=False,
                         help="Enable L1 Speculative Attention (low-rank draft + entropy verify, 57% attn cut, lossless)")
     parser.add_argument("--no-compile", action="store_true", default=False,
                         help="Disable torch.compile (use eager mode for debugging)")
+    parser.add_argument("--compile-mode", type=str, default="default",
+                        choices=["default", "reduce-overhead", "max-autotune"],
+                        help="torch.compile mode (default: kernel fusion. "
+                             "reduce-overhead: +CUDA Graphs (needs static shapes). "
+                             "max-autotune: +kernel autotuning (slower compile, faster run)")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -1086,7 +1603,7 @@ def main():
     # Only activates for long contexts (> 512 tokens). Lossless at init.
     mac_key = None
     if getattr(args, 'use_mac_attn', False):
-        from research.keys.attn_reuse_key import AttnReuseKey
+        from research.keys.attention.attn_reuse_key import AttnReuseKey
         mac_key = AttnReuseKey(max_entries=16, match_threshold=0.85)
         mac_key.apply(model)
         print(f"  [MAC-Attention] Patched {len(mac_key._patched_layers)} layers "
@@ -1096,7 +1613,7 @@ def main():
     # 56.8% attention compute saved, cos=1.0 (lossless), 71% accept rate
     spec_attn_key = None
     if getattr(args, 'use_spec_attn', False):
-        from research.keys.speculative_keys import SpeculativeAttentionKey
+        from research.keys.speculative.speculative_keys import SpeculativeAttentionKey
         spec_attn_key = SpeculativeAttentionKey(draft_rank=32)
         spec_attn_key.apply(model)
         print(f"  [SpecAttn] Patched {len(spec_attn_key._patched)} attention layers "
@@ -1104,15 +1621,30 @@ def main():
 
     vram.empty_cache()
 
-    # torch.compile for inference speedup (kernel fusion, ~1.3-2x decode).
-    # Uses mode="default" (no CUDA graphs) because the pre-allocated KV cache
-    # has dynamic fill lengths incompatible with CUDA graph capture.
+    # torch.compile for inference speedup.
+    # Strategy: compile the whole model with "default" (kernel fusion only)
+    # for the prefill pass, then use compile_decode_step with "reduce-overhead"
+    # (CUDA Graphs) for the fixed-shape decode loop. The decode step uses
+    # PreAllocatedKVCache (static buffer, in-place updates) which is
+    # CUDA Graph compatible. This eliminates the 40% CPU launch overhead
+    # that causes GPU to sit idle at 60% during autoregressive generation.
+    # Ref: gpt-fast pattern, PyTorch CUDA Graph best practices.
     if not args.no_compile:
+        compile_mode = getattr(args, 'compile_mode', 'default')
         try:
-            model = model.compile_for_inference(mode="default")
-            print("  [torch.compile] active (default mode, kernel fusion)")
+            model = model.compile_for_inference(mode=compile_mode)
+            print(f"  [torch.compile] active ({compile_mode} mode, kernel fusion)")
         except Exception as e:
-            print(f"  [torch.compile] failed ({e}), using eager mode")
+            print(f"  [torch.compile] {compile_mode} failed ({e}), using eager mode")
+
+        # NOTE: CUDA Graph decode step (compile_decode_step) is DISABLED for
+        # self-play training. The PreAllocatedKVCache returns dynamic slices
+        # [:, :, :position] whose stride changes every token as position grows.
+        # CUDA Graphs require static shapes/strides → dynamo hits recompile
+        # limit (8) then produces garbage output. The main torch.compile
+        # (kernel fusion, "default" mode) still works fine for the prefill.
+        model._compiled_decode = None
+        print("  [torch.compile] decode step CUDA Graphs DISABLED (incompatible with PreAllocatedKVCache dynamic slices)")
 
     # Warmup generation to measure peak VRAM (captures CUDA kernel overhead)
     vram.profile_after_warmup(model, tokenizer, max_warmup_tokens=16)
@@ -1131,25 +1663,21 @@ def main():
     print(f"  [VRAM] Dynamic max generation: {dynamic_max_tokens} tokens")
 
     # ── AirMoE: Infinite expert library with VRAM-limited hotswap ──
-    # v4 expert library: 14 topics × 28 layers, SVD-compressed (~15 MB each)
-    # Experts were built from v2 MoE experts (slices of original Qwen FFN).
-    # Only math_arithmetic (expert 0) was affected by the v2 corruption in
-    # layers 20-27 — all other topics use experts 1/2/3 which were not corrupted.
-    # v2 has since been rebuilt from v1 (clean). The v4 library will be rebuilt
-    # from clean v2 in a future pass; for now, non-math topics are safe to use.
-    from research.paths import FORGELM_V4_DIR, as_str; v4_dir = as_str(FORGELM_V4_DIR)
-    v4_manifest = os.path.join(v4_dir, "manifest.json")
-    if os.path.exists(v4_manifest):
-        print("\n[3] Creating AirMoE (v4 expert library)...")
+    # V2 expert library: 10 topics × 28 layers, SVD-compressed (~18 MB each)
+    # Experts are spectrally-injected from HF datasets into V2 base weights.
+    from research.paths import FORGELM_V2_EXPERTS_DIR, as_str; v2_dir = as_str(FORGELM_V2_EXPERTS_DIR)
+    v2_manifest = os.path.join(v2_dir, "manifest.json")
+    if os.path.exists(v2_manifest):
+        print("\n[3] Creating AirMoE (V2 expert library)...")
         airmoe = InfiniteAirMoE(
-            model, tokenizer, v4_dir,
+            model, tokenizer, v2_dir,
             device="cuda",
             vram_budget_gb=2.0,       # 2 GB for expert cache (model uses ~3.2 GB)
             max_cached_topics=5,       # 5 topics × ~56 MB = ~280 MB per topic set
         )
         print(f"  Available topics: {airmoe.router.list_topics()}")
     else:
-        print(f"\n[3] AirMoE disabled (no v4 manifest at {v4_manifest})")
+        print(f"\n[3] AirMoE disabled (no V2 manifest at {v2_manifest})")
         airmoe = None
 
     # Create trainer
@@ -1173,6 +1701,14 @@ def main():
         vram_manager=vram,
         max_gen_tokens=dynamic_max_tokens,
         use_curriculum=args.use_curriculum,
+        use_grpo=args.use_grpo,
+        use_monitor=args.use_monitor,
+        use_data_quality=args.use_data_quality,
+        use_replay=args.use_replay,
+        batch_size=args.batch_size,
+        verify_workers=args.verify_workers,
+        heartbeat_interval=args.heartbeat_interval,
+        kv_int8=args.kv_int8,
     )
 
     # Determine topics

@@ -32,12 +32,23 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from research.moe.keyword_router import KeywordRouter
 
-class TopicRouter:
+try:
+    from loguru import logger as _log
+except ImportError:
+    import logging
+    _log = logging.getLogger(__name__)
+
+
+class TopicRouter(KeywordRouter):
     """Classifies user queries into topics for AirMoE hotswap.
 
     Uses keyword matching (fast, no model needed) to route queries
     to the correct topic module.
+
+    Keyword scoring logic lives in the shared KeywordRouter base; this
+    class restricts routing to topics with an available module on disk.
     """
 
     # Topic keywords for routing
@@ -92,6 +103,13 @@ class TopicRouter:
         with open(index_path, encoding="utf-8") as f:
             self.index = json.load(f)
         self.available_topics = set(self.index.get("topics", {}).keys())
+        super().__init__(fallback="general", min_score=1)
+
+    def _iter_keywords(self):
+        # Only route to topics that have an available module on disk.
+        for topic, keywords in self.TOPIC_KEYWORDS.items():
+            if topic in self.available_topics:
+                yield topic, keywords
 
     def classify(self, query: str) -> str:
         """Classify a query into a topic.
@@ -99,23 +117,14 @@ class TopicRouter:
         Returns the best-matching topic that has an available module.
         Falls back to the first available topic if no match.
         """
-        query_lower = query.lower()
-        scores = {}
-
-        for topic, keywords in self.TOPIC_KEYWORDS.items():
-            if topic not in self.available_topics:
-                continue
-            score = sum(1 for kw in keywords if kw in query_lower)
-            if score > 0:
-                scores[topic] = score
-
+        scores = self._score(query.lower())
         if scores:
             return max(scores, key=scores.get)
 
         # Fallback: pick first available topic
         if self.available_topics:
             return next(iter(self.available_topics))
-        return "general"
+        return self.fallback
 
     def list_topics(self) -> list[str]:
         """List all available topic modules."""
@@ -236,7 +245,7 @@ class AirMoEHotswapLoader:
             return None
 
         try:
-            from research.keys.knowledge_pack_key import KnowledgePack
+            from research.keys.knowledge.knowledge_pack_key import KnowledgePack
             # Pre-compute KV cache from knowledge text
             pack = KnowledgePack.from_text(
                 self.model, self.tokenizer, self.current_knowledge,
@@ -245,6 +254,7 @@ class AirMoEHotswapLoader:
             pack.inject(self.model)
             return input_ids  # input_ids unchanged (KV cache is separate)
         except Exception as e:
+            _log.warning(f"[AirMoE] KV cache injection failed: {e}, using context")
             print(f"    [AirMoE] KV cache injection failed: {e}, using context")
             return None
 

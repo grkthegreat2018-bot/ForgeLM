@@ -67,6 +67,36 @@ Transform weights directly between architectures, no extraction needed:
   - Apply: `python -u .devin\apply_novel_keys.py` (lossless)
   - Checkpoint: `research/checkpoints/forgelm_v3.safetensors` (815 tensors, 3643 MB)
   - 113 fewer tensors than v2 (norms folded into adjacent weights)
+- **ForgeLM v4**: LFM2.5-style hybrid conv+attention for speed/VRAM parity — **ABANDONED**
+  - 22 DoubleGatedConvLayer (O(T*k*d)) + 6 MLA attention (only 6 layers grow KV cache)
+  - Matches LFM2.5-2.6B architecture ratio (73% conv, 27% attention)
+  - Convert: `python -u .devin\convert_v2_to_v4.py` (LOSSY — conv init from attention Q/O proj)
+  - Compress: `python -u .devin\compress_v4.py` (tensor dedup + int4 quant → 1843 MB)
+  - Config: `forgelm_v4` (layer_types=[22 conv + 6 attention], conv_kernel_size=3)
+  - Config: `forgelm_v4b` (layer_types=[14 conv + 14 attention, alternating])
+  - Checkpoint (bf16): `research/checkpoints/forgelm_v4.safetensors` (689 tensors, 3747 MB)
+  - Checkpoint (v4b): `research/checkpoints/forgelm_v4b.safetensors` (745 tensors, 3709 MB)
+  - Benchmark: `python .devin\benchmark_v4.py`
+  - Results (bf16, RTX 5070):
+    - Weights VRAM: 3393 MB (18.1% less than v2's 4141 MB)
+    - KV cache VRAM: 44 MB (36.9% less than v2's 70 MB — only 6 layers)
+    - Peak VRAM: 3481 MB (18.5% less than v2's 4273 MB)
+    - Prefill: 2347 tok/s (3.7% faster than v2)
+    - Decode: 20.6 tok/s (6.2% faster than v2)
+    - With int4 quant: ~1987 MB total VRAM (under 2.5 GB target)
+  - **WHY ABANDONED**: Conv retrofitting into a pretrained attention model does NOT work.
+    LFM2 trains conv+attention from scratch on 10-12T tokens. Retrofitting requires
+    distillation but conv kernel=3 (2-token context) cannot replicate attention's global
+    context. Even with correct LFM2 architecture (raw multiply gates, no sigmoid, in_proj
+    d→3d), distillation reached cos=0.94 but generation produced repetitive garbage.
+    v4b (50% conv/50% attention) generated real words but still repetitive — conv layers
+    between attention layers scramble the signal. The fundamental issue: conv layers
+    need to be trained from scratch, not retrofitted. V2 remains the production model.
+  - Architecture: `DoubleGatedConvLayer` in `model_loader.py` (LFM2-style: in_proj d→3d,
+    raw multiply gates B*x, depthwise causal conv, C*conv_out, out_proj — NO sigmoid)
+  - Distillation: `.devin/distill_v4.py` (KL + CE + hidden state loss, EMA, best-checkpoint save)
+  - Layer pattern v4: attention at indices [2,6,10,14,18,22], conv elsewhere
+  - Layer pattern v4b: alternating conv/attention (14 each)
 - **Lossless Quant Chain**: SpinQuant→QuaRot→int4 — **IMPLEMENTED** (`keys/lossless_quant_key.py`)
   - Chains Hadamard rotation + int4 GPTQ for near-lossless 4x compression
   - Target: sub-8GB VRAM (3.4GB bf16 → ~1.2GB int4 + ~0.8GB KV/activations = ~2GB total)
@@ -216,7 +246,9 @@ Transform weights directly between architectures, no extraction needed:
   - **Verified: logit cos=1.0, top-1 match=100%, KL=0.0 — PERFECTLY LOSSLESS**
   - **Save: 467.6 MB (12.8%), 193 fewer tensors (20.8%)**
 - **KeyStack**: 61 keys total (13 FULL, 5 BI, 26 PARTIAL, 17 TRIVIAL)
-- **Version naming**: V1 = published. V2+ = unpublished dev versions until published to HF.
+- **Version naming**: **V1 = PUBLISHED to HuggingFace.** All future model progress is solely V2+.
+  V3/V4 internal names are abandoned — everything is "V2" until the next HF publish.
+  See "Self-Train Research Findings (2026-08)" section below for the V2+ improvement roadmap.
 - **Pipeline**: `python -m research.serving.forge_pipeline` chains MLA → MoE → BitNet
 
 ### Directory Structure (refactored)
@@ -905,3 +937,95 @@ Data formats: JSON `[{"prompt":"...","completion":"..."}]`, JSONL, CSV (prompt,c
 - **ruff** 0.16.2: 413 default rules (up from 59), auto-fixed 1,237 issues
   - Config: `py313` target, `UP`/`SIM`/`RUF` rules added
   - Remaining 390 issues are style preferences (manual review needed)
+
+## Self-Train Research Findings (2026-08)
+
+### V2+ Improvement Roadmap (research-guided)
+
+**Source papers**: AZR (NeurIPS 2025), "Survive or Collapse" (arxiv 2605.22217),
+DeepSeek-R1, LADDER (arxiv 2503.00735), GRPO small-model ablations, FOREVER replay.
+
+**CRITICAL � Data gate is the binding constraint (not reward design)**:
+- "Survive or Collapse" proves: strict executor gate (e=0) = stable under EVERY reward variant.
+  Gate off = collapse to 0.002 accuracy regardless of reward design.
+- Our `test_passed=True` requirement IS the strict gate. KEEP IT. Never train on unverified solutions.
+- Grounded Proposer Paradox: grounded proposer accelerates collapse when gate is off.
+  With gate on, grounded proposer is fine and optimal.
+- Phase transition: training-side decoupling at e�0.05, validation collapse at e�0.20-0.40.
+  e=0 (strict) is optimal on all metrics.
+
+**Goldilocks zone fix (AZR)**:
+- Current: target 20% success (too hard, model fails 80%).
+- AZR optimal: target 50% success, range [0.2, 0.8].
+- Proposer reward: r_propose = 1 - |success_rate - 0.5| (learnability).
+- Solver reward: r_solve = 1.0 if correct else 0.0 (binary from executor).
+
+**GRPO RL training (replaces/augments pure SFT)**:
+- SGRPO 58.0% vs DPO 49.1% at 1.5B scale (-8.9pp). Rankings invert at 7B.
+- G=4 (MC-GRPO median baseline for stability), KL=0.02, clip=0.2, LR=5e-6.
+- Advantage = (reward - group_median) / (group_std + eps).
+- Binary correctness reward from executor (the gate ensures reward quality).
+- Reference model = frozen V2 base.
+
+**LADDER recursive decomposition**:
+- When solver fails hard task ? generate easier variant ? solve ? learn ? retry original.
+- Llama 3.2 3B: 1% ? 82% on MIT Integration Bee. Max decomposition depth 3.
+
+**Reflect-Retry-Reward**:
+- After failure ? self-reflection ("why did this fail?") ? second attempt with reflection context.
+- +34.7% math gains at 1.5-7B scale.
+
+**Data quality pipeline**:
+- Multi-level dedup: exact (n-gram >90%) ? semantic (embedding >0.85) ? AST structural.
+- Difficulty filter: keep tasks with success rate [0.3, 0.7].
+- Diversity score: target >0.7 (embedding pairwise distance).
+- QDC scoring: 0.5*Quality + 0.3*Diversity + 0.2*Complexity.
+
+**FOREVER replay buffer**:
+- Forgetting-curve scheduling: replay interval = f(optimizer_update_magnitude).
+- Buffer size: 10K samples max. Prevents catastrophic forgetting.
+
+**Failure mode monitoring**:
+- Advantage Collapse Rate (ACR): alert if >0.3.
+- Intrinsic-grounded gap: alert if >0.2.
+- Diversity score: alert if <0.6.
+
+### Project Reorganization Plan (deferred � do after self-train improvements)
+- scripts/: train_dspark.py, train_expert.py, ablation_benchmark.py, extract_vocab_packs.py, launch.py
+- web/: app.js, tools.js, index.html, styles.css
+- tests/integration/: test_integration_keys.py, test_novel_keys.py, test_novel_keys2.py, .devin/test_*.py
+- research/keys/ ? 12 subdirs (attention, normalization, activation, position, quantization,
+  moe, compression, knowledge, speculative, cache, training, misc)
+- Only 8 external files import from keys (all direct module imports) � safe to reorganize.
+- Full research notes in `.devin/scratchpad.md` (REFACTOR PLAN + CRITICAL RESEARCH FINDINGS sections).
+
+## Self-Play Revamp (2026-08-10)
+
+- `research/self_play/io_match.py`: semantic I/O verification (`io_match`/`io_similarity`) �
+  tolerant to float formatting, unordered answers, bracket/quote differences. Used by
+  `SandboxExecutor` on both persistent + subprocess paths (`output_matches_expected` now semantic).
+- `_score_packet` reweighted for I/O focus: correctness 60% (partial credit via io_score),
+  exec 15%, speed 10%, code 5%, confidence 5%, no-timeout 5%.
+- `ExpertSelfPlayTrainer` new flags: `--use-grpo`, `--no-monitor`, `--no-data-quality`,
+  `--no-replay`. Monitor/DataQuality/ReplayBuffer now wired in by default (were orphaned).
+- Self-play status for GUI: `research/checkpoints/self_play/status.json` + `heartbeat.json`
+  written each epoch (StatusReader scans `research/checkpoints/**`). Extras: io_accuracy,
+  mean_reward, diversity_score, kl_divergence, advantage_collapse_rate, replay_buffer_size,
+  data_quality_kept, monitor_alerts.
+- `ReplayBuffer.sample` weight bug FIXED: was `exp(-d/tau)` (favored recent); now
+  `1 - exp(-d/tau)` (favors due-for-replay, per FOREVER/Ebbinghaus docstring intent).
+- `SandboxExecutor(temp_dir=...)` replaces the duplicated `DDriveSandboxExecutor.execute`
+  (which also bypassed the PersistentCodeExecutor fast path � fixed; DDrive class is now a
+  thin back-compat subclass).
+- Log dirs env-overridable: `FORGE_SELF_PLAY_DIR`, `FORGE_RECURSIVE_SELF_PLAY_DIR`.
+- Routers consolidated: `research/moe/keyword_router.py` `KeywordRouter` base;
+  `ExpertRouter`/`TopicRouter` subclass it. Expert sha256 verify: set
+  `InfiniteAirMoE.verify_hashes = True` (warn-only).
+- Scripts use `research.paths` constants (no hardcoded D:/ paths).
+- Bugs fixed: `epoch_attempts` dead-reference (GRPO had no failure contrast),
+  `prompt_len` NameError in `generate_fix_with_reflection`, `moe_top_k` NameError in
+  `ModelLoader.build_model`, `manifest_data` NameError in airmoe_infinite,
+  packet-list memory leak (`save_packets` now clears).
+- Tests: tests/unit (164 passing) incl. test_self_play_components.py, test_moe.py,
+  test_keyword_router.py. 15 integration failures are pre-existing (missing key modules
+  from restructure + HF offline).

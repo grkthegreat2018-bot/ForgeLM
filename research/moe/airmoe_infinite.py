@@ -25,7 +25,7 @@ Architecture:
   With int4 + SVD: each expert ~2 MB, can cache 100+ experts in 2 GB VRAM.
 
 File layout:
-  forgelm_v4/
+  forgelm_v2/
     base_model_int4.safetensors     # base weights (no routed experts)
     manifest.json                    # expert library index
     rotorquant_rotations.pt          # KV cache compression
@@ -37,10 +37,11 @@ File layout:
 
 Usage:
     from research.moe.airmoe_infinite import InfiniteAirMoE
-    airmoe = InfiniteAirMoE(model, tokenizer, "forgelm_v4/")
+    airmoe = InfiniteAirMoE(model, tokenizer, "forgelm_v2/")
     airmoe.load_expert_topic("python_algorithms")  # hotswap
     result = thinker.generate_with_thinking("Sort a list using merge sort")
 """
+import hashlib
 import json
 import os
 import time
@@ -50,13 +51,24 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from research.moe.keyword_router import KeywordRouter
 
-class ExpertRouter:
+try:
+    from loguru import logger as _log
+except ImportError:
+    import logging
+    _log = logging.getLogger(__name__)
+
+
+class ExpertRouter(KeywordRouter):
     """Routes queries to expert topics using keyword matching.
 
     The router has no hard limit on topics — new topics can be registered
     at any time. It maps a user query to the best-matching expert topic
     in the library.
+
+    Keyword scoring/threshold logic lives in the shared KeywordRouter base;
+    this class sources keywords from the expert library manifest.
     """
 
     # Module-level manifest cache: {manifest_path: manifest_dict}
@@ -71,49 +83,15 @@ class ExpertRouter:
 
         self.topics: dict[str, dict] = self.manifest.get("topics", {})
         self.n_layers = self.manifest.get("n_layers", 28)
+        super().__init__(fallback="general", min_score=1)
 
-    def classify(self, query: str) -> str:
-        """Classify a query into the best expert topic.
-
-        Returns the topic name with the highest keyword match score.
-        Falls back to "general" if no match.
-        """
-        query_lower = query.lower()
-        scores = {}
-
+    def _iter_keywords(self):
+        # Keywords come from the (mutable) manifest topics, not a static dict.
         for topic_name, info in self.topics.items():
-            keywords = info.get("keywords", [])
-            score = sum(1 for kw in keywords if kw in query_lower)
-            if score > 0:
-                scores[topic_name] = score
+            yield topic_name, info.get("keywords", [])
 
-        if scores:
-            return max(scores, key=scores.get)
-        return "general"
-
-    def classify_multi(self, query: str, top_n: int = 2) -> list[str]:
-        """Classify a query into multiple expert topics (for multi-expert routing).
-
-        Returns up to top_n topic names sorted by match score.
-        """
-        query_lower = query.lower()
-        scores = {}
-
-        for topic_name, info in self.topics.items():
-            keywords = info.get("keywords", [])
-            score = sum(1 for kw in keywords if kw in query_lower)
-            if score > 0:
-                scores[topic_name] = score
-
-        if not scores:
-            return ["general"]
-
-        sorted_topics = sorted(scores, key=scores.get, reverse=True)
-        return sorted_topics[:top_n]
-
-    def list_topics(self) -> list[str]:
-        """List all available expert topics in the library."""
-        return sorted(self.topics.keys())
+    def _topic_names(self):
+        return self.topics.keys()
 
     def register_topic(self, topic: str, keywords: list[str],
                         label: str = "", subtopics: list[str] = None):
@@ -154,7 +132,7 @@ class InfiniteAirMoE:
         Args:
             model: ForgeLM model with shared FFN + expert slots
             tokenizer: tokenizer
-            module_dir: path to forgelm_v4/ directory
+            module_dir: path to forgelm_v2/ directory
             device: target device
             vram_budget_gb: VRAM budget for expert cache
             max_cached_topics: max topics cached simultaneously
@@ -166,10 +144,42 @@ class InfiniteAirMoE:
         self.vram_budget_gb = vram_budget_gb
         self.max_cached_topics = max_cached_topics
 
-        # Load router from manifest
+        # Load router from manifest — prefer SemanticRouter (embedding-based)
+        # over keyword-based ExpertRouter for better query routing.
         manifest_path = self.module_dir / "manifest.json"
-        self.router = ExpertRouter(str(manifest_path))
-        self.n_layers = self.router.n_layers
+        # Initialize before try so it's always defined for n_layers below.
+        manifest_data: dict = {}
+        try:
+            from research.moe.semantic_router import SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS
+            # Build topic descriptions from manifest topics
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest_data = json.load(f)
+            topic_descs = {}
+            for tname, tinfo in manifest_data.get("topics", {}).items():
+                kws = tinfo.get("keywords", [])
+                topic_descs[tname] = tinfo.get("label", tname) + ": " + ", ".join(kws)
+            # Fill in defaults for any missing topics
+            for k, v in DEFAULT_TOPIC_DESCRIPTIONS.items():
+                if k not in topic_descs:
+                    topic_descs[k] = v
+            self.router = SemanticRouter(model, tokenizer, topic_descs, device=device)
+            print(f"  [AirMoE] Using SemanticRouter ({len(topic_descs)} topics)")
+        except Exception as e:
+            _log.warning(f"[AirMoE] SemanticRouter failed ({e}), falling back to keyword router")
+            print(f"  [AirMoE] SemanticRouter failed ({e}), falling back to keyword router")
+            self.router = ExpertRouter(str(manifest_path))
+            # manifest_data may be empty here — recover n_layers from the
+            # keyword router's manifest (already loaded by ExpertRouter).
+            if not manifest_data:
+                manifest_data = getattr(self.router, "manifest", {}) or {}
+        self.n_layers = manifest_data.get("n_layers", 28)
+
+        # Expert file integrity: optional sha256 verification against hashes
+        # published in manifest.json ("expert_hashes": {filename: sha256}).
+        # Off by default (hashing 28 files adds disk I/O); corrupt files are
+        # always caught at safetensors parse time regardless (warn + skip).
+        self.verify_hashes: bool = False
+        self._expert_hashes: dict[str, str] = manifest_data.get("expert_hashes", {}) or {}
 
         # LRU cache: topic → {layer: expert_weights}
         self.cache: OrderedDict[str, dict[int, dict[str, torch.Tensor]]] = OrderedDict()
@@ -187,7 +197,30 @@ class InfiniteAirMoE:
 
     def _get_expert_path(self, layer: int, topic: str) -> Path:
         """Get the file path for a topic expert at a given layer."""
+        # Expert files are directly in module_dir (flat layout)
+        path = self.module_dir / f"expert_l{layer}_{topic}.safetensors"
+        if path.exists():
+            return path
+        # Fallback: experts/ subdir (legacy layout)
         return self.module_dir / "experts" / f"expert_l{layer}_{topic}.safetensors"
+
+    def _verify_sha256(self, path: Path):
+        """Verify an expert file's sha256 against the manifest hash (if any).
+
+        Warn-only: a mismatch is logged but does not block loading.
+        Files without a manifest hash entry are skipped (no-op).
+        """
+        expected = self._expert_hashes.get(path.name)
+        if not expected:
+            return
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        actual = h.hexdigest()
+        if actual != expected:
+            _log.warning(f"[AirMoE] sha256 mismatch for {path.name}: "
+                         f"expected {expected[:16]}…, got {actual[:16]}…")
 
     def _load_topic_from_disk(self, topic: str) -> dict[int, dict[str, torch.Tensor]]:
         """Load all layer experts for a topic from disk.
@@ -211,10 +244,36 @@ class InfiniteAirMoE:
         if not paths:
             return {}
 
-        def _load_one(layer_path_tuple):
-            layer, path = layer_path_tuple
-            state = load_file(str(path))
+        def _load_one_disk(layer_path_tuple):
+            """Thread-safe: only disk I/O, no GPU ops.
 
+            Validates the expert file before returning it: optional sha256
+            check against the manifest, then a real safetensors parse. A
+            corrupt/unparseable file is skipped (warn-only) instead of
+            crashing the whole topic load.
+            """
+            layer, path = layer_path_tuple
+            try:
+                if self.verify_hashes:
+                    self._verify_sha256(path)
+                state = load_file(str(path))
+                return layer, state, path.stat().st_size
+            except Exception as e:
+                _log.warning(f"[AirMoE] Skipping corrupt expert file {path}: {e}")
+                return layer, None, 0
+
+        experts = {}
+        total_bytes = 0
+
+        # Phase 1: Parallel disk reads (I/O bound, thread-safe)
+        max_workers = min(8, len(paths))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            raw_results = list(executor.map(_load_one_disk, paths.items()))
+
+        # Phase 2: GPU decompression (sequential — CUDA is single-threaded)
+        for layer, state, size in raw_results:
+            if state is None:
+                continue  # corrupt file — already logged in _load_one_disk
             # Decompress: check which format
             if any(k.endswith("_U_q") for k in state):
                 expert = self._decompress_expert(state)
@@ -226,28 +285,16 @@ class InfiniteAirMoE:
                     k = f"{part}.weight"
                     if k in state:
                         expert[part] = state[k].to(self.device)
-
-            return layer, expert, path.stat().st_size
-
-        experts = {}
-        total_bytes = 0
-
-        # Parallel disk reads (I/O bound, threads are safe for safetensors load)
-        max_workers = min(8, len(paths))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(_load_one, paths.items()))
-
-        for layer, expert, size in results:
             experts[layer] = expert
             total_bytes += size
 
         self.stats["bytes_loaded"] += total_bytes
         return experts
 
-    @staticmethod
-    def _decompress_expert(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Decompress SVD + int4 expert to full weight matrices."""
+    def _decompress_expert(self, state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Decompress SVD + int4 expert to full weight matrices on GPU."""
         expert = {}
+        dev = self.device
         gs = 128
         for part in ["w1", "w2", "w3"]:
             U_q = state.get(f"{part}_U_q")
@@ -261,36 +308,47 @@ class InfiniteAirMoE:
             if U_q is None:
                 continue
 
-            # Dequantize U: q is [n_groups, gs], scale is [n_groups]
-            U = (U_q.float() * U_scale.float().unsqueeze(-1)).reshape(-1)
+            # Dequantize U on GPU: q is [n_groups, gs], scale is [n_groups]
+            U_q_d = U_q.to(dev)
+            U_scale_d = U_scale.to(dev)
+            U = (U_q_d.float() * U_scale_d.float().unsqueeze(-1)).reshape(-1)
             if U_shape is not None:
                 U = U[:U_shape[0].item() * U_shape[1].item()].reshape(
                     U_shape[0].item(), U_shape[1].item())
 
-            # Dequantize Vh: q is [n_groups, gs], scale is [n_groups]
-            Vh = (Vh_q.float() * Vh_scale.float().unsqueeze(-1)).reshape(-1)
+            # Dequantize Vh on GPU
+            Vh_q_d = Vh_q.to(dev)
+            Vh_scale_d = Vh_scale.to(dev)
+            Vh = (Vh_q_d.float() * Vh_scale_d.float().unsqueeze(-1)).reshape(-1)
             if Vh_shape is not None:
                 Vh = Vh[:Vh_shape[0].item() * Vh_shape[1].item()].reshape(
                     Vh_shape[0].item(), Vh_shape[1].item())
 
-            # Reconstruct: W = U @ diag(S) @ Vh
-            W = (U * S.float().unsqueeze(0)) @ Vh
+            # Reconstruct on GPU: W = U @ diag(S) @ Vh
+            S_d = S.to(dev)
+            W = (U * S_d.float().unsqueeze(0)) @ Vh
             expert[part] = W.to(torch.bfloat16)
+            del U_q_d, U_scale_d, Vh_q_d, Vh_scale_d, S_d
 
         return expert
 
-    @staticmethod
-    def _decompress_expert_svd_only(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Decompress SVD-only expert (v2 format)."""
+    def _decompress_expert_svd_only(self, state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Decompress SVD-only expert (v2 format) on GPU for speed."""
         expert = {}
+        dev = self.device
         for part in ["w1", "w2", "w3"]:
             U = state.get(f"{part}_U")
             S = state.get(f"{part}_S")
             Vh = state.get(f"{part}_Vh")
             if U is None:
                 continue
-            W = (U.float() * S.float().unsqueeze(0)) @ Vh.float()
+            # Reconstruct on GPU: W = U @ diag(S) @ Vh
+            U_d = U.to(dev)
+            S_d = S.to(dev)
+            Vh_d = Vh.to(dev)
+            W = (U_d.float() * S_d.float().unsqueeze(0)) @ Vh_d.float()
             expert[part] = W.to(torch.bfloat16)
+            del U_d, S_d, Vh_d
         return expert
 
     def _inject_expert(self, layer: int, expert: dict[str, torch.Tensor]):
@@ -310,7 +368,8 @@ class InfiniteAirMoE:
                 if "w3" in expert:
                     expert_module.w3.weight.data = expert["w3"].to(self.device, model_dtype)
         except (IndexError, AttributeError) as e:
-            pass  # Model might not have expert slots at this layer
+            # Model might not have expert slots at this layer
+            _log.warning(f"[AirMoE] Expert injection skipped at layer {layer}: {e}")
 
     def _evict_lru(self):
         """Evict the least recently used topic from the cache."""
@@ -352,9 +411,13 @@ class InfiniteAirMoE:
             self.stats["cache_hits"] += 1
             return True
 
-        # Check if topic exists on disk
-        first_path = self._get_expert_path(0, topic)
-        if not first_path.exists():
+        # Check if topic exists on disk (any layer, not just layer 0)
+        found = False
+        for layer in range(self.n_layers):
+            if self._get_expert_path(layer, topic).exists():
+                found = True
+                break
+        if not found:
             print(f"    [AirMoE] Topic '{topic}' not found in expert library")
             return False
 
@@ -453,16 +516,16 @@ def main():
     print("Infinite AirMoE Test")
     print("=" * 70)
 
-    from research.paths import FORGELM_V4_DIR, as_str
-    module_dir = as_str(FORGELM_V4_DIR)
+    from research.paths import FORGELM_V2_EXPERTS_DIR, as_str
+    module_dir = as_str(FORGELM_V2_EXPERTS_DIR)
 
     if not os.path.exists(os.path.join(module_dir, "manifest.json")):
-        print(f"\n  ERROR: No v4 module at {module_dir}")
-        print("  Run: python -m research.bake_v4")
+        print(f"\n  ERROR: No V2 expert library at {module_dir}")
+        print("  Run: python scripts/inject_hf_data.py --topics all")
         return
 
     # Load model
-    print("\n[1] Loading ForgeLM v4 base...")
+    print("\n[1] Loading ForgeLM v2 base...")
     cfg = get_config("forgelm_v2", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/forgelm_v2.safetensors")

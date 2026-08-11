@@ -25,7 +25,6 @@ from research.json_compat import dumps, dumps_bytes, loads
 # Worker script that runs persistently, receiving code via stdin.
 _WORKER_SCRIPT = r'''
 import sys, json, struct, io, traceback, time, builtins
-from research.json_compat import dumps_bytes
 
 # Sandbox: block dangerous imports
 _orig_import = builtins.__import__
@@ -38,7 +37,7 @@ def _restricted_import(name, *args, **kwargs):
 builtins.__import__ = _restricted_import
 
 def send_result(result):
-    data = dumps_bytes(result)
+    data = json.dumps(result).encode('utf-8')
     sys.stdout.buffer.write(struct.pack('<I', len(data)))
     sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
@@ -126,6 +125,7 @@ class PersistentCodeExecutor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,  # binary mode for length-prefixed protocol
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         )
 
     def execute(self, code: str, expected_output: str | None = None) -> dict:

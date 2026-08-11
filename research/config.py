@@ -55,6 +55,12 @@ class ModelConfig:
     # ~50% activation VRAM at the cost of ~20% more compute. Enables larger
     # batch sizes or longer sequences on memory-constrained GPUs.
     use_gradient_checkpointing: bool = False
+    # Hybrid conv/attention: per-layer type list. None = all attention (default).
+    # Each entry is "attention" (or "attn") or "conv".
+    # Conv layers use DoubleGatedConvLayer (LFM2-style), O(T*k*d) not O(T^2*d).
+    layer_types: list[str] | None = None
+    # Conv kernel size for DoubleGatedConvLayer (LFM2 uses 3).
+    conv_kernel_size: int = 3
 
     # Training defaults
     batch_size: int = 4
@@ -258,6 +264,13 @@ MODEL_CONFIGS = {
         seq_len=1024,
         use_qk_norm=True,  # QK-Norm for MLA (identity init)
     ),
+    # ForgeLM v4: LFM2.5-style hybrid conv+attention for speed/VRAM parity.
+    #   - 22 conv layers (DoubleGatedConvLayer, O(T*k*d)) + 6 MLA attention layers
+    #   - Only 6 layers grow KV cache (vs 28 in v2) = 4.7x less KV VRAM
+    #   - Conv layers initialized from v2 attention via LiquidConvKey (lossy, needs fine-tune)
+    #   - Tied embeddings (already default in ConfigurableResearchLLM)
+    #   - Target: <2.5GB VRAM with int4 quant, 2x+ faster generation
+    # Layer pattern: attention every ~4 layers in first 22, last 5 all conv.
 }
 
 
