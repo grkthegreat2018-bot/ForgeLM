@@ -180,3 +180,26 @@ class EventsReader:
             return time.time() - ts
         except (json.JSONDecodeError, OSError, ValueError):
             return None
+
+    def heartbeat_stalled(self) -> Optional[bool]:
+        """Check if the training loop has stalled (progress-coupled heartbeat).
+
+        Returns True if the heartbeat writer detected no training-loop
+        progress within its stall threshold (the heartbeat.json contains
+        a "stalled": true flag). Returns False if the heartbeat is fresh
+        and progress is being made. Returns None if no heartbeat file
+        exists or it can't be read.
+        """
+        if self._status_path is None:
+            self.latest_status()
+        if self._status_path is None:
+            return None
+        hb = self._status_path.with_name("heartbeat.json")
+        if not hb.is_file():
+            return None
+        try:
+            with open(hb, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return bool(data.get("stalled", False))
+        except (json.JSONDecodeError, OSError, ValueError):
+            return None

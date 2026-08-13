@@ -1,4 +1,4 @@
-"""Central path management — replaces 17 hardcoded Windows paths.
+"""Central path management — replaces hardcoded Windows paths.
 
 All paths are relative to the project root (the parent of `research/`).
 This makes the codebase portable across machines and operating systems.
@@ -23,19 +23,18 @@ LCB_EVAL_DIR = DATA_DIR / "lcb_eval"
 REASONING_BENCH_DIR = DATA_DIR / "reasoning_bench"
 AIRMOE_MODULES_DIR = CHECKPOINTS_DIR / "airmoe_modules"
 
-# V2 expert library — spectrally-injected experts built on V2 checkpoint.
-FORGELM_V2_EXPERTS_DIR = EXPERT_TRAINING_DIR / "experts_injected"
-FORGELM_V2_CHECKPOINT = CHECKPOINTS_DIR / "forgelm_v2.safetensors"
-# Backward compat alias
-FORGELM_V4_DIR = FORGELM_V2_EXPERTS_DIR
+# LFM2.5 model checkpoint and tokenizer.
+LFM25_CHECKPOINT = CHECKPOINTS_DIR / "ForgeLM_V2_LFM25-1.2B.safetensors"
+LFM25_HF_DIR = CHECKPOINTS_DIR / "lfm25_tokenizer"
 
-# Additional artifacts used by scripts/ (previously hardcoded there).
-QWEN_HF_TOKENIZER_DIR = CHECKPOINTS_DIR / "qwen_hf"
-DSPARK_HEAD_PATH = CHECKPOINTS_DIR / "dspark_head.pt"
-VOCAB_PACK_DIR = CHECKPOINTS_DIR / "vocab_packs"
+# LM Studio model paths (for GGUF inference / data generation).
+LMSTUDIO_MODELS_ROOT = Path("D:/LMstudio/Models/lmstudio-community")
+LMSTUDIO_GGUF = LMSTUDIO_MODELS_ROOT / "LFM2.5-1.2B-Instruct-GGUF" / "LFM2.5-1.2B-Instruct-Q8_0.gguf"
+LMSTUDIO_API = "http://localhost:1234/v1"
+
+# Additional artifacts used by scripts/.
 EXPERTS_DIR = EXPERT_TRAINING_DIR / "experts"
 HF_DATASETS_DIR = EXPERT_TRAINING_DIR / "hf_datasets"
-ALL_TEACHERS_V2_SCORED = DATA_DIR / "all_teachers_v2_scored.jsonl"
 RESULTS_DIR = PROJECT_ROOT / "research" / "results"
 ABLATION_RESULTS_DIR = RESULTS_DIR / "ablation"
 

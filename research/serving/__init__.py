@@ -1,1 +1,1 @@
-"""serving package."""
+# ForgeAI Serving — custom inference backend

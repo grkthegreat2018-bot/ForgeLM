@@ -51,6 +51,7 @@ class LiveStatusWriter:
         self._status: dict = {"status": "running", "phase": "startup"}
         self._last_status_write = 0.0
         self._start_ts = time.time()
+        self._last_progress_ts = time.time()  # for stall detection (Fix 4)
 
         # Throughput tracking (rolling windows)
         self._task_done_ts: deque = deque(maxlen=200)
@@ -66,15 +67,46 @@ class LiveStatusWriter:
         self._hb_thread.start()
 
     # ── heartbeat thread ─────────────────────────────────────────────
+    # Fix 4: progress-coupled heartbeat. The old thread wrote heartbeat.json
+    # every interval regardless of training-loop progress — so a hung loop
+    # still looked "alive" to the GUI. Now the thread tracks the last
+    # progress timestamp (updated by every public API call) and marks the
+    # heartbeat as "stalled" when the training loop hasn't advanced within
+    # the stall threshold. The GUI can then detect hangs even when the
+    # heartbeat thread itself is still running.
+    _STALL_THRESHOLD_S = 120.0  # mark stalled if no progress for 2 min
+
     def _hb_loop(self) -> None:
         while not self._stop.wait(self._hb_interval):
             self._write_heartbeat()
 
     def _write_heartbeat(self) -> None:
         try:
-            _atomic_write(self.heartbeat_path, dumps({"ts": time.time()}))
+            now = time.time()
+            with self._lock:
+                last_progress = self._last_progress_ts
+            stall_age = now - last_progress
+            hb = {"ts": now}
+            if stall_age > self._STALL_THRESHOLD_S:
+                hb["stalled"] = True
+                hb["stall_age_s"] = round(stall_age, 1)
+            _atomic_write(self.heartbeat_path, dumps(hb))
         except Exception as e:
             logger.debug("heartbeat write failed: %s", e)
+
+    def stop_requested(self) -> bool:
+        """Check for the cooperative STOP_REQUESTED sentinel file.
+
+        The GUI writes this sentinel next to status.json when the user
+        clicks Stop. The training loop polls this method at epoch/task
+        boundaries to shut down gracefully — reliable on Windows where
+        SIGTERM delivery from taskkill is unreliable.
+        """
+        sentinel = self.status_path.parent / "STOP_REQUESTED"
+        try:
+            return sentinel.is_file()
+        except Exception:
+            return False
 
     # ── status.json ──────────────────────────────────────────────────
     def _write_status(self, force: bool = False) -> None:
@@ -114,9 +146,14 @@ class LiveStatusWriter:
         self._status["ts"] = now
 
     # ── public API ───────────────────────────────────────────────────
+    def _touch_progress(self) -> None:
+        """Mark that the training loop made progress (for stall detection)."""
+        self._last_progress_ts = time.time()
+
     def set_phase(self, phase: str, detail: str = "", **fields) -> None:
         """Transition the run phase (proposing/generating/verifying/...)."""
         with self._lock:
+            self._touch_progress()
             self._status["phase"] = phase
             self._status["phase_detail"] = detail
             self._status.update(fields)
@@ -127,6 +164,7 @@ class LiveStatusWriter:
     def update(self, **fields) -> None:
         """Merge fields into status.json (throttled writes)."""
         with self._lock:
+            self._touch_progress()
             self._status.update(fields)
             self._refresh_rates()
             self._write_status()
@@ -138,6 +176,7 @@ class LiveStatusWriter:
 
     def task_started(self, task: str, idx: int, total: int, **fields) -> None:
         with self._lock:
+            self._touch_progress()
             self._tasks_total = total
             self._status["current_task"] = task[:80]
             self._emit_locked("task_start", task=task[:120], idx=idx, total=total, **fields)
@@ -148,6 +187,7 @@ class LiveStatusWriter:
                    quality: float = 0.0, gen_ms: float = 0.0, exec_ms: float = 0.0,
                    tokens: int = 0, error: str = "", round_active: int = 0) -> None:
         with self._lock:
+            self._touch_progress()
             if tokens or gen_ms:
                 self._gen_window.append((time.time(), tokens, gen_ms))
             self._status["round_active"] = round_active
@@ -161,6 +201,7 @@ class LiveStatusWriter:
     def task_done(self, task_idx: int, task: str, success: bool,
                   rounds_used: int = 0, best_quality: float = 0.0) -> None:
         with self._lock:
+            self._touch_progress()
             self._tasks_done += 1
             if success:
                 self._epoch_successes += 1

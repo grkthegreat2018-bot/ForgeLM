@@ -7,7 +7,7 @@ wraps with gigatoken's HFCompat for ~35x faster encode on bulk operations.
 Usage:
     from research.tokenizer_cache import get_tokenizer
 
-    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
     tokens = tokenizer("print('hello')", return_tensors="pt")
     decoded = tokenizer.decode(tokens.input_ids[0])
 """
@@ -17,7 +17,7 @@ from typing import Optional
 
 
 @lru_cache(maxsize=8)
-def get_tokenizer(path: str = "research/checkpoints/qwen_hf"):
+def get_tokenizer(path: str = "research/checkpoints/lfm25_tokenizer"):
     """Load and cache a tokenizer, wrapped with gigatoken if available.
 
     Args:
@@ -42,7 +42,7 @@ def get_tokenizer(path: str = "research/checkpoints/qwen_hf"):
 
 
 @lru_cache(maxsize=8)
-def get_tokenizer_no_wrap(path: str = "research/checkpoints/qwen_hf"):
+def get_tokenizer_no_wrap(path: str = "research/checkpoints/lfm25_tokenizer"):
     """Load and cache a raw HF tokenizer (no gigatoken wrapping).
 
     Use this when you need the exact HF tokenizer object (e.g. for save_pretrained).

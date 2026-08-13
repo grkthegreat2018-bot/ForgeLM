@@ -63,6 +63,7 @@ compare_*.txt
 dedup_run.log
 _inspect_template.py
 *.log
+.devin/profile_trace.json
 
 # IDE / OS
 .vscode/

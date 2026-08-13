@@ -173,22 +173,16 @@ class HadamardKVCache(KVCacheStrategy):
         self.bits = 4
         self.block_size = 64  # Hadamard block size
 
-        # Generate block-diagonal Hadamard matrix (pure torch, no scipy)
+        # Block-diagonal Hadamard via per-block FWHT (O(n log n), no matrix
+        # materialization). Equivalent to matmul with block-diagonal H/sqrt(bs)
+        # but avoids the O(n^2) construction and the O(n^2) per-append matmul.
         bs = self.block_size
-        H = self._hadamard_matrix(bs) / (bs ** 0.5)
-        # Block-diagonal: repeat H for each block
-        n_blocks = head_dim // bs
-        if n_blocks * bs != head_dim:
-            # Pad to next multiple of block_size
-            n_blocks = (head_dim + bs - 1) // bs
-            padded_dim = n_blocks * bs
-            H_full = torch.zeros(padded_dim, padded_dim)
-            for i in range(n_blocks):
-                H_full[i*bs:(i+1)*bs, i*bs:(i+1)*bs] = H
-            self.H = H_full[:head_dim, :head_dim].to(device, dtype)
-        else:
-            self.H = torch.block_diag(*[H] * n_blocks).to(device, dtype)
-        self.H_inv = self.H.T  # Hadamard is orthogonal: inverse = transpose
+        assert bs & (bs - 1) == 0, "block_size must be power of 2"
+        self.n_blocks = (head_dim + bs - 1) // bs
+        self.padded_dim = self.n_blocks * bs
+        self._norm = 1.0 / (bs ** 0.5)
+        # Precompute FWHT bit-reversal stages as strided index pairs for speed.
+        self._stages = self._fwht_stage_indices(bs, device)
 
         # Storage: quantized K/V
         self.k_quant = None
@@ -199,22 +193,59 @@ class HadamardKVCache(KVCacheStrategy):
         self.qmax = (1 << (self.bits - 1)) - 1  # 7 for 4-bit
 
     @staticmethod
-    def _hadamard_matrix(n: int) -> torch.Tensor:
-        """Generate Hadamard matrix of order n (must be power of 2). Pure torch."""
-        H = torch.tensor([[1.0]])
-        while H.shape[0] < n:
-            H = torch.cat([torch.cat([H, H], dim=1),
-                           torch.cat([H, -H], dim=1)], dim=0)
-        return H
+    def _fwht_stage_indices(n: int, device):
+        """Precompute (i, j) index pairs for each of log2(n) FWHT butterfly stages."""
+        stages = []
+        h = 1
+        while h < n:
+            idx_i = []
+            idx_j = []
+            for i in range(0, n, h * 2):
+                for k in range(i, i + h):
+                    idx_i.append(k)
+                    idx_j.append(k + h)
+            stages.append((
+                torch.tensor(idx_i, device=device, dtype=torch.long),
+                torch.tensor(idx_j, device=device, dtype=torch.long),
+            ))
+            h *= 2
+        return stages
+
+    def _fwht(self, t):
+        """In-place Fast Walsh-Hadamard Transform along the last dim.
+
+        t: [..., block_size] (block_size must be power of 2). Returns the
+        unnormalized Hadamard transform of the last dim.
+        """
+        for idx_i, idx_j in self._stages:
+            a = t[..., idx_i]
+            b = t[..., idx_j]
+            t[..., idx_i] = a + b
+            t[..., idx_j] = a - b
+        return t
 
     def _rotate(self, t):
-        """Apply Hadamard rotation: t @ H (rotate columns)."""
-        # t shape: [B, n_kv, T, head_dim]
-        return torch.matmul(t, self.H)
+        """Apply block-diagonal Hadamard rotation via per-block FWHT.
+
+        Equivalent to t @ H where H is block-diagonal(H_bs/sqrt(bs)), but
+        O(n log n) per block instead of O(n^2) matmul and no matrix tensor.
+        t shape: [B, n_kv, T, head_dim].
+        """
+        *lead, hd = t.shape
+        if hd != self.padded_dim:
+            t = F.pad(t, (0, self.padded_dim - hd), value=0)
+        t = t.reshape(*lead, self.n_blocks, self.block_size)
+        t = self._fwht(t.contiguous().clone())
+        t = t * self._norm
+        t = t.reshape(*lead, self.padded_dim)
+        if hd != self.padded_dim:
+            t = t[..., :hd]
+        return t
 
     def _inverse_rotate(self, t):
-        """Apply inverse rotation: t @ H^T."""
-        return torch.matmul(t, self.H_inv)
+        """Inverse Hadamard rotation. H/sqrt(n) is orthogonal and symmetric,
+        so the inverse equals the forward transform."""
+        return self._rotate(t)
 
     def _quantize(self, t):
         """Per-token INT4 quantization on rotated values."""

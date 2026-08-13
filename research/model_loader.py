@@ -2,6 +2,7 @@
 import math
 import os
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -24,6 +25,10 @@ class PreAllocatedKVCache:
     into the buffer by index, then reads a view of the filled portion.
     This eliminates the O(n²) tensor growth from torch.cat in generation loops.
 
+    With quantize="int8": stores K/V as int8 with per-token scale (q8_0 style),
+    halving cache memory. Dequantization happens on read in get_layer().
+    This matches llama.cpp's q8_0 KV cache approach.
+
     Usage:
         cache = PreAllocatedKVCache(n_layers, batch, n_kv_heads, max_seq_len, head_dim, dtype, device)
         # In generation loop:
@@ -34,38 +39,92 @@ class PreAllocatedKVCache:
 
     def __init__(self, n_layers: int, batch: int, n_kv_heads: int,
                  max_seq_len: int, head_dim: int, dtype: torch.dtype,
-                 device: torch.device, n_kv_heads_per_layer: list = None):
+                 device: torch.device, n_kv_heads_per_layer: list = None,
+                 quantize: str = "none"):
         self.max_seq_len = max_seq_len
         self.n_layers = n_layers
         self.position = 0  # current fill position (shared across layers)
+        self.quantize = quantize  # "none", "int8"
+        self._dtype = dtype
 
         # Support per-layer head counts (e.g. GQA with different n_kv_heads)
         if n_kv_heads_per_layer is None:
             n_kv_heads_per_layer = [n_kv_heads] * n_layers
 
+        # Skip cache allocation for layers with 0 KV heads (conv layers)
+        self.n_kv_heads_per_layer = n_kv_heads_per_layer
+
+        if quantize == "int8":
+            # INT8 quantized cache: store int8 values + fp16 per-token scale
+            # Memory: 1 byte/element + 2 bytes/scale per (B, n_kv, T) = ~50% of fp16
+            cache_dtype = torch.int8
+            scale_dtype = torch.float16
+        else:
+            cache_dtype = dtype
+            scale_dtype = dtype
+
         self.k_caches = []
         self.v_caches = []
+        self.k_scales = []
+        self.v_scales = []
         for i in range(n_layers):
             nkvh = n_kv_heads_per_layer[i]
-            k = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=dtype, device=device)
-            v = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=dtype, device=device)
+            if nkvh == 0:
+                # Conv layer — no KV cache needed
+                self.k_caches.append(None)
+                self.v_caches.append(None)
+                self.k_scales.append(None)
+                self.v_scales.append(None)
+                continue
+            k = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
+            v = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
             self.k_caches.append(k)
             self.v_caches.append(v)
+            if quantize == "int8":
+                # Per-token scale: (B, n_kv, max_seq_len, 1)
+                ks = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
+                vs = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
+                self.k_scales.append(ks)
+                self.v_scales.append(vs)
+            else:
+                self.k_scales.append(None)
+                self.v_scales.append(None)
 
     def get_layer(self, layer_idx: int) -> KVCache | None:
         """Get the (k, v) view for a layer, or None if at position 0."""
-        if self.position == 0:
+        if self.position == 0 or self.k_caches[layer_idx] is None:
             return None
-        k = self.k_caches[layer_idx][:, :, :self.position]
-        v = self.v_caches[layer_idx][:, :, :self.position]
+        pos = self.position
+        if self.quantize == "int8":
+            # Dequantize: int8 * scale → original dtype
+            k = self.k_caches[layer_idx][:, :, :pos].to(self._dtype) * \
+                self.k_scales[layer_idx][:, :, :pos].to(self._dtype)
+            v = self.v_caches[layer_idx][:, :, :pos].to(self._dtype) * \
+                self.v_scales[layer_idx][:, :, :pos].to(self._dtype)
+            return (k, v)
+        k = self.k_caches[layer_idx][:, :, :pos]
+        v = self.v_caches[layer_idx][:, :, :pos]
         return (k, v)
 
     def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor):
         """Write new k/v at the current position and advance (per-layer)."""
+        if self.k_caches[layer_idx] is None:
+            return  # conv layer, no cache
         T = k_new.shape[-2]
         pos = self.position
-        self.k_caches[layer_idx][:, :, pos:pos + T] = k_new
-        self.v_caches[layer_idx][:, :, pos:pos + T] = v_new
+        if self.quantize == "int8":
+            # Quantize: scale = max(abs(x)) / 127, q = round(x / scale)
+            k_scale = k_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+            v_scale = v_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+            k_q = torch.clamp(torch.round(k_new / k_scale), -128, 127).to(torch.int8)
+            v_q = torch.clamp(torch.round(v_new / v_scale), -128, 127).to(torch.int8)
+            self.k_caches[layer_idx][:, :, pos:pos + T] = k_q
+            self.v_caches[layer_idx][:, :, pos:pos + T] = v_q
+            self.k_scales[layer_idx][:, :, pos:pos + T] = k_scale.to(torch.float16)
+            self.v_scales[layer_idx][:, :, pos:pos + T] = v_scale.to(torch.float16)
+        else:
+            self.k_caches[layer_idx][:, :, pos:pos + T] = k_new
+            self.v_caches[layer_idx][:, :, pos:pos + T] = v_new
 
     def advance(self, n: int = 1):
         """Advance the fill position by n tokens."""
@@ -78,6 +137,20 @@ class PreAllocatedKVCache:
     @property
     def filled(self) -> int:
         return self.position
+
+    def cache_memory_mb(self) -> float:
+        """Estimate current KV cache memory usage in MB."""
+        total = 0
+        for i in range(self.n_layers):
+            if self.k_caches[i] is None:
+                continue
+            k_bytes = self.k_caches[i].element_size() * self.k_caches[i].numel()
+            v_bytes = self.v_caches[i].element_size() * self.v_caches[i].numel()
+            total += k_bytes + v_bytes
+            if self.quantize == "int8":
+                total += self.k_scales[i].element_size() * self.k_scales[i].numel()
+                total += self.v_scales[i].element_size() * self.v_scales[i].numel()
+        return total / 1e6
 
 
 def flash_attention(q, k, v, is_causal=True):
@@ -230,250 +303,13 @@ class RotaryEmbedding(nn.Module):
         return (x * cos) + (self._rotate_half(x) * sin)
 
 
-class DifferentialAttention(nn.Module):
-    """
-    Causal Differential Attention.
-    Splits Q/K into two groups and subtracts a scaled softmax attention map.
-    """
-
-    def __init__(self, d_model: int = 768, n_heads: int = 12, max_seq_len: int = 2048, base: float = 10000.0, rope_scaling=None):
-        super().__init__()
-        self.n_heads = n_heads
-        self.head_dim = d_model // (2 * n_heads)
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.v_proj = nn.Linear(d_model, d_model, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling)
-
-        self.lambda_init = 0.8
-        self.lambda_q1 = nn.Parameter(torch.randn(n_heads, self.head_dim) * 0.1)
-        self.lambda_k1 = nn.Parameter(torch.randn(n_heads, self.head_dim) * 0.1)
-        self.lambda_q2 = nn.Parameter(torch.randn(n_heads, self.head_dim) * 0.1)
-        self.lambda_k2 = nn.Parameter(torch.randn(n_heads, self.head_dim) * 0.1)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_key_value: KVCache | None = None,
-        use_cache: bool = False,
-    ) -> tuple[torch.Tensor, KVCache | None]:
-        B, T, C = x.shape
-
-        # Q/K use 2*n_heads heads, V uses n_heads heads with doubled head dim.
-        q = self.q_proj(x).view(B, T, 2 * self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, 2 * self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_heads, 2 * self.head_dim).transpose(1, 2)
-
-        past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-        q = self.rope(q, offset=past_len)
-        k = self.rope(k, offset=past_len)
-
-        if past_key_value is not None:
-            k = torch.cat([past_key_value[0], k], dim=-2)
-            v = torch.cat([past_key_value[1], v], dim=-2)
-
-        q1, q2 = q[:, : self.n_heads], q[:, self.n_heads :]
-        k1, k2 = k[:, : self.n_heads], k[:, self.n_heads :]
-
-        total_len = k1.shape[-2]
-
-        lambda_val = (
-            torch.exp((self.lambda_q1 * self.lambda_k1).sum(dim=-1, keepdim=True))
-            - torch.exp((self.lambda_q2 * self.lambda_k2).sum(dim=-1, keepdim=True))
-            + self.lambda_init
-        )
-        lambda_val = lambda_val.unsqueeze(0).unsqueeze(-1)  # (1, n_heads, 1, 1)
-
-        # Differential attention: out = (attn1 - lambda * attn2) @ v
-        #   = attn1 @ v - lambda * (attn2 @ v) = out1 - lambda * out2.
-        # We compute out1/out2 via flash_attention (FA2 on CUDA) for each
-        # sub-attention, then combine — FA2 cannot be applied to the diff
-        # directly because it does not expose attention weights.
-        if T == 1 and total_len > 1:
-            # Single-token decode: all cached keys are valid; no causal mask needed.
-            out1 = flash_attention(q1, k1, v, is_causal=False)
-            out2 = flash_attention(q2, k2, v, is_causal=False)
-        elif past_len == 0 and total_len == T:
-            # Standard prefill: use FlashAttention-2 via SDPA (is_causal=True).
-            out1 = flash_attention(q1, k1, v, is_causal=True)
-            out2 = flash_attention(q2, k2, v, is_causal=True)
-        else:
-            # Chunked prefill with a custom causal mask — manual attention.
-            scale = 1.0 / math.sqrt(self.head_dim)
-            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
-            scores1 = torch.matmul(q1, k1.transpose(-2, -1)) * scale + mask
-            scores2 = torch.matmul(q2, k2.transpose(-2, -1)) * scale + mask
-            attn1 = F.softmax(scores1, dim=-1)
-            attn2 = F.softmax(scores2, dim=-1)
-            out1 = torch.matmul(attn1, v)
-            out2 = torch.matmul(attn2, v)
-
-        out = out1 - lambda_val * out2
-        out = out.transpose(1, 2).reshape(B, T, C)
-        out = self.out_proj(out)
-        if use_cache:
-            return out, (k, v)
-        return out, None
-
-
-class MultiHeadLatentAttention(nn.Module):
-    """
-    Multi-Head Latent Attention (MLA) with low-rank KV compression.
-    For generation we cache the full up-projected K/V (simplest and fastest).
-    """
-
-    def __init__(
-        self,
-        d_model: int = 768,
-        n_heads: int = 12,
-        kv_compression_dim: int = 128,
-        max_seq_len: int = 2048,
-        base: float = 10000.0,
-        rope_scaling=None,
-        use_qk_norm: bool = False,
-        attn_scale: float = None,
-        attn_bias: bool = False,
-    ):
-        super().__init__()
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.kv_compression_dim = kv_compression_dim
-
-        self.kv_down_proj = nn.Linear(d_model, kv_compression_dim, bias=False)
-        self.k_up_proj = nn.Linear(kv_compression_dim, d_model, bias=attn_bias)
-        self.v_up_proj = nn.Linear(kv_compression_dim, d_model, bias=attn_bias)
-        self.q_proj = nn.Linear(d_model, d_model, bias=attn_bias)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
-
-        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling)
-
-        # QK-norm: RMSNorm on Q and K before RoPE (NanoGPT speedrun / IMU-1).
-        self.use_qk_norm = use_qk_norm
-        self._qk_norm_identity = True  # assume identity until weights loaded
-        if use_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-        # Fixed attention scale (0.12 from NanoGPT speedrun) instead of head_dim**-0.5.
-        self.attn_scale = attn_scale
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_key_value: KVCache | None = None,
-        use_cache: bool = False,
-        preallocated_cache: Optional["PreAllocatedKVCache"] = None,
-        layer_idx: int = 0,
-        attention_bias: torch.Tensor | None = None,
-        position_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, KVCache | None]:
-        B, T, C = x.shape
-
-        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        c_kv = self.kv_down_proj(x)
-
-        k = self.k_up_proj(c_kv).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_up_proj(c_kv).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-
-        # QK-norm: normalize Q and K before RoPE for training stability.
-        # When weights are identity (all 1.0), skip — it's a no-op that would
-        # otherwise divide by RMS and break the lossless property.
-        if self.use_qk_norm and not self._qk_norm_identity:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-        # Pre-allocated cache path: O(1) append, no torch.cat.
-        if preallocated_cache is not None:
-            past_len = preallocated_cache.position
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k = self.rope(k, offset=past_len, position_ids=position_ids)
-            # Write new k/v into the pre-allocated buffer.
-            preallocated_cache.append(layer_idx, k, v)
-            # Read the filled portion as a view (no copy).
-            k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-            v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
-        else:
-            past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k = self.rope(k, offset=past_len, position_ids=position_ids)
-
-            if past_key_value is not None:
-                k = torch.cat([past_key_value[0], k], dim=-2)
-                v = torch.cat([past_key_value[1], v], dim=-2)
-
-        total_len = k.shape[-2]
-        # Use pre-built attention_bias (additive mask) if provided — computed once
-        # in ForgeLM.forward and shared across all layers to avoid per-layer allocation.
-        if attention_bias is not None:
-            # attention_bias: (B, 1, T, total_len) or (B, 1, 1, total_len) — additive.
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
-        elif T == 1 and total_len > 1:
-            # Single-token decode: all cached keys are valid; no causal mask needed.
-            out = flash_attention(q, k, v, is_causal=False)
-        elif past_len == 0 and total_len == T:
-            out = flash_attention(q, k, v, is_causal=True)
-        else:
-            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-
-        out = out.transpose(1, 2).reshape(B, T, C)
-        out = self.out_proj(out)
-        if use_cache:
-            return out, (k, v)
-        return out, None
-
-
-class StandardSDPA(nn.Module):
-    """Standard causal scaled dot-product attention with RoPE."""
-
-    def __init__(self, d_model: int = 768, n_heads: int = 12, max_seq_len: int = 2048, base: float = 10000.0, rope_scaling=None, use_qk_norm=False, attn_scale=None):
-        super().__init__()
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_key_value: KVCache | None = None,
-        use_cache: bool = False,
-    ) -> tuple[torch.Tensor, KVCache | None]:
-        B, T, C = x.shape
-        q, k, v = self.qkv_proj(x).chunk(3, dim=-1)
-        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-
-        past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-        q = self.rope(q, offset=past_len)
-        k = self.rope(k, offset=past_len)
-
-        if past_key_value is not None:
-            k = torch.cat([past_key_value[0], k], dim=-2)
-            v = torch.cat([past_key_value[1], v], dim=-2)
-
-        total_len = k.shape[-2]
-        if T == 1 and total_len > 1:
-            # Single-token decode: all cached keys are valid; no causal mask needed.
-            out = flash_attention(q, k, v, is_causal=False)
-        elif past_len == 0 and total_len == T:
-            out = flash_attention(q, k, v, is_causal=True)
-        else:
-            mask = _causal_mask(T, total_len, past_len, x.device, q.dtype)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-
-        out = out.transpose(1, 2).reshape(B, T, C)
-        out = self.out_proj(out)
-        if use_cache:
-            return out, (k, v)
-        return out, None
-
-
 class GroupedQueryAttention(nn.Module):
-    """GQA: n_heads query heads share n_kv_heads KV heads (saves KV cache memory)."""
+    """GQA: n_heads query heads share n_kv_heads KV heads (saves KV cache memory).
+
+    With use_qk_norm=True, applies RMSNorm on Q and K per-head (head_dim)
+    after projection, before RoPE — matching LFM2's q_layernorm/k_layernorm.
+    Identity init (all 1.0) = no-op, lossless at start.
+    """
 
     def __init__(self, d_model=768, n_heads=12, n_kv_heads=None, max_seq_len=2048, base=10000.0, rope_scaling=None,
                  use_qk_norm=False, attn_scale=None, attn_bias=False):
@@ -487,6 +323,14 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)  # o_proj never has bias (Qwen2 convention)
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling)
+
+        # QK-norm: RMSNorm on Q and K before RoPE (LFM2 / Gemma3 / Qwen3 style).
+        # When weights are identity (all 1.0), skip — it's a no-op.
+        self.use_qk_norm = use_qk_norm
+        self._qk_norm_identity = True  # assume identity until weights loaded
+        if use_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
     def _repeat_kv(self, x):
         """Repeat KV heads to match query heads."""
@@ -503,6 +347,12 @@ class GroupedQueryAttention(nn.Module):
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        # QK-norm: normalize Q and K per-head before RoPE (LFM2 style).
+        # When weights are identity (all 1.0), skip — no-op.
+        if self.use_qk_norm and not self._qk_norm_identity:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # Pre-allocated cache path: O(1) append, no torch.cat.
         if preallocated_cache is not None:
@@ -704,7 +554,7 @@ class ModularBlock(nn.Module):
         self.ln2 = norm(config.d_model)
         self.ffn = build_ffn(config)
         # Cache whether attn supports pre-allocated KV cache (avoids inspect.signature per forward).
-        self._supports_prealloc_cache = isinstance(self.attn, (MultiHeadLatentAttention, GroupedQueryAttention))
+        self._supports_prealloc_cache = isinstance(self.attn, GroupedQueryAttention)
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
         self._gradient_checkpointing = False
 
@@ -725,14 +575,15 @@ class ModularBlock(nn.Module):
                 attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False)
                 x_inner = x_inner + attn_out
                 ffn_out = self.ffn(self.ln2(x_inner))
-                # MoE returns (output, aux_loss) tuple; dense returns just output.
+                aux = None
                 if isinstance(ffn_out, tuple):
+                    aux = ffn_out[1]
                     ffn_out = ffn_out[0]
                 x_inner = x_inner + ffn_out
-                return x_inner, present
-            x, present = torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=False)
+                return x_inner, present, aux
+            x, present, aux = torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=False)
+            self._last_aux_loss = aux
         else:
-            # Pass pre-allocated cache params to attention if supported (cached at init).
             if preallocated_cache is not None and self._supports_prealloc_cache:
                 attn_out, present = self.attn(
                     self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
@@ -746,7 +597,9 @@ class ModularBlock(nn.Module):
                 )
             x = x + attn_out
             ffn_out = self.ffn(self.ln2(x))
+            self._last_aux_loss = None
             if isinstance(ffn_out, tuple):
+                self._last_aux_loss = ffn_out[1]
                 ffn_out = ffn_out[0]
             x = x + ffn_out
         return x, present
@@ -755,56 +608,20 @@ class ModularBlock(nn.Module):
 def build_attention(config: ModelConfig) -> nn.Module:
     kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
                   use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None))
-    if config.attn_type == "diff":
-        return DifferentialAttention(**kwargs)
-    if config.attn_type == "mla":
-        return MultiHeadLatentAttention(kv_compression_dim=config.kv_compression_dim,
-                                        attn_bias=getattr(config, 'attn_bias', False), **kwargs)
-    if config.attn_type == "standard":
-        return StandardSDPA(**kwargs)
     if config.attn_type == "gqa":
         return GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False))
     raise ValueError(
         f"Unknown attention type: '{config.attn_type}'. "
-        f"Valid options: 'mha', 'mqa', 'gqa', 'mla'")
+        f"Valid options: 'gqa'")
 
 
 def build_ffn(config: ModelConfig) -> nn.Module:
     if config.ffn_type == "swiglu":
         return SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
-    if config.ffn_type == "standard":
-        hidden = 4 * config.d_model
-        return nn.Sequential(
-            nn.Linear(config.d_model, hidden, bias=False),
-            nn.GELU(),
-            nn.Linear(hidden, config.d_model, bias=False),
-        )
     raise ValueError(
         f"Unknown FFN type: '{config.ffn_type}'. "
-        f"Valid options: 'standard', 'gated', 'moe'")
-
-
-class EAGLESpeculativeDraftHead(nn.Module):
-    """Auxiliary draft head predicting t+2 from hidden states."""
-
-    def __init__(self, d_model: int, vocab_size: int):
-        super().__init__()
-        self.draft_fc = nn.Sequential(
-            nn.Linear(d_model, d_model, bias=False),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model, bias=False),
-        )
-        self.draft_head = nn.Linear(d_model, vocab_size, bias=False)
-
-    def forward(self, hidden_states: torch.Tensor, draft_targets: torch.Tensor | None = None):
-        draft_features = self.draft_fc(hidden_states)
-        draft_logits = self.draft_head(draft_features)
-
-        draft_loss = None
-        if draft_targets is not None:
-            draft_loss = F.cross_entropy(draft_logits.view(-1, draft_logits.size(-1)), draft_targets.view(-1))
-        return draft_logits, draft_loss
+        f"Valid options: 'swiglu'")
 
 
 class ConfigurableResearchLLM(nn.Module):
@@ -818,7 +635,10 @@ class ConfigurableResearchLLM(nn.Module):
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         self.ln_f = norm(config.d_model)
         self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.embed.weight = self.head.weight  # Weight tying
+        # Weight tying: skip if PIT is enabled (PIT replaces tying),
+        # or if config explicitly disables it (e.g., Qwen2.5).
+        if not getattr(config, 'use_pit', False) and getattr(config, 'tie_word_embeddings', True):
+            self.embed.weight = self.head.weight  # Weight tying
 
         # Zero-init residual: output projections start at zero so the residual
         # stream is unchanged at init — cleaner gradient flow early in training
@@ -833,8 +653,20 @@ class ConfigurableResearchLLM(nn.Module):
         self.draft_head: nn.Module | None = None
         if config.use_gradient_checkpointing:
             self.enable_gradient_checkpointing()
-        if config.enable_draft_head:
-            self.draft_head = EAGLESpeculativeDraftHead(config.d_model, config.vocab_size)
+
+        # MTP heads (Nemotron Lightning): shared-weight multi-token prediction
+        self.mtp_module: nn.Module | None = None
+        if getattr(config, 'use_mtp', False):
+            from research.architecture.mtp import MTPModule
+            self.mtp_module = MTPModule(
+                d_model=config.d_model,
+                vocab_size=config.vocab_size,
+                n_heads=getattr(config, 'mtp_n_heads', 2),
+                loss_weight=getattr(config, 'mtp_loss_weight', 0.3),
+                identity_init=getattr(config, 'zero_init_residual', True),
+            )
+            # Tie MTP head to model head (shared weight design)
+            self.mtp_module.tie_head_to_model(self.head.weight)
 
         # Cache config flags to avoid getattr/hasattr per forward.
         self._use_liger_ce = getattr(config, 'use_liger_ce', False)
@@ -944,9 +776,19 @@ class ConfigurableResearchLLM(nn.Module):
                     pad_mask.unsqueeze(1).unsqueeze(1), float('-inf'))
                 attention_bias = causal + pad_add
 
+        # Move input to embed's device (handles hybrid offload)
+        embed_device = next(self.embed.parameters()).device
+        if idx.device != embed_device:
+            idx = idx.to(embed_device)
         x = self.embed(idx)
         presents: list[KVCache | None] = []
+        # Track device for hybrid offload: move x to each block's device
+        cur_device = x.device
         for i, block in enumerate(self.blocks):
+            block_device = next(block.parameters()).device
+            if block_device != cur_device:
+                x = x.to(block_device)
+                cur_device = block_device
             past = past_key_values[i] if past_key_values is not None else None
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
@@ -956,7 +798,17 @@ class ConfigurableResearchLLM(nn.Module):
         # Advance the pre-allocated cache position after all layers processed.
         if preallocated_cache is not None:
             preallocated_cache.advance(idx.shape[1])
+        # Move x to ln_f's device (GPU for hybrid offload)
+        ln_f_device = next(self.ln_f.parameters()).device
+        if x.device != ln_f_device:
+            x = x.to(ln_f_device)
         hidden = self.ln_f(x)
+
+        # Collect MoE aux_loss from all blocks that have it
+        moe_aux_loss = torch.tensor(0.0, device=idx.device, dtype=hidden.dtype)
+        for block in self.blocks:
+            if hasattr(block, '_last_aux_loss') and block._last_aux_loss is not None:
+                moe_aux_loss = moe_aux_loss + block._last_aux_loss
 
         # Chunked CE path: skip materializing full [B*T, V] logits for loss.
         # The head Linear + CE are fused into chunked passes over the token dim,
@@ -998,6 +850,17 @@ class ConfigurableResearchLLM(nn.Module):
             if loss is not None and draft_loss is not None:
                 loss = loss + 0.1 * draft_loss
 
+        # Add MoE aux_loss (load balancing) to total loss
+        if loss is not None and moe_aux_loss.requires_grad:
+            loss = loss + moe_aux_loss
+
+        # MTP loss (Nemotron Lightning): multi-token prediction with shared weights
+        if self.mtp_module is not None and targets is not None and not use_cache and targets.size(1) > 3:
+            token_embeds = self.embed(idx)  # ground truth token embeddings
+            mtp_loss, _ = self.mtp_module(hidden, token_embeds, targets)
+            if mtp_loss is not None and loss is not None:
+                loss = loss + mtp_loss
+
         if return_hidden:
             if use_cache:
                 return logits, loss, presents, hidden
@@ -1018,7 +881,8 @@ class ModelLoader:
     def _config_signature(config: ModelConfig) -> str:
         """A stable hashable signature for caching blank models."""
         layer_types_sig = tuple(getattr(config, 'layer_types', None) or [])
-        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}"
+        mtp_sig = f"mtp{getattr(config, 'use_mtp', False)}_{getattr(config, 'mtp_n_heads', 0)}"
+        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}"
 
     @staticmethod
     def blank_state_dict(config: ModelConfig) -> dict:
@@ -1050,29 +914,84 @@ class ModelLoader:
         ModelLoader._blank_cache.clear()
 
     @staticmethod
-    def _detect_moe_config(state: dict) -> tuple[int, bool, int | None] | None:
-        """Single-pass scan of checkpoint keys for MoE architecture info.
+    def _load_safetensors_mmap(path: str, model: nn.Module,
+                               device: torch.device = None) -> dict:
+        """Load safetensors weights via memory-mapped access.
 
-        Returns (n_experts, has_shared, d_ff) if the checkpoint contains MoE
-        expert weights, else None. Replaces the previous repeated full-dict
-        scans (any() + set comprehension + next()).
+        Uses safetensors' safe_open for lazy per-tensor loading. Each tensor
+        is read from the mmap'd file and copied directly to the target device,
+        avoiding the 2x RAM overhead of loading the full state dict to CPU
+        first. This is ~2x faster for GPU loading and uses ~0 peak CPU RAM.
+
+        For CPU-only models, tensors stay mmap'd (zero-copy) until accessed.
         """
-        expert_ids: set = set()
-        has_shared = False
-        w1_key = None
-        for k in state:
-            if "ffn.shared." in k:
-                has_shared = True
-            idx = k.find("ffn.experts.")
-            if idx < 0:
-                continue
-            expert_ids.add(k[idx + len("ffn.experts."):].split(".")[0])
-            if w1_key is None and "ffn.experts.0.w1.weight" in k:
-                w1_key = k
-        if not expert_ids:
-            return None
-        d_ff = state[w1_key].shape[0] if w1_key else None
-        return len(expert_ids), has_shared, d_ff
+        from safetensors import safe_open
+        if device is None:
+            device = next(model.parameters()).device
+
+        state = {}
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                tensor = f.get_tensor(key)  # mmap'd read
+                state[key] = tensor.to(device) if device.type != "cpu" else tensor
+        return state
+
+    @staticmethod
+    def _load_sharded_safetensors(ckpt_dir: Path, model: nn.Module,
+                                  device: torch.device = None) -> dict:
+        """Load weights from sharded safetensors (model-00001-of-00002.safetensors)."""
+        from safetensors import safe_open
+        if device is None:
+            device = next(model.parameters()).device
+        state = {}
+        for sf_path in sorted(ckpt_dir.glob("model-*.safetensors")):
+            with safe_open(str(sf_path), framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    tensor = f.get_tensor(key)
+                    state[key] = tensor.to(device) if device.type != "cpu" else tensor
+        return state
+
+    @staticmethod
+    def _remap_hf_keys(state: dict, config) -> dict:
+        """Remap HuggingFace Qwen/Llama-style keys to ForgeAI internal names."""
+        import re
+        new_state = {}
+        for key, tensor in state.items():
+            # model.embed_tokens.weight → embed.weight
+            if key == "model.embed_tokens.weight":
+                new_state["embed.weight"] = tensor
+            # model.norm.weight → ln_f.weight
+            elif key == "model.norm.weight":
+                new_state["ln_f.weight"] = tensor
+            # lm_head.weight → head.weight
+            elif key == "lm_head.weight":
+                new_state["head.weight"] = tensor
+            # model.layers.{i}.self_attn.{proj}.{weight|bias} → blocks.{i}.attn.{proj}.{weight|bias}
+            elif m := re.match(r"model\.layers\.(\d+)\.self_attn\.(.+)", key):
+                layer = m.group(1)
+                rest = m.group(2)
+                # q_proj/k_proj/v_proj → same name
+                # o_proj → out_proj
+                rest = rest.replace("o_proj", "out_proj")
+                new_state[f"blocks.{layer}.attn.{rest}"] = tensor
+            # model.layers.{i}.input_layernorm.weight → blocks.{i}.ln1.weight
+            elif m := re.match(r"model\.layers\.(\d+)\.input_layernorm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ln1.{m.group(2)}"] = tensor
+            # model.layers.{i}.post_attention_layernorm.weight → blocks.{i}.ln2.weight
+            elif m := re.match(r"model\.layers\.(\d+)\.post_attention_layernorm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ln2.{m.group(2)}"] = tensor
+            # model.layers.{i}.mlp.gate_proj.weight → blocks.{i}.ffn.w_gate.weight
+            elif m := re.match(r"model\.layers\.(\d+)\.mlp\.gate_proj\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ffn.w_gate.{m.group(2)}"] = tensor
+            # model.layers.{i}.mlp.up_proj.weight → blocks.{i}.ffn.w_up.weight
+            elif m := re.match(r"model\.layers\.(\d+)\.mlp\.up_proj\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ffn.w_up.{m.group(2)}"] = tensor
+            # model.layers.{i}.mlp.down_proj.weight → blocks.{i}.ffn.w_down.weight
+            elif m := re.match(r"model\.layers\.(\d+)\.mlp\.down_proj\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ffn.w_down.{m.group(2)}"] = tensor
+            else:
+                new_state[key] = tensor  # pass through unknown keys
+        return new_state
 
     @staticmethod
     def build_model_fast(config: ModelConfig, checkpoint_path: str | None = None,
@@ -1125,28 +1044,37 @@ class ModelLoader:
 
         if checkpoint_path and os.path.exists(checkpoint_path):
             t_load = time.time()
-            from research.checkpoint_io import load_checkpoint
-            # Load to CPU first — avoids 2x VRAM (state dict + model both on CUDA)
-            state = load_checkpoint(checkpoint_path, map_location="cpu")
-            if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
-                state = state["model_state"]
-            # Auto-detect MoE (single-pass key scan)
-            moe_info = ModelLoader._detect_moe_config(state)
-            if moe_info is not None:
-                from research.moe import replace_ffn_with_moe
-                n_experts, has_shared, d_ff = moe_info
-                effective_top_k = moe_top_k if moe_top_k else n_experts
-                # Use dense_bypass when moe_top_k=0 (skip router, run all experts).
-                # This reproduces dense FFN output when router is untrained.
-                use_dense_bypass = (moe_top_k is not None and moe_top_k == 0)
-                replace_ffn_with_moe(model, n_experts=n_experts, top_k=effective_top_k,
-                                     d_model=config.d_model,
-                                     shared_expert=has_shared, d_ff=d_ff,
-                                     dense_bypass=use_dense_bypass)
-                model = model.to(device)
-                # Re-apply dtype after MoE replacement (new layers are fp32 by default)
-                if dtype is not None:
-                    model = model.to(dtype)
+            ckpt_path = Path(checkpoint_path)
+
+            # Handle sharded models (directory with model.safetensors.index.json)
+            if ckpt_path.is_dir():
+                index_file = ckpt_path / "model.safetensors.index.json"
+                if index_file.exists():
+                    state = ModelLoader._load_sharded_safetensors(
+                        ckpt_path, model, device=device)
+                else:
+                    # Single safetensors in directory
+                    sf_files = list(ckpt_path.glob("*.safetensors"))
+                    if len(sf_files) == 1:
+                        state = ModelLoader._load_safetensors_mmap(
+                            str(sf_files[0]), model, device=device)
+                    else:
+                        state = ModelLoader._load_sharded_safetensors(
+                            ckpt_path, model, device=device)
+            elif str(checkpoint_path).endswith(".safetensors"):
+                state = ModelLoader._load_safetensors_mmap(
+                    checkpoint_path, model, device=device)
+            else:
+                from research.checkpoint_io import load_checkpoint
+                state = load_checkpoint(checkpoint_path, map_location="cpu")
+                if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
+                    state = state["model_state"]
+
+            # Auto-detect and remap HuggingFace keys to ForgeAI internal names.
+            if state and any(k.startswith("model.") for k in state):
+                state = ModelLoader._remap_hf_keys(state, config)
+                print(f"  [FastBuild] Remapped {len(state)} HF keys to ForgeAI format")
+
             missing, unexpected = model.load_state_dict(state, strict=False)
             if missing:
                 print("Missing keys:", missing[:5], "..." if len(missing) > 5 else "")
@@ -1178,6 +1106,61 @@ class ModelLoader:
         return model
 
     @staticmethod
+    def hybrid_offload(model: nn.Module, gpu_layers: int = -1,
+                       device: str = "cuda") -> nn.Module:
+        """Offload specific layers to GPU, keep rest on CPU.
+
+        For LFM2.5 hybrid models, conv layers are cheap (O(T*k*d)) and can
+        run on CPU, while attention layers benefit from GPU (O(T^2*d) matmuls).
+        This enables running larger models on limited VRAM.
+
+        Args:
+            model: the model to offload (must have .blocks ModuleList)
+            gpu_layers: number of layers to put on GPU (from the end).
+                       -1 = put attention layers on GPU, conv on CPU.
+                       N = last N layers on GPU, rest on CPU.
+            device: GPU device string ("cuda", "cuda:0", etc.)
+
+        Returns:
+            The model with per-layer device placement applied.
+        """
+        gpu_dev = torch.device(device)
+        cpu_dev = torch.device("cpu")
+
+        if not hasattr(model, 'blocks'):
+            return model.to(gpu_dev)
+
+        layer_types = getattr(model.config, 'layer_types', None)
+
+        # Always keep embed, head, ln_f on GPU
+        model.embed = model.embed.to(gpu_dev)
+        model.head = model.head.to(gpu_dev)
+        if hasattr(model, 'ln_f'):
+            model.ln_f = model.ln_f.to(gpu_dev)
+
+        gpu_count = 0
+        cpu_count = 0
+        for i, block in enumerate(model.blocks):
+            if gpu_layers == -1 and layer_types:
+                # Auto: attention on GPU, conv on CPU
+                lt = layer_types[i] if i < len(layer_types) else "attention"
+                target = gpu_dev if lt == "attention" else cpu_dev
+            elif gpu_layers == -1:
+                target = gpu_dev
+            else:
+                # Last N layers on GPU
+                target = gpu_dev if i >= len(model.blocks) - gpu_layers else cpu_dev
+
+            block.to(target)
+            if target == gpu_dev:
+                gpu_count += 1
+            else:
+                cpu_count += 1
+
+        print(f"  [HybridOffload] {gpu_count} layers on {device}, {cpu_count} on CPU")
+        return model
+
+    @staticmethod
     def build_model(config: ModelConfig, checkpoint_path: str | None = None, compile: bool = False):
         print(
             f"Building {config.d_model}d x {config.n_layers}L {config.attn_type.upper()} model "
@@ -1198,19 +1181,6 @@ class ModelLoader:
             # unwrap the model_state key.
             if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
                 state = state["model_state"]
-            # Auto-detect MoE checkpoint and replace FFN layers before loading
-            # (single-pass key scan; also infers d_ff from expert weight shape)
-            moe_info = ModelLoader._detect_moe_config(state)
-            if moe_info is not None:
-                from research.moe import replace_ffn_with_moe
-                # Infer MoE config from checkpoint keys
-                n_experts, has_shared, d_ff = moe_info
-                # build_model has no moe_top_k parameter — run all experts
-                # (dense behaviour) when auto-detecting from a checkpoint.
-                replace_ffn_with_moe(model, n_experts=n_experts, top_k=n_experts,
-                                     d_model=config.d_model,
-                                     shared_expert=has_shared, d_ff=d_ff)
-                model = model.to(device)
             missing, unexpected = model.load_state_dict(state, strict=False)
             if missing:
                 print("Missing keys:", missing)
@@ -1316,7 +1286,7 @@ class ModelLoader:
 
 
 def load_default_model(
-    config_name: str = "forgelm_v2",
+    config_name: str = "lfm25_1.2b",
     checkpoint_path: str | None = None,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -1331,7 +1301,7 @@ def load_default_model(
         tokenizer = get_tokenizer(...)
 
     Args:
-        config_name: model config name (default "forgelm_v2")
+        config_name: model config name (default "lfm25_1.2b")
         checkpoint_path: path to .safetensors checkpoint (default: config default)
         device: "cuda" or "cpu"
         dtype: torch.bfloat16 or torch.float32 (default: bf16 for cuda, fp32 for cpu)
@@ -1358,7 +1328,7 @@ def load_default_model(
         except Exception:
             pass
 
-    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
     return model, tokenizer
 
 
@@ -1380,8 +1350,8 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
         The quantized model (modified in-place).
 
     Example:
-        model = load_default_model("forgelm_v2")
-        model = quantize_int4(model)  # 3.6GB → ~1.5GB VRAM (int4)
+        model = load_default_model("lfm25_1.2b")
+        model = quantize_int4(model)  # 2.3GB → ~0.7GB VRAM (int4)
     """
     try:
         from torchao.quantization import quantize_
@@ -1409,7 +1379,7 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
 if __name__ == "__main__":
     from research.config import get_config
 
-    for name in ["360m_mla", "250m_diff", "tiny_test"]:
+    for name in ["lfm25_tiny", "lfm25_1.2b"]:
         print("\n" + "=" * 50)
         cfg = get_config(name)
         cfg.device = "cpu"

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 
 from research.moe.keyword_router import KeywordRouter
 
@@ -281,7 +282,13 @@ class InfiniteAirMoE:
                 expert = self._decompress_expert_svd_only(state)
             else:
                 expert = {}
+                # Legacy SwiGLU format: w1, w2, w3
                 for part in ["w1", "w2", "w3"]:
+                    k = f"{part}.weight"
+                    if k in state:
+                        expert[part] = state[k].to(self.device)
+                # LatentMoE format: up, down
+                for part in ["up", "down"]:
                     k = f"{part}.weight"
                     if k in state:
                         expert[part] = state[k].to(self.device)
@@ -296,7 +303,8 @@ class InfiniteAirMoE:
         expert = {}
         dev = self.device
         gs = 128
-        for part in ["w1", "w2", "w3"]:
+        # Support both legacy (w1/w2/w3) and LatentMoE (up/down) formats
+        for part in ["w1", "w2", "w3", "up", "down"]:
             U_q = state.get(f"{part}_U_q")
             U_scale = state.get(f"{part}_U_scale")
             S = state.get(f"{part}_S")
@@ -336,7 +344,8 @@ class InfiniteAirMoE:
         """Decompress SVD-only expert (v2 format) on GPU for speed."""
         expert = {}
         dev = self.device
-        for part in ["w1", "w2", "w3"]:
+        # Support both legacy (w1/w2/w3) and LatentMoE (up/down) formats
+        for part in ["w1", "w2", "w3", "up", "down"]:
             U = state.get(f"{part}_U")
             S = state.get(f"{part}_S")
             Vh = state.get(f"{part}_Vh")
@@ -352,7 +361,13 @@ class InfiniteAirMoE:
         return expert
 
     def _inject_expert(self, layer: int, expert: dict[str, torch.Tensor]):
-        """Inject expert weights into the model's expert slot for a layer."""
+        """Inject expert weights into the model's expert slot for a layer.
+
+        Handles two expert formats:
+        1. Legacy SwiGLU experts (MoELayer.Expert): w1, w2, w3 attributes
+        2. LatentMoE experts (nn.Sequential): [0].weight (up), [2].weight (down)
+           operating in latent space (ℓ → hidden → ℓ)
+        """
         try:
             block = self.model.blocks[layer]
             ffn = block.ffn
@@ -361,12 +376,35 @@ class InfiniteAirMoE:
             if hasattr(ffn, 'experts') and len(ffn.experts) > 0:
                 expert_module = ffn.experts[0]
                 model_dtype = next(self.model.parameters()).dtype
-                if "w1" in expert:
-                    expert_module.w1.weight.data = expert["w1"].to(self.device, model_dtype)
-                if "w2" in expert:
-                    expert_module.w2.weight.data = expert["w2"].to(self.device, model_dtype)
-                if "w3" in expert:
-                    expert_module.w3.weight.data = expert["w3"].to(self.device, model_dtype)
+
+                # Legacy SwiGLU format: w1 (gate), w2 (down), w3 (up)
+                if hasattr(expert_module, 'w1'):
+                    if "w1" in expert:
+                        expert_module.w1.weight.data = expert["w1"].to(self.device, model_dtype)
+                    if "w2" in expert:
+                        expert_module.w2.weight.data = expert["w2"].to(self.device, model_dtype)
+                    if "w3" in expert:
+                        expert_module.w3.weight.data = expert["w3"].to(self.device, model_dtype)
+
+                # LatentMoE format: nn.Sequential([Linear, SquaredReLU, Linear])
+                # Expert operates in latent space: ℓ → hidden → ℓ
+                # Keys from disk: "up.weight" (first linear), "down.weight" (last linear)
+                # Or from decompression: "up", "down"
+                elif isinstance(expert_module, nn.Sequential) and len(expert_module) >= 3:
+                    up_w = expert.get("up") or expert.get("up.weight")
+                    down_w = expert.get("down") or expert.get("down.weight")
+                    # Backward compat: map w1→up, w2→down
+                    if up_w is None:
+                        up_w = expert.get("w1") or expert.get("w1.weight")
+                    if down_w is None:
+                        down_w = expert.get("w2") or expert.get("w2.weight")
+                    if up_w is not None:
+                        expert_module[0].weight.data = up_w.to(self.device, model_dtype)
+                    if down_w is not None:
+                        expert_module[2].weight.data = down_w.to(self.device, model_dtype)
+                else:
+                    _log.warning(f"[AirMoE] Unknown expert format at layer {layer}, "
+                                 f"type={type(expert_module).__name__}")
         except (IndexError, AttributeError) as e:
             # Model might not have expert slots at this layer
             _log.warning(f"[AirMoE] Expert injection skipped at layer {layer}: {e}")
@@ -516,8 +554,8 @@ def main():
     print("Infinite AirMoE Test")
     print("=" * 70)
 
-    from research.paths import FORGELM_V2_EXPERTS_DIR, as_str
-    module_dir = as_str(FORGELM_V2_EXPERTS_DIR)
+    from research.paths import EXPERTS_DIR, as_str
+    module_dir = as_str(EXPERTS_DIR)
 
     if not os.path.exists(os.path.join(module_dir, "manifest.json")):
         print(f"\n  ERROR: No V2 expert library at {module_dir}")
@@ -525,10 +563,10 @@ def main():
         return
 
     # Load model
-    print("\n[1] Loading ForgeLM v2 base...")
-    cfg = get_config("forgelm_v2", device="cuda")
+    print("\n[1] Loading LFM2.5 base...")
+    cfg = get_config("lfm25_1.2b", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors")
     model.to("cuda").eval()
     tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 

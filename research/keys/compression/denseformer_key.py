@@ -87,27 +87,39 @@ class DenseFormerKey(Key):
         )
 
 
-def apply_denseformer_to_model(model, dilation=1):
+def apply_denseformer_to_model(model, dilation=1, safe=True):
     """Add DWA modules to a model (in-place).
+
+    Uses safety validation. DWA weights are identity-init (α_{i,i}=1, others=0),
+    so the model output should be unchanged after attachment.
 
     Args:
         model: ConfigurableResearchLLM with .blocks
         dilation: DWA dilation factor (1 = dense, >1 = sparse)
+        safe: if True, use safe_apply with rollback on corruption.
 
     Returns:
         Total DWA parameters added.
     """
+    def _apply(m):
+        n_layers = len(m.blocks)
+        key = DenseFormerKey()
+        result = key.forward({"n_layers": n_layers, "dilation": dilation})
+        if not result.success:
+            raise RuntimeError(f"DenseFormer key failed: {result.error}")
+        for i, block in enumerate(m.blocks):
+            block.dwa_weights = torch.nn.Parameter(result.weights["dwa_weights"][i].clone())
+        return m
+
+    if safe:
+        from research.keys.safety import safe_apply
+        safe_apply(model, _apply, identity_init=True, atol=1e-5, rtol=1e-4)
+    else:
+        _apply(model)
+
     n_layers = len(model.blocks)
     key = DenseFormerKey()
     result = key.forward({"n_layers": n_layers, "dilation": dilation})
-
-    if not result.success:
-        raise RuntimeError(f"DenseFormer key failed: {result.error}")
-
-    # Attach DWA weights to each block
-    for i, block in enumerate(model.blocks):
-        block.dwa_weights = torch.nn.Parameter(result.weights["dwa_weights"][i].clone())
-
     return result.metadata["total_params"]
 
 

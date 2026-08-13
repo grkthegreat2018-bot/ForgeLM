@@ -310,11 +310,21 @@ class SelfPlayPage(QWidget):
             # the process was killed without writing a final status).
             hb_age = self._events.heartbeat_age()
             is_stale = hb_age is not None and hb_age > 60.0
+            # Progress-coupled stall detection: the heartbeat thread may be
+            # alive (fresh hb_age) but the training loop itself may be hung.
+            # The heartbeat writer sets "stalled": true when no progress is
+            # detected within its stall threshold.
+            hb_stalled = self._events.heartbeat_stalled()
+            is_hung = hb_stalled is True and not is_stale
             if run_status == "running" and not is_stale:
                 if not self._selfplay_task_id:
                     # A run is active but we didn't launch it (e.g. from Launch page)
                     self._stop_btn.setEnabled(True)
                     self._start_btn.setEnabled(False)
+                if is_hung and not self._selfplay_task_id:
+                    self._ctrl_status.setText(
+                        "Run appears hung (heartbeat alive but no training progress). "
+                        "Click Stop to terminate.")
             elif run_status == "running" and is_stale:
                 # Stale run — treat as dead, allow starting a new one
                 if not self._selfplay_task_id:
@@ -436,6 +446,7 @@ class SelfPlayPage(QWidget):
         new_evts = self._events.poll()
         status = self._events.latest_status()
         hb_age = self._events.heartbeat_age()
+        hb_stalled = self._events.heartbeat_stalled()
 
         # No status file and no events → empty or launching state
         if status is None and not self._events.all_events():
@@ -486,6 +497,10 @@ class SelfPlayPage(QWidget):
             elif run_status == "error":
                 self._phase_tag.setText("ERROR")
                 self._phase_tag.setObjectName("tagErr")
+            elif hb_stalled is True and hb_age is not None and hb_age < 60:
+                # Heartbeat thread alive but training loop hung
+                self._phase_tag.setText(phase.upper() + " (STALLED)")
+                self._phase_tag.setObjectName("tagWarn")
             elif hb_age is not None and hb_age < 10:
                 self._phase_tag.setText(phase.upper())
                 self._phase_tag.setObjectName("tagOk")

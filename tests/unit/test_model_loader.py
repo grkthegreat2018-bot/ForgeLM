@@ -134,16 +134,6 @@ class TestSwiGLUFFN:
 
 
 class TestBuildFunctions:
-    def test_build_attention_standard(self):
-        cfg = ModelConfig(d_model=128, n_heads=4, attn_type="standard", max_seq_len=64)
-        attn = build_attention(cfg)
-        assert attn is not None
-
-    def test_build_attention_mla(self):
-        cfg = ModelConfig(d_model=128, n_heads=4, attn_type="mla", max_seq_len=64, kv_compression_dim=32)
-        attn = build_attention(cfg)
-        assert attn is not None
-
     def test_build_attention_gqa(self):
         cfg = ModelConfig(d_model=128, n_heads=4, attn_type="gqa", max_seq_len=64, n_kv_heads=2)
         attn = build_attention(cfg)
@@ -158,11 +148,6 @@ class TestBuildFunctions:
         cfg = ModelConfig(d_model=128, ffn_type="swiglu")
         ffn = build_ffn(cfg)
         assert isinstance(ffn, SwiGLUFFN)
-
-    def test_build_ffn_standard(self):
-        cfg = ModelConfig(d_model=128, ffn_type="standard")
-        ffn = build_ffn(cfg)
-        assert isinstance(ffn, nn.Sequential)
 
     def test_build_ffn_unknown_raises(self):
         cfg = ModelConfig(d_model=128, ffn_type="nonexistent")
@@ -181,8 +166,8 @@ class TestConfigurableResearchLLM:
 
     def test_model_creation(self, model):
         assert isinstance(model, nn.Module)
-        assert model.config.d_model == 256
-        assert model.config.n_layers == 2
+        assert model.config.d_model == 128
+        assert model.config.n_layers == 4
 
     def test_weight_tying(self, model):
         assert model.embed.weight is model.head.weight
@@ -206,8 +191,12 @@ class TestConfigurableResearchLLM:
         idx = torch.randint(0, model.config.vocab_size, (1, 5))
         logits, loss, presents = model(idx, use_cache=True)
         assert len(presents) == model.config.n_layers
+        # Conv layers return None; attention layers return (k, v)
         for p in presents:
-            assert p is not None
+            if p is not None:
+                k_cache, v_cache = p
+                assert k_cache is not None
+                assert v_cache is not None
 
     def test_forward_return_hidden(self, model):
         idx = torch.randint(0, model.config.vocab_size, (1, 5))
@@ -239,10 +228,11 @@ class TestConfigurableResearchLLM:
             if hasattr(block.ffn, "w_down"):
                 assert torch.allclose(block.ffn.w_down.weight, torch.zeros_like(block.ffn.w_down.weight))
 
-    def test_draft_head_creation(self, tiny_config):
+    def test_draft_head_is_none(self, tiny_config):
+        """Draft head is always None (EAGLE removed, MTP is separate module)."""
         cfg = ModelConfig(**{**tiny_config.__dict__, "enable_draft_head": True})
         model = ConfigurableResearchLLM(cfg)
-        assert model.draft_head is not None
+        assert model.draft_head is None
 
     def test_no_draft_head_by_default(self, model):
         assert model.draft_head is None
@@ -347,39 +337,6 @@ class TestPreAllocatedKVCache:
 class TestKVCacheEquivalence:
     """Verify pre-allocated cache produces identical output to torch.cat cache."""
 
-    def test_mla_cache_equivalence(self, tiny_config):
-        """MLA attention with pre-allocated cache should match torch.cat cache."""
-        model = ConfigurableResearchLLM(tiny_config)
-        model.eval()
-
-        idx = torch.randint(0, tiny_config.vocab_size, (1, 5))
-
-        # Path 1: traditional torch.cat cache
-        with torch.no_grad():
-            logits1, _, presents1 = model(idx, use_cache=True)
-            # Generate one more token with cache
-            next_token1 = logits1[:, -1:, :].argmax(dim=-1)
-            logits1b, _, _ = model(next_token1, past_key_values=presents1, use_cache=True)
-
-        # Path 2: pre-allocated cache
-        cache = PreAllocatedKVCache(
-            n_layers=tiny_config.n_layers,
-            batch=1,
-            n_kv_heads=tiny_config.n_heads,  # MLA uses n_heads for KV
-            max_seq_len=tiny_config.max_seq_len,
-            head_dim=tiny_config.d_model // tiny_config.n_heads,
-            dtype=torch.float32,
-            device=torch.device("cpu"),
-        )
-        with torch.no_grad():
-            logits2, _ = model(idx, use_cache=False, preallocated_cache=cache)
-            next_token2 = logits2[:, -1:, :].argmax(dim=-1)
-            logits2b, _ = model(next_token2, use_cache=False, preallocated_cache=cache)
-
-        # Outputs should be identical
-        assert torch.allclose(logits1, logits2, atol=1e-5), "Prefill logits differ"
-        assert torch.allclose(logits1b, logits2b, atol=1e-5), "Decode logits differ"
-
     def test_gqa_cache_equivalence(self):
         """GQA attention with pre-allocated cache should match torch.cat cache."""
         cfg = ModelConfig(
@@ -450,9 +407,12 @@ class TestConfigurableResearchLLMGPU:
         with torch.no_grad():
             logits, loss, presents = gpu_model(idx, use_cache=True)
         assert len(presents) == gpu_model.config.n_layers
-        for k_cache, v_cache in presents:
-            assert k_cache.is_cuda
-            assert v_cache.is_cuda
+        # Conv layers return None for their cache entry; attention layers return (k, v)
+        for present in presents:
+            if present is not None:
+                k_cache, v_cache = present
+                assert k_cache.is_cuda
+                assert v_cache.is_cuda
 
     def test_bf16_forward_gpu(self, tiny_config_gpu, gpu_available):
         cfg = ModelConfig(**{**tiny_config_gpu.__dict__, "dtype": "bfloat16"})
@@ -473,9 +433,14 @@ class TestConfigurableResearchLLMGPU:
         # Compile with default mode (kernel fusion, no CUDA graphs).
         compiled = model.compile_for_inference(mode="default")
 
-        # Pre-allocated cache
+        # Pre-allocated cache — use n_kv_heads (conv layers have 0 KV heads)
+        n_kv_heads_per_layer = [
+            cfg.n_kv_heads if lt == "attention" else 0
+            for lt in (cfg.layer_types or ["attention"] * cfg.n_layers)
+        ]
         cache = PreAllocatedKVCache(
-            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_heads,
+            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
+            n_kv_heads_per_layer=n_kv_heads_per_layer,
             max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
             dtype=torch.float32, device=torch.device("cuda"),
         )

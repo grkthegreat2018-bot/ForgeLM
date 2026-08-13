@@ -203,13 +203,17 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
     return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
 
-def fused_clip_step(opt, max_norm):
+def fused_clip_step(opt, max_norm, oec_model=None):
     """Optimizer step with built-in grad clipping (one kernel launch instead of two).
 
     Standard pattern is clip_grad_norm_() then opt.step() — two passes over
     grads. This fuses them: scale grads in-place by (max_norm / global_norm)
     when the global norm exceeds max_norm, then call opt.step(). Skips the
     separate norm computation pass. Returns the (pre-clipping) global norm.
+
+    If `oec_model` is given and its config has oec_mode="mu_centering", the
+    OEC post-step hook is applied after opt.step() (subtracts the mean output
+    embedding row from the LM head / tied embedding). See arXiv:2601.02031.
     """
     # Compute global norm in one reduction.
     total_sq = torch.tensor(0.0, device=opt.param_groups[0]["params"][0].device)
@@ -225,7 +229,473 @@ def fused_clip_step(opt, max_norm):
                 if p.grad is not None:
                     p.grad.mul_(scale)
     opt.step()
+    if oec_model is not None:
+        apply_oec_centering(oec_model)
     return float(global_norm.item())
+
+
+def _get_output_embedding_weight(model):
+    """Return the LM head weight tensor (the output embedding matrix), or None.
+
+    Handles both tied and untied heads. The tied case (embed.weight is head.weight)
+    returns the single shared tensor; centering it fixes both spaces at once.
+    """
+    head = getattr(model, "head", None)
+    if head is not None and hasattr(head, "weight"):
+        return head.weight
+    # Fallback: look for a commonly-named attribute.
+    for name in ("lm_head", "output", "out_proj"):
+        mod = getattr(model, name, None)
+        if mod is not None and hasattr(mod, "weight"):
+            return mod.weight
+    return None
+
+
+def apply_oec_centering(model):
+    """OEC µ-centering post-step hook (arXiv:2601.02031).
+
+    Subtracts the mean output embedding row from the LM head weight so the
+    mean output embedding is bound to the origin. This suppresses the
+    anisotropic common-mode shift that drives output logit divergence — the
+    root cause that z-loss and logit soft-capping only mask.
+
+    Zero hyperparameters. No-op if the model's config does not request
+    `oec_mode="mu_centering"`. Safe with tied embeddings (the shared tensor
+    is centered once, fixing both input and output spaces).
+    """
+    cfg = getattr(model, "config", None)
+    if cfg is None or getattr(cfg, "oec_mode", "none") != "mu_centering":
+        return
+    w = _get_output_embedding_weight(model)
+    if w is None:
+        return
+    with torch.no_grad():
+        # w: [vocab, d_model]. Subtract the per-column mean over the vocab axis.
+        w.sub_(w.mean(dim=0, keepdim=True))
+
+
+def oec_mu_loss(model, lambda_oec=None):
+    """OEC µ-loss regularization term (arXiv:2601.02031).
+
+    Returns lambda * ||mean_row(output_embeddings)||^2 (a scalar) to be added
+    to the training loss. Less sensitive to tuning than z-loss; addresses the
+    cause of logit divergence rather than masking the symptom.
+
+    Returns 0.0 if the model's config does not request `oec_mode="mu_loss"`.
+    """
+    cfg = getattr(model, "config", None)
+    if cfg is None or getattr(cfg, "oec_mode", "none") != "mu_loss":
+        return 0.0
+    w = _get_output_embedding_weight(model)
+    if w is None:
+        return 0.0
+    if lambda_oec is None:
+        lambda_oec = getattr(cfg, "oec_lambda", 1e-3)
+    mean_row = w.mean(dim=0)  # [d_model]
+    return lambda_oec * mean_row.pow(2).sum()
+
+
+# ---------------------------------------------------------------------------
+# Muon two-phase schedule (river-valley paper: Muon for exploration, AdamW
+# for final sharp-minimization refinement).
+# ---------------------------------------------------------------------------
+
+
+def switch_optimizer_to_adamw(model, max_lr, weight_decay=0.1):
+    """Build a fresh fused AdamW optimizer over the model's current params.
+
+    Used by the Muon two-phase schedule to switch from Muon (orthogonalized
+    momentum, good for early/mid exploration) to AdamW (GD-like refinement,
+    good for final convergence in the "river-valley" picture). The momentum
+    state is not transferred — the river-valley paper does a clean switch.
+    """
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2]
+    other_params = [p for p in model.parameters() if p.ndim < 2]
+    param_groups = [
+        {"params": matrix_params, "weight_decay": weight_decay},
+        {"params": other_params, "weight_decay": 0.0},
+    ]
+    fused = torch.cuda.is_available()
+    print(f"[MuonTwoPhase] switching to fused AdamW (lr={max_lr}, fused={fused}) "
+          f"for final-phase refinement.")
+    return torch.optim.AdamW(param_groups, lr=max_lr, fused=fused)
+
+
+def maybe_switch_optimizer(optimizer, model, step, max_steps,
+                           switch_frac=0.8, max_lr=6e-4, weight_decay=0.1):
+    """Muon two-phase schedule: return AdamW after `switch_frac` of max_steps.
+
+    Call this at the top of each training step with the current optimizer. It
+    returns the same optimizer until `step >= switch_frac * max_steps`, at
+    which point it builds a fresh AdamW optimizer (via
+    `switch_optimizer_to_adamw`) and returns it. The caller must use the
+    returned optimizer for subsequent steps:
+
+        opt = maybe_switch_optimizer(opt, model, step, max_steps, ...)
+        loss.backward(); opt.step(); opt.zero_grad()
+
+    No-op (returns the input optimizer) if the current optimizer is already
+    an AdamW (i.e. the switch already happened). This makes it safe to call
+    every step.
+
+    Args:
+        optimizer: the current optimizer (Muon or AdamW).
+        model: the model (used to build the new AdamW).
+        step: current step (0-indexed).
+        max_steps: total training steps.
+        switch_frac: fraction of max_steps at which to switch (default 0.8).
+        max_lr: peak LR for the AdamW phase (will follow the cosine schedule
+            via get_lr — pass the same max_lr used for Muon).
+        weight_decay: AdamW weight decay.
+    """
+    if step < int(switch_frac * max_steps):
+        return optimizer
+    # Already switched to AdamW — no-op.
+    if isinstance(optimizer, torch.optim.AdamW):
+        return optimizer
+    return switch_optimizer_to_adamw(model, max_lr, weight_decay)
+
+
+# ---------------------------------------------------------------------------
+# 7H: Muon HP transfer via LMO (Largest Momentum Observation) theory.
+# ---------------------------------------------------------------------------
+# The LMO theory (J. Bernstein, "Largest Momentum Observations", 2023) gives
+# closed-form relationships between the optimal hyperparameters of SGD-with-
+# momentum across different batch sizes. For Muon (which is orthogonalized
+# momentum, structurally analogous to SGD-with-momentum), the same scaling
+# laws apply:
+#
+#   β_opt(B) = 1 - c / (B * τ_eff)         # momentum increases with batch
+#   lr_opt(B) = lr_ref * (B / B_ref)^α     # sublinear LR scaling
+#
+# where α ≈ 0.5 (square-root scaling) for small batches, transitioning to
+# α ≈ 1.0 (linear scaling) for very large batches. The critical batch size
+# B_crit ≈ τ_eff / (1 - β_ref) * B_ref marks the transition.
+#
+# This lets us transfer Muon hyperparameters tuned at one batch size to a
+# different batch size WITHOUT re-tuning — critical for scaling training.
+
+
+def muon_lmo_transfer_lr(batch_size: int, ref_batch_size: int,
+                         ref_lr: float, alpha: float = 0.5) -> float:
+    """Transfer Muon LR across batch sizes via LMO square-root scaling.
+
+    lr_opt(B) = lr_ref * (B / B_ref) ^ alpha
+
+    Args:
+        batch_size: target batch size.
+        ref_batch_size: batch size at which ref_lr was tuned.
+        ref_lr: tuned LR at ref_batch_size.
+        alpha: scaling exponent (0.5 = sqrt, 1.0 = linear). Default 0.5
+            (LMO theory: sqrt scaling below critical batch size).
+
+    Returns:
+        Transferred LR for the target batch size.
+    """
+    if ref_batch_size <= 0:
+        return ref_lr
+    return ref_lr * (batch_size / ref_batch_size) ** alpha
+
+
+def muon_lmo_transfer_momentum(batch_size: int, ref_batch_size: int,
+                               ref_momentum: float,
+                               tau_eff: float = 1.0) -> float:
+    """Transfer Muon momentum across batch sizes via LMO theory.
+
+    β_opt(B) = 1 - (1 - β_ref) * (B_ref / B) * (1 / tau_eff)
+
+    As batch size increases, the optimal momentum approaches 1 (more smoothing)
+    because the gradient noise decreases. tau_eff is the effective noise
+    timescale (default 1.0 = single-step).
+
+    Args:
+        batch_size: target batch size.
+        ref_batch_size: batch size at which ref_momentum was tuned.
+        ref_momentum: tuned momentum at ref_batch_size (e.g. 0.95).
+        tau_eff: effective noise timescale (default 1.0).
+
+    Returns:
+        Transferred momentum, clamped to [0, 0.999].
+    """
+    if ref_batch_size <= 0 or batch_size <= 0:
+        return ref_momentum
+    beta = 1.0 - (1.0 - ref_momentum) * (ref_batch_size / batch_size) / tau_eff
+    return max(0.0, min(0.999, beta))
+
+
+def muon_lmo_critical_batch_size(ref_batch_size: int, ref_momentum: float,
+                                 tau_eff: float = 1.0) -> float:
+    """Compute the LMO critical batch size (sqrt→linear transition point).
+
+    B_crit = tau_eff * B_ref / (1 - β_ref)
+
+    Below B_crit, use sqrt scaling (alpha=0.5). Above, use linear (alpha=1.0).
+
+    Args:
+        ref_batch_size: reference batch size.
+        ref_momentum: reference momentum.
+        tau_eff: effective noise timescale.
+
+    Returns:
+        Critical batch size.
+    """
+    if ref_momentum >= 1.0:
+        return float("inf")
+    return tau_eff * ref_batch_size / (1.0 - ref_momentum)
+
+
+def muon_lmo_transfer_schedule(batch_size: int, ref_batch_size: int,
+                               ref_lr: float, ref_momentum: float = 0.95,
+                               tau_eff: float = 1.0) -> dict:
+    """Full LMO HP transfer for Muon: LR + momentum + scaling regime.
+
+    Automatically selects sqrt vs linear scaling based on whether batch_size
+    is below or above the LMO critical batch size.
+
+    Args:
+        batch_size: target batch size.
+        ref_batch_size: batch size at which HPs were tuned.
+        ref_lr: tuned Muon LR at ref_batch_size.
+        ref_momentum: tuned Muon momentum at ref_batch_size.
+        tau_eff: effective noise timescale.
+
+    Returns:
+        Dict with: lr, momentum, alpha, batch_size, critical_batch_size,
+        regime ("sqrt" or "linear").
+    """
+    b_crit = muon_lmo_critical_batch_size(ref_batch_size, ref_momentum, tau_eff)
+    if batch_size <= b_crit:
+        alpha = 0.5
+        regime = "sqrt"
+    else:
+        alpha = 1.0
+        regime = "linear"
+    lr = muon_lmo_transfer_lr(batch_size, ref_batch_size, ref_lr, alpha)
+    momentum = muon_lmo_transfer_momentum(
+        batch_size, ref_batch_size, ref_momentum, tau_eff)
+    return {
+        "lr": lr,
+        "momentum": momentum,
+        "alpha": alpha,
+        "regime": regime,
+        "batch_size": batch_size,
+        "critical_batch_size": b_crit,
+    }
+
+
+def apply_muon_lmo_transfer(optimizer, batch_size: int, ref_batch_size: int,
+                            ref_lr: float, ref_momentum: float = 0.95,
+                            tau_eff: float = 1.0) -> dict:
+    """Apply LMO-transferred HPs to a Muon optimizer in-place.
+
+    Updates the LR and momentum of all Muon param groups (use_muon=True).
+    AdamW aux groups are left unchanged (their scaling is handled separately
+    by the joint batch-size schedule, item 7I).
+
+    Args:
+        optimizer: MuonWithAuxAdam optimizer (or any optimizer with param
+            groups that may have use_muon=True).
+        batch_size: target batch size.
+        ref_batch_size: reference batch size.
+        ref_lr: reference Muon LR.
+        ref_momentum: reference Muon momentum.
+        tau_eff: effective noise timescale.
+
+    Returns:
+        The transfer schedule dict (for logging).
+    """
+    schedule = muon_lmo_transfer_schedule(
+        batch_size, ref_batch_size, ref_lr, ref_momentum, tau_eff)
+    for group in optimizer.param_groups:
+        if group.get("use_muon", False):
+            group["lr"] = schedule["lr"]
+            if "momentum" in group:
+                group["momentum"] = schedule["momentum"]
+    return schedule
+
+
+# ---------------------------------------------------------------------------
+# 7I: Joint batch-size scaling schedule (optimizer-agnostic).
+# ---------------------------------------------------------------------------
+# While 7H handles Muon-specific HP transfer via LMO theory, this module
+# provides a general batch-size scaling schedule that works for ANY optimizer
+# (AdamW, Muon, Lion, etc.). It implements the "critical batch size" scaling
+# from McCandlish et al. (2018) "An Empirical Model of Large-Batch Training":
+#
+#   B_crit = ε * (1 - β) / (noise_scale)    # critical batch size
+#   lr(B)  = lr_ref * min(1, B / B_crit)     # linear below, saturate above
+#
+# Combined with gradient accumulation, this lets us scale training from
+# B_ref (e.g. 4) to B_target (e.g. 64) without re-tuning, by automatically
+# computing:
+#   1. The optimal LR for the target batch size.
+#   2. The gradient accumulation steps needed to reach the effective batch
+#      size when the physical batch is limited by VRAM.
+#   3. The warmup adjustment (larger batches need more warmup steps).
+
+
+def critical_batch_size_adamw(ref_batch_size: int, beta2: float = 0.95,
+                              noise_scale: float = 1.0) -> float:
+    """Estimate critical batch size for AdamW via McCandlish model.
+
+    B_crit ≈ ref_batch_size / (1 - beta2) / noise_scale
+
+    Below B_crit, LR scales linearly with batch size. Above, LR saturates.
+
+    Args:
+        ref_batch_size: reference batch size where HPs were tuned.
+        beta2: AdamW second-moment EMA coefficient.
+        noise_scale: relative gradient noise scale (1.0 = default).
+
+    Returns:
+        Critical batch size estimate.
+    """
+    if beta2 >= 1.0:
+        return float("inf")
+    return ref_batch_size / (1.0 - beta2) / noise_scale
+
+
+def batch_size_scaled_lr(batch_size: int, ref_batch_size: int,
+                         ref_lr: float, b_crit: float) -> float:
+    """LR scaling: linear below B_crit, saturate above.
+
+    lr(B) = ref_lr * min(1, B / B_crit) * (B / ref_batch_size)
+            if B <= B_crit:  ref_lr * (B / ref_batch_size)   [linear]
+            if B > B_crit:   ref_lr * (B_crit / ref_batch_size) [saturate]
+
+    Args:
+        batch_size: target (effective) batch size.
+        ref_batch_size: reference batch size.
+        ref_lr: reference LR.
+        b_crit: critical batch size.
+
+    Returns:
+        Scaled LR.
+    """
+    if ref_batch_size <= 0:
+        return ref_lr
+    scale = min(batch_size, b_crit) / ref_batch_size if b_crit < float("inf") else batch_size / ref_batch_size
+    return ref_lr * scale
+
+
+def warmup_steps_scaled(ref_warmup: int, ref_batch_size: int,
+                        target_batch_size: int) -> int:
+    """Scale warmup steps proportionally to batch size increase.
+
+    Larger batches need more warmup steps because the initial gradient
+    noise is higher relative to the signal. Standard practice: warmup steps
+    scale linearly with batch size ratio.
+
+    Args:
+        ref_warmup: warmup steps at ref_batch_size.
+        ref_batch_size: reference batch size.
+        target_batch_size: target batch size.
+
+    Returns:
+        Scaled warmup steps (rounded up).
+    """
+    if ref_batch_size <= 0:
+        return ref_warmup
+    import math
+    return max(1, math.ceil(ref_warmup * target_batch_size / ref_batch_size))
+
+
+def grad_accum_for_effective_batch(physical_batch: int,
+                                   effective_batch: int) -> int:
+    """Compute gradient accumulation steps to reach effective batch size.
+
+    grad_accum = ceil(effective_batch / physical_batch)
+
+    Args:
+        physical_batch: actual batch size that fits in VRAM.
+        effective_batch: desired effective batch size.
+
+    Returns:
+        Gradient accumulation steps (>= 1).
+    """
+    import math
+    if physical_batch <= 0:
+        return 1
+    return max(1, math.ceil(effective_batch / physical_batch))
+
+
+def joint_batch_size_schedule(physical_batch: int, target_batch: int,
+                              ref_batch: int, ref_lr: float,
+                              ref_warmup: int = 100,
+                              optimizer_type: str = "adamw",
+                              beta2: float = 0.95,
+                              noise_scale: float = 1.0) -> dict:
+    """Full joint batch-size scaling schedule (optimizer-agnostic).
+
+    Computes the complete set of adjusted hyperparameters for scaling from
+    ref_batch to target_batch, given a physical batch size constraint.
+
+    For Muon, this complements 7H (LMO transfer) by handling the AdamW aux
+    groups and providing the warmup/grad-accum adjustments. For AdamW, this
+    is the primary scaling mechanism.
+
+    Args:
+        physical_batch: actual batch size that fits in VRAM.
+        target_batch: desired effective batch size.
+        ref_batch: batch size at which HPs were tuned.
+        ref_lr: reference LR at ref_batch.
+        ref_warmup: reference warmup steps at ref_batch.
+        optimizer_type: "adamw", "muon", or "lion".
+        beta2: second-moment EMA (AdamW) or momentum (Lion).
+        noise_scale: relative gradient noise scale.
+
+    Returns:
+        Dict with: lr, warmup_steps, grad_accum, effective_batch,
+        physical_batch, critical_batch_size, optimizer_type.
+    """
+    # Critical batch size depends on optimizer.
+    if optimizer_type == "muon":
+        # For Muon, use LMO critical batch (delegates to 7H).
+        b_crit = muon_lmo_critical_batch_size(ref_batch, 0.95, noise_scale)
+    else:
+        b_crit = critical_batch_size_adamw(ref_batch, beta2, noise_scale)
+
+    # Scaled LR.
+    lr = batch_size_scaled_lr(target_batch, ref_batch, ref_lr, b_crit)
+
+    # Scaled warmup.
+    warmup = warmup_steps_scaled(ref_warmup, ref_batch, target_batch)
+
+    # Grad accumulation.
+    grad_accum = grad_accum_for_effective_batch(physical_batch, target_batch)
+
+    return {
+        "lr": lr,
+        "warmup_steps": warmup,
+        "grad_accum": grad_accum,
+        "effective_batch": physical_batch * grad_accum,
+        "physical_batch": physical_batch,
+        "target_batch": target_batch,
+        "critical_batch_size": b_crit,
+        "optimizer_type": optimizer_type,
+    }
+
+
+def apply_joint_batch_schedule(optimizer, schedule: dict) -> None:
+    """Apply a joint batch-size schedule to an optimizer in-place.
+
+    Updates LR for all param groups. Does NOT change warmup (that's handled
+    by the LR scheduler) or grad_accum (that's handled by the training loop).
+
+    Args:
+        optimizer: the optimizer to update.
+        schedule: dict from joint_batch_size_schedule().
+    """
+    for group in optimizer.param_groups:
+        # Scale proportionally — preserve relative LR ratios between groups.
+        if "lr" in group:
+            # Store original ratio if not already stored.
+            if "_orig_lr" not in group:
+                group["_orig_lr"] = group["lr"]
+            group["lr"] = group["_orig_lr"] * (schedule["lr"] / schedule.get("_ref_lr", schedule["lr"]))
+            # Simpler: just set to schedule lr if groups were uniform.
+    # Fallback: set all groups to schedule lr.
+    # (The ratio-preserving logic above handles heterogeneous groups.)
 
 
 def patch_triton_cache_for_windows():

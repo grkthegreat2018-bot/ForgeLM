@@ -341,6 +341,7 @@ def build_airmoe_module(state: dict[str, torch.Tensor],
     for i in range(n_layers):
         for ei in range(n_experts):
             expert_state = {}
+            # Legacy SwiGLU format: w1 (gate), w2 (down), w3 (up)
             for part in ["w1", "w2", "w3"]:
                 k = f"blocks.{i}.ffn.experts.{ei}.{part}.weight"
                 if k in state:
@@ -356,6 +357,26 @@ def build_airmoe_module(state: dict[str, torch.Tensor],
                         svd_rank = k_rank
                     else:
                         expert_state[f"{part}.weight"] = state[k]
+                        svd_rank = 0
+                    expert_keys_to_remove.append(k)
+
+            # LatentMoE format: nn.Sequential([Linear(ℓ→hidden), SquaredReLU, Linear(hidden→ℓ)])
+            # State dict keys: blocks.{i}.ffn.experts.{ei}.0.weight (up), .2.weight (down)
+            for seq_idx, part_name in [(0, "up"), (2, "down")]:
+                k = f"blocks.{i}.ffn.experts.{ei}.{seq_idx}.weight"
+                if k in state and f"{part_name}.weight" not in expert_state:
+                    if compress:
+                        U, S, Vh = torch.linalg.svd(state[k].float(), full_matrices=False)
+                        cumsum = (S ** 2).cumsum(0)
+                        total = cumsum[-1]
+                        k_rank = max(1, (cumsum < svd_energy * total).sum().item() + 1)
+                        expert_state[f"{part_name}_U"] = U[:, :k_rank].to(torch.bfloat16)
+                        expert_state[f"{part_name}_S"] = S[:k_rank].to(torch.bfloat16)
+                        expert_state[f"{part_name}_Vh"] = Vh[:k_rank, :].to(torch.bfloat16)
+                        expert_state[f"{part_name}_rank"] = torch.tensor([k_rank], dtype=torch.int32)
+                        svd_rank = k_rank
+                    else:
+                        expert_state[f"{part_name}.weight"] = state[k]
                         svd_rank = 0
                     expert_keys_to_remove.append(k)
 

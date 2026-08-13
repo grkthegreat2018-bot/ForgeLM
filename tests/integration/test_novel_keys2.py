@@ -81,7 +81,7 @@ def test_vocab_pack():
 
 def test_conformal_sampler():
     """ConformalSamplerKey: conformal-calibrated sampling temperature."""
-    from research.keys.conformal_sampler_key import ConformalSamplerKey, ConformalSampler
+    from research.keys.training.conformal_sampler_key import ConformalSamplerKey, ConformalSampler
 
     key = ConformalSamplerKey()
     assert key.name == "conformal_sampler"
@@ -119,7 +119,7 @@ def test_conformal_sampler():
 
 def test_compute_futures():
     """ComputeFuturesKey: skip verification for high-confidence drafts."""
-    from research.keys.compute_futures_key import ComputeFuturesKey, ComputeFutures
+    from research.keys.misc.compute_futures_key import ComputeFuturesKey, ComputeFutures
 
     key = ComputeFuturesKey()
     assert key.name == "compute_futures"
@@ -166,7 +166,7 @@ def test_compute_futures():
 
 def test_sae_pack():
     """SAEPackKey: extract SAE feature deltas as portable steering pack."""
-    from research.keys.sae_pack_key import SAEPackKey, SAEPack
+    from research.keys.knowledge.sae_pack_key import SAEPackKey, SAEPack
 
     key = SAEPackKey()
     assert key.name == "sae_pack"
@@ -214,7 +214,7 @@ def test_sae_pack():
 
 def test_cross_attn_pack():
     """CrossAttnPackKey: extract cross-attention adapter as portable pack."""
-    from research.keys.cross_attn_pack_key import CrossAttnPackKey, CrossAttnPack
+    from research.keys.attention.cross_attn_pack_key import CrossAttnPackKey, CrossAttnPack
 
     key = CrossAttnPackKey()
     assert key.name == "cross_attn_pack"
@@ -273,7 +273,7 @@ def test_cross_attn_pack():
 
 def test_per_query_interp():
     """PerQueryInterpKey: per-query weight interpolation."""
-    from research.keys.per_query_interp_key import PerQueryInterpKey, PerQueryInterp
+    from research.keys.training.per_query_interp_key import PerQueryInterpKey, PerQueryInterp
 
     key = PerQueryInterpKey()
     assert key.name == "per_query_interp"

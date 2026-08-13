@@ -12,7 +12,7 @@ _CPU_VOCAB = 256
 @pytest.fixture
 def tiny_config():
     """Minimal config for fast CPU-only testing. Uses small vocab to avoid CPU spike."""
-    cfg = get_config("tiny_test")
+    cfg = get_config("lfm25_tiny")
     return ModelConfig(**{**cfg.__dict__, "device": "cpu", "vocab_size": _CPU_VOCAB})
 
 
@@ -25,7 +25,7 @@ def tiny_config_cpu(tiny_config):
 @pytest.fixture
 def tiny_config_gpu():
     """Tiny config for GPU tests. Uses small vocab. Mark with @pytest.mark.gpu."""
-    cfg = get_config("tiny_test")
+    cfg = get_config("lfm25_tiny")
     return ModelConfig(**{**cfg.__dict__, "device": "cuda", "vocab_size": _CPU_VOCAB})
 
 

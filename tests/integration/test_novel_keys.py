@@ -29,8 +29,8 @@ def build_tiny_model(device="cpu"):
         d_model=128,
         n_layers=4,
         n_heads=4,
-        attn_type="mla",
-        kv_compression_dim=64,
+        n_kv_heads=2,
+        attn_type="gqa",
         ffn_type="swiglu",
         norm_type="rmsnorm",
         max_seq_len=128,
@@ -49,8 +49,8 @@ def build_tiny_moe_model(device="cpu"):
         d_model=128,
         n_layers=4,
         n_heads=4,
-        attn_type="mla",
-        kv_compression_dim=64,
+        n_kv_heads=2,
+        attn_type="gqa",
         ffn_type="swiglu",
         norm_type="rmsnorm",
         max_seq_len=128,
@@ -60,7 +60,7 @@ def build_tiny_moe_model(device="cpu"):
     # Replace FFN with MoE (4 experts, top-2, dense_bypass for testing)
     replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=128,
                         shared_expert=True, d_ff=64, dense_bypass=False)
-    # MoE layers are created on CPU — move entire model to device again
+    # MoE layers are created on CPU ï¿½ move entire model to device again
     model = model.to(device)
     model.eval()
     return model, config
@@ -332,14 +332,14 @@ def benchmark_anchor_vocab():
         print("  [SKIP] CUDA not available, skipping benchmark")
         return True
 
-    # Build model with large vocab (like ForgeLM V2)
+    # Build model with large vocab (like LFM2.5)
     config = ModelConfig(
-        vocab_size=151936,
-        d_model=1536,
+        vocab_size=65536,
+        d_model=2048,
         n_layers=4,  # few layers for speed
-        n_heads=12,
-        attn_type="mla",
-        kv_compression_dim=512,
+        n_heads=32,
+        n_kv_heads=8,
+        attn_type="gqa",
         ffn_type="swiglu",
         norm_type="rmsnorm",
         max_seq_len=128,

@@ -15,7 +15,7 @@ Usage:
 
     engine = ForgeEngine.from_checkpoint(
         checkpoint="research/checkpoints/xp_full_no_mqa.safetensors",
-        config_name="qwen25_coder_1.5b",
+        config_name="lfm25_1.2b",
         tokenizer_path="research/checkpoints/qwen_hf",
     )
     engine.activate(kv_cache="hadamard_int4", decoding="mtp_selfspec")
@@ -84,7 +84,7 @@ class ForgeEngine:
             self._detect_keystack_features()
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: str, config_name: str = "qwen25_coder_1.5b",
+    def from_checkpoint(cls, checkpoint: str, config_name: str = "lfm25_1.2b",
                         tokenizer_path: str | None = None,
                         device: str = "cuda", **kwargs):
         """Build engine from a KeyStack checkpoint.
@@ -135,21 +135,34 @@ class ForgeEngine:
     def _detect_keystack_features(self):
         """Detect which KeyStack transforms are in the checkpoint."""
         from safetensors import safe_open
+        from pathlib import Path as _Path
         features = []
-        with safe_open(self.checkpoint_path, framework="pt") as f:
-            keys = set(f.keys())
-            if "value_residual_v0" in keys:
-                features.append("value_residual")
-            if "rotorquant_rotations" in keys:
-                features.append("rotorquant")
-            if "mtp_head.heads.0.weight" in keys:
-                features.append("mtp")
-            if "_airllm_streamable" in keys:
-                features.append("airllm")
-            # QuaRot detection: check if V/O weights are Hadamard-rotated
-            # (heuristic: compare against original if available)
-            features.append("quarot")  # Assume applied by pipeline
-            features.append("mrl")     # Assume applied by pipeline
+        ckpt = _Path(self.checkpoint_path)
+        if ckpt.is_dir():
+            # Sharded model: read keys from first shard
+            shards = sorted(ckpt.glob("model-*.safetensors"))
+            if shards:
+                with safe_open(str(shards[0]), framework="pt") as f:
+                    keys = set(f.keys())
+            else:
+                keys = set()
+        else:
+            with safe_open(self.checkpoint_path, framework="pt") as f:
+                keys = set(f.keys())
+
+        # Detect features from keys (works for both single-file and sharded)
+        if "value_residual_v0" in keys:
+            features.append("value_residual")
+        if "rotorquant_rotations" in keys:
+            features.append("rotorquant")
+        if "mtp_head.heads.0.weight" in keys:
+            features.append("mtp")
+        if "_airllm_streamable" in keys:
+            features.append("airllm")
+        # QuaRot detection: check if V/O weights are Hadamard-rotated
+        # (heuristic: compare against original if available)
+        features.append("quarot")  # Assume applied by pipeline
+        features.append("mrl")     # Assume applied by pipeline
 
         self.keystack_features = features
         print(f"  [ForgeEngine] KeyStack features detected: {features}")
@@ -171,7 +184,7 @@ class ForgeEngine:
             kv_cache: "standard", "paged", "rotorquant", "hadamard_int4", "compressed",
                       "streaming", "snapkv"
             decoding: "standard", "speculative", "medusa", "dspark", "mtp_selfspec"
-            quantize: None, "int8", "int4"
+            quantize: None, "int8", "int4", "fp8"
             acceleration: None, "cuda_graph", "airllm_streaming"
             mrl_keep_ratio: if set (e.g. 0.75), truncate to that fraction of dims
             kv_bits: 4 or 8, for KV cache quantization
@@ -368,6 +381,9 @@ class ForgeEngine:
         elif mode == "int4":
             from research.quantization.inference_quant import quantize_model_int4
             quantize_model_int4(self.model, group_size=128)
+        elif mode == "fp8":
+            from research.quantization.fp8_infer import quantize_model_fp8
+            quantize_model_fp8(self.model)
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 100,
@@ -383,39 +399,73 @@ class ForgeEngine:
         ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
 
         # Prefix caching: check if we've seen this prompt prefix before
+        prefix_hit = False
         if self._prefix_cache is not None and ids.shape[1] > 16:
-            # Use first 32 tokens as cache key (or full prompt if shorter)
             key_len = min(32, ids.shape[1])
             cache_key = ids[:, :key_len].cpu().tolist()[0]
             cached = self._prefix_cache.get(str(cache_key))
             if cached is not None:
                 cached_ids, cached_past_kv = cached
-                # Reuse cached prefix KV, only process new tokens
-                new_ids = ids[:, cached_ids.shape[1]:]
-                if new_ids.shape[1] > 0:
-                    # TODO: full prefix cache integration with decoding
-                    pass
-                # For now, just log the hit
-                print(f"  [PrefixCache] HIT (prefix len={cached_ids.shape[1]})")
+                # Reuse cached prefix KV: only process new tokens
+                suffix_ids = ids[:, cached_ids.shape[1]:]
+                if suffix_ids.shape[1] > 0 and cached_past_kv is not None:
+                    with torch.inference_mode():
+                        out = self.model(suffix_ids, past_key_values=cached_past_kv,
+                                         use_cache=True)
+                        if isinstance(out, tuple):
+                            logits = out[0]
+                            past_kv = out[2] if len(out) > 2 else out[1]
+                        else:
+                            logits = out
+                            past_kv = None
+                    # Build full KV cache: prefix + suffix
+                    full_past_kv = []
+                    for li, (pk, pv) in enumerate(cached_past_kv):
+                        sk, sv = past_kv[li]
+                        full_past_kv.append((
+                            torch.cat([pk, sk], dim=-2),
+                            torch.cat([pv, sv], dim=-2),
+                        ))
+                    # Continue decoding from here (skip the prefill in StandardDecoding)
+                    output_ids = self._decode_with_kv(
+                        ids, logits, full_past_kv,
+                        max_new_tokens, temperature, top_p)
+                    prefix_hit = True
+                    print(f"  [PrefixCache] HIT + REUSE (prefix len={cached_ids.shape[1]}, "
+                          f"saved prefill)")
+                else:
+                    print(f"  [PrefixCache] HIT (prefix len={cached_ids.shape[1]})")
 
-        if self.acceleration == "airllm_streaming":
-            output_ids = self._generate_streaming(ids, max_new_tokens, temperature)
-        else:
-            output_ids = self.decoding.generate(
-                self.model, ids, max_new_tokens, temperature, top_p)
+        if not prefix_hit:
+            if self.acceleration == "airllm_streaming":
+                output_ids = self._generate_streaming(ids, max_new_tokens, temperature)
+            else:
+                output_ids = self.decoding.generate(
+                    self.model, ids, max_new_tokens, temperature, top_p)
+
+        # Capture KV cache from decoding step for fast finish-to-stop path
+        captured_kv = getattr(self.model, '_forge_last_kv', None)
 
         # Smart cutoff: if we hit max_new_tokens without EOS, extend to next
         # natural stopping point (up to 32 extra tokens).
         if finish_sentence and output_ids.shape[1] - ids.shape[1] >= max_new_tokens:
             output_ids = self._finish_to_stop(output_ids, ids.shape[1],
                                               max_new_tokens, temperature, top_p,
-                                              extra_budget=32)
+                                              extra_budget=32, past_kv=captured_kv)
 
-        # Store prefix in cache
+        # Store prefix KV cache for future reuse
         if self._prefix_cache is not None and ids.shape[1] > 16:
             key_len = min(32, ids.shape[1])
             cache_key = ids[:, :key_len].cpu().tolist()[0]
-            self._prefix_cache[str(cache_key)] = (ids, None)
+            if str(cache_key) not in self._prefix_cache:
+                # Capture KV cache for the prefix (first key_len tokens)
+                with torch.inference_mode():
+                    prefix_out = self.model(ids[:, :key_len], use_cache=True)
+                    if isinstance(prefix_out, tuple):
+                        prefix_kv = prefix_out[2] if len(prefix_out) > 2 else prefix_out[1]
+                    else:
+                        prefix_kv = None
+                self._prefix_cache[str(cache_key)] = (ids[:, :key_len], prefix_kv)
 
         self.generation_count += 1
         self.total_tokens_generated += output_ids.shape[1] - ids.shape[1]
@@ -423,6 +473,48 @@ class ForgeEngine:
         prompt_len = ids.shape[1]
         generated_ids = output_ids[0, prompt_len:]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+    @torch.no_grad()
+    def _decode_with_kv(self, ids, logits, past_kv,
+                        max_new_tokens, temperature, top_p):
+        """Standard autoregressive decode from existing KV cache state.
+
+        Used by prefix cache fast path: prefill already done, just decode.
+        """
+        device = ids.device
+        eos = getattr(self.model, "eos_token_id", None)
+        eos_set = {151643, 151645}
+        if eos is not None:
+            eos_set.add(eos)
+        eos_tensor = torch.tensor(list(eos_set), device=device)
+        token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
+
+        for _ in range(max_new_tokens):
+            next_logits = logits[:, -1, :] / max(temperature, 1e-5)
+            if temperature == 0:
+                next_token = next_logits.argmax(-1, keepdim=True)
+            else:
+                next_token = torch.multinomial(
+                    torch.nn.functional.softmax(next_logits, dim=-1),
+                    num_samples=1)
+
+            is_eos = (next_token == eos_tensor).any()
+            token_pinned.copy_(next_token, non_blocking=True)
+            if is_eos.item():
+                break
+
+            ids = torch.cat([ids, next_token], dim=-1)
+            with torch.inference_mode():
+                out = self.model(next_token, past_key_values=past_kv, use_cache=True)
+                if isinstance(out, tuple):
+                    logits = out[0]
+                    past_kv = out[2] if len(out) > 2 else out[1]
+                else:
+                    logits = out
+
+        # Expose final KV cache for _finish_to_stop
+        self.model._forge_last_kv = past_kv
+        return ids
 
     # Token IDs for natural stopping points (Qwen2.5)
     _STOP_TOKENS = None  # cached on first use
@@ -447,27 +539,41 @@ class ForgeEngine:
 
     @torch.no_grad()
     def _finish_to_stop(self, output_ids, prompt_len, max_new_tokens,
-                        temperature, top_p, extra_budget=32):
-        """Continue generation until a natural stopping point or extra_budget."""
+                        temperature, top_p, extra_budget=32,
+                        past_kv=None):
+        """Continue generation until a natural stopping point or extra_budget.
+
+        If past_kv is provided (captured from the decoding step), skips the
+        expensive full-sequence re-run and continues directly from the last state.
+        Otherwise falls back to a full prefill to recover KV cache state.
+        """
         stop_tokens = self._get_stop_tokens()
         stop_tensor = torch.tensor(list(stop_tokens), device=output_ids.device)
-        token_pinned = torch.zeros(1, dtype=torch.long, pin_memory=True)
-        eos_set = {151643, 151645}
-
-        # Use the decoding strategy to extend, checking each new token
-        generated = output_ids.shape[1] - prompt_len
+        token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
         extra = 0
 
-        # Get current KV cache state by re-running with use_cache
-        # Simplest: just continue with standard decoding on the full sequence
-        with torch.inference_mode():
-            out = self.model(output_ids, use_cache=True)
-            if isinstance(out, tuple):
-                logits = out[0]
-                past_kv = out[2] if len(out) > 2 else out[1]
-            else:
-                logits = out
-                past_kv = None
+        if past_kv is not None:
+            # Fast path: KV cache captured from decoding step.
+            # Run just the last token through the model to get logits.
+            last_token = output_ids[:, -1:]
+            with torch.inference_mode():
+                out = self.model(last_token, past_key_values=past_kv, use_cache=True)
+                if isinstance(out, tuple):
+                    logits = out[0]
+                    past_kv = out[2] if len(out) > 2 else out[1]
+                else:
+                    logits = out
+                    past_kv = None
+        else:
+            # Slow path: re-run full sequence to recover KV cache state.
+            with torch.inference_mode():
+                out = self.model(output_ids, use_cache=True)
+                if isinstance(out, tuple):
+                    logits = out[0]
+                    past_kv = out[2] if len(out) > 2 else out[1]
+                else:
+                    logits = out
+                    past_kv = None
 
         while extra < extra_budget:
             next_logits = logits[:, -1, :] / max(temperature, 1e-5)
@@ -500,43 +606,95 @@ class ForgeEngine:
 
     def _generate_streaming(self, ids: torch.Tensor, max_new_tokens: int,
                             temperature: float) -> torch.Tensor:
-        """AirLLM streaming generation: load one layer at a time from disk shards."""
+        """AirLLM streaming generation: load layer shards per forward pass.
+
+        Shards are loaded once per forward pass (not per token). KV cache is
+        maintained across decode steps to avoid O(seq_len) recomputation.
+        """
         from safetensors.torch import load_file
         eos = getattr(self.tokenizer, "eos_token_id", None)
         param_map = self._param_map
+        device = self.device
+        n_layers = len(self.model.blocks)
 
+        # Pre-allocate KV cache on GPU (small: n_layers * 2 * max_seq * n_kv * head_dim * 2 bytes)
+        cfg = getattr(self.model, "config", None)
+        n_kv = getattr(cfg, "n_kv_heads", 2) or 12
+        head_dim = getattr(cfg, "d_model", 2048) // (getattr(cfg, "n_heads", 32) or 32)
+        max_seq = getattr(cfg, "max_seq_len", 32768)
+        kv_cache = [
+            (
+                torch.empty(1, n_kv, max_seq, head_dim, dtype=torch.bfloat16, device=device),
+                torch.empty(1, n_kv, max_seq, head_dim, dtype=torch.bfloat16, device=device),
+            )
+            for _ in range(n_layers)
+        ]
+        cache_pos = ids.shape[1]  # current fill position in KV cache
+
+        def _load_all_shards():
+            """Load all layer shards from disk to GPU. Call once per forward pass."""
+            for li in range(n_layers):
+                state = load_file(str(self._layer_shards[li]))
+                for kn, t in state.items():
+                    if kn in param_map:
+                        param_map[kn].data = t.to(device, dtype=torch.bfloat16, non_blocking=True)
+            torch.cuda.synchronize() if device.type == "cuda" else None
+
+        def _free_all_shards():
+            """Free all layer weights back to CPU."""
+            for li in range(n_layers):
+                state = load_file(str(self._layer_shards[li]))
+                for kn in state:
+                    if kn in param_map:
+                        param_map[kn].data = param_map[kn].data.cpu()
+                del state
+            torch.cuda.empty_cache()
+
+        def _forward_with_kv(x: torch.Tensor, start_layer: int = 0,
+                             start_pos: int = 0) -> torch.Tensor:
+            """Run layers with KV cache update. x shape: (1, seq, d_model)."""
+            for li in range(start_layer, n_layers):
+                k_cache, v_cache = kv_cache[li]
+                # Pass KV cache to the block (blocks must support past_kv)
+                out = self.model.blocks[li](x)
+                if isinstance(out, tuple) and len(out) >= 3:
+                    x, new_k, new_v = out[0], out[1], out[2]
+                    # Update KV cache at current positions
+                    seq_len = new_k.shape[1]
+                    end = start_pos + seq_len
+                    k_cache[:, :, start_pos:end] = new_k
+                    v_cache[:, :, start_pos:end] = new_v
+                else:
+                    x = out[0] if isinstance(out, tuple) else out
+            x = self.model.ln_f(x)
+            return self.model.head(x)
+
+        with torch.inference_mode():
+            # Prefill: run full sequence through all layers with KV cache
+            _load_all_shards()
+            logits = _forward_with_kv(self.model.embed(ids), start_pos=0)
+            _free_all_shards()
+
+        # Decode loop: one token at a time, only the new token through layers
         for step in range(max_new_tokens):
+            if temperature == 0:
+                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            else:
+                probs = torch.softmax(logits[:, -1, :] / max(temperature, 1e-5), dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+
+            if eos is not None and (next_token == eos).any():
+                break
+
+            ids = torch.cat([ids, next_token], dim=-1)
+
             with torch.inference_mode():
-                # Embed (resident in VRAM)
-                x = self.model.embed(ids)
+                _load_all_shards()
+                x = self.model.embed(next_token)
+                logits = _forward_with_kv(x, start_pos=cache_pos)
+                _free_all_shards()
 
-                # Stream each layer: load shard → compute → free to CPU
-                for li, block in enumerate(self.model.blocks):
-                    shard = self._layer_shards[li]
-                    state = load_file(str(shard))
-                    for kn, t in state.items():
-                        if kn in param_map:
-                            param_map[kn].data = t.to(self.device, dtype=torch.bfloat16)
-                    x = block(x)
-                    if isinstance(x, tuple):
-                        x = x[0]
-                    # Free layer weights back to CPU
-                    for kn in state:
-                        if kn in param_map:
-                            param_map[kn].data = param_map[kn].data.cpu()
-                    del state
-                    torch.cuda.empty_cache()
-
-                # Final norm + head (resident)
-                x = self.model.ln_f(x)
-                logits = self.model.head(x)
-
-            next_token_gpu = logits[0, -1].argmax(keepdim=True).unsqueeze(0)  # (1, 1) GPU
-            if eos:
-                is_eos = (next_token_gpu == eos).any()
-                if is_eos.item():
-                    break
-            ids = torch.cat([ids, next_token_gpu], dim=-1)
+            cache_pos += 1
 
         return ids
 
@@ -572,6 +730,93 @@ class ForgeEngine:
             "quarot_kv": self.quarot_kv.info() if self.quarot_kv else None,
             "v0_warm": self.v0_warm.info() if self.v0_warm else None,
             "progressive_kv": self.progressive_kv.info() if self.progressive_kv else None,
+        }
+
+    def sleep(self, level: int = 1):
+        """Release GPU memory by offloading model weights.
+
+        Level 1 (default): Move weights to CPU RAM. Fast wake (~2-3s).
+            Preserves tokenizer, config, KV cache strategies, and CUDA context.
+        Level 2: Discard weights entirely. Slower wake (reload from disk).
+            Use for model switching when Level 1 CPU RAM is insufficient.
+
+        After sleep, generation will fail until wake() is called.
+        """
+        if not hasattr(self, '_awake') or self._awake is False:
+            return  # Already asleep
+
+        if level == 1:
+            # Offload weights to CPU, keep CUDA context alive
+            self.model.to('cpu', non_blocking=True)
+            torch.cuda.synchronize() if self.device.type == 'cuda' else None
+            torch.cuda.empty_cache()
+            self._awake = False
+            self._sleep_level = 1
+            print(f"  [ForgeEngine] Sleep level 1: weights offloaded to CPU")
+        elif level == 2:
+            # Store minimal state, discard model
+            self._stored_config = getattr(self.model, 'config', None)
+            self._stored_dtype = next(self.model.parameters()).dtype
+            self._stored_checkpoint = self.checkpoint_path
+            del self.model
+            self.model = None
+            torch.cuda.empty_cache()
+            self._awake = False
+            self._sleep_level = 2
+            print(f"  [ForgeEngine] Sleep level 2: weights discarded, {torch.cuda.mem_get_info()[0]/1e9:.1f}GB free")
+
+    def wake(self):
+        """Restore model to GPU and resume inference.
+
+        Level 1 wake: CPU→GPU copy (~2-3s). Preserves all strategies.
+        Level 2 wake: Reload from checkpoint (~5-10s). Strategies must be re-activated.
+        """
+        if getattr(self, '_awake', True):
+            return  # Already awake
+
+        if self._sleep_level == 1:
+            self.model.to(self.device, non_blocking=True)
+            torch.cuda.synchronize() if self.device.type == 'cuda' else None
+            self._awake = True
+            print(f"  [ForgeEngine] Woke from level 1 sleep")
+        elif self._sleep_level == 2:
+            if not hasattr(self, '_stored_checkpoint') or not self._stored_checkpoint:
+                raise RuntimeError("Level 2 wake requires stored checkpoint path")
+            from research.model_loader import ModelLoader
+            self.model = ModelLoader.build_model_fast(
+                self._stored_config, checkpoint_path=self._stored_checkpoint)
+            self.model.to(self.device)
+            self.model.eval()
+            del self._stored_config
+            del self._stored_checkpoint
+            self._awake = True
+            print(f"  [ForgeEngine] Woke from level 2 sleep (reloaded from checkpoint)")
+
+    @property
+    def is_awake(self) -> bool:
+        return getattr(self, '_awake', True)
+
+    def vram_usage(self) -> dict:
+        """Report current VRAM usage for this engine."""
+        if self.device.type != 'cuda':
+            return {"total_gb": 0, "free_gb": 0, "used_gb": 0}
+        total = torch.cuda.get_device_properties(self.device).total_memory
+        free = torch.cuda.mem_get_info(self.device)[0]
+        used = total - free
+        # Estimate model weight VRAM
+        model_bytes = 0
+        if self.is_awake and self.model is not None:
+            try:
+                model_bytes = sum(
+                    p.numel() * p.element_size() for p in self.model.parameters()
+                    if p.device.type == 'cuda')
+            except Exception:
+                pass
+        return {
+            "total_gb": total / 1e9,
+            "free_gb": free / 1e9,
+            "used_gb": used / 1e9,
+            "model_weights_gb": model_bytes / 1e9,
         }
 
     def compare_strategies(self, prompt: str, max_new_tokens: int = 30) -> dict:
