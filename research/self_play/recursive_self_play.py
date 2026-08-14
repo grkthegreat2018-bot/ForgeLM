@@ -194,15 +194,9 @@ class RecursiveSelfPlay(SelfPlaySandbox):
             out_ids[:, :prompt_len] = input_ids
 
             # Pre-allocated KV cache — O(1) append instead of O(n) torch.cat per token.
-            from research.model_loader import PreAllocatedKVCache
-            cfg = self.model.config
-            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
-            head_dim = cfg.d_model // cfg.n_heads
-            dtype = next(self.model.parameters()).dtype
-            cache = PreAllocatedKVCache(
-                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
-                max_seq_len=min(cfg.max_seq_len, max_total),
-                head_dim=head_dim, dtype=dtype, device=input_ids.device,
+            from research.model_loader import create_kv_cache
+            cache = create_kv_cache(
+                self.model, max_total, batch=1, device=input_ids.device,
             )
 
             newline_count = 0

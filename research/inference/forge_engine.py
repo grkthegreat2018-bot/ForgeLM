@@ -35,6 +35,7 @@ from research.inference.innovations import (
     V0WarmStart,
 )
 from research.inference.kv_backend import KVCacheStrategy, build_kv_cache
+from research.model_loader import unpack_output_with_kv
 
 
 class ForgeEngine:
@@ -412,12 +413,7 @@ class ForgeEngine:
                     with torch.inference_mode():
                         out = self.model(suffix_ids, past_key_values=cached_past_kv,
                                          use_cache=True)
-                        if isinstance(out, tuple):
-                            logits = out[0]
-                            past_kv = out[2] if len(out) > 2 else out[1]
-                        else:
-                            logits = out
-                            past_kv = None
+                        logits, past_kv = unpack_output_with_kv(out)
                     # Build full KV cache: prefix + suffix
                     full_past_kv = []
                     for li, (pk, pv) in enumerate(cached_past_kv):
@@ -558,22 +554,12 @@ class ForgeEngine:
             last_token = output_ids[:, -1:]
             with torch.inference_mode():
                 out = self.model(last_token, past_key_values=past_kv, use_cache=True)
-                if isinstance(out, tuple):
-                    logits = out[0]
-                    past_kv = out[2] if len(out) > 2 else out[1]
-                else:
-                    logits = out
-                    past_kv = None
+                logits, past_kv = unpack_output_with_kv(out)
         else:
             # Slow path: re-run full sequence to recover KV cache state.
             with torch.inference_mode():
                 out = self.model(output_ids, use_cache=True)
-                if isinstance(out, tuple):
-                    logits = out[0]
-                    past_kv = out[2] if len(out) > 2 else out[1]
-                else:
-                    logits = out
-                    past_kv = None
+                logits, past_kv = unpack_output_with_kv(out)
 
         while extra < extra_budget:
             next_logits = logits[:, -1, :] / max(temperature, 1e-5)

@@ -456,15 +456,10 @@ class SelfPlaySandbox:
             eos_id = self.tokenizer.eos_token_id
 
             # Pre-allocate KV cache for O(1) append per token.
-            from research.model_loader import PreAllocatedKVCache
-            cfg = self.model.config
-            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
-            head_dim = cfg.d_model // cfg.n_heads
-            dtype = next(self.model.parameters()).dtype
-            cache = PreAllocatedKVCache(
-                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
-                max_seq_len=min(cfg.max_seq_len, input_ids.shape[1] + self.max_gen_tokens),
-                head_dim=head_dim, dtype=dtype, device=self.device,
+            from research.model_loader import create_kv_cache
+            cache = create_kv_cache(
+                self.model, input_ids.shape[1] + self.max_gen_tokens,
+                batch=1, device=self.device,
             )
 
             # Initial forward pass on the full prompt
@@ -974,15 +969,9 @@ class SelfPlaySandbox:
             eos_id = self.tokenizer.eos_token_id
 
             # Pre-allocated KV cache
-            from research.model_loader import PreAllocatedKVCache
-            cfg = self.model.config
-            n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
-            head_dim = cfg.d_model // cfg.n_heads
-            dtype = next(self.model.parameters()).dtype
-            cache = PreAllocatedKVCache(
-                n_layers=cfg.n_layers, batch=1, n_kv_heads=n_kv_heads,
-                max_seq_len=min(cfg.max_seq_len, ids.shape[1] + 60),
-                head_dim=head_dim, dtype=dtype, device=self.device,
+            from research.model_loader import create_kv_cache
+            cache = create_kv_cache(
+                self.model, ids.shape[1] + 60, batch=1, device=self.device,
             )
 
             # Initial pass on full prompt

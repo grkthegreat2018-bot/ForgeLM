@@ -16,6 +16,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
+from research.model_loader import unpack_output_with_kv
+
 
 class DecodingStrategy(ABC):
     """Base interface for decoding strategies."""
@@ -56,13 +58,7 @@ class StandardDecoding(DecodingStrategy):
         # Prefill — model returns (logits, loss, presents) when use_cache=True
         with torch.inference_mode():
             out = model(ids, use_cache=True)
-            if isinstance(out, tuple):
-                logits = out[0]
-                # KV cache is at index 2 (after loss at index 1), or index 1 if no loss
-                past_kv = out[2] if len(out) > 2 else out[1]
-            else:
-                logits = out
-                past_kv = None
+            logits, past_kv = unpack_output_with_kv(out)
 
         for _ in range(max_new_tokens):
             next_logits = logits[:, -1, :] / max(temperature, 1e-5)
@@ -83,11 +79,7 @@ class StandardDecoding(DecodingStrategy):
             ids = torch.cat([ids, next_token], dim=-1)
             with torch.inference_mode():
                 out = model(next_token, past_key_values=past_kv, use_cache=True)
-                if isinstance(out, tuple):
-                    logits = out[0]
-                    past_kv = out[2] if len(out) > 2 else out[1]
-                else:
-                    logits = out
+                logits, past_kv = unpack_output_with_kv(out)
 
         # Expose final KV cache state for _finish_to_stop fast path
         model._forge_last_kv = past_kv

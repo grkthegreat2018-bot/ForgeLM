@@ -153,6 +153,53 @@ class PreAllocatedKVCache:
         return total / 1e6
 
 
+def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
+                    device: Optional[torch.device] = None) -> PreAllocatedKVCache:
+    """Build a PreAllocatedKVCache sized for *model* with per-layer head counts.
+
+    Handles hybrid conv/attention architectures (e.g. LFM2.5): conv layers get
+    0 KV heads to avoid wasting VRAM.  This replaces the open-coded cache
+    construction that was duplicated across self_play and inference modules.
+    """
+    cfg = model.config
+    n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
+    head_dim = cfg.d_model // cfg.n_heads
+    dtype = next(model.parameters()).dtype
+    if device is None:
+        device = next(model.parameters()).device
+
+    layer_types = getattr(cfg, "layer_types", None)
+    if layer_types is not None:
+        n_kv_heads_per_layer = [
+            n_kv_heads if (i < len(layer_types) and layer_types[i] in ("attention", "attn"))
+            else 0
+            for i in range(cfg.n_layers)
+        ]
+    else:
+        n_kv_heads_per_layer = None
+
+    return PreAllocatedKVCache(
+        n_layers=cfg.n_layers, batch=batch, n_kv_heads=n_kv_heads,
+        max_seq_len=min(cfg.max_seq_len, max_total),
+        head_dim=head_dim, dtype=dtype, device=device,
+        n_kv_heads_per_layer=n_kv_heads_per_layer,
+    )
+
+
+def unpack_output_with_kv(out) -> Tuple[torch.Tensor, Optional[KVCache]]:
+    """Unpack a model forward output into (logits, past_kv).
+
+    Handles the (logits, loss, presents) and (logits, presents) tuple shapes
+    emitted by ConfigurableResearchLLM.  Replaces the 3-4 line
+    ``if isinstance(out, tuple): ...`` block repeated across inference paths.
+    """
+    if isinstance(out, tuple):
+        logits = out[0]
+        past_kv = out[2] if len(out) > 2 else out[1]
+        return logits, past_kv
+    return out, None
+
+
 def flash_attention(q, k, v, is_causal=True):
     """Use FlashAttention-2 via PyTorch's SDPA when available.
 
@@ -1225,30 +1272,7 @@ class ModelLoader:
         out_ids = torch.zeros(B, max_total, dtype=prompt_ids.dtype, device=device)
         out_ids[:, :prompt_len] = prompt_ids
 
-        # Determine KV cache shape from the attention type.
-        cfg = model.config
-        n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
-        head_dim = cfg.d_model // cfg.n_heads
-        dtype = next(model.parameters()).dtype
-
-        # For hybrid conv/attention models (v4+): conv layers don't use KV cache.
-        # Allocate 0 heads for conv layers to save VRAM (22 layers × ~3MB each).
-        layer_types = getattr(cfg, 'layer_types', None)
-        if layer_types is not None:
-            n_kv_heads_per_layer = [
-                n_kv_heads if (i < len(layer_types) and layer_types[i] in ("attention", "attn"))
-                else 0
-                for i in range(cfg.n_layers)
-            ]
-        else:
-            n_kv_heads_per_layer = None
-
-        cache = PreAllocatedKVCache(
-            n_layers=cfg.n_layers, batch=B, n_kv_heads=n_kv_heads,
-            max_seq_len=min(cfg.max_seq_len, max_total),
-            head_dim=head_dim, dtype=dtype, device=device,
-            n_kv_heads_per_layer=n_kv_heads_per_layer,
-        )
+        cache = create_kv_cache(model, max_total, batch=B, device=device)
 
         with torch.no_grad():
             for step in range(max_new_tokens):

@@ -110,8 +110,6 @@ markers = [
 source = ["research"]
 omit = [
     "research/evaluation/prompt_tests_auto.py",
-    "research/serving/*",
-    "research/o1_generation/*",
     "*/__main__",
 ]
 

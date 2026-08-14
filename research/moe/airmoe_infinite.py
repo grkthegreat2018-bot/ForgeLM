@@ -152,9 +152,12 @@ class InfiniteAirMoE:
         manifest_data: dict = {}
         try:
             from research.moe.semantic_router import SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS
-            # Build topic descriptions from manifest topics
-            with open(manifest_path, encoding="utf-8") as f:
-                manifest_data = json.load(f)
+            # Build topic descriptions from manifest topics (use cached manifest)
+            manifest_data = ExpertRouter._manifest_cache.get(str(manifest_path))
+            if manifest_data is None:
+                with open(manifest_path, encoding="utf-8") as f:
+                    manifest_data = json.load(f)
+                ExpertRouter._manifest_cache[str(manifest_path)] = manifest_data
             topic_descs = {}
             for tname, tinfo in manifest_data.get("topics", {}).items():
                 kws = tinfo.get("keywords", [])

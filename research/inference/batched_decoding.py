@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from typing import Optional
 
 from research.inference.decoding import DecodingStrategy
+from research.model_loader import unpack_output_with_kv
 
 
 class BatchedDecoding(DecodingStrategy):
@@ -73,12 +74,7 @@ class BatchedDecoding(DecodingStrategy):
         # Prefill
         with torch.inference_mode():
             out = model(padded_ids, attention_mask=attn_mask, use_cache=True)
-            if isinstance(out, tuple):
-                logits = out[0]
-                past_kv = out[2] if len(out) > 2 else out[1]
-            else:
-                logits = out
-                past_kv = None
+            logits, past_kv = unpack_output_with_kv(out)
 
         # Decode — one batched step per token
         next_ids = torch.zeros(B, 1, dtype=torch.long, device=device)
@@ -138,11 +134,7 @@ class BatchedDecoding(DecodingStrategy):
             # Batched forward
             with torch.inference_mode():
                 out = model(next_ids, past_key_values=past_kv, use_cache=True)
-                if isinstance(out, tuple):
-                    logits = out[0]
-                    past_kv = out[2] if len(out) > 2 else out[1]
-                else:
-                    logits = out
+                logits, past_kv = unpack_output_with_kv(out)
 
         return generated
 
