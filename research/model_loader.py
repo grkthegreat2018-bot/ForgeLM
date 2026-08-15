@@ -9,6 +9,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Enable safetensors fast CUDA loading (pinned-memory + async DMA to GPU).
+# This dramatically speeds up weight loading on CUDA by using pinned host
+# memory and asynchronous copies instead of synchronous per-tensor CPU→GPU.
+os.environ.setdefault("SAFETENSORS_FAST_CUDA", "1")
+
 # Enable TensorFloat32 tensor cores for float32 matmuls (RTX 5070 supports this).
 # Free ~8x speedup on fp32 matmuls with negligible precision loss (~1e-5).
 torch.set_float32_matmul_precision("high")
@@ -965,37 +970,78 @@ class ModelLoader:
                                device: torch.device = None) -> dict:
         """Load safetensors weights via memory-mapped access.
 
-        Uses safetensors' safe_open for lazy per-tensor loading. Each tensor
-        is read from the mmap'd file and copied directly to the target device,
-        avoiding the 2x RAM overhead of loading the full state dict to CPU
-        first. This is ~2x faster for GPU loading and uses ~0 peak CPU RAM.
+        For CUDA targets, uses fastsafetensors (pinned-memory + async DMA) when
+        available, falling back to safetensors direct device loading. This loads
+        weights directly to GPU, skipping the CPU→GPU copy entirely.
 
         For CPU-only models, tensors stay mmap'd (zero-copy) until accessed.
         """
-        from safetensors import safe_open
         if device is None:
             device = next(model.parameters()).device
 
+        # Fast path: fastsafetensors async GPU loading (pinned mem + async DMA)
+        if device.type == "cuda":
+            try:
+                from fastsafetensors import fastsafe_open
+                state = {}
+                with fastsafe_open(path, framework="pt", device=str(device),
+                                   nogds=True) as f:
+                    for key in f.keys():
+                        # Clone — tensors are backed by a device buffer
+                        # that is freed when the context exits.
+                        state[key] = f.get_tensor(key).clone()
+                return state
+            except Exception as e:
+                print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
+                      f"using safetensors direct device loading")
+
+        # Fallback: safetensors safe_open with direct device loading.
+        # SAFETENSORS_FAST_CUDA=1 (set at module import) enables pinned async.
+        from safetensors import safe_open
+        load_device = str(device) if device.type != "cpu" else "cpu"
         state = {}
-        with safe_open(path, framework="pt", device="cpu") as f:
+        with safe_open(path, framework="pt", device=load_device) as f:
             for key in f.keys():
-                tensor = f.get_tensor(key)  # mmap'd read
-                state[key] = tensor.to(device) if device.type != "cpu" else tensor
+                state[key] = f.get_tensor(key)
         return state
 
     @staticmethod
     def _load_sharded_safetensors(ckpt_dir: Path, model: nn.Module,
                                   device: torch.device = None) -> dict:
-        """Load weights from sharded safetensors (model-00001-of-00002.safetensors)."""
-        from safetensors import safe_open
+        """Load weights from sharded safetensors (model-00001-of-00002.safetensors).
+
+        For CUDA targets, uses fastsafetensors async GPU loading when available,
+        falling back to safetensors direct device loading.
+        """
         if device is None:
             device = next(model.parameters()).device
+
+        sf_paths = sorted(ckpt_dir.glob("model-*.safetensors"))
+        if not sf_paths:
+            sf_paths = sorted(ckpt_dir.glob("*.safetensors"))
+
+        # Fast path: fastsafetensors async GPU loading (all shards at once)
+        if device.type == "cuda":
+            try:
+                from fastsafetensors import fastsafe_open
+                state = {}
+                with fastsafe_open([str(p) for p in sf_paths], framework="pt",
+                                   device=str(device), nogds=True) as f:
+                    for key in f.keys():
+                        state[key] = f.get_tensor(key).clone()
+                return state
+            except Exception as e:
+                print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
+                      f"using safetensors direct device loading")
+
+        # Fallback: safetensors safe_open with direct device loading
+        from safetensors import safe_open
+        load_device = str(device) if device.type != "cpu" else "cpu"
         state = {}
-        for sf_path in sorted(ckpt_dir.glob("model-*.safetensors")):
-            with safe_open(str(sf_path), framework="pt", device="cpu") as f:
+        for sf_path in sf_paths:
+            with safe_open(str(sf_path), framework="pt", device=load_device) as f:
                 for key in f.keys():
-                    tensor = f.get_tensor(key)
-                    state[key] = tensor.to(device) if device.type != "cpu" else tensor
+                    state[key] = f.get_tensor(key)
         return state
 
     @staticmethod
@@ -1073,14 +1119,14 @@ class ModelLoader:
             t_arch = time.time() - t_arch
             print(f"  [FastBuild] Architecture built in {t_arch:.1f}s (cached)")
         else:
-            t_clone = time.time()
+            t_arch = time.time()
             cached = ModelLoader._model_cache[sig]
             ModelLoader._model_cache.move_to_end(sig)  # mark as recently used
             # Deep copy the cached model (CPU — no VRAM overhead)
             import copy
             model = copy.deepcopy(cached).to(device)
-            t_clone = time.time() - t_clone
-            print(f"  [FastBuild] Architecture cloned in {t_clone:.1f}s (from cache)")
+            t_arch = time.time() - t_arch
+            print(f"  [FastBuild] Architecture cloned in {t_arch:.1f}s (from cache)")
 
         # Convert dtype before loading weights (prevents bf16→fp32 upcast)
         if dtype is not None:
@@ -1090,7 +1136,7 @@ class ModelLoader:
             model = torch.compile(model, mode="reduce-overhead", dynamic=True)
 
         if checkpoint_path and os.path.exists(checkpoint_path):
-            t_load = time.time()
+            t_weights = time.time()
             ckpt_path = Path(checkpoint_path)
 
             # Handle sharded models (directory with model.safetensors.index.json)
@@ -1122,11 +1168,19 @@ class ModelLoader:
                 state = ModelLoader._remap_hf_keys(state, config)
                 print(f"  [FastBuild] Remapped {len(state)} HF keys to ForgeAI format")
 
+            t_weights = time.time() - t_weights
+
+            # load_state_dict copies weights into model parameters (GPU→GPU
+            # if weights were loaded directly to device, CPU→GPU otherwise).
+            t_gpu = time.time()
             missing, unexpected = model.load_state_dict(state, strict=False)
             if missing:
                 print("Missing keys:", missing[:5], "..." if len(missing) > 5 else "")
             if unexpected:
                 print("Unexpected keys:", unexpected[:5], "..." if len(unexpected) > 5 else "")
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t_gpu = time.time() - t_gpu
 
             # Post-load: detect non-identity QK-Norm weights.
             # If all q_norm/k_norm weights are 1.0, skip normalization (lossless).
@@ -1142,14 +1196,17 @@ class ModelLoader:
             if getattr(config, 'use_qk_norm', False):
                 print(f"  [FastBuild] QK-Norm: {n_identity}/{len(model.blocks)} layers identity (skipped)")
 
-            t_load = time.time() - t_load
-            print(f"  [FastBuild] Weights loaded in {t_load:.1f}s")
+            print(f"  [FastBuild] Weights: {t_weights:.1f}s | GPU transfer: {t_gpu:.1f}s")
         elif checkpoint_path:
             print(f"Warning: checkpoint {checkpoint_path} not found, using random weights.")
 
         t_total = time.time() - t0
         param_count = sum(p.numel() for p in model.parameters()) / 1e6
-        print(f"  [FastBuild] Total: {t_total:.1f}s ({param_count:.1f}M params)")
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            print(f"  [FastBuild] Architecture: {t_arch:.1f}s | Weights: {t_weights:.1f}s | "
+                  f"GPU transfer: {t_gpu:.1f}s | Total: {t_total:.1f}s ({param_count:.1f}M params)")
+        else:
+            print(f"  [FastBuild] Total: {t_total:.1f}s ({param_count:.1f}M params)")
         return model
 
     @staticmethod

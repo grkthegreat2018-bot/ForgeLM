@@ -70,6 +70,10 @@ class GRPOConfig:
     # from per-round execution errors. Advantage = outcome + λ * Σ(process).
     use_gvpo: bool = False
     gvpo_lambda: float = 0.3           # weight on process rewards
+    # Tool-use GRPO: rewards are continuous 0..1 from tool-use trajectories
+    # (format, execution, answer quality) instead of binary code pass/fail.
+    # When True, the trainer expects rewards from tool_use_loop.compute_reward.
+    use_tool_use_rewards: bool = False
 
 
 @dataclass
@@ -168,6 +172,67 @@ class GRPOTrainer:
         # Track advantage collapse (all advantages ≈ 0)
         if all(abs(a) < 0.01 for a in advantages):
             self.stats.advantage_collapse_count += 1
+
+        return advantages
+
+    def compute_turn_level_advantages(
+        self, turn_rewards: list[list[float]]
+    ) -> list[list[float]]:
+        """Turn-level credit assignment for multi-turn tool use.
+
+        Instead of a single trajectory-level reward, each turn (tool call)
+        gets its own reward. The advantage for each turn is computed
+        relative to the group of completions at that turn position.
+
+        This implements the approach from arXiv 2505.11821 (MT-GRPO):
+        "Reinforcing Multi-Turn Reasoning in LLM Agents via Turn-Level
+        Credit Assignment."
+
+        Args:
+            turn_rewards: list of lists — turn_rewards[g][t] is the reward
+                          for turn t in completion g.
+        Returns:
+            list of lists — advantages per turn per completion.
+        """
+        if not turn_rewards or not turn_rewards[0]:
+            return [[] for _ in turn_rewards]
+
+        n_completions = len(turn_rewards)
+        max_turns = max(len(tr) for tr in turn_rewards)
+
+        # Compute per-turn baseline across completions
+        turn_baselines = []
+        for t in range(max_turns):
+            turn_rewards_t = [tr[t] for tr in turn_rewards if t < len(tr)]
+            if not turn_rewards_t:
+                turn_baselines.append(0.0)
+                continue
+            if self.config.use_median_baseline and len(turn_rewards_t) >= 2:
+                sorted_r = sorted(turn_rewards_t)
+                n = len(sorted_r)
+                if n % 2 == 1:
+                    baseline = sorted_r[n // 2]
+                else:
+                    baseline = (sorted_r[n // 2 - 1] + sorted_r[n // 2]) / 2
+            else:
+                baseline = sum(turn_rewards_t) / len(turn_rewards_t)
+            turn_baselines.append(baseline)
+
+        # Compute advantages
+        advantages = []
+        for g in range(n_completions):
+            comp_advs = []
+            for t in range(len(turn_rewards[g])):
+                # Turn advantage = (reward - turn_baseline) / (turn_std + eps)
+                turn_rewards_t = [tr[t] for tr in turn_rewards if t < len(tr)]
+                if len(turn_rewards_t) > 1:
+                    var = sum((r - turn_baselines[t]) ** 2 for r in turn_rewards_t) / len(turn_rewards_t)
+                    std = math.sqrt(var + 1e-8)
+                else:
+                    std = 1.0
+                adv = (turn_rewards[g][t] - turn_baselines[t]) / (std + 1e-8)
+                comp_advs.append(adv)
+            advantages.append(comp_advs)
 
         return advantages
 

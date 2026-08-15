@@ -164,7 +164,7 @@ def quantize_model_int4(model: nn.Module, group_size: int = 128,
     total_params = 0
     quantized_params = 0
 
-    for name, module in model.named_modules():
+    for name, module in list(model.named_modules()):
         total_params += sum(p.numel() for p in module.parameters(recurse=False))
 
         if not isinstance(module, nn.Linear):
@@ -226,7 +226,7 @@ def dequantize_model_int4(model: nn.Module) -> int:
         Number of layers dequantized.
     """
     count = 0
-    for name, module in model.named_modules():
+    for name, module in list(model.named_modules()):
         if not isinstance(module, INT4Linear):
             continue
 
@@ -262,7 +262,7 @@ def estimate_int4_memory(model: nn.Module) -> dict:
     current_bytes = 0
     int4_bytes = 0
 
-    for name, param in model.named_named_parameters():
+    for name, param in model.named_parameters():
         current_bytes += param.element_size() * param.numel()
         # INT4: 0.5 bytes per param + scale overhead (~1.5%)
         int4_bytes += 0.5 * param.numel() + 0.015 * param.numel() * 2

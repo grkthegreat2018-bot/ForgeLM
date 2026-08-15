@@ -26,8 +26,14 @@ class DecodingStrategy(ABC):
     def generate(self, model, input_ids: torch.Tensor,
                  max_new_tokens: int = 100,
                  temperature: float = 0.0,
-                 top_p: float = 1.0) -> torch.Tensor:
-        """Generate tokens. Returns full sequence [1, prompt_len + gen_len]."""
+                 top_p: float = 1.0,
+                 top_k: int = 80,
+                 repetition_penalty: float = 1.05) -> torch.Tensor:
+        """Generate tokens. Returns full sequence [1, prompt_len + gen_len].
+
+        top_k and repetition_penalty are LFM2.5-recommended defaults; they are
+        only applied when temperature > 0 (ignored for greedy decoding).
+        """
         pass
 
     @property
@@ -39,7 +45,8 @@ class StandardDecoding(DecodingStrategy):
     """Standard autoregressive decoding with KV cache."""
 
     def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0):
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
         ids = input_ids.clone()
         device = input_ids.device
         # EOS detection: check model attr, config, then Qwen defaults
@@ -54,6 +61,8 @@ class StandardDecoding(DecodingStrategy):
         eos_tensor = torch.tensor(list(eos_set), device=device)
         # Pinned memory for async D2H (reduces CPU sync spikes).
         token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
+        # Track generated token ids for repetition penalty
+        generated_ids: list[int] = []
 
         # Prefill — model returns (logits, loss, presents) when use_cache=True
         with torch.inference_mode():
@@ -62,15 +71,27 @@ class StandardDecoding(DecodingStrategy):
 
         for _ in range(max_new_tokens):
             next_logits = logits[:, -1, :] / max(temperature, 1e-5)
-            if top_p < 1.0:
-                next_logits = self._top_p(next_logits, top_p)
             if temperature == 0:
                 next_token = next_logits.argmax(-1, keepdim=True)
             else:
+                # Repetition penalty: penalize tokens already generated
+                # (look at last 64 tokens to limit compute)
+                if generated_ids:
+                    for tid in set(generated_ids[-64:]):
+                        next_logits[:, tid] /= repetition_penalty
+                # Top-k filtering: keep only top_k logits before softmax
+                if top_k > 0:
+                    indices_to_remove = next_logits < torch.topk(
+                        next_logits, top_k)[0][..., -1, None]
+                    next_logits.masked_fill_(indices_to_remove, float('-inf'))
+                if top_p < 1.0:
+                    next_logits = self._top_p(next_logits, top_p)
                 next_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
 
             # GPU-side EOS check: single sync only if token matches EOS.
+            tok_id = next_token.item()
+            generated_ids.append(tok_id)
             is_eos = (next_token == eos_tensor).any()
             token_pinned.copy_(next_token, non_blocking=True)
             if is_eos.item():
@@ -98,7 +119,8 @@ class SpeculativeDecoding(DecodingStrategy):
         self.k = k
 
     def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0):
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
         from research.speculative_decode import speculative_generate
         return speculative_generate(
             model, self.draft_model, input_ids,
@@ -114,7 +136,8 @@ class MedusaDecoding(DecodingStrategy):
         self.medusa = medusa_heads
 
     def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0):
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
         from research.decoding.medusa import medusa_generate
         return medusa_generate(
             model, self.medusa, input_ids,
@@ -130,12 +153,52 @@ class DSparkDecoding(DecodingStrategy):
         self.dspark = dspark_head
 
     def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0):
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
         from research.decoding.dspark import dspark_generate
         return dspark_generate(
             model, self.dspark, input_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature, device=str(input_ids.device),
+        )
+
+
+class Eagle3Decoding(DecodingStrategy):
+    """EAGLE-3 feature-level speculative decoding.
+
+    Uses a lightweight draft head that operates on the target model's
+    multi-layer hidden states (low/mid/high) to predict draft tokens.
+    No separate draft model needed — the head is attached to the target.
+
+    Args:
+        eagle_head: trained Eagle3Head module (optional, can be loaded later)
+        draft_length: number of tokens to draft per iteration (default 4)
+    """
+
+    def __init__(self, eagle_head=None, draft_length: int = 4):
+        self.eagle_head = eagle_head
+        self.draft_length = draft_length
+
+    def generate(self, model, input_ids, max_new_tokens=100,
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
+        if self.eagle_head is None:
+            # Fallback to standard if no head loaded
+            return StandardDecoding().generate(
+                model, input_ids, max_new_tokens=max_new_tokens,
+                temperature=temperature, top_p=top_p,
+                top_k=top_k, repetition_penalty=repetition_penalty,
+            )
+        from research.decoding.eagle import eagle3_generate as _eagle_gen
+        # eagle3_generate takes a prompt string; here we work with token ids
+        # so we use the internal generation loop directly.
+        return _eagle_generate_from_ids(
+            model, self.eagle_head, input_ids,
+            max_new_tokens=max_new_tokens,
+            draft_length=self.draft_length,
+            temperature=temperature, top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            device=str(input_ids.device),
         )
 
 
@@ -169,7 +232,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
         self.mtp = mtp_module  # Optional: pre-loaded MTP module
 
     def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0):
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
         ids = input_ids.clone()
         device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
@@ -181,7 +245,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
         if mtp is None:
             # No MTP heads — fall back to standard
             return StandardDecoding().generate(
-                model, input_ids, max_new_tokens, temperature, top_p)
+                model, input_ids, max_new_tokens, temperature, top_p,
+                top_k=top_k, repetition_penalty=repetition_penalty)
 
         # Prefill — need both KV cache (presents) and hidden states for MTP
         with torch.inference_mode():
@@ -308,7 +373,92 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
         "speculative": SpeculativeDecoding,
         "medusa": MedusaDecoding,
         "dspark": DSparkDecoding,
+        "eagle3": Eagle3Decoding,
         "mtp_selfspec": MTPSelfSpecDecoding,
     }
     cls = strategies.get(strategy, StandardDecoding)
     return cls(**kwargs)
+
+
+@torch.inference_mode()
+def _eagle_generate_from_ids(
+    model, head, input_ids, max_new_tokens=100, draft_length=4,
+    temperature=0.0, top_k=0, repetition_penalty=1.0, device="cuda",
+):
+    """EAGLE-3 generation from token ids (used by Eagle3Decoding strategy)."""
+    from research.decoding.eagle import extract_hidden_states, Eagle3Head
+
+    model.eval()
+    head.eval()
+
+    extract_layers = [head.low_layer, head.mid_layer, head.high_layer]
+    eos_id = getattr(model, 'eos_token_id', None) or 7
+
+    # Prefill
+    hidden_list, final_hidden, presents = extract_hidden_states(
+        model, input_ids, extract_layers, use_cache=True,
+    )
+    fused = head.fuse_hidden_states(hidden_list)
+    target_logits = model.head(final_hidden)
+    last_logits = target_logits[:, -1, :]
+
+    if temperature <= 0:
+        next_token = last_logits.argmax(dim=-1, keepdim=True)
+    else:
+        l = last_logits / temperature
+        if top_k > 0:
+            idx_rm = l < torch.topk(l, top_k)[0][..., -1, None]
+            l.masked_fill_(idx_rm, float('-inf'))
+        probs = F.softmax(l, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+
+    generated = [next_token.item()]
+    ids = torch.cat([input_ids, next_token], dim=1)
+
+    while len(generated) < max_new_tokens:
+        if generated[-1] == eos_id:
+            break
+
+        # Draft tokens autoregressively
+        draft_tokens = []
+        cur_fused = fused[:, -1:, :]
+        cur_token = next_token
+        for _ in range(draft_length):
+            draft_tok, _ = head.predict_next(cur_fused, cur_token, temperature=temperature, top_k=top_k)
+            draft_tokens.append(draft_tok.item())
+            cur_token = draft_tok
+
+        # Verify with target
+        draft_tensor = torch.tensor([draft_tokens], device=device, dtype=ids.dtype)
+        verify_hidden, verify_final, presents = extract_hidden_states(
+            model, draft_tensor, extract_layers,
+            past_key_values=presents, use_cache=True,
+        )
+        verify_logits = model.head(verify_final)
+
+        # Accept longest prefix
+        n_accepted = 0
+        for i, dt in enumerate(draft_tokens):
+            target_tok = verify_logits[:, i, :].argmax(dim=-1).item()
+            if target_tok == dt:
+                n_accepted += 1
+            else:
+                break
+
+        for i in range(n_accepted):
+            generated.append(draft_tokens[i])
+            if len(generated) >= max_new_tokens:
+                break
+
+        if n_accepted < draft_length:
+            next_token = verify_logits[:, n_accepted, :].argmax(dim=-1, keepdim=True)
+        else:
+            next_token = verify_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+        fused = head.fuse_hidden_states(verify_hidden)
+        if next_token.item() == eos_id:
+            break
+        generated.append(next_token.item())
+        ids = torch.cat([ids, next_token], dim=1)
+
+    return ids[:, input_ids.shape[1]:]

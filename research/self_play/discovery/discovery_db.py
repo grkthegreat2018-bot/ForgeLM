@@ -122,9 +122,24 @@ _SCHEMA = [
         notes TEXT,
         ts REAL NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS tool_trajectories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        task TEXT NOT NULL,              -- the user query/task
+        messages TEXT NOT NULL,          -- JSON: full Qwen-format conversation
+        tool_calls TEXT NOT NULL,        -- JSON: list of {name, args, result, success}
+        n_tool_calls INTEGER NOT NULL,
+        n_successful INTEGER NOT NULL,
+        reward REAL NOT NULL,            -- composite reward 0..1
+        format_ok INTEGER NOT NULL,      -- 1 if all tool calls parsed correctly
+        final_answer TEXT,               -- model's final answer
+        ts REAL NOT NULL
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_thoughts_session ON thoughts(session_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_scripts_session ON scripts(session_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_traj_session ON tool_trajectories(session_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_traj_reward ON tool_trajectories(reward)",
 ]
 
 
@@ -266,6 +281,61 @@ class DiscoveryDB:
                 (session_id, theory_id, summary, confidence, time.time()))
             return cur.lastrowid
 
+    # ── tool-use trajectories ────────────────────────────────────────
+    def add_tool_trajectory(self, session_id: str, task: str,
+                            messages: list[dict], tool_calls: list[dict],
+                            reward: float, final_answer: str | None = None) -> int:
+        """Save a tool-use trajectory for SFT/RL training.
+
+        Args:
+            session_id: discovery session.
+            task: the user query/task string.
+            messages: full Qwen-format conversation (list of message dicts).
+            tool_calls: list of {name, args, result, success} per tool call.
+            reward: composite reward 0..1.
+            final_answer: model's final answer text (if any).
+        """
+        n_total = len(tool_calls)
+        n_ok = sum(1 for tc in tool_calls if tc.get("success"))
+        format_ok = 1 if all(tc.get("success") for tc in tool_calls) else 0
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO tool_trajectories"
+                "(session_id, task, messages, tool_calls, n_tool_calls, "
+                "n_successful, reward, format_ok, final_answer, ts) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (session_id, task, json.dumps(messages, ensure_ascii=False),
+                 json.dumps(tool_calls, ensure_ascii=False),
+                 n_total, n_ok, reward, format_ok, final_answer, time.time()))
+            return cur.lastrowid
+
+    def get_trajectories(self, min_reward: float = 0.5,
+                         limit: int = 200) -> list[dict]:
+        """Get high-quality tool-use trajectories for SFT training."""
+        with self._lock, self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM tool_trajectories WHERE reward >= ? "
+                "ORDER BY reward DESC, ts DESC LIMIT ?",
+                (min_reward, limit)).fetchall()
+            results = []
+            for r in rows:
+                d = dict(r)
+                d["messages"] = json.loads(d["messages"])
+                d["tool_calls"] = json.loads(d["tool_calls"])
+                results.append(d)
+            return results
+
+    def trajectory_stats(self) -> dict:
+        """Aggregate stats for trajectory quality monitoring."""
+        with self._lock, self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) as n, "
+                "AVG(reward) as avg_reward, "
+                "AVG(n_successful) as avg_success, "
+                "SUM(format_ok) as n_format_ok "
+                "FROM tool_trajectories").fetchone()
+            return dict(row) if row else {"n": 0}
+
     # ── LLM-facing read/query ────────────────────────────────────────
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         """Read-only SELECT for the LLM. Returns list of dicts."""
@@ -319,7 +389,7 @@ class DiscoveryDB:
     def table_counts(self) -> dict[str, int]:
         tables = ["sessions", "thoughts", "scripts", "research",
                   "theories", "discoveries", "events", "schema_migrations",
-                  "epochs", "distill_runs"]
+                  "epochs", "distill_runs", "tool_trajectories"]
         out = {}
         with self._lock, self._conn() as c:
             for t in tables:

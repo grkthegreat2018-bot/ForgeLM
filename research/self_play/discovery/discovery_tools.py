@@ -196,6 +196,20 @@ class ToolRegistry:
             db.emit("finish_session", {"summary": args.get("summary", "")[:200]}, sid)
             return {"finished": True}
 
+        def summarize_context(args: dict) -> dict:
+            """Let the model proactively summarize its own context.
+
+            The model writes a summary of what it's learned so far, which
+            gets saved to the DB. This helps with long conversations where
+            the model needs to consolidate findings before continuing.
+            """
+            summary = args.get("summary", "")
+            tid = db.add_thought(sid, "context_summary", summary,
+                                 confidence=args.get("confidence", 0.8))
+            db.emit("summarize_context", {"summary": summary[:200]}, sid)
+            return {"saved": True, "thought_id": tid,
+                    "note": "Summary saved. Use this to consolidate findings before continuing."}
+
         self._register("think", "Record a train-of-thought idea or observation.",
                        {"content": "string", "confidence": "number 0-1 optional"}, think)
         self._register("sudo_think",
@@ -233,6 +247,13 @@ class ToolRegistry:
                        "Add/refactor database tables (CREATE/ALTER/INDEX/VIEW only; "
                        "DROP TABLE and DML are blocked). Audited.",
                        {"sql": "string", "reason": "string"}, migrate_schema)
+        self._register("summarize_context",
+                       "Summarize what you've learned so far in this session. "
+                       "Use when the conversation is getting long and you need to "
+                       "consolidate findings before continuing. The summary is saved "
+                       "to your memory and can be retrieved with query_db.",
+                       {"summary": "string", "confidence": "number 0-1 optional"},
+                       summarize_context)
         self._register("finish_session",
                        "End this discovery session with a summary.",
                        {"summary": "string"}, finish_session)

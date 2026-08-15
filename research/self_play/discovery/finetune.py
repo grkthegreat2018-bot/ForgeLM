@@ -52,7 +52,12 @@ class FinetuneConfig:
 
 
 def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict]:
-    """Build (prompt, completion) pairs from curated DB content."""
+    """Build (prompt, completion) pairs from curated DB content.
+
+    Now includes tool-use trajectories from the tool_trajectories table.
+    Trajectories are rendered in Qwen chat format and split into per-turn
+    examples (same approach as sft_train.py).
+    """
     pairs: list[tuple[str, str]] = []
 
     for r in db.query("SELECT summary FROM discoveries WHERE summary IS NOT NULL AND length(summary) > 10"):
@@ -68,6 +73,12 @@ def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict
     for r in db.query("SELECT query, summary FROM research WHERE summary IS NOT NULL AND length(summary) > 10 LIMIT 100"):
         pairs.append((f"Summarize findings on: {r['query']}", r["summary"]))
 
+    # Tool-use trajectories: render as Qwen-format per-turn examples.
+    # These teach the model to call tools and produce final answers.
+    from research.self_play.discovery.qwen_adapter import qwen_render_messages
+    traj_pairs = _build_trajectory_pairs(db)
+    pairs.extend(traj_pairs)
+
     # Tokenize into input_ids + completion_start for CE-on-completion.
     out = []
     eos = tokenizer.eos_token_id
@@ -82,6 +93,56 @@ def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict
         comp_start = min(len(p_ids), len(ids) - 1)
         out.append({"ids": ids, "comp_start": comp_start})
     return out
+
+
+def _build_trajectory_pairs(db: DiscoveryDB,
+                            min_reward: float = 0.5,
+                            max_pairs: int = 200) -> list[tuple[str, str]]:
+    """Build (prompt, completion) pairs from tool-use trajectories.
+
+    Each trajectory is a multi-turn conversation. We split it into per-turn
+    examples: each assistant turn becomes a completion, with everything before
+    it as the prompt.
+
+    This mirrors the per-turn splitting in sft_train.py.
+    """
+    from research.self_play.discovery.qwen_adapter import (
+        qwen_render_messages, IM_START, IM_END)
+
+    trajectories = db.get_trajectories(min_reward=min_reward, limit=max_pairs)
+    pairs = []
+
+    for traj in trajectories:
+        messages = traj["messages"]
+        if not isinstance(messages, list) or len(messages) < 2:
+            continue
+
+        # Split into per-turn examples
+        for i in range(1, len(messages)):
+            msg = messages[i]
+            if msg.get("role") != "assistant":
+                continue
+
+            # Prompt = everything up to and including the generation prompt
+            prompt_msgs = messages[:i]
+            prompt = qwen_render_messages(
+                prompt_msgs, tools=None, add_generation_prompt=True)
+
+            # Completion = this assistant turn (with <|im_end|>)
+            if msg.get("tool_calls"):
+                import json as _json
+                body = "\n".join(
+                    _json.dumps(tc, ensure_ascii=False) for tc in msg["tool_calls"]
+                )
+            else:
+                body = msg.get("content", "")
+
+            completion = f"{body}{IM_END}\n"
+
+            if len(prompt) > 10 and len(body) > 2:
+                pairs.append((prompt, completion))
+
+    return pairs
 
 
 def _collate(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -115,7 +115,74 @@ class QuantizedLinear(nn.Module):
         return f"QuantizedLinear(in={self.in_features}, out={self.out_features}, bits={self.bits})"
 
 
-def quantize_model_int8(model, target_modules=None, verbose=True):
+class FastINT8Linear(nn.Module):
+    """FP8 weight-only Linear using torch._scaled_mm (Blackwell-native FP8 matmul).
+
+    Stores weights as FP8 (e4m3fn) + per-tensor fp32 scale. Forward quantizes
+    the bf16 activation to FP8 dynamically and calls torch._scaled_mm, which
+    performs the matmul directly in FP8 on Tensor Cores — NO dequantization
+    step. This avoids the dequant+matmul overhead of QuantizedLinear that
+    makes INT8 slower than bf16 on RTX 5070 (Blackwell, fast bf16 matmul).
+
+    Note: torch._scaled_mm supports FP8 (not INT8) on Blackwell.
+    Falls back to dequant + F.linear on CPU / when _scaled_mm is unavailable.
+    """
+
+    def __init__(self, original: nn.Linear):
+        super().__init__()
+        self.in_features = original.in_features
+        self.out_features = original.out_features
+        self.bias = original.bias
+
+        # Per-tensor symmetric quantization of weight [out, in] to FP8 e4m3fn.
+        W = original.weight.data.float()
+        max_val = W.abs().amax().clamp(min=1e-8)
+        scale = (max_val / 448.0).to(torch.float32)  # e4m3fn max = 448
+        # Quantize to FP8 e4m3fn
+        q_w = (W / scale).to(torch.float8_e4m3fn)
+        self.register_buffer('q_weight', q_w, persistent=False)
+        self.register_buffer('w_scale', scale, persistent=False)
+        if self.bias is not None:
+            self.register_buffer('bias_weight', self.bias.data.clone(), persistent=False)
+
+        self._use_scaled_mm = (
+            hasattr(torch, '_scaled_mm')
+            and torch.cuda.is_available()
+        )
+
+    def _get_dequantized_weight(self):
+        """Get BF16 weight from FP8 for INT4 requantization."""
+        return self.q_weight.to(torch.float32) * self.w_scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_shape = x.shape
+        x2d = x.reshape(-1, self.in_features)
+        bias = self.bias_weight if self.bias is not None else None
+
+        if self._use_scaled_mm and x2d.is_cuda and self.q_weight.is_cuda:
+            # Dynamic per-tensor activation scale for FP8 e4m3fn.
+            x_scale_val = (x2d.abs().amax().float() / 448.0).clamp(min=1e-12)
+            x_fp8 = (x2d.float() / x_scale_val).to(torch.float8_e4m3fn)
+            # _scaled_mm(a, b): a [M, K] row-major fp8, b [K, N] col-major fp8.
+            out = torch._scaled_mm(
+                x_fp8, self.q_weight.T,
+                scale_a=x_scale_val.to(torch.float32),
+                scale_b=self.w_scale,
+                out_dtype=torch.bfloat16,
+            )
+            if bias is not None:
+                out = out + bias.to(out.dtype)
+            return out.reshape(*orig_shape[:-1], self.out_features)
+
+        # Fallback: dequant weight to bf16, standard matmul (CPU / no _scaled_mm).
+        w_bf16 = self.q_weight.to(torch.float32) * self.w_scale.to(torch.float32)
+        return F.linear(x, w_bf16.to(x.dtype), bias).reshape(*orig_shape[:-1], self.out_features)
+
+    def __repr__(self):
+        return f"FastINT8Linear(in={self.in_features}, out={self.out_features}, fp8_scaled_mm)"
+
+
+def quantize_model_int8(model, target_modules=None, verbose=True, fast=False):
     """Replace Linear layers with INT8 weight-only quantized versions.
     
     Args:
@@ -123,14 +190,19 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
         target_modules: list of module name substrings to target.
                        Default: all Linear layers except embeddings and lm_head.
         verbose: print stats
+        fast: if True, use FastINT8Linear (torch._scaled_mm, no dequant overhead).
+              Recommended on Blackwell (RTX 5070) where bf16 matmul is fast and
+              dequant overhead makes standard INT8 slower than bf16.
     
     Returns:
         number of layers quantized
     """
     if target_modules is None:
-        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj',
-                         'w1', 'w2', 'w3', 'fc1', 'fc2', 'qkv_proj', 'out_proj',
-                         'kv_down_proj', 'k_up_proj', 'v_up_proj']
+        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'out_proj',
+                         'w1', 'w2', 'w3', 'w_gate', 'w_up', 'w_down',
+                         'fc1', 'fc2', 'qkv_proj',
+                         'kv_down_proj', 'k_up_proj', 'v_up_proj',
+                         'in_proj']
 
     n_quantized = 0
     for name, module in list(model.named_modules()):
@@ -140,7 +212,10 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
                 parent_name = '.'.join(name.split('.')[:-1])
                 child_name = name.split('.')[-1]
                 parent = model.get_submodule(parent_name)
-                quantized = QuantizedLinear(module, bits=8)
+                if fast:
+                    quantized = FastINT8Linear(module)
+                else:
+                    quantized = QuantizedLinear(module, bits=8)
                 setattr(parent, child_name, quantized)
                 n_quantized += 1
 
@@ -149,13 +224,14 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
         total_params = 0
         quantized_bytes = 0
         for m in model.modules():
-            if isinstance(m, QuantizedLinear):
-                total_params += m.q_weight.numel()
-                quantized_bytes += m.q_weight.numel() * (1 if m.bits == 8 else 0.5)
+            if isinstance(m, (QuantizedLinear, FastINT8Linear)):
+                total_params += m.in_features * m.out_features
+                quantized_bytes += m.in_features * m.out_features * 1  # 1 byte int8
             elif isinstance(m, nn.Linear):
                 total_params += m.weight.numel()
                 quantized_bytes += m.weight.numel() * 2  # BF16
-        print(f"  [InferQuant] INT8: {n_quantized} layers quantized")
+        mode = "fast (_scaled_mm)" if fast else "dequant"
+        print(f"  [InferQuant] INT8 ({mode}): {n_quantized} layers quantized")
         if total_params > 0:
             print(f"  [InferQuant] weight memory: {quantized_bytes/1024**2:.1f} MB (was {total_params*2/1024**2:.1f} MB, {quantized_bytes/(total_params*2)*100:.0f}%)")
     return n_quantized
@@ -163,31 +239,59 @@ def quantize_model_int8(model, target_modules=None, verbose=True):
 
 def quantize_model_int4(model, target_modules=None, group_size=128, verbose=True):
     """Replace Linear layers with INT4 weight-only quantized versions.
-    
+
     INT4 with group_size=128 gives best speed/quality tradeoff.
-    
+    Handles both nn.Linear and already-quantized QuantizedLinear/FastINT8Linear.
+
     Args:
         model: the model
         target_modules: modules to target (default: all projections)
         group_size: quantization group size (128 is standard)
         verbose: print stats
-    
+
     Returns:
         number of layers quantized
     """
     if target_modules is None:
-        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj',
-                         'w1', 'w2', 'w3', 'fc1', 'fc2', 'qkv_proj', 'out_proj',
-                         'kv_down_proj', 'k_up_proj', 'v_up_proj']
+        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'out_proj',
+                         'w1', 'w2', 'w3', 'w_gate', 'w_up', 'w_down',
+                         'fc1', 'fc2', 'qkv_proj',
+                         'kv_down_proj', 'k_up_proj', 'v_up_proj',
+                         'in_proj']
 
     n_quantized = 0
     for name, module in list(model.named_modules()):
+        # Handle nn.Linear directly
         if isinstance(module, nn.Linear):
             if any(t in name for t in target_modules):
                 parent_name = '.'.join(name.split('.')[:-1])
                 child_name = name.split('.')[-1]
                 parent = model.get_submodule(parent_name)
                 quantized = QuantizedLinear(module, bits=4, group_size=group_size)
+                setattr(parent, child_name, quantized)
+                n_quantized += 1
+        # Handle already-quantized layers (dequantize first, then requantize)
+        elif isinstance(module, (QuantizedLinear, FastINT8Linear)):
+            if any(t in name for t in target_modules):
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                parent = model.get_submodule(parent_name)
+                # Dequantize to a temporary nn.Linear
+                if hasattr(module, '_get_dequantized_weight'):
+                    w = module._get_dequantized_weight()
+                elif hasattr(module, '_cached_weight') and module._cached_weight is not None:
+                    w = module._cached_weight
+                elif hasattr(module, '_dequantize'):
+                    w = module._dequantize()
+                else:
+                    continue
+                tmp = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None)
+                tmp.weight.data.copy_(w.to(tmp.weight.dtype))
+                if module.bias is not None:
+                    tmp.bias.data.copy_(module.bias_weight.to(tmp.bias.dtype))
+                tmp = tmp.to(w.device)
+                # Requantize to INT4
+                quantized = QuantizedLinear(tmp, bits=4, group_size=group_size)
                 setattr(parent, child_name, quantized)
                 n_quantized += 1
 

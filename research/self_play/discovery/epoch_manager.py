@@ -36,6 +36,7 @@ _MIN_SCRIPTS_OK = 20
 _MIN_THEORIES = 10
 _MIN_DISCOVERIES = 5
 _MIN_RESEARCH = 10
+_MIN_TRAJECTORIES = 15  # tool-use trajectories for SFT
 # Distill cadence.
 DISTILL_EVERY = 12
 
@@ -50,7 +51,10 @@ class EpochComparison:
 
 
 def _db_quality_score(db: DiscoveryDB) -> float:
-    """Heuristic 0..1 score for DB readiness. Used as the fine-tune trigger."""
+    """Heuristic 0..1 score for DB readiness. Used as the fine-tune trigger.
+
+    Now includes tool-use trajectory quality as a component.
+    """
     counts = db.table_counts()
     if counts["thoughts"] < _MIN_THOUGHTS:
         return 0.0
@@ -62,12 +66,20 @@ def _db_quality_score(db: DiscoveryDB) -> float:
     ok_scripts = db.query(
         "SELECT COUNT(*) AS n FROM scripts WHERE returncode=0 AND length(stdout) > 0")[0]["n"]
     script_quality = min(ok_scripts / _MIN_SCRIPTS_OK, 1.0) if _MIN_SCRIPTS_OK else 1.0
+
+    # Tool-use trajectory quality
+    traj_stats = db.trajectory_stats()
+    n_traj = traj_stats.get("n", 0) or 0
+    avg_traj_reward = traj_stats.get("avg_reward", 0.0) or 0.0
+    traj_quality = min(n_traj / _MIN_TRAJECTORIES, 1.0) * avg_traj_reward
+
     coverage = min(1.0, (
-        min(counts["thoughts"] / _MIN_THOUGHTS, 1.0) * 0.3 +
-        min(counts["discoveries"] / _MIN_DISCOVERIES, 1.0) * 0.3 +
-        min(counts["research"] / _MIN_RESEARCH, 1.0) * 0.2 +
-        min(counts["theories"] / _MIN_THEORIES, 1.0) * 0.2))
-    return coverage * 0.5 + resolution_rate * 0.3 + script_quality * 0.2
+        min(counts["thoughts"] / _MIN_THOUGHTS, 1.0) * 0.25 +
+        min(counts["discoveries"] / _MIN_DISCOVERIES, 1.0) * 0.25 +
+        min(counts["research"] / _MIN_RESEARCH, 1.0) * 0.15 +
+        min(counts["theories"] / _MIN_THEORIES, 1.0) * 0.15 +
+        min(n_traj / _MIN_TRAJECTORIES, 1.0) * 0.20))
+    return coverage * 0.4 + resolution_rate * 0.2 + script_quality * 0.2 + traj_quality * 0.2
 
 
 def db_is_ready(db: DiscoveryDB, min_score: float = 0.6) -> bool:

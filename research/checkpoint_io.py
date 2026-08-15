@@ -187,7 +187,7 @@ def load_checkpoint(path: str, map_location=None) -> dict[str, Any]:
         # Try fastsafetensors first (4.8-7.5x faster, BOOT_TIME_AUDIT Stage 2)
         if _HAS_FAST_SAFETENSORS and map_location is not None and "cuda" in device_str:
             try:
-                loader = SafeTensorsFileLoader()
+                loader = SafeTensorsFileLoader(pg=None, device=device_str)
                 tensors = loader.load(path, map_location=device_str)
                 result: dict[str, Any] = {k: v for k, v in tensors.items()}
                 meta_path = path + ".meta.json"

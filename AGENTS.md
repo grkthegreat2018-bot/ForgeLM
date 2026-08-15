@@ -41,12 +41,16 @@ Only two configs exist now:
 
 ### Decoding implementations
 - `research/decoding/dspark.py` — DSpark speculative decoding
-- `research/decoding/eagle.py` — EAGLE speculative decoding
+- `research/decoding/eagle.py` — EAGLE-3 speculative decoding (feature-level, multi-layer fusion, TTT training)
 - `research/decoding/medusa.py` — Medusa parallel prediction heads
 - `research/decoding/mtp.py` — MTP speculative decoding
 
 ### Quantization
 - `research/quantization/` — BitNet, FP8, RotorQuant, SpinQuant, WANDA, paged KV, KV compress
+
+### Model Merging
+- `research/merge_models.py` — SLERP, TIES, DARE, SVD, Task Arithmetic, Linear (model soup) on safetensors state dicts. CLI: `python -m research.merge_models --method <slerp|ties|dare|svd|task_arith|linear> ...`
+- `research/inject_and_merge.py` — Unified pipeline: inject new params via KeyStack knowledge keys (facts, context patches, self-play, spectral, test-gated) then merge delta into target model. Auto-clones target as injection base for clean task vector. CLI: `python -m research.inject_and_merge --target <ckpt> --inject-type <facts|test_gated|context_patch|selfplay_patch|spectral> --merge-method <task_arith|ties|dare|svd|slerp|linear> ...`
 
 ### Keys (70+ files in research/keys/)
 All keys preserved. Planned for LFM2.5 integration:
