@@ -10,7 +10,8 @@
 - Vocab=65536, tied embeddings
 - 1.17B params, 2.34GB bf16
 
-**Checkpoint**: `research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors`
+**Base checkpoint**: `research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors`
+**Self-play starting checkpoint**: `research/checkpoints/ForgeLM_V2_BSP.safetensors` (sft4: 600 steps, 1657 examples, proper tool use + format)
 **Tokenizer**: `research/checkpoints/lfm25_tokenizer/`
 
 ## Config Presets

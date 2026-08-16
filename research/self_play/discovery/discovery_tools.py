@@ -96,6 +96,80 @@ def _web_search(query: str, n: int = 5) -> dict:
     return {"results": results, "error": None if results else "no results parsed"}
 
 
+# ── Wikipedia API (free, no key) ──────────────────────────────────────
+def _wikipedia_search(query: str, n: int = 3) -> dict:
+    """Search Wikipedia via the REST API. Returns summaries."""
+    try:
+        search_url = (f"https://en.wikipedia.org/w/api.php?action=query&list=search"
+                      f"&format=json&srlimit={n}&srsearch={quote_plus(query)}")
+        req = Request(search_url, headers={"User-Agent": _UA})
+        with urlopen(req, timeout=12) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+        items = data.get("query", {}).get("search", [])
+        results = []
+        for item in items[:n]:
+            title = item.get("title", "")
+            snippet = _RE_TAG.sub("", item.get("snippet", "")).strip()
+            results.append({"title": title, "snippet": snippet[:400],
+                            "url": f"https://en.wikipedia.org/wiki/{quote_plus(title)}"})
+        return {"results": results, "error": None if results else "no results"}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+
+# ── arXiv API (free, no key) ──────────────────────────────────────────
+def _arxiv_search(query: str, n: int = 3) -> dict:
+    """Search arXiv for academic papers."""
+    try:
+        url = (f"http://export.arxiv.org/api/query?search_query=all:{quote_plus(query)}"
+               f"&start=0&max_results={n}")
+        req = Request(url, headers={"User-Agent": _UA})
+        with urlopen(req, timeout=15) as r:
+            xml = r.read().decode("utf-8", "ignore")
+        # Parse atom feed entries (lightweight regex, no lxml dependency)
+        entries = re.findall(r"<entry>(.*?)</entry>", xml, re.DOTALL)
+        results = []
+        for entry in entries[:n]:
+            title = re.search(r"<title>(.*?)</title>", entry, re.DOTALL)
+            summary = re.search(r"<summary>(.*?)</summary>", entry, re.DOTALL)
+            link = re.search(r'<id>(.*?)</id>', entry, re.DOTALL)
+            published = re.search(r"<published>(.*?)</published>", entry, re.DOTALL)
+            if title:
+                results.append({
+                    "title": _RE_TAG.sub("", title.group(1)).strip()[:200],
+                    "summary": summary.group(1).strip()[:400] if summary else "",
+                    "url": link.group(1).strip() if link else "",
+                    "published": published.group(1)[:10] if published else "",
+                })
+        return {"results": results, "error": None if results else "no results"}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+
+# ── fetch URL (extract text from any web page) ────────────────────────
+def _fetch_url(url: str, max_chars: int = 2000) -> dict:
+    """Fetch a URL and extract readable text (strip HTML tags)."""
+    try:
+        req = Request(url, headers={"User-Agent": _UA, "Accept-Language": "en"})
+        with urlopen(req, timeout=12) as r:
+            html = r.read().decode("utf-8", "ignore")
+        # Remove scripts, styles, tags
+        html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = _RE_TAG.sub(" ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+        return {"text": text[:max_chars], "url": url, "chars": len(text), "error": None}
+    except Exception as e:
+        return {"text": "", "url": url, "error": str(e)}
+
+
+# ── calculate (safe math evaluation) ──────────────────────────────────
+def _calculate(code: str) -> dict:
+    """Evaluate a math expression safely via the sandbox."""
+    # Wrap in print() so output is captured
+    wrapped = f"print({code})" if not code.strip().startswith("print") else code
+    return _run_script(wrapped)
+
+
 # ── tool registry ─────────────────────────────────────────────────────
 class ToolRegistry:
     """Holds bound tools + their schemas for the system prompt.
@@ -147,6 +221,30 @@ class ToolRegistry:
                                    "n_results": len(res["results"])}, sid)
             return res
 
+        def wikipedia_search(args: dict) -> dict:
+            res = _wikipedia_search(args.get("query", ""), n=int(args.get("n", 3)))
+            db.emit("wikipedia_search", {"query": args.get("query", ""),
+                                         "n_results": len(res["results"])}, sid)
+            return res
+
+        def arxiv_search(args: dict) -> dict:
+            res = _arxiv_search(args.get("query", ""), n=int(args.get("n", 3)))
+            db.emit("arxiv_search", {"query": args.get("query", ""),
+                                     "n_results": len(res["results"])}, sid)
+            return res
+
+        def fetch_url(args: dict) -> dict:
+            res = _fetch_url(args.get("url", ""), max_chars=int(args.get("max_chars", 2000)))
+            db.emit("fetch_url", {"url": args.get("url", "")[:120],
+                                  "chars": res.get("chars", 0)}, sid)
+            return res
+
+        def calculate(args: dict) -> dict:
+            res = _calculate(args.get("code", args.get("expression", "")))
+            db.emit("calculate", {"ok": res.get("ok", False),
+                                  "stdout": res.get("stdout", "")[:100]}, sid)
+            return res
+
         def save_research(args: dict) -> dict:
             rid = db.add_research(sid, args.get("query", ""),
                                   url=args.get("url"), title=args.get("title"),
@@ -196,6 +294,38 @@ class ToolRegistry:
             db.emit("finish_session", {"summary": args.get("summary", "")[:200]}, sid)
             return {"finished": True}
 
+        def set_goal(args: dict) -> dict:
+            """Let the model set its own goal for the current session.
+
+            The model proposes a goal, which is recorded in the DB. This enables
+            self-directed exploration where the model decides what to investigate.
+            """
+            goal = args.get("goal", "")
+            tid = db.add_thought(sid, "self_goal", goal, confidence=0.9)
+            db.emit("set_goal", {"goal": goal[:200], "thought_id": tid}, sid)
+            return {"goal_id": tid, "saved": True,
+                    "note": "Goal recorded. Now pursue it using your tools."}
+
+        def ask_clarification(args: dict) -> dict:
+            """Let the model ask a clarifying question about the task.
+
+            Unlike outputting text (which ends the task), this tool records
+            the question and provides a synthetic response, allowing the
+            loop to continue. This teaches the model to seek clarification
+            when tasks are ambiguous (SynthAgent, ACL 2026).
+            """
+            question = args.get("question", "")
+            tid = db.add_thought(sid, "clarification", question, confidence=0.5)
+            db.emit("ask_clarification", {"question": question[:200]}, sid)
+            # Provide a generic encouraging response — the model should
+            # proceed with its best interpretation
+            return {
+                "question_id": tid,
+                "response": "Proceed with your best interpretation of the task. "
+                            "Make reasonable assumptions and document them with think.",
+                "note": "Clarification recorded. Continue working on the task.",
+            }
+
         def summarize_context(args: dict) -> dict:
             """Let the model proactively summarize its own context.
 
@@ -223,6 +353,22 @@ class ToolRegistry:
         self._register("web_search",
                        "Search the internet via DuckDuckGo. Returns result snippets.",
                        {"query": "string", "n": "int optional, default 5"}, web_search)
+        self._register("wikipedia_search",
+                       "Search Wikipedia for encyclopedic knowledge. Returns article summaries. "
+                       "Best for factual questions, definitions, history, science.",
+                       {"query": "string", "n": "int optional, default 3"}, wikipedia_search)
+        self._register("arxiv_search",
+                       "Search arXiv for academic papers on AI, ML, CS, physics, math. "
+                       "Returns titles, abstracts, and links. Best for research questions.",
+                       {"query": "string", "n": "int optional, default 3"}, arxiv_search)
+        self._register("fetch_url",
+                       "Fetch a web page and extract its text content. Use to read articles, "
+                       "documentation, or pages found via web_search.",
+                       {"url": "string", "max_chars": "int optional, default 2000"}, fetch_url)
+        self._register("calculate",
+                       "Evaluate a math expression or short Python calculation. "
+                       "Example: calculate('2**10 + 3*5') or calculate('sum(range(100))').",
+                       {"code": "string"}, calculate)
         self._register("save_research",
                        "Persist a web research finding to your database.",
                        {"query": "string", "url": "string", "title": "string",
@@ -257,6 +403,16 @@ class ToolRegistry:
         self._register("finish_session",
                        "End this discovery session with a summary.",
                        {"summary": "string"}, finish_session)
+        self._register("set_goal",
+                       "Set your own goal for this session. Use this to propose what you want "
+                       "to investigate or accomplish, then pursue it with your other tools. "
+                       "This enables self-directed exploration and learning.",
+                       {"goal": "string"}, set_goal)
+        self._register("ask_clarification",
+                       "Ask a clarifying question about the task if something is ambiguous. "
+                       "Unlike outputting text (which ends the task), this records your "
+                       "question and lets you continue working. Use when the task is unclear.",
+                       {"question": "string"}, ask_clarification)
 
     def call(self, name: str, args: dict) -> dict:
         fn = self.tools.get(name)

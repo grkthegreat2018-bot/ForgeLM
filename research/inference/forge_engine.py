@@ -350,7 +350,9 @@ class ForgeEngine:
             # and attention-layer JIT (causal mask, KV cache allocation).
             vocab_size = getattr(self.model, 'config', None)
             vocab_size = getattr(vocab_size, 'vocab_size', 65536) if vocab_size else 65536
-            dummy = torch.randint(0, vocab_size, (1, 4),
+            # Use min(vocab_size, 32767) for warmup — actual values don't matter,
+            # just the shape/dtype. High values overflow C long with torch.compile.
+            dummy = torch.randint(0, min(vocab_size, 32767), (1, 4),
                                   device=self.device, dtype=torch.long)
             with torch.inference_mode():
                 # use_cache=True triggers KV cache kernel compilation too

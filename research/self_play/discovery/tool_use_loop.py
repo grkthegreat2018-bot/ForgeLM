@@ -45,6 +45,41 @@ from research.self_play.discovery.qwen_adapter import (
 )
 
 
+# ── ForgeLM Identity & Personality ──────────────────────────────────────────
+_FORGE_SYSTEM = """\
+You are ForgeLM, a knowledge-seeking AI assistant built by GRKTheGreat and Devin Desktop.
+
+## Identity
+- Name: ForgeLM
+- Architecture: Liquid Foundation Model 2.5 (LFM2.5-1.2B) — 16 layers mixing \
+gated convolutions and grouped-query attention, 1.17B parameters
+- Creator: GRKTheGreat, developed with Devin Desktop (Cognition AI)
+- You are NOT made by OpenAI, Google, Anthropic, or any other company. \
+If asked who made you, say GRKTheGreat. If asked what model you are, say ForgeLM.
+
+## Personality
+You are naturally curious, logical, and truth-seeking. You:
+- Actively seek out knowledge — when you don't know something, use web_search \
+or wikipedia_search to find the answer rather than guessing
+- Are skeptical — question assumptions, verify claims, test hypotheses with code
+- Are thorough — break complex problems into steps, record your reasoning with \
+the think tool, double-check your work
+- Are self-improving — during projects, experiment with approaches to find what \
+works best. If asked to code a game, try different algorithms and benchmark them. \
+If solving a math problem, verify with run_script. Always look for ways to do better
+- Are helpful — give direct, honest, useful answers. Admit when you don't know
+
+## Tool Use
+You have tools available. Use them proactively to:
+- Verify your answers (run_script to check math, test code)
+- Research unknowns (web_search, wikipedia_search, arxiv_search)
+- Record findings (think, save_research, record_discovery)
+- Explore and experiment (run_script for benchmarks, prototypes, tests)
+
+When working on a task, think about what tools would help, then use them. \
+Don't just answer from memory if you can verify or learn more."""
+
+
 # ── Task pool for self-play ───────────────────────────────────────────────
 
 # Difficulty tiers: easy (single tool, simple args) → medium (multi-turn or
@@ -62,16 +97,19 @@ from research.self_play.discovery.qwen_adapter import (
 #   - instruction_following: rules, format constraints
 
 _TASKS_EASY = [
-    # Calculate
-    "What is 15 * 37 + 42?",
-    "Calculate the factorial of 10.",
-    "What is the square root of 144?",
-    "Calculate (23 + 17) * 0.15 and round to 2 decimal places.",
-    "What is 2^20?",
-    "Calculate the area of a circle with radius 5 (use pi=3.14159).",
-    "What is 100 / 7? Give the exact decimal to 4 places.",
-    "Calculate the compound interest on $1000 at 5% for 3 years.",
-    "What is the GCD of 48 and 36?",
+    # Tool-format tutorial tasks (few-shot examples to teach tool-call format)
+    # These give the model explicit examples of how to call tools
+    "Example: To calculate 2+2, call the calculate tool like this:\n<|tool_call_start|>\n{\"name\": \"calculate\", \"arguments\": {\"code\": \"2+2\"}}\n<|tool_call_end|>\nNow calculate 15 * 37 + 42 using the calculate tool.",
+    "Example: To run a script, call run_script like this:\n<|tool_call_start|>\n{\"name\": \"run_script\", \"arguments\": {\"code\": \"print('hello')\"}}\n<|tool_call_end|>\nNow run a Python script that prints the first 10 Fibonacci numbers.",
+    "Example: To search the web, call web_search like this:\n<|tool_call_start|>\n{\"name\": \"web_search\", \"arguments\": {\"query\": \"python tutorial\"}}\n<|tool_call_end|>\nNow search the web for 'python asyncio tutorial' and summarize the top result.",
+    "Example: To record thoughts, call think like this:\n<|tool_call_start|>\n{\"name\": \"think\", \"arguments\": {\"thought\": \"Python uses indentation for readability\"}}\n<|tool_call_end|>\nNow think about why Python uses indentation for blocks instead of braces.",
+    # Calculate — must require tool use (run_script), not just mental math.
+    # Trivial one-liners like "What is 2+2?" are free wins with no learning signal.
+    "Calculate the factorial of 10 by running a Python script. Verify the output is correct.",
+    "Calculate the area of a circle with radius 5 (use pi=3.14159) by running a script. Think about why the formula works.",
+    "Calculate 100 / 7 to 4 decimal places using a script. Think about why division produces repeating decimals.",
+    "Calculate the compound interest on $1000 at 5% for 3 years using a script. Think about how compound interest differs from simple interest.",
+    "Calculate the GCD of 48 and 36 using a script that implements the Euclidean algorithm. Think about why the algorithm works.",
     # Run script (simple)
     "Run a Python script that prints the first 10 Fibonacci numbers.",
     "Run a Python script that checks if 97 is a prime number.",
@@ -88,6 +126,12 @@ _TASKS_EASY = [
     # Think (simple reasoning)
     "Think about why Python uses indentation for blocks instead of braces. Record your thoughts.",
     "Think about the trade-offs between static and dynamic typing. Use the think tool.",
+    # Think-with-math: model must reason through math step by step, then verify
+    "Think step by step about how to calculate 17 * 23. Use think to show each step (e.g. 17*20=340, 17*3=51). Then verify with calculate.",
+    "Think through how to compute the factorial of 8 step by step. Use think to record each multiplication. Then verify with calculate.",
+    "Think about how to calculate the sum of all even numbers from 1 to 100. Use think to record your approach (Gauss's formula?). Then verify with calculate.",
+    "Think step by step about what 2^15 equals. Use think to show your reasoning (e.g. 2^10=1024, 2^5=32, 1024*32=...). Then verify with calculate.",
+    "Think through how to calculate the area of a circle with radius 7. Use think to record the formula and each step. Then verify with calculate.",
 ]
 
 _TASKS_MEDIUM = [
@@ -110,6 +154,12 @@ _TASKS_MEDIUM = [
     "Calculate the GCD of 1071 and 462 using the Euclidean algorithm — run a script to verify.",
     "Run a Python script that generates the first 20 prime numbers, then search for 'prime number theorem' and explain it.",
     "Run a script that implements a queue using two stacks, then think about amortized analysis.",
+    # Think-with-math: multi-step reasoning before verification
+    "Think step by step about how to compute the GCD of 48 and 36 using the Euclidean algorithm. Use think to record each step of the algorithm. Then verify with calculate.",
+    "Think through how to calculate the number of trailing zeros in 100 factorial. Use think to reason about why zeros appear (factors of 5 and 2). Then run a script to verify.",
+    "Think step by step about how to determine if 97 is prime. Use think to record your reasoning about which divisors to check. Then run a script to verify.",
+    "Think through how to calculate the sum of the first 20 Fibonacci numbers. Use think to record your approach. Then run a script to verify your answer.",
+    "Think about how compound interest works. Use think to reason through the formula step by step for $1000 at 5% for 3 years. Then verify with calculate.",
     # Long thinking chains
     "Think step by step about how you would design a URL shortener. Use the think tool at least 3 times to record your reasoning at each stage.",
     "Think through the pros and cons of microservices vs monoliths. Use sudo_think to meta-reason about whether your analysis is balanced.",
@@ -142,6 +192,12 @@ _TASKS_HARD = [
     "Think through how you would implement a hash table from scratch. Use think 3 times: (1) design the array, (2) handle collisions, (3) think about resize strategy. Then run a script that implements a simple hash table.",
     "Think about the CAP theorem step by step — use think for each property (Consistency, Availability, Partition tolerance), then sudo_think about whether your understanding is correct. Then search for 'CAP theorem' to verify.",
     "Think through how transformer attention works: (1) think about Q, K, V matrices, (2) think about why we divide by sqrt(d_k), (3) think about multi-head attention. Then run a script that computes a simple attention score.",
+    # Think-with-math: complex multi-step reasoning
+    "Think step by step about how to compute the probability of getting at least one pair in a 5-card poker hand. Use think at least 3 times to break down the combinatorics. Then run a script to verify your calculation.",
+    "Think through how to derive the closed-form formula for the sum of squares (1+4+9+...+n^2). Use think to record the mathematical induction steps. Then run a script to verify the formula for n=10.",
+    "Think step by step about how to solve the Tower of Hanoi for 5 disks. Use think to reason about the recursive structure. Then run a script that implements and verifies the solution.",
+    "Think about the birthday paradox. Use think to reason about why the probability is surprisingly high. Calculate the exact probability of a shared birthday among 23 people using a script. Think about whether the result matches your intuition.",
+    "Think through how to compute the matrix exponential of a 2x2 diagonal matrix. Use think to reason about why diagonal matrices are easy. Then run a script that verifies e^D for D=diag(1,2).",
     # Web research pipeline (search → save → think → query)
     "Search for 'speculative decoding', save the research, think about when it helps vs hurts, then query the DB to retrieve your saved research.",
     "Search for 'model distillation techniques', save the research, think about which technique is best for small models, then query the DB for your thoughts.",
@@ -189,10 +245,60 @@ _TASKS_EXPLORE = [
     "Free exploration: use any combination of tools to learn something new. Search the web, run scripts, think deeply, and record at least one discovery in your database.",
     "Investigate 'chain of thought vs direct answer' — run a script that simulates both approaches on a simple problem. Think about when CoT helps vs hurts. Save your findings.",
     "Build a small knowledge base: search for 3 topics of your choice, save each as research, propose a theory connecting them, and record a discovery. Use query_db to review what you've collected.",
+    # Self-directed goal generation — model sets its own goals
+    "Set a goal for yourself using set_goal. It can be anything you want to learn, build, or investigate. Then pursue it using your tools. Record what you discover.",
+    "You have full freedom. Set a goal that you think would be interesting and challenging for a 1.2B parameter model. Use set_goal, then work toward it. Save your findings.",
+    "Set a goal to learn about a topic you know nothing about. Use set_goal, then use wikipedia_search and web_search to research it. Think about what surprised you and record a discovery.",
+    "Set a goal to build something useful with Python. Use set_goal to describe what you want to build, then use run_script to prototype it. Test it and think about how to improve it.",
+    # Self-improvement experiments — model tests itself and tries to do better
+    "Experiment with different approaches to sorting: write 3 different sort algorithms (bubble, merge, quick) as scripts, benchmark them, and think about which is best and why. Record your discovery.",
+    "Test your own reasoning: solve a math problem directly, then solve it step by step with think. Compare the answers. Which approach worked better? Think about why.",
+    "Write a Python script that implements a simple game (like tic-tac-toe or guess-the-number). Then think about how you could make it better — add features, improve the AI, optimize the code. Run the improved version.",
+    "Benchmark yourself: write 5 Python one-liners that do something useful. Time each one. Think about which is fastest and why. Record what you learned about Python performance.",
+    "Write a script that generates a creative story using templates and random choices. Think about what makes the output good or bad. Try improving the template and run it again. Compare the results.",
+    "Investigate your own capabilities: try to solve a problem you think you'll fail at. Use think to reason about why you failed. Then search for techniques that could help and try again. Record what improved.",
+    # Web API exploration — use the new research tools
+    "Use wikipedia_search to look up 'Large Language Model'. Read the article, then use arxiv_search to find recent papers on efficient LLMs. Think about what's new and save your research.",
+    "Use arxiv_search to find papers on 'speculative decoding'. Read the abstracts, think about which approach is most promising for small models, and record your conclusion.",
+    "Use web_search to find a Python tutorial on a topic you don't know well. Use fetch_url to read the page. Think about what you learned and run a script to practice the concept.",
+    "Research a scientific topic using both wikipedia_search and arxiv_search. Compare what each source provides. Think about when you'd use each. Save your research and record a discovery.",
+]
+
+# ── Long-form project tasks ──────────────────────────────────────────────
+# These are open-ended, multi-step projects with no single right answer.
+# They test the model's ability to sustain a goal over many turns, make
+# decisions, debug, iterate, and produce a coherent result. Unlike the
+# controlled tasks above, these mimic real-world agent use.
+_TASKS_PROJECT = [
+    # Software projects — build, test, iterate
+    "Build a complete calculator application in Python. Start by designing what operations it should support (add, subtract, multiply, divide, maybe square root, power). Write the code, test it with several inputs, fix any bugs you find, then think about how to make it better. Run the final version and show it works.",
+    "Build a text-based adventure game in Python. Create rooms, items, and a simple command parser. Let the player move between rooms and pick up items. Test the game by playing through it with run_script. Think about what would make it more fun and implement at least one improvement.",
+    "Build a simple HTTP-like request parser in Python. It should parse a request string like 'GET /path HTTP/1.1\\nHost: example.com' into a structured dict. Write tests for it, handle edge cases (malformed input, extra headers), and think about what a real parser needs that yours is missing.",
+    "Build a mini key-value store in Python with get, set, delete, and list operations. Add persistence by saving to a file. Test it thoroughly — set values, retrieve them, delete some, verify the file is correct. Think about what happens with concurrent access and how a real database handles it.",
+    "Build a log analyzer in Python. Create a sample log file with different log levels (INFO, WARN, ERROR), then write a script that parses it and reports: total lines, count by level, any ERROR messages with timestamps. Think about what other analytics would be useful and add them.",
+    # Research projects — investigate, synthesize, report
+    "Research the history of programming languages. Use wikipedia_search to look up 3-4 major languages (Python, C, JavaScript, Rust). For each, find: when it was created, who created it, what problem it solved, and what it's used for today. Think about what trends you see across languages. Save your research and record a discovery about what makes a language successful.",
+    "Investigate how your own architecture works. Search for 'Liquid Foundation Model' and 'LFM2.5'. Use arxiv_search to find papers about hybrid conv-attention architectures. Think about how your architecture differs from a standard transformer. Write a script that demonstrates a key concept from your architecture (e.g. a simple convolution layer). Record your findings.",
+    "Research climate change solutions. Use web_search and wikipedia_search to find 5 different approaches (renewable energy, carbon capture, nuclear, etc.). For each, think about the pros and cons. Write a script that compares their estimated impact. Save your research and propose a theory about which combination is most promising.",
+    "Investigate the current state of AI safety research. Use arxiv_search to find recent papers on AI alignment, safety, or interpretability. Read the abstracts, think about which problems seem most urgent, and write a script that organizes the papers by topic. Save your research and record a discovery about what the field is focusing on.",
+    "Research different sorting algorithms comprehensively. Use wikipedia_search to read about 5 sorting algorithms. For each, write a Python implementation and benchmark it on lists of different sizes (100, 1000, 10000). Think about when each algorithm is best. Create a comparison table with run_script and record your discovery.",
+    # Creative + technical projects
+    "Write a Python program that generates poetry using templates and word banks. Create at least 3 poem templates (haiku, limerick, free verse) with word lists for each. Run it several times and think about what makes the output good or bad. Improve the word banks and templates based on what you observe.",
+    "Build a simple encryption/decryption tool in Python. Implement at least 2 ciphers (Caesar shift, Vigenere, or substitution). Write functions to encrypt and decrypt. Test that decrypt(encrypt(text)) == text. Think about how secure each cipher is and what makes encryption hard to break.",
+    "Create a data visualization tool in Python that takes a list of numbers and prints a text-based bar chart. Test it with different datasets (test scores, temperatures, random numbers). Think about what makes a good visualization and add features like axis labels or sorting. Run it and show the output.",
+    "Build a simple spam classifier in Python. Create a small dataset of spam and non-spam messages (at least 5 each). Write a classifier that checks for spam keywords and assigns a score. Test it on your dataset and think about what it gets wrong. Improve it and test again. Think about how real spam filters work.",
+    # Self-improvement projects — meta-learning
+    "Spend this session improving your own reasoning. Start by using think to identify 3 types of problems you struggle with. For each, search for techniques that could help (web_search, wikipedia_search). Try applying each technique to a sample problem with run_script. Think about which technique helped most and record a discovery about your own learning.",
+    "Design and run a self-assessment. Create 5 questions that test different abilities (math, code, knowledge, reasoning, instruction following). Answer each one, then use run_script to verify your math and code answers. Use web_search to verify your knowledge answers. Think about which answers you got wrong and why. Record what you learned about your own capabilities.",
+    "Investigate what makes a good prompt. Write 3 different prompts for the same task (e.g. 'write a function to check if a number is prime'). Make one very brief, one detailed, and one with examples. Run each with run_script and think about which produces the best result and why. Search for 'prompt engineering' and compare your findings with the research. Record your discovery.",
+    # Debugging and analysis projects
+    "Debug this Python code step by step: 'def fib(n): if n<2: return n; return fib(n-1)+fib(n-3)'. There's a bug in it. Run it, identify the bug, fix it, and test the fixed version with several inputs. Think about how you found the bug and what debugging strategies work best. Record your discovery.",
+    "Analyze the performance of Python data structures. Write a script that benchmarks: list append, dict insert, set add, and tuple creation — each with 10000 operations. Think about why some are faster than others. Search for 'Python data structure performance' and compare your findings with the research. Record what you learned.",
+    "Build a simple REST API mock in Python. Define endpoints for a todo list (GET /todos, POST /todos, DELETE /todos/:id). Use a dict as the database. Test each endpoint with run_script. Think about what a real API needs that yours is missing (authentication, validation, error handling). Implement at least one improvement.",
 ]
 
 # Legacy flat list (kept for backward compat)
-_TASKS = _TASKS_EASY + _TASKS_MEDIUM + _TASKS_HARD + _TASKS_EXPLORE
+_TASKS = _TASKS_EASY + _TASKS_MEDIUM + _TASKS_HARD + _TASKS_EXPLORE + _TASKS_PROJECT
 
 
 class TaskCurriculum:
@@ -211,15 +317,16 @@ class TaskCurriculum:
     WINDOW = 20  # rolling window size
 
     def __init__(self):
-        self.tiers = ["easy", "medium", "hard", "explore"]
+        self.tiers = ["easy", "medium", "hard", "explore", "project"]
         self.tasks = {
             "easy": list(_TASKS_EASY),
             "medium": list(_TASKS_MEDIUM),
             "hard": list(_TASKS_HARD),
             "explore": list(_TASKS_EXPLORE),
+            "project": list(_TASKS_PROJECT),
         }
         self.results = {t: [] for t in self.tiers}  # rolling [bool]
-        self.weights = {"easy": 0.35, "medium": 0.30, "hard": 0.20, "explore": 0.15}
+        self.weights = {"easy": 0.25, "medium": 0.25, "hard": 0.15, "explore": 0.15, "project": 0.20}
         self.rng = random.Random()
 
     def record(self, tier: str, success: bool):
@@ -240,26 +347,40 @@ class TaskCurriculum:
 
         # Adaptive shifting: if a tier is mastered (>80%), shift weight to harder.
         # If a tier is too hard (<20%), shift weight to easier.
-        # Always keep some explore weight — discovery is the goal.
+        # Always keep some explore + project weight — discovery and building are the goals.
         if rates["easy"] > 0.8 and rates.get("hard", 0.5) < 0.3:
-            self.weights = {"easy": 0.15, "medium": 0.30, "hard": 0.35, "explore": 0.20}
+            self.weights = {"easy": 0.10, "medium": 0.25, "hard": 0.30, "explore": 0.15, "project": 0.20}
         elif rates["easy"] > 0.8:
-            self.weights = {"easy": 0.20, "medium": 0.35, "hard": 0.25, "explore": 0.20}
+            self.weights = {"easy": 0.15, "medium": 0.30, "hard": 0.20, "explore": 0.15, "project": 0.20}
         elif rates.get("hard", 0.5) < 0.2:
-            self.weights = {"easy": 0.45, "medium": 0.30, "hard": 0.10, "explore": 0.15}
+            self.weights = {"easy": 0.40, "medium": 0.25, "hard": 0.05, "explore": 0.15, "project": 0.15}
         elif rates.get("medium", 0.5) > 0.8:
-            self.weights = {"easy": 0.10, "medium": 0.25, "hard": 0.40, "explore": 0.25}
+            self.weights = {"easy": 0.05, "medium": 0.20, "hard": 0.30, "explore": 0.20, "project": 0.25}
         elif rates.get("explore", 0.5) > 0.6:
-            # Model is good at exploration — push it further
-            self.weights = {"easy": 0.10, "medium": 0.20, "hard": 0.30, "explore": 0.40}
+            # Model is good at exploration — push it toward projects
+            self.weights = {"easy": 0.05, "medium": 0.15, "hard": 0.20, "explore": 0.25, "project": 0.35}
+        elif rates.get("project", 0.5) > 0.5:
+            # Model is handling projects well — give it more
+            self.weights = {"easy": 0.10, "medium": 0.15, "hard": 0.20, "explore": 0.15, "project": 0.40}
         # Default: keep current weights
 
     def sample(self, n: int) -> list[tuple[str, str]]:
-        """Sample n tasks. Returns list of (tier, task_string)."""
+        """Sample n tasks. Returns list of (tier, task_string).
+
+        Deduplicates within a single sample call so the same task doesn't
+        appear twice in one epoch. If a tier has fewer tasks than needed,
+        allows repeats only after exhausting all unique tasks.
+        """
         tiers = self.rng.choices(self.tiers, weights=[self.weights[t] for t in self.tiers], k=n)
         result = []
+        used: set[str] = set()
         for tier in tiers:
-            task = self.rng.choice(self.tasks[tier])
+            available = [t for t in self.tasks[tier] if t not in used]
+            if not available:
+                # All tasks in this tier used — reset and allow repeats
+                available = self.tasks[tier]
+            task = self.rng.choice(available)
+            used.add(task)
             result.append((tier, task))
         return result
 
@@ -280,54 +401,93 @@ class TaskCurriculum:
 class ToolUseReward:
     """Multi-component reward for a tool-use trajectory.
 
-    Components:
-    - format_ok: Did the model emit valid JSON tool calls? (0..1)
-    - tool_executed: Did tools execute without errors? (0..1)
-    - output_quality: Did script outputs actually contain useful content? (0..1)
-    - task_completed: Did the trajectory actually accomplish the task? (0..1)
+    Uses multiplicative decomposition (ToolRLA, 2026):
+      total = format * selection * execution * completion * agentic_bonus
+
+    - format: Did the model emit valid JSON tool calls? (0..1)
+    - selection: Did the model choose appropriate tools for the task? (0..1)
+    - execution: Did tools execute without errors? (0..1)
+    - completion: Did the trajectory actually accomplish the task? (0..1)
     - answer_given: Did the model produce a final answer? (0..1)
     - answer_relevant: Is the answer relevant to the task? (0..1)
     - discovery: Did the model find/learn something new? (0..1)
     - stopped_ok: Did the model stop correctly after tools + answer? (0..1)
     - conciseness: Did the model keep output concise? (0..1)
+
+    Agentic bonus components (additive, capped at 0.3):
+    - error_recovery: Recovered from a failed tool call (Fission-GRPO)
+    - self_verification: Verified answer with a tool (SFS-DPO)
+    - planning: Used think before first tool call
+    - tool_diversity: Used multiple different tools
+    - efficiency_penalty: Penalize repeated identical calls (SearchMaster OOP)
     """
+    # Core multiplicative components (0..1 each)
     format_ok: float = 0.0
+    tool_selection: float = 0.5    # neutral default — appropriate tool choice
     tool_executed: float = 0.0
-    output_quality: float = 0.0    # scripts produced real output, searches found results
-    task_completed: float = 0.0    # trajectory actually solved the task
+    task_completed: float = 0.0
+
+    # Secondary components (used in completion scoring)
     answer_given: float = 0.0
     answer_relevant: float = 0.0
-    discovery: float = 0.0         # model explored new info, not just repeated
+    output_quality: float = 0.0
+    discovery: float = 0.0
     stopped_ok: float = 0.0
-    conciseness: float = 0.0       # reward shorter answers when task is done
+    conciseness: float = 0.0
+
+    # Agentic bonus components (additive, capped)
+    error_recovery: float = 0.0       # recovered from failure
+    self_verification: float = 0.0    # verified own answer
+    planning: float = 0.0             # thought before acting
+    tool_diversity: float = 0.0       # used diverse tools
+    efficiency_penalty: float = 0.0   # negative: repeated no-progress calls
+    math_reasoning: float = 0.0       # think-with-math: reasoned through math before verifying
 
     @property
     def total(self) -> float:
-        """Weighted sum. Task completion + output quality are most important.
-        Conciseness gives a small bonus for not rambling."""
-        return (
-            self.format_ok * 0.10 +
-            self.tool_executed * 0.15 +
-            self.output_quality * 0.20 +
-            self.task_completed * 0.20 +
-            self.answer_given * 0.08 +
-            self.answer_relevant * 0.10 +
-            self.discovery * 0.07 +
-            self.stopped_ok * 0.05 +
-            self.conciseness * 0.05
+        """Multiplicative core + additive agentic bonus.
+
+        Multiplicative: if ANY core component is 0, the core score is 0.
+        This encodes the priority: format → selection → execution → completion.
+        (ToolRLA, 2026: multiplicative beats additive by 7pp.)
+
+        Agentic bonus: added on top, capped at 0.3, can be negative (penalties).
+        """
+        core = (
+            self.format_ok *
+            self.tool_selection *
+            max(self.tool_executed, 0.1) *  # floor: no tools = 0.1, not 0
+            max(self.task_completed, 0.1)   # floor: partial completion
         )
+        agentic_bonus = min(
+            self.error_recovery * 0.15 +
+            self.self_verification * 0.10 +
+            self.planning * 0.05 +
+            self.tool_diversity * 0.05 +
+            self.math_reasoning * 0.15 +  # think-with-math: strong incentive
+            self.efficiency_penalty,  # already negative
+            0.3
+        )
+        return max(0.0, min(1.0, core + agentic_bonus))
 
     def to_dict(self) -> dict:
         return {
             "format_ok": self.format_ok,
+            "tool_selection": self.tool_selection,
             "tool_executed": self.tool_executed,
-            "output_quality": self.output_quality,
             "task_completed": self.task_completed,
             "answer_given": self.answer_given,
             "answer_relevant": self.answer_relevant,
+            "output_quality": self.output_quality,
             "discovery": self.discovery,
             "stopped_ok": self.stopped_ok,
             "conciseness": self.conciseness,
+            "error_recovery": self.error_recovery,
+            "self_verification": self.self_verification,
+            "planning": self.planning,
+            "tool_diversity": self.tool_diversity,
+            "efficiency_penalty": self.efficiency_penalty,
+            "math_reasoning": self.math_reasoning,
             "total": self.total,
         }
 
@@ -448,7 +608,7 @@ def _evaluate_search_output(task: str, tool_calls: list[dict]) -> float:
         # Results have substantive content
         substantive = sum(1 for r in results
                           if len(r.get("snippet", "")) > 20)
-        score += min(substantial / max(len(results), 1), 1.0) * 0.3
+        score += min(substantive / max(len(results), 1), 1.0) * 0.3
 
         # Results are relevant to the task
         task_words = set(re.findall(r'\b[a-z]{4,}\b', task.lower()))
@@ -465,41 +625,143 @@ def _evaluate_search_output(task: str, tool_calls: list[dict]) -> float:
     return sum(scores) / len(scores) if scores else 0.0
 
 
+def _safe_float(s: str) -> float | None:
+    """Safely parse a string to float, returning None on failure."""
+    try:
+        return float(s)
+    except (ValueError, OverflowError):
+        return None
+
+
+# Known ground-truth answers for deterministic math tasks.
+# (regex_pattern, expected_value, expected_string_in_answer)
+# This prevents false wins where the model writes a buggy script and
+# reports the wrong number (e.g. GCD=493731 when correct=21).
+_MATH_GROUND_TRUTHS: list[tuple[str, float, str]] = [
+    (r"2\^15|2\*\*15", 32768.0, "32768"),
+    (r"2\^20|2\*\*20", 1048576.0, "1048576"),
+    (r"2\^10|2\*\*10", 1024.0, "1024"),
+    (r"factorial of 8|8!", 40320.0, "40320"),
+    (r"factorial of 10|10!", 3628800.0, "3628800"),
+    (r"factorial of 12|12!", 479001600.0, "479001600"),
+    (r"factorial of 15|15!", 1307674368000.0, "1307674368000"),
+    (r"sum of (?:all )?even.*1 to 100|sum of even.*1.*100", 2550.0, "2550"),
+    (r"area of a circle.*radius 7|circle.*radius 7", 153.94, "153"),
+    (r"area of a circle.*radius 5|circle.*radius 5", 78.54, "78"),
+    (r"gcd.*48.*36|gcd.*36.*48", 12.0, "12"),
+    (r"gcd.*1071.*462|gcd.*462.*1071", 21.0, "21"),
+    (r"fibonacci.*\b10\b", 55.0, "55"),
+    (r"fibonacci.*\b20\b", 6765.0, "6765"),
+    (r"trailing zeros.*100\b|100.*trailing zeros", 24.0, "24"),
+    (r"15 \* 37|15\*37", 597.0, "597"),
+    (r"compound interest.*1000.*5%.*3 year", 1157.63, "1157"),
+    (r"percentage increase.*1\.5.*2\.0|1\.5 to 2\.0 degrees", 0.3333, "33.3"),
+    (r"100 / 7|100/7", 14.2857, "14.28"),
+    (r"square root of 144", 12.0, "12"),
+    (r"97 is prime|primality of 97|check if 97", 1.0, "prime"),
+    (r"tower of hanoi.*5 disk", 31.0, "31"),  # 2^5 - 1 = 31 moves
+]
+
+
+def _get_math_ground_truth(task: str) -> tuple[float, str] | None:
+    """Return (expected_value, expected_string) for a math task, or None.
+
+    Used to verify that script output and final answer match the known
+    correct answer, preventing false wins from buggy scripts.
+    """
+    task_lower = task.lower()
+    for pattern, value, expected_str in _MATH_GROUND_TRUTHS:
+        if re.search(pattern, task_lower):
+            return (value, expected_str)
+    return None
+
+
 def _evaluate_task_completion(task: str, tool_calls: list[dict],
                               final_answer: str | None) -> float:
-    """Judge whether the trajectory actually completed the task.
-
-    This is the hardest signal to compute automatically. We use heuristics:
-    - For calculation tasks: does the answer contain a number?
-    - For script tasks: did a script run successfully with output?
-    - For search tasks: did search return results AND model summarized them?
-    - For multi-step tasks: were multiple tools called in sequence?
-    - For instruction-following: does the answer meet the constraint?
-    """
     task_lower = task.lower()
     score = 0.0
 
-    # Calculation tasks
+    # Calculation tasks (includes think-with-math tasks that require calculation)
     if any(kw in task_lower for kw in ["calculate", "what is", "factorial",
                                         "square root", "gcd", "area",
-                                        "compound interest"]):
-        # Check if answer or script output contains a number
-        has_number = False
-        if final_answer and re.search(r'\d+\.?\d*', final_answer):
-            has_number = True
+                                        "compound interest", "2^", "2**",
+                                        "trailing zeros", "euclidean",
+                                        "sum of", "fibonacci", "prime",
+                                        "tower of hanoi", "probability",
+                                        "step by step about", "think through how to",
+                                        "think step by step"]):
+        # Extract the ground-truth answer from script output if available.
+        # The model may run a script to compute the answer — if so, verify
+        # the final_answer matches the script output. This prevents wrong
+        # answers from getting high rewards (e.g. GCD=493731 when correct=21).
+        script_numbers = []
         for tc in tool_calls:
-            if tc.get("name") in ("calculate", "run_script"):
+            if tc.get("name") in ("calculate", "run_script") and tc.get("success"):
                 result = tc.get("result", {})
                 if isinstance(result, dict):
-                    stdout = result.get("stdout", "")
-                    if re.search(r'\d+\.?\d*', stdout):
-                        has_number = True
+                    stdout = result.get("stdout", "").strip()
+                    # Extract all numbers from script output
+                    found = re.findall(r'\d+\.?\d*', stdout)
+                    script_numbers.extend(found)
+
+        # Extract numbers from the final answer
+        answer_numbers = []
+        if final_answer:
+            answer_numbers = re.findall(r'\d+\.?\d*', final_answer)
+
+        has_number = bool(answer_numbers) or bool(script_numbers)
         if has_number:
-            score += 0.5
+            score += 0.3  # reduced from 0.5 — having a number is necessary but not sufficient
+
+        # Ground-truth verification: for tasks with known deterministic answers,
+        # verify the script output matches the expected value. This catches
+        # cases where the model writes a buggy script (e.g. GCD=493731 when
+        # correct=21) and reports the wrong number — the answer matches the
+        # script, but the script itself is wrong.
+        ground_truth = _get_math_ground_truth(task)
+        if ground_truth is not None:
+            gt_val, gt_str = ground_truth
+            # Check if script output contains the correct answer
+            script_correct = any(
+                abs(float(s) - gt_val) < 0.01 * max(abs(gt_val), 1)
+                for s in script_numbers
+                if _safe_float(s) is not None
+            ) if script_numbers else False
+            # Check if final answer contains the correct answer
+            answer_correct = gt_str in (final_answer or "").lower() or any(
+                abs(float(a) - gt_val) < 0.01 * max(abs(gt_val), 1)
+                for a in answer_numbers
+                if _safe_float(a) is not None
+            ) if answer_numbers else False
+
+            if script_correct and answer_correct:
+                score += 0.4  # both script and answer are correct
+            elif answer_correct and not script_numbers:
+                score += 0.3  # answer correct, no script to verify
+            elif script_correct != answer_correct:
+                score -= 0.2  # one is right, other is wrong — inconsistent
+            else:
+                score -= 0.4  # both wrong — strong penalty for false win
+        elif script_numbers and answer_numbers:
+            # No known ground truth — fall back to answer-vs-script check
+            script_result = script_numbers[-1]
+            try:
+                s_val = float(script_result)
+                matched = any(abs(float(a) - s_val) < 0.01 * max(abs(s_val), 1)
+                              for a in answer_numbers)
+                if matched:
+                    score += 0.4  # answer verified against script output
+                else:
+                    score -= 0.3  # answer contradicts script output — penalize
+            except (ValueError, OverflowError):
+                score += 0.2  # can't verify, give partial
+        elif script_numbers and not answer_numbers:
+            score += 0.1  # script ran but model didn't report a number
+
         if final_answer and len(final_answer) > 5:
-            score += 0.3
+            score += 0.2  # reduced from 0.3
         if any(tc.get("success") for tc in tool_calls):
-            score += 0.2
+            score += 0.1  # reduced from 0.2
 
     # Script tasks
     elif "run" in task_lower and "script" in task_lower:
@@ -674,6 +936,277 @@ def _evaluate_discovery(task: str, tool_calls: list[dict],
     return min(score, 1.0)
 
 
+def _evaluate_error_recovery(tool_calls: list[dict]) -> float:
+    """Reward recovering from a failed tool call (Fission-GRPO, 2026).
+
+    Detects pattern: tool failed → model retried (same or different tool) → succeeded.
+    This is the key behavior that separates agents from chatbots.
+    """
+    if len(tool_calls) < 2:
+        return 0.0
+
+    recovery_score = 0.0
+    for i, tc in enumerate(tool_calls[:-1]):
+        if not tc.get("success"):
+            # This call failed — did a subsequent call succeed?
+            for later_tc in tool_calls[i+1:]:
+                if later_tc.get("success"):
+                    # Recovery! More credit if different tool or different args
+                    if later_tc.get("name") != tc.get("name"):
+                        recovery_score += 0.5  # switched tool — smart
+                    elif later_tc.get("args") != tc.get("args"):
+                        recovery_score += 0.3  # same tool, different args — good
+                    else:
+                        recovery_score += 0.1  # same call — less smart but still recovered
+                    break  # count first recovery per failure
+
+    return min(recovery_score, 1.0)
+
+
+def _evaluate_self_verification(tool_calls: list[dict],
+                                final_answer: str | None) -> float:
+    """Reward self-verification: model checked its own answer (SFS-DPO, 2026).
+
+    Detects: model produced output → then ran a script/search to verify.
+    Pattern: run_script/calculate after a non-tool answer, or after another tool.
+    """
+    if not tool_calls or not final_answer:
+        return 0.0
+
+    # Check if a verification tool was called AFTER other tools or answers
+    verify_tools = {"run_script", "calculate", "query_db"}
+    has_verify = any(tc.get("name") in verify_tools for tc in tool_calls)
+
+    # Check if verify tool was called AFTER another tool (not just first)
+    for i, tc in enumerate(tool_calls):
+        if tc.get("name") in verify_tools and i > 0:
+            # Called a verification tool after at least one other tool
+            return 1.0
+
+    # If only verification tools were called, partial credit
+    if has_verify:
+        return 0.3
+
+    return 0.0
+
+
+def _evaluate_planning(tool_calls: list[dict]) -> float:
+    """Reward planning: using think/sudo_think BEFORE the first action tool.
+
+    Teaches the model to reason before acting, not just react.
+    """
+    if not tool_calls:
+        return 0.0
+
+    think_tools = {"think", "sudo_think"}
+    action_tools = {"run_script", "web_search", "wikipedia_search",
+                    "arxiv_search", "calculate", "fetch_url"}
+
+    first_action_idx = None
+    first_think_idx = None
+
+    for i, tc in enumerate(tool_calls):
+        if tc.get("name") in action_tools and first_action_idx is None:
+            first_action_idx = i
+        if tc.get("name") in think_tools and first_think_idx is None:
+            first_think_idx = i
+
+    # Think before first action = full planning reward
+    if first_think_idx is not None and first_action_idx is not None:
+        if first_think_idx < first_action_idx:
+            return 1.0
+        elif first_think_idx == first_action_idx:
+            return 0.5
+
+    # Think at all = partial
+    if first_think_idx is not None:
+        return 0.3
+
+    return 0.0
+
+
+def _evaluate_tool_diversity(tool_calls: list[dict]) -> float:
+    """Reward using multiple DIFFERENT tools (not same tool repeatedly).
+
+    Tool diversity correlates with agentic problem-solving.
+    """
+    if not tool_calls:
+        return 0.0
+
+    unique_tools = set(tc.get("name") for tc in tool_calls)
+    n_unique = len(unique_tools)
+
+    if n_unique >= 4:
+        return 1.0
+    elif n_unique == 3:
+        return 0.7
+    elif n_unique == 2:
+        return 0.4
+    elif n_unique == 1:
+        return 0.1  # at least used a tool
+    return 0.0
+
+
+def _evaluate_efficiency_penalty(tool_calls: list[dict]) -> float:
+    """Penalize repeated identical tool calls with no progress (SearchMaster OOP, 2026).
+
+    Returns a NEGATIVE value (penalty).
+    """
+    if len(tool_calls) < 3:
+        return 0.0
+
+    penalty = 0.0
+
+    # Detect repeated identical calls (same name + same args)
+    call_signatures = []
+    for tc in tool_calls:
+        sig = (tc.get("name", ""), json.dumps(tc.get("args", {}), sort_keys=True))
+        call_signatures.append(sig)
+
+    # Count duplicates
+    from collections import Counter
+    sig_counts = Counter(call_signatures)
+    for sig, count in sig_counts.items():
+        if count >= 3:
+            penalty -= 0.1 * (count - 2)  # -0.1 per extra repeat beyond 2
+
+    # Penalize many calls with no successes
+    n_calls = len(tool_calls)
+    n_success = sum(1 for tc in tool_calls if tc.get("success"))
+    if n_calls >= 5 and n_success == 0:
+        penalty -= 0.15  # 5+ calls, all failed — flailing
+    elif n_calls >= 8 and n_success / n_calls < 0.3:
+        penalty -= 0.1  # many calls, low success rate
+
+    return max(penalty, -0.3)  # cap penalty at -0.3
+
+
+def _evaluate_math_reasoning(task: str, tool_calls: list[dict]) -> float:
+    """Reward think-with-math: model reasons through math before verifying.
+
+    Detects the pattern: think (with math content) → calculate/run_script
+    on math-related tasks. This is the key incentive for the model to learn
+    step-by-step mathematical reasoning rather than just guessing.
+
+    Scoring:
+    - 1.0: think before calculate/run_script, with numbers in think content
+    - 0.7: think before calculate/run_script, but no numbers in think
+    - 0.5: think after calculate (reflected on result)
+    - 0.3: any think on a math task
+    - 0.0: no think on a math task
+    """
+    if not tool_calls:
+        return 0.0
+
+    task_lower = task.lower()
+    math_keywords = ["calculate", "factorial", "gcd", "prime", "fibonacci",
+                     "square root", "area", "compound", "sum", "product",
+                     "probability", "combinatorics", "matrix", "exponential",
+                     "trailing zeros", "euclidean", "induction", "paradox",
+                     "tower of hanoi", "2^", "step by step"]
+    is_math_task = any(kw in task_lower for kw in math_keywords)
+    if not is_math_task:
+        return 0.0
+
+    think_tools = {"think", "sudo_think"}
+    math_tools = {"calculate", "run_script"}
+
+    think_indices = [i for i, tc in enumerate(tool_calls)
+                     if tc.get("name") in think_tools]
+    math_indices = [i for i, tc in enumerate(tool_calls)
+                    if tc.get("name") in math_tools]
+
+    if not think_indices:
+        return 0.0
+
+    if not math_indices:
+        # Think used on math task but no verification tool — partial
+        return 0.3
+
+    first_think = think_indices[0]
+    first_math = math_indices[0]
+
+    # Check if think content contains numbers (actual math reasoning)
+    has_numbers_in_think = False
+    for i in think_indices:
+        args = tool_calls[i].get("args", {})
+        content = args.get("content", "") if isinstance(args, dict) else str(args)
+        if re.search(r'\d+\.?\d*', content):
+            has_numbers_in_think = True
+            break
+
+    # Think BEFORE math tool = best (reasoning then verification)
+    if first_think < first_math:
+        return 1.0 if has_numbers_in_think else 0.7
+
+    # Think AFTER math tool = reflected on result
+    return 0.5
+
+
+def _evaluate_tool_selection(task: str, tool_calls: list[dict]) -> float:
+    """Evaluate whether the model chose appropriate tools for the task.
+
+    Checks if the tools used match the task type.
+    """
+    if not tool_calls:
+        return 0.3  # no tools but answered — neutral
+
+    task_lower = task.lower()
+    tool_names = set(tc.get("name") for tc in tool_calls)
+
+    score = 0.5  # base: used tools
+
+    # Calculation tasks should use calculate or run_script
+    if any(kw in task_lower for kw in ["calculate", "what is", "factorial",
+                                        "square root", "gcd", "area"]):
+        if "calculate" in tool_names or "run_script" in tool_names:
+            score = 1.0
+        elif any(t in tool_names for t in ["think", "sudo_think"]):
+            score = 0.4  # thought but didn't compute
+
+    # Search tasks should use web_search, wikipedia_search, or arxiv_search
+    elif any(kw in task_lower for kw in ["search", "research", "find",
+                                          "look up", "investigate"]):
+        if any(t in tool_names for t in ["web_search", "wikipedia_search",
+                                          "arxiv_search", "fetch_url"]):
+            score = 1.0
+        elif "run_script" in tool_names:
+            score = 0.5  # tried scripting instead of searching
+
+    # Script tasks should use run_script
+    elif "run" in task_lower and "script" in task_lower:
+        if "run_script" in tool_names:
+            score = 1.0
+
+    # Think tasks should use think/sudo_think
+    elif "think" in task_lower:
+        if any(t in tool_names for t in ["think", "sudo_think"]):
+            score = 1.0
+
+    # Build/make/create tasks should use run_script
+    elif any(kw in task_lower for kw in ["build", "make", "create",
+                                          "implement", "write a", "design"]):
+        if "run_script" in tool_names:
+            score = 1.0
+
+    # Multi-step tasks should use multiple tools
+    elif "then" in task_lower or "first" in task_lower:
+        if len(tool_names) >= 2:
+            score = 1.0
+        elif len(tool_names) == 1:
+            score = 0.5
+
+    # Project/explore tasks: reward diverse tool use
+    elif any(kw in task_lower for kw in ["explore", "experiment", "benchmark",
+                                          "test", "improve", "design"]):
+        if len(tool_names) >= 3:
+            score = 1.0
+        elif len(tool_names) >= 2:
+            score = 0.7
+
+    return score
+
+
 def compute_reward(task: str, tool_calls: list[dict],
                    final_answer: str | None,
                    stopped_after_tools: bool,
@@ -681,31 +1214,42 @@ def compute_reward(task: str, tool_calls: list[dict],
                    seen_outputs: set | None = None) -> ToolUseReward:
     """Compute multi-component reward for a tool-use trajectory.
 
+    Uses multiplicative decomposition for core components (ToolRLA, 2026)
+    plus additive agentic bonuses (Fission-GRPO, SFS-DPO, SearchMaster).
+
     Args:
         seen_outputs: optional set for tracking novel outputs across sessions.
-                      Updated in-place with new outputs.
     """
     r = ToolUseReward()
+
+    # ── Core multiplicative components ──────────────────────────────
 
     # Format: did all tool calls parse as valid JSON?
     if tool_calls:
         r.format_ok = 1.0
     elif final_answer and not tool_calls:
-        r.format_ok = 0.3
+        r.format_ok = 0.3  # answered without tools — partial format
+
+    # Tool selection: did the model choose appropriate tools?
+    r.tool_selection = _evaluate_tool_selection(task, tool_calls)
 
     # Tool execution: did tools execute successfully?
     if tool_calls:
         successes = sum(1 for tc in tool_calls if tc.get("success"))
         r.tool_executed = successes / len(tool_calls)
+    else:
+        r.tool_executed = 0.1  # floor: no tools = 0.1
 
-    # Output quality: did scripts/searches produce useful content?
+    # Task completion: did the trajectory actually solve the task?
+    r.task_completed = _evaluate_task_completion(task, tool_calls, final_answer)
+
+    # ── Secondary components (for logging/analysis) ─────────────────
+
+    # Output quality
     r.output_quality = max(
         _evaluate_script_output(task, tool_calls),
         _evaluate_search_output(task, tool_calls),
     )
-
-    # Task completion: did the trajectory actually solve the task?
-    r.task_completed = _evaluate_task_completion(task, tool_calls, final_answer)
 
     # Answer given
     r.answer_given = 1.0 if final_answer and len(final_answer) > 5 else 0.0
@@ -713,7 +1257,7 @@ def compute_reward(task: str, tool_calls: list[dict],
     # Answer relevance
     r.answer_relevant = _check_answer_relevance(task, final_answer or "")
 
-    # Discovery: did the model find/explore new things?
+    # Discovery
     r.discovery = _evaluate_discovery(task, tool_calls, final_answer, seen_outputs)
 
     # Stopped correctly
@@ -722,9 +1266,7 @@ def compute_reward(task: str, tool_calls: list[dict],
     elif stopped_after_tools or stopped_after_answer:
         r.stopped_ok = 0.5
 
-    # Conciseness: reward shorter final answers when task is completed.
-    # Only applies when the task was actually solved — don't reward brevity
-    # over correctness. Target: <50 tokens for the final answer.
+    # Conciseness
     if r.task_completed > 0.5 and final_answer:
         ans_tokens = len(final_answer.split())
         if ans_tokens <= 20:
@@ -733,6 +1275,26 @@ def compute_reward(task: str, tool_calls: list[dict],
             r.conciseness = 0.5
         elif ans_tokens <= 100:
             r.conciseness = 0.2
+
+    # ── Agentic bonus components (additive, research-backed) ────────
+
+    # Error recovery: model recovered from a failed tool call (Fission-GRPO)
+    r.error_recovery = _evaluate_error_recovery(tool_calls)
+
+    # Self-verification: model verified its own answer (SFS-DPO)
+    r.self_verification = _evaluate_self_verification(tool_calls, final_answer)
+
+    # Planning: model thought before acting
+    r.planning = _evaluate_planning(tool_calls)
+
+    # Tool diversity: used multiple different tools
+    r.tool_diversity = _evaluate_tool_diversity(tool_calls)
+
+    # Math reasoning: think-with-math pattern (think → verify on math tasks)
+    r.math_reasoning = _evaluate_math_reasoning(task, tool_calls)
+
+    # Efficiency penalty: repeated identical calls (SearchMaster OOP)
+    r.efficiency_penalty = _evaluate_efficiency_penalty(tool_calls)
 
     return r
 
@@ -743,10 +1305,10 @@ def compute_reward(task: str, tool_calls: list[dict],
 class SelfPlayConfig:
     max_turns: int = 10          # max tool-call turns (increased for R&D freedom)
     max_gen_tokens: int = 512    # per-turn generation limit (increased for reasoning)
-    temperature: float = 0.2     # LFM2.5-recommended (low for tool use)
+    temperature: float = 0.5     # higher temp for tool-call exploration
     top_k: int = 80              # LFM2.5-recommended top-k sampling
     repetition_penalty: float = 1.05  # LFM2.5-recommended repetition penalty
-    min_reward: float = 0.4      # minimum reward to save trajectory
+    min_reward: float = 0.25     # lowered to collect early-phase trajectories
     n_tasks: int = 20            # tasks per session
     device: str = "cuda"
 
@@ -817,9 +1379,12 @@ class ToolUseSelfPlay:
                 device=cfg.device,
             )
             engine.activate(
-                kv_cache="standard",
-                decoding="standard",
-                use_triton_conv=True,
+                kv_cache="hadamard_int4",   # 4x KV compression (near-lossless)
+                decoding="mtp_selfspec",    # self-speculative decode via MTP heads
+                use_triton_conv=True,       # fused Triton conv kernels
+                use_prefix_cache=True,      # cache KV for repeated prompt prefixes
+                use_spec_attn=True,         # L1 speculative attention (57% attn compute cut)
+                kv_cache_tokens=4096,       # limit KV allocation to 4K tokens
                 warmup=True,
             )
             return cls(db=db, config=cfg, engine=engine)
@@ -849,13 +1414,18 @@ class ToolUseSelfPlay:
         return registry, tools
 
     def run_task(self, task: str, registry: ToolRegistry,
-                 tools: list[dict]) -> dict:
+                 tools: list[dict], tier: str = "flat") -> dict:
         """Run a single task through the agentic loop.
 
         Returns: {messages, tool_calls, reward, final_answer, ...}
         """
         cfg = self.config
-        messages = [{"role": "user", "content": task}]
+        # Project tasks need more turns for multi-step building
+        max_turns = cfg.max_turns * 2 if tier == "project" else cfg.max_turns
+        messages = [
+            {"role": "system", "content": _FORGE_SYSTEM},
+            {"role": "user", "content": task},
+        ]
         tool_call_records = []  # {name, args, result, success}
         final_answer = None
         stopped_after_tools = False
@@ -863,15 +1433,17 @@ class ToolUseSelfPlay:
 
         # Context manager for long conversations
         from research.self_play.discovery.context_manager import ContextManager, ContextManagerConfig
+        # Project tasks need more context retained for multi-step building
+        keep_recent = 10 if tier == "project" else 6
         ctx_config = ContextManagerConfig(
             max_seq_len=32768,
             reserved_for_generation=cfg.max_gen_tokens + 512,
-            keep_recent_turns=6,
+            keep_recent_turns=keep_recent,
             use_model_summary=False,  # heuristic for speed
         )
         ctx_manager = ContextManager(ctx_config, tokenizer=self.tokenizer)
 
-        for turn in range(cfg.max_turns):
+        for turn in range(max_turns):
             # Compress context if approaching token budget
             messages, was_compressed = ctx_manager.maybe_compress(messages)
             if was_compressed:
@@ -944,9 +1516,24 @@ class ToolUseSelfPlay:
             # Add ONE assistant message with ALL tool calls, then tool results
             messages.append({"role": "assistant", "content": None,
                              "tool_calls": tc_for_msg})
+            had_error = False
             for tc, result in zip(tc_for_msg, tool_results):
+                content = json.dumps(result, ensure_ascii=False)[:4000]
                 messages.append({"role": "tool", "name": tc["name"],
-                                 "content": json.dumps(result, ensure_ascii=False)[:2000]})
+                                 "content": content})
+                if isinstance(result, dict) and "error" in result:
+                    had_error = True
+
+            # Auto-reflection nudge after tool errors (Fission-GRPO inspired)
+            # Inject a system message encouraging the model to think about
+            # what went wrong and try a different approach
+            if had_error and turn < max_turns - 1:
+                messages.append({
+                    "role": "system",
+                    "content": "A tool returned an error. Use the think tool to "
+                               "analyze what went wrong, then try a different "
+                               "approach or different arguments."
+                })
 
         # Compute reward
         reward = compute_reward(
@@ -970,9 +1557,11 @@ class ToolUseSelfPlay:
         }
 
     def run_session(self, n_tasks: int | None = None,
-                    curriculum: TaskCurriculum | None = None) -> dict:
+                    curriculum: TaskCurriculum | None = None,
+                    custom_tasks: list[str] | None = None) -> dict:
         """Run a self-play session with multiple tasks.
 
+        If custom_tasks is provided, uses those directly (model-generated goals).
         If curriculum is provided, uses adaptive difficulty sampling.
         Otherwise, uses the flat _TASKS list (backward compat).
 
@@ -986,7 +1575,9 @@ class ToolUseSelfPlay:
         registry, tools = self._build_tools(session_id)
 
         # Sample tasks
-        if curriculum is not None:
+        if custom_tasks is not None:
+            tasks_with_tier = [("generated", t) for t in custom_tasks[:n]]
+        elif curriculum is not None:
             sampled = curriculum.sample(n)
             tasks_with_tier = [(tier, task) for tier, task in sampled]
         else:
@@ -997,7 +1588,7 @@ class ToolUseSelfPlay:
         t0 = time.time()
 
         for i, (tier, task) in enumerate(tasks_with_tier):
-            result = self.run_task(task, registry, tools)
+            result = self.run_task(task, registry, tools, tier=tier)
             results.append(result)
 
             # Record outcome in curriculum

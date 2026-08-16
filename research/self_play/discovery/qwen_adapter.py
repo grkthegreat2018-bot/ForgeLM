@@ -283,16 +283,21 @@ def qwen_generate(model, tokenizer, prompt: str, max_new_tokens: int = 256,
             next_logits = logits[:, -1, :] / max(temperature, 1e-5)
 
             # Apply xgrammar bitmask only when in constrained mode.
-            # Preserve skip-list token logits so structural tokens (end marker,
-            # newlines) can still be sampled despite the JSON grammar mask.
+            # Structural tokens (end marker, newlines) are ONLY un-masked when
+            # the JSON grammar is complete. If they're always un-masked, the
+            # model emits <|tool_call_end|> or newline spam mid-JSON and the
+            # tool call becomes unparseable (epoch-3 collapse: 50/50 tasks
+            # with 0 tools because the JSON was garbage).
             if constrained and grammar_matcher is not None and bitmask is not None:
                 import xgrammar as xgr
                 grammar_matcher.fill_next_token_bitmask(bitmask)
-                # Save skip-list logits before masking
+                # Save skip-list logits before masking — only when grammar done
                 skip_logits = {}
-                for sid in skip_token_ids:
-                    if 0 <= sid < next_logits.shape[-1]:
-                        skip_logits[sid] = next_logits[:, sid].clone()
+                grammar_done = grammar_matcher.is_terminated()
+                if grammar_done:
+                    for sid in skip_token_ids:
+                        if 0 <= sid < next_logits.shape[-1]:
+                            skip_logits[sid] = next_logits[:, sid].clone()
                 xgr.apply_token_bitmask_inplace(next_logits, bitmask)
                 # Restore skip-list logits (un-mask structural tokens)
                 for sid, val in skip_logits.items():
@@ -360,8 +365,10 @@ def _get_xgr_compiler(tokenizer) -> xgr.GrammarCompiler:
         # Load a fresh HF tokenizer for xgrammar (gigatoken wrapper not supported)
         from transformers import AutoTokenizer
         hf_tok = AutoTokenizer.from_pretrained("research/checkpoints/lfm25_tokenizer")
+        # Pass vocab_size=65536 to match model config (tokenizer has 64416)
+        # This ensures the bitmask covers all model logits
         _xgr_tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            hf_tok, stop_token_ids=[7])
+            hf_tok, vocab_size=65536, stop_token_ids=[7])
         _xgr_compiler = xgr.GrammarCompiler(_xgr_tokenizer_info)
     return _xgr_compiler
 
@@ -418,6 +425,23 @@ def make_grammar_logits_processor(grammar_matcher, bitmask, tokenizer):
 
     def logits_processor(next_logits: torch.Tensor,
                          generated_ids: list[int]) -> torch.Tensor:
+        # FIRST accept the previous token into the grammar matcher, so the
+        # bitmask for the NEXT token reflects the full state. Doing this
+        # after fill_next_token_bitmask leaves the mask one step stale and
+        # lets the model re-emit tokens it already generated (garbage like
+        # {"{"namename"") — only visible when the model emits the real
+        # <|tool_call_start|> special token (id 10).
+        if state["constrained"] and generated_ids and grammar_matcher is not None:
+            last_tok = generated_ids[-1]
+            if last_tok == TOOL_CALL_END_FIRST_ID:
+                # End marker → back to free text
+                state["constrained"] = False
+            elif last_tok not in skip_token_ids and last_tok != TOOL_CALL_START_FIRST_ID:
+                try:
+                    grammar_matcher.accept_token(last_tok)
+                except Exception:
+                    pass  # grammar mismatch — let it slide
+
         # Check if we just entered a tool call (last token was start marker)
         if generated_ids and not state["constrained"]:
             if generated_ids[-1] == TOOL_CALL_START_FIRST_ID:
@@ -426,34 +450,24 @@ def make_grammar_logits_processor(grammar_matcher, bitmask, tokenizer):
         if not state["constrained"]:
             return next_logits
 
-        # In constrained mode: apply grammar bitmask
+        # In constrained mode: apply grammar bitmask (state is now current)
         if grammar_matcher is not None and bitmask is not None:
             grammar_matcher.fill_next_token_bitmask(bitmask)
             # Move bitmask to same device as logits (xgrammar allocates on CPU)
             bitmask_dev = bitmask.to(next_logits.device)
-            # Save skip-list logits before masking
+            # Save skip-list logits before masking — only when grammar done.
+            # If always un-masked, model emits newline spam or the end marker
+            # mid-JSON, making the tool call unparseable.
             skip_logits = {}
-            for sid in skip_token_ids:
-                if 0 <= sid < next_logits.shape[-1]:
-                    skip_logits[sid] = next_logits[:, sid].clone()
+            grammar_done = grammar_matcher.is_terminated()
+            if grammar_done:
+                for sid in skip_token_ids:
+                    if 0 <= sid < next_logits.shape[-1]:
+                        skip_logits[sid] = next_logits[:, sid].clone()
             xgr.apply_token_bitmask_inplace(next_logits, bitmask_dev)
             # Restore skip-list logits
             for sid, val in skip_logits.items():
                 next_logits[:, sid] = val
-
-        # Check if last token was end marker → exit constrained mode
-        if generated_ids and generated_ids[-1] == TOOL_CALL_END_FIRST_ID:
-            state["constrained"] = False
-            return next_logits
-
-        # Accept last token in grammar matcher (skip structural tokens)
-        if generated_ids and grammar_matcher is not None:
-            last_tok = generated_ids[-1]
-            if last_tok not in skip_token_ids and last_tok != TOOL_CALL_START_FIRST_ID:
-                try:
-                    grammar_matcher.accept_token(last_tok)
-                except Exception:
-                    pass  # grammar mismatch — let it slide
 
         return next_logits
 

@@ -69,6 +69,8 @@ from research.training.training_utils import (
     init_ema,
     update_ema,
     patch_triton_cache_for_windows,
+    ram_exceeded,
+    ram_usage,
     vram_exceeded,
     write_heartbeat,
     write_status_json,
@@ -234,7 +236,11 @@ def load_examples(paths: list[str]) -> list[dict]:
                     if key in seen:
                         continue
                     seen.add(key)
-                    examples.append({"type": "multi_turn", "messages": obj["messages"]})
+                    ex = {"type": "multi_turn", "messages": obj["messages"]}
+                    # Carry reward for reward-weighted SFT (if present)
+                    if "reward" in obj:
+                        ex["reward"] = float(obj["reward"])
+                    examples.append(ex)
                     n_loaded += 1
                 elif "prompt" in obj and "response" in obj:
                     key = obj["prompt"][:200]
@@ -325,12 +331,20 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
 
 
 # Tokenization cache — avoids re-tokenizing repeated prompts (2-3x speedup)
+# Bounded LRU cache: evicts oldest entries when exceeding _CACHE_MAX entries.
 _tokenize_cache: dict[str, list[int]] = {}
+_CACHE_MAX = 10000  # max 10K entries (~50MB typical)
 
 def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None:
-    """Tokenize text with caching. Returns None on error."""
+    """Tokenize text with caching. Returns None on error.
+
+    Uses a bounded dict with manual LRU eviction to prevent unbounded RAM growth.
+    """
     if text in _tokenize_cache:
-        return _tokenize_cache[text]
+        # Move to end (most recently used) by re-inserting
+        val = _tokenize_cache.pop(text)
+        _tokenize_cache[text] = val
+        return val
     try:
         enc = tokenizer(text, add_special_tokens=False, return_tensors=None)
         ids = enc["input_ids"] if isinstance(enc, dict) else enc
@@ -338,6 +352,9 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
             ids = list(ids)
         # Only cache if reasonable size (don't blow up memory)
         if len(text) < 10000:
+            # Evict oldest entries if cache is full
+            while len(_tokenize_cache) >= _CACHE_MAX:
+                _tokenize_cache.pop(next(iter(_tokenize_cache)))
             _tokenize_cache[text] = ids
         return ids
     except Exception:
@@ -382,14 +399,15 @@ def tokenize_example(ex: dict, tokenizer, max_seq_len: int) -> list[dict]:
             labels.append(-100)
 
         results.append({"input_ids": input_ids, "labels": labels,
-                        "n_comp": len(input_ids) - comp_start_tok})
+                        "n_comp": len(input_ids) - comp_start_tok,
+                        "reward": ex.get("reward", 1.0)})
     return results
 
 
-def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Left-pad a batch of variable-length examples.
 
-    Returns (input_ids, labels, attention_mask) all [B, T].
+    Returns (input_ids, labels, attention_mask, reward_weights) all [B, T] or [B].
     Left-padding keeps the completion at the end so causal LM predicts correctly.
     Uses pin_memory when transferring to GPU for faster H2D copy.
     """
@@ -398,12 +416,14 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
     input_ids = torch.full((b, max_len), pad_id, dtype=torch.long)
     labels = torch.full((b, max_len), -100, dtype=torch.long)
     attn_mask = torch.zeros((b, max_len), dtype=torch.long)
+    reward_weights = torch.ones(b, dtype=torch.float32)
     for i, ex in enumerate(batch):
         n = len(ex["input_ids"])
         offset = max_len - n  # left-pad
         input_ids[i, offset:] = torch.tensor(ex["input_ids"], dtype=torch.long)
         labels[i, offset:] = torch.tensor(ex["labels"], dtype=torch.long)
         attn_mask[i, offset:] = 1
+        reward_weights[i] = ex.get("reward", 1.0)
     # Use pin_memory + non_blocking for faster CPU→GPU transfer
     use_pin = "cuda" in device and torch.cuda.is_available()
     if use_pin:
@@ -412,7 +432,8 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
         attn_mask = attn_mask.pin_memory()
     return (input_ids.to(device, non_blocking=use_pin),
             labels.to(device, non_blocking=use_pin),
-            attn_mask.to(device, non_blocking=use_pin))
+            attn_mask.to(device, non_blocking=use_pin),
+            reward_weights.to(device, non_blocking=use_pin))
 
 
 # ── Training loop ────────────────────────────────────────────────────────────
@@ -424,24 +445,50 @@ def compute_loss(model, input_ids, labels, attn_mask,
 
     The model's forward(targets=...) computes mean CE over ALL non-ignored
     positions. We pass labels as targets with -100 for masked positions, so
-    only completion tokens contribute. We use the standard CE path (not
-    chunked) since our batch is small and we need per-position control.
+    only completion tokens contribute.
 
-    Anti-regression extensions:
+    Memory-optimized fast path: when entropy_alpha=0 and no sample_weights,
+    we pass targets directly to the model forward, which activates the chunked
+    CE path (chunked_linear_cross_entropy). This avoids materializing the full
+    [B, T, V] logits tensor — saving ~1 GB at batch=4/seq=1024/vocab=65536.
+
+    Anti-regression extensions (require the manual logits path):
       - Token Entropy Weighting (WeFT/VCORE 2025): when entropy_alpha > 0,
         per-token CE is scaled by (1 + alpha * normalized_entropy), giving
         MORE weight to high-entropy (reasoning/uncertain) tokens and LESS
-        to low-entropy (boilerplate) tokens. Works with the existing chunked
-        CE path since we compute logits manually here.
+        to low-entropy (boilerplate) tokens.
       - Easy Sample Upweighting (ICML 2025): when sample_weights is provided
         (pre-computed from base model loss), per-example loss is scaled by
         weight = 1/(1+base_loss), so easy samples get higher weight.
     """
+    # ── Fast path: chunked CE (no logits materialization) ──
+    # Used when no per-token/per-example weighting is needed. The model's
+    # forward(targets=labels) computes the loss internally via
+    # chunked_linear_cross_entropy, never materializing [B, T, V] logits.
+    if entropy_alpha == 0.0 and sample_weights is None:
+        # Shift labels for causal LM: hidden[i] predicts token i+1.
+        # Pad with -100 to match hidden [B, T] (last position has no target).
+        shift_labels = labels[:, 1:].contiguous()
+        pad = torch.full((shift_labels.size(0), 1), -100,
+                         dtype=shift_labels.dtype, device=shift_labels.device)
+        shift_labels = torch.cat([shift_labels, pad], dim=1)  # [B, T]
+        out = model(input_ids, attention_mask=attn_mask, targets=shift_labels)
+        if isinstance(out, tuple):
+            loss = out[1] if out[1] is not None else out[0]
+        else:
+            loss = out
+        if loss is None:
+            # Model didn't use chunked CE (use_chunked_ce=False); fall through
+            # to the manual path below.
+            pass
+        else:
+            return loss
+
+    # ── Manual path: full logits for per-position control ──
     # Forward — compute logits manually for full per-position control.
     out = model(input_ids, attention_mask=attn_mask)
     logits = out[0] if isinstance(out, tuple) else out  # [B, T, V]
     if logits is None:
-        # Chunked CE path was used — shouldn't happen since we don't pass targets.
         raise RuntimeError("model returned None logits; pass targets manually")
     # Shift: predict token t+1 from position t.
     shift_logits = logits[:, :-1, :].contiguous()  # [B, T-1, V]
@@ -537,7 +584,7 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
     with torch.no_grad():
         for i in range(0, len(dataset), batch_size):
             batch = [dataset[j] for j in range(i, min(i + batch_size, len(dataset)))]
-            input_ids, labels, attn_mask = collate_batch(batch, pad_id, device)
+            input_ids, labels, attn_mask, _rw = collate_batch(batch, pad_id, device)
             loss = compute_loss(model, input_ids, labels, attn_mask)
             # Per-example loss is the mean CE for this batch (batch_size=1 typically).
             w = 1.0 / (1.0 + loss.item())
@@ -663,10 +710,10 @@ def main():
     cfg.grad_clip = args.grad_clip
     if args.grad_checkpoint:
         cfg.use_gradient_checkpointing = True
-    elif args.batch_size > 2 or args.seq_len > 2048:
-        # Auto-enable gradient checkpointing for large configs on 12GB VRAM
+    elif args.batch_size > 8 or args.seq_len > 4096:
+        # Auto-enable gradient checkpointing only for very large configs
         cfg.use_gradient_checkpointing = True
-        print("Auto-enabled gradient checkpointing (batch>2 or seq>2048)")
+        print("Auto-enabled gradient checkpointing (batch>8 or seq>4096)")
     # Use chunked CE to save VRAM on the 65K vocab.
     cfg.use_chunked_ce = True
     cfg.ce_chunk_size = 128
@@ -677,15 +724,18 @@ def main():
 
     # ── LoRA (PEFT) ──
     if args.lora:
-        from peft import LoraConfig, get_peft_model, TaskType
+        from peft import LoraConfig, get_peft_model
         lora_cfg = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"],
+            # LFM2.5 module names: attn uses out_proj (not o_proj),
+            # ffn uses w_gate/w_up/w_down (not gate_proj/up_proj/down_proj).
+            # No task_type — ConfigurableResearchLLM is not an HF model;
+            # we only train + merge, no generation through PEFT wrapper.
+            target_modules=["q_proj", "k_proj", "v_proj", "out_proj",
+                            "w_gate", "w_up", "w_down"],
             lora_dropout=0.0,
             bias="none",
-            task_type=TaskType.CAUSAL_LM,
         )
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
@@ -694,7 +744,12 @@ def main():
             param.requires_grad_(True)
 
     if args.grad_checkpoint:
-        model.gradient_checkpointing_enable() if hasattr(model, "gradient_checkpointing_enable") else None
+        # ConfigurableResearchLLM uses enable_gradient_checkpointing (not HF's
+        # gradient_checkpointing_enable). The config flag path above already
+        # enabled it via cfg.use_gradient_checkpointing, but call the method
+        # explicitly too in case the model was built before the flag was set.
+        if hasattr(model, "enable_gradient_checkpointing"):
+            model.enable_gradient_checkpointing()
 
     # ── torch.compile (experimental) ──
     if args.compile:
@@ -767,15 +822,49 @@ def main():
                     aborted = True
                     break
 
+                # ── RAM safeguard (psutil) ──
+                # Prevents OOMKilled / freezing / stuttering from host memory pressure.
+                # Throttle at threshold%, emergency save at threshold+10%.
+                if ram_exceeded(args.ram_limit_percent):
+                    ru = ram_usage()
+                    emergency_pct = args.ram_limit_percent + 10
+                    if ru.get("percent", 0) > emergency_pct:
+                        print(f"RAM critical ({ru.get('percent', 0):.0f}%); emergency save + abort.")
+                        emergency_save(model, args.save, "emergency", step, optimizer=optimizer)
+                        aborted = True
+                        break
+                    else:
+                        print(f"RAM high ({ru.get('percent', 0):.0f}%); gc.collect() + skip batch.")
+                        import gc
+                        gc.collect()
+                        continue  # skip this batch, try next
+
+                # ── Periodic gc.collect() to prevent memory fragmentation ──
+                if step > 0 and step % 100 == 0:
+                    import gc
+                    gc.collect()
+
                 batch_idx = indices[batch_start:batch_start + args.batch_size]
                 batch = [dataset[i] for i in batch_idx]
-                input_ids, labels, attn_mask = collate_batch(batch, pad_id, device)
+                input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
 
                 # ── Easy Sample Upweighting (ICML 2025) ──
                 # Get pre-computed sample weights for this batch (if enabled).
                 sw = None
                 if sample_weights is not None:
                     sw = sample_weights[batch_idx].to(device)
+
+                # ── Reward-Weighted SFT ──
+                # Weight per-example loss by trajectory reward (if present).
+                # High-reward trajectories get more weight, low-reward get less.
+                # reward_weights is [B] with values in [0, 1]; normalize to mean=1.
+                rw = reward_weights
+                if rw.max() > 0:
+                    rw = rw / rw.mean().clamp(min=1e-8)  # normalize mean=1
+                    if sw is not None:
+                        sw = sw * rw  # combine with easy-sample weights
+                    else:
+                        sw = rw
 
                 # Forward + backward (accumulate gradients).
                 # Token entropy weighting (WeFT/VCORE 2025) applied inside compute_loss.
@@ -848,6 +937,13 @@ def main():
                 from research.training.training_utils import restore_ema
                 restore_ema(ema_state, model)
                 print("Restored EMA weights for final save.")
+            # If LoRA enabled, merge adapter weights into base model so the
+            # saved checkpoint is a standalone full model (no PEFT dependency
+            # needed for inference). This is the standard approach for
+            # self-play loops where the next epoch loads from a plain checkpoint.
+            if args.lora and hasattr(model, "merge_and_unload"):
+                model = model.merge_and_unload()
+                print("Merged LoRA adapters into base model for standalone save.")
             save_training_checkpoint(model, args.save, optimizer=optimizer, step=step,
                                      meta={"config": cfg.__dict__, "sft": True,
                                            "n_examples": len(dataset)})

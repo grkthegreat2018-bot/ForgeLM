@@ -33,33 +33,44 @@ class ChunkedLinearCrossEntropy(Function):
         N, H = x.shape
         V = weight.shape[0]
         device = x.device
+        ignore_index = -100
 
         grad_input = torch.zeros_like(x) if x.requires_grad else None
         grad_weight = torch.zeros_like(weight) if weight.requires_grad else None
         loss_total = torch.zeros((), device=device, dtype=torch.float32)
+        n_valid = 0  # count of non-ignored tokens for mean reduction
 
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
             x_chunk = x[start:end]                          # [cs, H]
             target_chunk = target[start:end]                # [cs]
 
+            # Mask for non-ignored tokens (target != ignore_index)
+            valid_mask = target_chunk != ignore_index       # [cs]
+            n_valid_chunk = valid_mask.sum().item()
+            n_valid += n_valid_chunk
+
             # Materialize logits only for this chunk: [cs, V]
             logits_chunk = x_chunk @ weight.t()
+            # F.cross_entropy handles ignore_index=-100 by default
             loss_chunk = F.cross_entropy(
                 logits_chunk.float(), target_chunk, reduction="sum"
             )
             loss_total = loss_total + loss_chunk
 
             if x.requires_grad:
-                # grad_logits = softmax(logits) - one_hot(target), then / N for mean
+                # grad_logits = softmax(logits) - one_hot(target), then / n_valid for mean
                 with torch.no_grad():
                     probs = F.softmax(logits_chunk.float(), dim=-1)  # [cs, V]
                     # Subtract 1 at target positions (gradient of CE w.r.t. logits)
+                    # Only for non-ignored tokens; use clamped index to avoid OOB.
+                    safe_target = target_chunk.clamp(min=0)  # -100 → 0 (will be masked)
                     probs.scatter_add_(
-                        1, target_chunk.unsqueeze(1),
+                        1, safe_target.unsqueeze(1),
                         torch.full_like(probs[:, :1], -1.0),
                     )
-                    probs = probs / N  # mean reduction
+                    # Zero out gradients for ignored positions
+                    probs = probs * valid_mask.unsqueeze(1).to(probs.dtype)
 
                 # grad_input_chunk = grad_logits @ weight  → [cs, H]
                 grad_input[start:end] = probs.to(x.dtype) @ weight
@@ -68,7 +79,8 @@ class ChunkedLinearCrossEntropy(Function):
 
             # logits_chunk and probs go out of scope here → freed
 
-        loss = loss_total / N  # mean reduction
+        # Mean over non-ignored tokens (not total N)
+        loss = loss_total / max(n_valid, 1)
 
         ctx.save_for_backward(grad_input, grad_weight)
         return loss.to(x.dtype)

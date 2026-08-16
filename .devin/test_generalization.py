@@ -89,7 +89,7 @@ def parse_tool_calls(text):
 def main():
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft8.safetensors")
+    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_BSP.safetensors")
     args = p.parse_args()
 
     device = "cuda"

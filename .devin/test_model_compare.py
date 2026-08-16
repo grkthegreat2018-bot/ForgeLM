@@ -17,7 +17,7 @@ The winner is promoted as default; the loser is archived.
 
 Usage:
     python .devin/test_model_compare.py
-    python .devin/test_model_compare.py --base research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors --candidate research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft4.safetensors
+    python .devin/test_model_compare.py --base research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors --candidate research/checkpoints/ForgeLM_V2_BSP.safetensors
 """
 from __future__ import annotations
 
@@ -668,7 +668,7 @@ def main():
     parser = argparse.ArgumentParser(description="Model comparison benchmark")
     parser.add_argument("--base", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors",
                         help="Base model checkpoint")
-    parser.add_argument("--candidate", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft8.safetensors",
+    parser.add_argument("--candidate", default="research/checkpoints/ForgeLM_V2_BSP.safetensors",
                         help="Candidate (SFT) model checkpoint")
     parser.add_argument("--archive", action="store_true",
                         help="Archive the losing checkpoint")

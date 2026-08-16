@@ -864,6 +864,38 @@ def vram_exceeded(limit_gb, device="cuda") -> bool:
     return torch.cuda.memory_allocated(device) / 1e9 > limit_gb
 
 
+def ram_exceeded(threshold_percent: float = 85.0) -> bool:
+    """Return True if system RAM usage exceeds `threshold_percent`.
+
+    Uses psutil to check host RAM. Prevents OOMKilled / freezing / stuttering
+    when system memory is under pressure (Kubernetes OOMKilled pattern).
+
+    Args:
+        threshold_percent: RAM usage percentage that triggers the safeguard.
+            85% = throttle/warn, 90%+ = emergency.
+    """
+    try:
+        import psutil
+        return psutil.virtual_memory().percent > threshold_percent
+    except ImportError:
+        return False  # psutil not installed — skip check
+
+
+def ram_usage() -> dict:
+    """Return system RAM usage stats (empty dict if psutil unavailable)."""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return {
+            "total_gb": vm.total / 1e9,
+            "used_gb": vm.used / 1e9,
+            "free_gb": vm.available / 1e9,
+            "percent": vm.percent,
+        }
+    except ImportError:
+        return {}
+
+
 def vram_gb(device="cuda") -> float:
     """Current allocated VRAM in GB (0.0 if CUDA unavailable)."""
     if not torch.cuda.is_available():
@@ -895,7 +927,7 @@ def add_safeguard_args(parser):
     """Add the shared progress-safety CLI flags to an argparse parser.
 
     Flags: --save-every, --keep-checkpoints, --status-file, --heartbeat-file,
-    --vram-limit-gb. (--resume is defined per-script since semantics vary.)
+    --vram-limit-gb, --ram-limit-percent. (--resume is defined per-script since semantics vary.)
     """
     parser.add_argument("--save-every", type=int, default=0,
                         help="Save a periodic .stepN checkpoint every N steps (0 = disabled)")
@@ -907,4 +939,7 @@ def add_safeguard_args(parser):
                         help="Write a timestamp here every log interval (hang detection)")
     parser.add_argument("--vram-limit-gb", type=float, default=0.0,
                         help="Abort with an emergency checkpoint before exceeding this VRAM (0 = disabled)")
+    parser.add_argument("--ram-limit-percent", type=float, default=90.0,
+                        help="Throttle if system RAM exceeds this percent (default 90, 0=disabled). "
+                             "Emergency abort at threshold+10%. Prevents OOMKilled / freezing.")
     return parser

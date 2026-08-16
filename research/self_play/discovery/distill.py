@@ -50,7 +50,7 @@ class DistillConfig:
     temperature: float = 0.3
     # SFT hyperparams (lighter than finetune — fresh model, small clean set)
     epochs: int = 1
-    batch_size: int = 2
+    batch_size: int = 1           # batch 1 + grad_accum 4 = effective batch 4
     grad_accum: int = 4
     max_lr: float = 3e-5
     min_lr: float = 3e-6
@@ -58,6 +58,13 @@ class DistillConfig:
     max_seq_len: int = 384
     weight_decay: float = 0.01
     vram_limit_gb: float = 11.0
+    # VRAM-saving options (match finetune.py / sft_train.py)
+    optimizer: str = "bnb"        # 8-bit AdamW (saves ~7GB)
+    use_lora: bool = True         # LoRA: train ~1M params instead of 1.17B
+    lora_r: int = 16
+    lora_alpha: int = 32
+    grad_checkpoint: bool = True  # activation checkpointing
+    use_chunked_ce: bool = True   # avoids [B,T,V] logits materialization
 
 
 def _build_corpus(db: DiscoveryDB) -> tuple[list[tuple[str, str]], int]:
@@ -163,12 +170,33 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
 
     # 4. Fresh student from the BASE checkpoint (no prior bloat).
     model_cfg = get_config("lfm25_1.2b", device=device)
+    model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
+    model_cfg.use_chunked_ce = cfg.use_chunked_ce
+    model_cfg.ce_chunk_size = 128
     student = ModelLoader.build_model_fast(
         model_cfg, checkpoint_path=str(LFM25_CHECKPOINT),
         moe_top_k=0, dtype=torch.bfloat16)
     student.to(device).train()
 
-    opt = configure_optimizer(student, cfg.max_lr, cfg.weight_decay)
+    # ── LoRA (PEFT) ──
+    if cfg.use_lora:
+        from peft import LoraConfig, get_peft_model
+        lora_cfg = LoraConfig(
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "out_proj",
+                            "w_gate", "w_up", "w_down"],
+            lora_dropout=0.0,
+            bias="none",
+        )
+        student = get_peft_model(student, lora_cfg)
+        student.print_trainable_parameters()
+    else:
+        for param in student.parameters():
+            param.requires_grad_(True)
+
+    opt = configure_optimizer(student, cfg.max_lr, cfg.weight_decay,
+                              optimizer_name=cfg.optimizer)
     steps_per_epoch = max(1, len(pairs) // (cfg.batch_size * cfg.grad_accum))
     total_steps = steps_per_epoch * cfg.epochs
     step = 0
@@ -183,10 +211,23 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
                     [pairs[(sp * cfg.grad_accum + j) % len(pairs)]
                      for j in range(cfg.batch_size)]
                 ids, tgt, _ = _collate(batch, pad_id, device)
-                out = student(ids)
-                logits = out[0] if isinstance(out, tuple) else out
-                loss = compute_ce_loss(logits, tgt) / cfg.grad_accum
-                loss.backward()
+                # Chunked CE fast path
+                if cfg.use_chunked_ce:
+                    shift_tgt = tgt[:, 1:].contiguous()
+                    pad_col = torch.full((shift_tgt.size(0), 1), -100,
+                                         dtype=shift_tgt.dtype, device=device)
+                    shift_tgt = torch.cat([shift_tgt, pad_col], dim=1)
+                    out = student(ids, targets=shift_tgt)
+                    loss = out[1] if isinstance(out, tuple) else out
+                    if loss is None:
+                        out = student(ids)
+                        logits = out[0] if isinstance(out, tuple) else out
+                        loss = compute_ce_loss(logits, tgt)
+                else:
+                    out = student(ids)
+                    logits = out[0] if isinstance(out, tuple) else out
+                    loss = compute_ce_loss(logits, tgt)
+                (loss / cfg.grad_accum).backward()
             lr = get_lr(step, total_steps, cfg.max_lr, cfg.min_lr, cfg.warmup_steps)
             for g in opt.param_groups:
                 g["lr"] = lr
@@ -195,6 +236,11 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
             step += 1
             if has_nan_params(student):
                 raise RuntimeError("NaN params during distill — aborting")
+
+    # ── Merge LoRA adapters into base model for standalone save ──
+    if cfg.use_lora and hasattr(student, "merge_and_unload"):
+        student = student.merge_and_unload()
+        print("  Merged LoRA adapters into base model for standalone save.")
 
     # 5. Save as a new distill epoch.
     _EPOCHS_DIR.mkdir(parents=True, exist_ok=True)

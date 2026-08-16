@@ -78,7 +78,7 @@ def clear_gpu():
 
 # ─── Benchmarks ───────────────────────────────────────────────────────────────
 
-CHECKPOINT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_LFM25-1.2B.sft10.safetensors"
+CHECKPOINT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_BSP.safetensors"
 TOKENIZER_PATH = r"D:\windsurf\ForgeAI\research\checkpoints\lfm25_tokenizer"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 RESULTS = {}

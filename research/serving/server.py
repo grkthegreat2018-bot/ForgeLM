@@ -38,7 +38,7 @@ from research.self_play.discovery.qwen_adapter import (
 # ── Config ─────────────────────────────────────────────────────────────────
 
 MODEL_ID = "ForgeLM_V2_LFM25-1.2B"
-DEFAULT_CHECKPOINT = "research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft10.safetensors"
+DEFAULT_CHECKPOINT = "research/checkpoints/ForgeLM_V2_BSP.safetensors"
 
 # Markers to strip from content shown to the client
 _SPECIAL_MARKERS = (TOOL_CALL_START, TOOL_CALL_END, IM_START, IM_END)

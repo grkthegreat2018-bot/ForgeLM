@@ -40,7 +40,7 @@ _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 @dataclass
 class FinetuneConfig:
     epochs: int = 1
-    batch_size: int = 2
+    batch_size: int = 1           # batch 1 + grad_accum 4 = effective batch 4
     grad_accum: int = 4
     max_lr: float = 5e-5
     min_lr: float = 5e-6
@@ -49,6 +49,15 @@ class FinetuneConfig:
     weight_decay: float = 0.01
     ema_decay: float = 0.999
     vram_limit_gb: float = 11.0
+    # VRAM-saving options (match sft_train.py defaults for self-play loop)
+    optimizer: str = "bnb"        # 8-bit AdamW (saves ~7GB vs fp32)
+    use_lora: bool = True         # LoRA: train ~1M params instead of 1.17B
+    lora_r: int = 16
+    lora_alpha: int = 32
+    grad_checkpoint: bool = True  # activation checkpointing (saves ~0.5GB)
+    use_chunked_ce: bool = True   # avoids materializing [B,T,V] logits
+    # L2-SP anchor regularization (prevents catastrophic forgetting)
+    l2_sp_lambda: float = 0.01    # lower layers get 10x this
 
 
 def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict]:
@@ -184,6 +193,10 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
 
     # Load base model + tokenizer (reuse existing loaders).
     model_cfg = get_config("lfm25_1.2b", device=device)
+    # Enable gradient checkpointing + chunked CE in the model config.
+    model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
+    model_cfg.use_chunked_ce = cfg.use_chunked_ce
+    model_cfg.ce_chunk_size = 128
     model = ModelLoader.build_model_fast(
         model_cfg, checkpoint_path=base_checkpoint,
         moe_top_k=0, dtype=torch.bfloat16)
@@ -195,8 +208,43 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
     if len(dataset) < 8:
         raise ValueError(f"DB too small to fine-tune: only {len(dataset)} usable samples")
 
-    opt = configure_optimizer(model, cfg.max_lr, cfg.weight_decay)
-    ema = init_ema(model)
+    # ── LoRA (PEFT) ──
+    # Train ~1M LoRA params instead of 1.17B full params. Saves ~9GB optimizer
+    # state. Adapters are merged into base weights before saving so the
+    # checkpoint is a standalone full model.
+    if cfg.use_lora:
+        from peft import LoraConfig, get_peft_model
+        lora_cfg = LoraConfig(
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "out_proj",
+                            "w_gate", "w_up", "w_down"],
+            lora_dropout=0.0,
+            bias="none",
+        )
+        model = get_peft_model(model, lora_cfg)
+        model.print_trainable_parameters()
+    else:
+        for param in model.parameters():
+            param.requires_grad_(True)
+
+    # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
+    # Penalizes drift from the base checkpoint to prevent catastrophic
+    # forgetting. Lower layers (0-5) get 10x higher lambda.
+    anchor_named_params = None
+    if cfg.l2_sp_lambda > 0 and base_checkpoint is not None and not cfg.use_lora:
+        from safetensors.torch import load_file as safetensors_load
+        anchor_sd = safetensors_load(base_checkpoint)
+        anchor_named_params = {}
+        for name, p in model.named_parameters():
+            if name in anchor_sd and p.requires_grad:
+                anchor_named_params[name] = anchor_sd[name].to(device).to(p.dtype)
+        print(f"  L2-SP: {len(anchor_named_params)} anchored params, "
+              f"lambda={cfg.l2_sp_lambda}")
+
+    opt = configure_optimizer(model, cfg.max_lr, cfg.weight_decay,
+                              optimizer_name=cfg.optimizer)
+    ema = init_ema(model) if not cfg.use_lora else None  # EMA less useful with LoRA
     steps_per_epoch = max(1, len(dataset) // (cfg.batch_size * cfg.grad_accum))
     total_steps = steps_per_epoch * cfg.epochs
 
@@ -214,19 +262,44 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
                     [dataset[order[(sp * cfg.grad_accum + j) % len(order)]]
                      for j in range(cfg.batch_size)]
                 ids, tgt, mask = _collate(batch, pad_id, device)
-                out = model(ids)
-                logits = out[0] if isinstance(out, tuple) else out
-                loss = compute_ce_loss(logits, tgt) / cfg.grad_accum
-                loss.backward()
+                # Chunked CE fast path: pass targets to model to avoid
+                # materializing [B, T, V] logits (saves ~1GB at vocab=65536).
+                if cfg.use_chunked_ce:
+                    shift_tgt = tgt[:, 1:].contiguous()
+                    pad_col = torch.full((shift_tgt.size(0), 1), -100,
+                                         dtype=shift_tgt.dtype, device=device)
+                    shift_tgt = torch.cat([shift_tgt, pad_col], dim=1)
+                    out = model(ids, targets=shift_tgt)
+                    loss = out[1] if isinstance(out, tuple) else out
+                    if loss is None:
+                        out = model(ids)
+                        logits = out[0] if isinstance(out, tuple) else out
+                        loss = compute_ce_loss(logits, tgt)
+                else:
+                    out = model(ids)
+                    logits = out[0] if isinstance(out, tuple) else out
+                    loss = compute_ce_loss(logits, tgt)
+                # L2-SP anchor regularization
+                if anchor_named_params is not None:
+                    from research.training.sft_train import compute_l2_sp_loss
+                    l2_sp = compute_l2_sp_loss(model, anchor_named_params, cfg.l2_sp_lambda)
+                    loss = loss + l2_sp
+                (loss / cfg.grad_accum).backward()
             lr = get_lr(step, total_steps, cfg.max_lr, cfg.min_lr, cfg.warmup_steps)
             for g in opt.param_groups:
                 g["lr"] = lr
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            update_ema(ema, model, cfg.ema_decay)
+            if ema is not None:
+                update_ema(ema, model, cfg.ema_decay)
             step += 1
             if has_nan_params(model):
                 raise RuntimeError("NaN params during fine-tune — aborting")
+
+    # ── Merge LoRA adapters into base model for standalone save ──
+    if cfg.use_lora and hasattr(model, "merge_and_unload"):
+        model = model.merge_and_unload()
+        print("  Merged LoRA adapters into base model for standalone save.")
 
     # Save the new epoch checkpoint.
     _EPOCHS_DIR.mkdir(parents=True, exist_ok=True)
