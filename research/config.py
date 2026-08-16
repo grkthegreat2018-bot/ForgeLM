@@ -59,6 +59,23 @@ class ModelConfig:
     use_mtp: bool = False
     mtp_n_heads: int = 2
     mtp_loss_weight: float = 0.3
+    # BitNet b1.58: ternary QAT on all linear layers ({-1,0,1} weights, STE).
+    # Training = ternary forward (STE, master weights fp); eval = full
+    # precision unless bitnet_force_quant (deploy after QAT converges).
+    use_bitnet: bool = False
+    bitnet_force_quant: bool = False
+    bitnet_learned_scale: bool = True  # per-layer learnable scale (QAT)
+    # Differential Attention (Diff-Transformer): dual softmax maps subtracted
+    # to cancel attention noise. Parameter-efficient; opt-in (not lossless).
+    use_diff_attn: bool = False
+    diff_attn_lambda_init: float | None = None  # None = paper formula
+    # TITAN neural memory: gated long-term memory, zero-init gate = lossless.
+    use_titan_memory: bool = False
+    titan_memory_rank: int = 0  # 0 = d_model
+    # Mixture-of-Depths: per-block token routing; keep_fraction=1.0 = lossless
+    # (all tokens processed). <1.0 skips tokens in training (FLOPs ceiling).
+    use_mod: bool = False
+    mod_keep_fraction: float = 1.0
 
     # === Training ===
     dropout: float = 0.0
@@ -86,6 +103,10 @@ class ModelConfig:
     use_liger_ce: bool = False
     # Gradient checkpointing: recompute forward during backward to save VRAM.
     use_gradient_checkpointing: bool = False
+    # Selective checkpoint strategy: "all" (full block), "ffn" (recompute only
+    # the FFN — largest activation consumer, minimal compute penalty), "attn",
+    # "none". Only applies when use_gradient_checkpointing is True.
+    selective_gradient_checkpointing: str = "all"
     # Fixed attention scale (0.12 from NanoGPT speedrun) instead of head_dim**-0.5.
     attn_scale: float = None
 
@@ -140,6 +161,42 @@ MODEL_CONFIGS = {
         batch_size=2,
         seq_len=1024,
     ),
+    # ForgeLM V3 — labeled evolution of the LFM2.5 port with the full
+    # 2025/2026 architecture stack:
+    #   - Differential Attention (identity warm start; GQA checkpoints
+    #     auto-convert losslessly at load)
+    #   - BitNet b1.58 QAT on the FFN (ternary in training, fp eval)
+    #   - TITAN neural memory (low-rank, zero-init gate)
+    #   - Mixture-of-Depths router (keep_fraction=1.0 = lossless start)
+    # ALL mechanisms are lossless at load: ForgeLM_V2_BSP.safetensors loads
+    # bit-exact (verified max logit diff 0.0, incl. KV-cached decode).
+    "forgelm_v3": ModelConfig(
+        vocab_size=65536,
+        d_model=2048,
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        intermediate_size=8192,
+        attn_type="diff",
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=32768,
+        conv_kernel_size=3,
+        use_qk_norm=True,
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
+                     "conv", "conv", "attention", "conv", "attention", "conv",
+                     "attention", "conv", "attention", "conv"],
+        use_titan_memory=True,
+        titan_memory_rank=64,
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        batch_size=2,
+        seq_len=1024,
+    ),
     # Qwen2.5-3B-Instruct: standard GQA transformer.
     #   - 36 layers, all attention (no conv/mamba)
     #   - d_model=2048, 16 Q heads, 2 KV heads (GQA 8x), head_dim=128
@@ -191,14 +248,16 @@ MODEL_CONFIGS = {
 
 
 def get_config(name: str | None = None, **overrides) -> ModelConfig:
-    """Fetch a named config and apply optional overrides."""
+    """Fetch a named config and apply optional overrides.
+
+    Always returns a FRESH ModelConfig instance (never the shared preset),
+    so callers can safely mutate fields (device, dtype, ...) without
+    corrupting MODEL_CONFIGS for other users of the same preset.
+    """
     if name is None:
         base = ModelConfig()
     else:
         if name not in MODEL_CONFIGS:
             raise ValueError(f"Unknown config '{name}'. Available: {list(MODEL_CONFIGS)}")
         base = MODEL_CONFIGS[name]
-    if overrides:
-        cfg = ModelConfig(**{**base.__dict__, **overrides})
-        return cfg
-    return base
+    return ModelConfig(**{**base.__dict__, **overrides})

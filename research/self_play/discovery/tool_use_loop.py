@@ -1374,7 +1374,7 @@ class ToolUseSelfPlay:
             from research.inference.forge_engine import ForgeEngine
             engine = ForgeEngine.from_checkpoint(
                 checkpoint=checkpoint,
-                config_name="lfm25_1.2b",
+                config_name="forgelm_v3",
                 tokenizer_path="research/checkpoints/lfm25_tokenizer",
                 device=cfg.device,
             )
@@ -1393,7 +1393,7 @@ class ToolUseSelfPlay:
             from research.model_loader import load_default_model
             from research.tokenizer_cache import get_tokenizer
             model, _ = load_default_model(
-                "lfm25_1.2b", checkpoint_path=checkpoint,
+                "forgelm_v3", checkpoint_path=checkpoint,
                 device=cfg.device, dtype=torch.bfloat16,
             )
             model.eval()

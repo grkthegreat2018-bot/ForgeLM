@@ -678,12 +678,12 @@ class InfiniteToolLoop:
 
         # Load policy + ref model
         model, tokenizer = load_default_model(
-            "lfm25_1.2b", checkpoint_path=self.best_checkpoint,
+            "forgelm_v3", checkpoint_path=self.best_checkpoint,
             device=self.config.device, dtype=torch.bfloat16)
         model.train()
 
         ref_model, _ = load_default_model(
-            "lfm25_1.2b", checkpoint_path=self.best_checkpoint,
+            "forgelm_v3", checkpoint_path=self.best_checkpoint,
             device=self.config.device, dtype=torch.bfloat16)
         ref_model.eval()
         for p in ref_model.parameters():

@@ -91,10 +91,13 @@ def _load_model_at(checkpoint_path: str | None, device: str):
     """Load the LFM2.5 model, optionally overriding weights from a checkpoint."""
     from research.model_loader import load_default_model
     from research.checkpoint_io import load_checkpoint
-    model, tok = load_default_model("lfm25_1.2b")
+    model, tok = load_default_model("forgelm_v3")
     if checkpoint_path:
         sd = load_checkpoint(checkpoint_path)
-        model.load_state_dict({k: v.to(model.device) for k, v in sd.items()})
+        # strict=False: checkpoints saved before the TITAN/MoD keys existed
+        # load losslessly — the new params are zero/keep-all init.
+        model.load_state_dict(
+            {k: v.to(model.device) for k, v in sd.items()}, strict=False)
     model.to(device).eval()
     return model, tok
 

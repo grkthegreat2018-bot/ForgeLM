@@ -200,14 +200,22 @@ def load_checkpoint(path: str, map_location=None) -> dict[str, Any]:
                 # Fall back to standard safetensors
                 print(f"  (fastsafetensors failed: {e}, falling back to standard)")
 
-        tensors = load_file(path, device=device_str)
-        # Convert to torch.Tensor (safetensors returns torch tensors already on torch>=2).
-        result: dict[str, Any] = {k: v for k, v in tensors.items()}
+        # CPU-only loads stay memory-mapped for zero-copy lazy access.
+        # Direct-to-GPU (CUDA) uses safetensors load_file for fast placement.
+        if device_str in ("cpu", "meta"):
+            from safetensors import safe_open
+            with safe_open(path, framework="pt", device="cpu") as f:
+                result: dict[str, Any] = {k: f.get_tensor(k) for k in f.keys()}
+        else:
+            tensors = load_file(path, device=device_str)
+            # Convert to torch.Tensor (safetensors returns torch tensors already on torch>=2).
+            result: dict[str, Any] = {k: v for k, v in tensors.items()}
+        n_tensors = len(result)
         meta_path = path + ".meta.json"
         if os.path.exists(meta_path):
             with open(meta_path, encoding="utf-8") as f:
                 result.update(json.load(f))
-        print(f"Loaded safetensors checkpoint from {path} ({len(tensors)} tensors)")
+        print(f"Loaded safetensors checkpoint from {path} ({n_tensors} tensors)")
         return result
 
     # Legacy .pt path. Try weights_only=True first (safer).

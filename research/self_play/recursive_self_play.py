@@ -1482,12 +1482,12 @@ def main():
     print("=" * 70)
 
     # Load model
-    print("\n[1] Loading ForgeLM V2...")
-    cfg = get_config("forgelm_v2", device="cuda")
+    print("\n[1] Loading ForgeLM V3 (diff-attn + BitNet QAT + TITAN + MoD)...")
+    cfg = get_config("forgelm_v3", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V2_BSP.safetensors")
     model.to("cuda").eval()
-    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
 
     # Create recursive engine
     print("\n[2] Creating recursive self-play engine...")

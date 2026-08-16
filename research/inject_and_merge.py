@@ -21,7 +21,7 @@ Usage (Python API):
 
     pipe = InjectMergePipeline(
         target_checkpoint="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors",
-        config_name="lfm25_1.2b",
+        config_name="forgelm_v3",
         merge_method="task_arith",
     )
     merged = pipe.run(
@@ -295,7 +295,7 @@ class InjectMergePipeline:
     same shapes), so every merge method works.
     """
 
-    def __init__(self, target_checkpoint: str, config_name: str = "lfm25_1.2b",
+    def __init__(self, target_checkpoint: str, config_name: str = "forgelm_v3",
                  merge_method: str = "task_arith", device: str = "cuda"):
         self.target_checkpoint = target_checkpoint
         self.config_name = config_name
@@ -531,7 +531,7 @@ def main():
         description="Inject-and-Merge: pass new params into a target model via KeyStack + merging")
     p.add_argument("--target", required=True,
                    help="Target model checkpoint (the main model)")
-    p.add_argument("--config", default="lfm25_1.2b",
+    p.add_argument("--config", default="forgelm_v3",
                    help="Model config name (lfm25_1.2b, lfm25_tiny, qwen25_3b)")
     p.add_argument("--inject-type", required=True,
                    choices=list(INJECT_HANDLERS.keys()),

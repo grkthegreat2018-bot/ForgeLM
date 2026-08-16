@@ -295,11 +295,17 @@ class SelfPlaySandbox:
                  device: str = "cuda", max_gen_tokens: int = 200,
                  temperature: float = 0.0, top_k: int = 0, top_p: float = 0.0,
                  temp_dir: str | None = None, verify_workers: int = 1,
-                 kv_int8: bool = False):
+                 kv_int8: bool = False,
+                 training_free: "TrainingFreeSolver | None" = None):
         if log_dir is None:
             log_dir = os.getenv("FORGE_SELF_PLAY_DIR", "research/data/self_play")
         self.model = model
         self.tokenizer = tokenizer
+        # Optional forward-only adaptation (TrainingFreeSolver): when set,
+        # run_task styles prompts with URIAL + Reflexion memory and records
+        # every outcome so a task vector can be extracted from successful
+        # runs — no weight updates, no optimizer, no backward passes.
+        self.training_free = training_free
         self.device = device
         self.max_gen_tokens = max_gen_tokens
         # Sampling params for solution diversity (anti-overfitting across epochs)
@@ -1094,7 +1100,11 @@ class SelfPlaySandbox:
         """
         self.stats["total_tasks"] += 1
 
-        # Phase 1: Generate code
+        # Phase 1: Generate code (optionally through the training-free
+        # adapter: URIAL styling + Reflexion memory of past attempts).
+        if self.training_free is not None:
+            task_prompt = self.training_free.style(task_prompt)
+
         full_prompt = task_prompt
         if code_prefix:
             full_prompt = f"{code_prefix}\n# {task_prompt}"
@@ -1166,8 +1176,56 @@ class SelfPlaySandbox:
         self.stats["total_exec_time_ms"] += exec_result["exec_time_ms"]
         self.stats["total_tokens_generated"] += model_telem["tokens_generated"]
 
+        # Training-free feedback: push success/failure into Reflexion memory
+        # (+ collect activations for later task-vector extraction).
+        if self.training_free is not None:
+            ok = (exec_result.get("returncode") == 0
+                  and exec_result.get("output_matches_expected", False))
+            error = "" if ok else (exec_result.get("stderr", "")
+                                   or "output mismatch")
+            self.training_free.record(
+                packet["prompt"], output=code, error=error, success=ok)
+
         self.packets.append(packet)
         return packet
+
+    # ── Training-free adapters (no weight updates) ────────────────
+
+    def enable_training_free(self, max_tokens: int | None = None,
+                             capture_activations: bool = True,
+                             memory_kwargs: dict | None = None):
+        """Lazily build a TrainingFreeSolver for this sandbox.
+
+        From here on, run_task styles prompts (URIAL + Reflexion memory) and
+        records every outcome — success/failure feeds the in-context buffer
+        and the activation sets used for task vectors.
+        """
+        from research.training_free import TrainingFreeSolver
+        if self.training_free is None:
+            self.training_free = TrainingFreeSolver(
+                self.model, self.tokenizer, device=self.device,
+                max_tokens=max_tokens or self.max_gen_tokens,
+                capture_activations=capture_activations,
+                memory_kwargs=memory_kwargs,
+            )
+        return self.training_free
+
+    def build_task_vector(self, normalize: bool = True) -> dict:
+        """Extract the success-minus-failure task vector from recorded runs."""
+        if self.training_free is None:
+            return {}
+        return self.training_free.build_task_vector(normalize=normalize)
+
+    def apply_steering(self, alpha: float = 1.0) -> bool:
+        """Apply the task vector at strength alpha (hooks, no weight edits)."""
+        if self.training_free is None:
+            return False
+        return self.training_free.apply_steering(alpha=alpha)
+
+    def clear_steering(self) -> None:
+        """Remove steering hooks — back to baseline behavior."""
+        if self.training_free is not None:
+            self.training_free.clear_steering()
 
     def _score_packet(self, packet: dict) -> float:
         """Score a data packet on a 0-1 scale (I/O-focused weighting).
@@ -1377,12 +1435,12 @@ def main():
     print("=" * 60)
 
     # Load model
-    print("\n[1] Loading ForgeLM V2...")
-    cfg = get_config("forgelm_v2", device="cuda")
+    print("\n[1] Loading ForgeLM V3 (diff-attn + BitNet QAT + TITAN + MoD)...")
+    cfg = get_config("forgelm_v3", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V2_BSP.safetensors")
     model.to("cuda").eval()
-    tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
+    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
 
     # Create sandbox
     print("\n[2] Creating sandbox...")

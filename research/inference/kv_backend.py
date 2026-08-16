@@ -187,6 +187,7 @@ class HadamardKVCache(KVCacheStrategy):
         self.head_dim = head_dim
         self.device = device
         self.dtype = dtype
+        self.max_seq_len = max_seq_len
         self.bits = 4
         self.block_size = 64  # Hadamard block size
 
@@ -278,40 +279,44 @@ class HadamardKVCache(KVCacheStrategy):
         k_q, k_s = self._quantize(k_rot)
         v_q, v_s = self._quantize(v_rot)
 
+        B, n_kv, T, hd = k_q.shape
+        end = position + T
         if self.k_quant is None:
-            self.k_quant = k_q
-            self.v_quant = v_q
-            self.k_scale = k_s
-            self.v_scale = v_s
-        else:
-            self.k_quant = torch.cat([self.k_quant, k_q], dim=2)
-            self.v_quant = torch.cat([self.v_quant, v_q], dim=2)
-            self.k_scale = torch.cat([self.k_scale, k_s], dim=2)
-            self.v_scale = torch.cat([self.v_scale, v_s], dim=2)
-        self.seq_len = self.k_quant.shape[2]
+            # Pre-allocate the static max buffer once — writing by position
+            # avoids the per-token torch.cat (which reallocated + copied the
+            # whole cache on every decode step).
+            self.k_quant = torch.zeros(B, n_kv, self.max_seq_len, hd,
+                                       device=k_q.device, dtype=k_q.dtype)
+            self.v_quant = torch.zeros_like(self.k_quant)
+            self.k_scale = torch.zeros(B, n_kv, self.max_seq_len, 1,
+                                       device=k_s.device, dtype=k_s.dtype)
+            self.v_scale = torch.zeros_like(self.k_scale)
+        self.k_quant[:, :, position:end] = k_q
+        self.v_quant[:, :, position:end] = v_q
+        self.k_scale[:, :, position:end] = k_s
+        self.v_scale[:, :, position:end] = v_s
+        self.seq_len = max(self.seq_len, end)
 
     def get(self, positions):
         # Dequantize: q * scale, then inverse rotate
-        k = self.k_quant * self.k_scale
-        v = self.v_quant * self.v_scale
+        k = self.k_quant[:, :, :self.seq_len] * self.k_scale[:, :, :self.seq_len]
+        v = self.v_quant[:, :, :self.seq_len] * self.v_scale[:, :, :self.seq_len]
         k = self._inverse_rotate(k)
         v = self._inverse_rotate(v)
         return k, v
 
     def clear(self):
-        self.k_quant = None
-        self.v_quant = None
-        self.k_scale = None
-        self.v_scale = None
+        # Keep the allocation for reuse (static buffer pattern) — just reset.
         self.seq_len = 0
 
     def info(self):
         size_mb = 0
         if self.k_quant is not None:
-            # INT4 = 0.5 bytes per element, but stored as int8 for simplicity
-            actual_bytes = self.k_quant.numel() * 0.5 + self.k_scale.numel() * 2
-            actual_bytes += self.v_quant.numel() * 0.5 + self.v_scale.numel() * 2
-            size_mb = actual_bytes / 1e6
+            # INT4 = 0.5 bytes per element (stored as float for simplicity)
+            n = self.seq_len
+            actual_bytes = n * self.n_kv * self.padded_dim * 0.5
+            actual_bytes += n * self.n_kv * 2  # per-token scales
+            size_mb = 2 * actual_bytes / 1e6  # K + V
         return {"type": "hadamard_int4", "seq_len": self.seq_len,
                 "bits": self.bits, "block_size": self.block_size,
                 "size_mb": size_mb, "compression": 16 / self.bits}

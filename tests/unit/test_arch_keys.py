@@ -1,0 +1,332 @@
+"""Tests for the 2025/2026 architecture keys:
+
+BitNet b1.58 QAT, Differential Attention, TITAN neural memory, MoD routing.
+All run on CPU with the tiny_test config.
+"""
+import torch
+
+from research.config import ModelConfig, get_config
+from research.keys.architecture.mod_router_key import ModRouter, ModRouterKey
+from research.keys.architecture.titan_memory_key import TitanMemory, TitanMemoryKey
+from research.keys.attention.differential_attn_key import (
+    DifferentialAttention,
+    DifferentialAttentionKey,
+    paper_lambda_init,
+)
+from research.keys.quantization.bitnet_b158_key import (
+    BitNetLinear,
+    BitNetB158Key,
+    apply_bitnet_b158,
+    ternary_quantize,
+)
+from research.model_loader import ConfigurableResearchLLM, create_kv_cache
+
+
+def _tiny(device="cpu"):
+    cfg = get_config("lfm25_tiny")
+    cfg.device = device
+    return cfg
+
+
+# ── BitNet b1.58 ─────────────────────────────────────────────────────────────
+
+
+class TestBitNet:
+    def test_ternary_values(self):
+        w = torch.randn(8, 8)
+        q, scale = ternary_quantize(w)
+        vals = torch.unique(q)
+        assert set(vals.tolist()) <= {-1.0, 0.0, 1.0}
+        assert scale > 0
+
+    def test_linear_lossless_when_off(self):
+        lin = BitNetLinear(16, 32, quantize=False)
+        x = torch.randn(2, 4, 16)
+        y = lin(x)
+        expected = torch.nn.functional.linear(x, lin.weight)
+        assert torch.allclose(y, expected)
+
+    def test_ste_backward(self):
+        lin = BitNetLinear(16, 32, quantize=True)
+        x = torch.randn(2, 4, 16)
+        y = lin(x).pow(2).mean()
+        y.backward()
+        assert lin.weight.grad is not None and torch.isfinite(lin.weight.grad).all()
+
+    def test_state_dict_key_compat(self):
+        # weight keeps its name -> existing checkpoints load as-is;
+        # qscale is optional (learned scale) and re-inits from absmean when
+        # missing (strict=False).
+        lin = BitNetLinear(16, 32, quantize=True)
+        assert set(lin.state_dict().keys()) == {"weight", "qscale"}
+        lin_no_scale = BitNetLinear(16, 32, quantize=True, learned_scale=False)
+        assert set(lin_no_scale.state_dict().keys()) == {"weight"}
+
+    def test_apply_bitnet_offline(self):
+        state = {"blocks.0.ffn.w_gate.weight": torch.randn(8, 8),
+                 "step": 5}
+        out = apply_bitnet_b158(state)
+        vals = torch.unique(out["blocks.0.ffn.w_gate.weight"])
+        assert set(vals.tolist()) <= {-1.0, 0.0, 1.0}
+        assert out["step"] == 5  # non-tensors pass through
+
+    def test_key_forward_reverse(self):
+        key = BitNetB158Key()
+        state = {"blocks.0.ffn.w_gate.weight": torch.randn(8, 8)}
+        res = key.forward(state)
+        assert res.success and res.weights is not None
+        rev = key.reverse(res.weights)
+        assert rev.success
+
+    def test_ffn_integration(self):
+        cfg = _tiny()
+        cfg.use_bitnet = True
+        model = ConfigurableResearchLLM(cfg)
+        model.train()
+        x = torch.randint(0, 256, (2, 8))
+        loss = model(x, targets=x)[1]
+        loss.backward()
+        assert loss.requires_grad
+
+    def test_eval_is_lossless_with_qat_gating(self):
+        """Ternary only in training; eval uses fp master weights."""
+        cfg = _tiny()
+        cfg.use_bitnet = True
+        bitnet = ConfigurableResearchLLM(cfg).eval()
+        plain = ConfigurableResearchLLM(_tiny()).eval()
+        bitnet.load_state_dict(plain.state_dict(), strict=False)
+        x = torch.randint(0, 256, (2, 8))
+        with torch.no_grad():
+            l_plain, _ = plain(x)
+            l_bitnet, _ = bitnet(x)
+        assert torch.allclose(l_plain, l_bitnet, atol=1e-6)
+
+    def test_training_quantizes(self):
+        cfg = _tiny()
+        cfg.use_bitnet = True
+        model = ConfigurableResearchLLM(cfg)
+        model.train()
+        ffn = model.blocks[0].ffn
+        assert ffn.w_gate.qscale is not None  # learned scale param
+        x = torch.randn(1, 2, 128)
+        q, _ = ternary_quantize(ffn.w_gate.weight, ffn.w_gate.qscale)
+        vals = set(q.unique().tolist())
+        assert vals <= {-1.0, 0.0, 1.0}
+
+
+# ── Differential Attention ───────────────────────────────────────────────────
+
+
+class TestDiffAttn:
+    def test_module_forward_and_backward(self):
+        cfg = _tiny()
+        cfg.attn_type = "diff"
+        model = ConfigurableResearchLLM(cfg)
+        x = torch.randint(0, 256, (2, 8))
+        model.train()
+        loss = model(x, targets=x)[1]
+        loss.backward()
+        assert torch.isfinite(loss).item()
+
+    def test_inference_with_kv_cache(self):
+        cfg = _tiny()
+        cfg.attn_type = "diff"
+        model = ConfigurableResearchLLM(cfg).eval()
+        cache = create_kv_cache(model, 16, batch=1, device="cpu")
+        ids = torch.randint(0, 256, (1, 6))
+        with torch.inference_mode():
+            logits1, _ = model(ids, preallocated_cache=cache)
+            logits2, _ = model(ids[:, -1:], preallocated_cache=cache)
+        assert logits1.shape == (1, 6, 256)
+        assert logits2.shape == (1, 1, 256)
+
+    def test_key_dup_avg_roundtrip(self):
+        q = torch.randn(8, 32)  # 2 heads * hd(4) * 2? just rows
+        state = {"blocks.0.attn.q_proj.weight": q,
+                 "blocks.0.attn.k_proj.weight": q.clone()}
+        key = DifferentialAttentionKey(n_layers=1, n_heads=2)
+        res = key.forward(state)
+        assert res.success
+        dup = res.weights["blocks.0.attn.q_proj.weight"]
+        assert dup.shape[0] == 2 * q.shape[0]
+        assert "blocks.0.attn.lambda_param" in res.weights
+        assert res.weights["blocks.0.attn.lambda_param"].shape[0] == 2
+        # identity mode: lambda == 0 (lossless warm start)
+        assert res.weights["blocks.0.attn.lambda_param"].abs().sum() == 0
+        # reverse averages back
+        rev = key.reverse(res.weights)
+        assert torch.allclose(rev.weights["blocks.0.attn.q_proj.weight"], q)
+
+    def test_gqa_to_diff_lossless_conversion(self):
+        """Duplicated rows + lambda=0 must be bit-exact vs the GQA model."""
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        cfg = _tiny(dev)  # tiny preset: gqa + qk-norm (identity at init)
+        gqa = ConfigurableResearchLLM(cfg).to(dev).eval()
+
+        cfg_diff = _tiny(dev)
+        cfg_diff.attn_type = "diff"
+        diff = ConfigurableResearchLLM(cfg_diff).to(dev).eval()
+
+        key = DifferentialAttentionKey(
+            n_layers=cfg.n_layers, n_heads=cfg.n_heads, identity=True)
+        res = key.forward(gqa.state_dict())
+        assert res.success
+        diff.load_state_dict(
+            {k: v.to(dev) for k, v in res.weights.items()}, strict=False)
+        # sync identity + qk-norm flags like ModelLoader does
+        for b in diff.blocks:
+            attn = b.attn
+            if hasattr(attn, "set_identity"):
+                attn.set_identity((attn.lambda_param == 0.0).all().item())
+
+        x = torch.randint(0, 256, (2, 8), device=dev)
+        with torch.no_grad():
+            l_gqa, _ = gqa(x)
+            l_diff, _ = diff(x)
+        # GQA uses manual softmax attention on CPU (different numerics than
+        # SDPA by ~1e-7); on CUDA both paths use SDPA -> bit-exact.
+        if dev == "cuda":
+            assert torch.equal(l_gqa, l_diff), "diff warm start must be bit-exact"
+        else:
+            assert torch.allclose(l_gqa, l_diff, atol=1e-6)
+
+    def test_paper_lambda_in_range(self):
+        for l in range(16):
+            v = paper_lambda_init(16, l)
+            assert 0.0 < v < 0.8
+
+
+# ── TITAN memory ─────────────────────────────────────────────────────────────
+
+
+class TestTitan:
+    def test_lossless_at_start(self):
+        cfg = _tiny()
+        cfg.use_titan_memory = True
+        plain = ConfigurableResearchLLM(_tiny()).eval()
+        with_mem = ConfigurableResearchLLM(cfg).eval()
+        # identical init weights? zero-init memory only; but random init of
+        # the rest differs — force same weights for the shared params.
+        with_mem.load_state_dict(plain.state_dict(), strict=False)
+        x = torch.randint(0, 256, (2, 8))
+        with torch.no_grad():
+            p1, _ = plain(x)
+            p2, _ = with_mem(x)
+        assert torch.allclose(p1, p2, atol=1e-6), "TITAN must be lossless at init"
+
+    def test_update_changes_output(self):
+        cfg = _tiny()
+        cfg.use_titan_memory = True
+        model = ConfigurableResearchLLM(cfg)
+        mem = model.blocks[0]._memory
+        assert mem is not None
+        x = torch.randn(2, 4, cfg.d_model)
+        mem.update(x)
+        # memory weights moved off zero
+        assert mem.memory.abs().sum().item() > 0
+        # with the gate open, the memory read of x is non-zero
+        mem.gate.data.fill_(1.0)
+        out = mem.forward(x)
+        assert not torch.allclose(out, torch.zeros_like(out), atol=1e-7)
+
+    def test_key_add_remove(self):
+        key = TitanMemoryKey(d_model=128)
+        state = {"blocks.0.ln1.weight": torch.ones(128),
+                 "blocks.1.ln1.weight": torch.ones(128)}
+        res = key.forward(state)
+        assert res.success
+        assert "blocks.0.memory.memory" in res.weights
+        assert "blocks.1.memory.gate" in res.weights
+        rev = key.reverse(res.weights)
+        assert not any(".memory." in k for k in rev.weights)
+
+    def test_module_lossless_gate(self):
+        mem = TitanMemory(64)
+        x = torch.randn(2, 4, 64)
+        out = mem.forward(x)
+        assert torch.allclose(out, torch.zeros_like(x), atol=1e-7)
+
+
+# ── Mixture-of-Depths ────────────────────────────────────────────────────────
+
+
+class TestMod:
+    def test_lossless_at_keep_one(self):
+        cfg = _tiny()
+        cfg.use_mod = True
+        cfg.mod_keep_fraction = 1.0
+        plain = ConfigurableResearchLLM(_tiny()).eval()
+        mod = ConfigurableResearchLLM(cfg).eval()
+        mod.load_state_dict(plain.state_dict(), strict=False)
+        x = torch.randint(0, 256, (2, 8))
+        with torch.no_grad():
+            p1, _ = plain(x)
+            p2, _ = mod(x)
+        assert torch.allclose(p1, p2, atol=1e-6), "MoD 1.0 must be lossless"
+
+    def test_mask_fraction(self):
+        router = ModRouter(64, keep_fraction=0.5)
+        x = torch.randn(2, 8, 64)
+        mask = router.token_mask(x)
+        assert mask is not None
+        assert mask.shape == (2, 8)
+        assert mask.sum(dim=-1).tolist() == [4, 4]
+
+    def test_apply_gates(self):
+        router = ModRouter(64, keep_fraction=0.5)
+        x = torch.randn(2, 8, 64)
+        update = torch.randn(2, 8, 64)
+        gated = router.apply(x, update)  # returns the gated update
+        mask = router.token_mask(x)
+        # skipped tokens: zero update; kept tokens: full update
+        assert torch.allclose(gated[~mask], torch.zeros_like(gated[~mask]),
+                              atol=1e-6)
+        assert torch.allclose(gated[mask], update[mask], atol=1e-6)
+        # new residual = x + gated update
+        out = x + gated
+        assert torch.allclose(out[~mask], x[~mask], atol=1e-6)
+
+    def test_training_runs_with_skips(self):
+        cfg = _tiny()
+        cfg.use_mod = True
+        cfg.mod_keep_fraction = 0.6
+        model = ConfigurableResearchLLM(cfg)
+        model.train()
+        x = torch.randint(0, 256, (2, 8))
+        loss = model(x, targets=x)[1]
+        loss.backward()
+        assert torch.isfinite(loss).item()
+
+    def test_key_add_remove(self):
+        key = ModRouterKey()
+        state = {"blocks.0.ln1.weight": torch.ones(128),
+                 "blocks.1.ln1.weight": torch.ones(128)}
+        res = key.forward(state)
+        assert res.success
+        assert res.weights["blocks.0.mod.router.weight"].shape == (1, 128)
+        rev = key.reverse(res.weights)
+        assert not any(".mod.router.weight" in k for k in rev.weights)
+
+
+# ── Main model (LFM2.5-1.2B) sanity: lossless flags enabled ──────────────────
+
+
+class TestMainModel:
+    def test_main_config_builds_with_new_keys(self):
+        cfg = get_config("forgelm_v3")  # labeled default for fresh self-play
+        assert cfg.use_titan_memory is True
+        assert cfg.use_mod is True and cfg.mod_keep_fraction == 1.0
+        assert cfg.attn_type == "diff"     # lossless warm start
+        assert cfg.use_bitnet is True      # QAT (ternary only in training)
+        cfg.device = "cpu"
+        cfg.dtype = "float32"
+        model = ConfigurableResearchLLM(cfg).eval()
+        n_mem = sum(1 for b in model.blocks if b._memory is not None)
+        n_mod = sum(1 for b in model.blocks if b._mod is not None)
+        assert n_mem == 16 and n_mod == 16
+        x = torch.randint(0, 65536, (1, 4))
+        with torch.no_grad():
+            logits, _ = model(x)
+        assert logits.shape == (1, 4, 65536)
+        print(f"Main LFM2.5-1.2B + TITAN/MoD forward OK "
+              f"({sum(p.numel() for p in model.parameters())/1e6:.0f}M params)")

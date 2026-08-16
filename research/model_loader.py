@@ -14,6 +14,16 @@ import torch.nn.functional as F
 # memory and asynchronous copies instead of synchronous per-tensor CPU→GPU.
 os.environ.setdefault("SAFETENSORS_FAST_CUDA", "1")
 
+# Short Triton/inductor cache dirs. The default (%TEMP%\torchinductor_<user>
+# with a "triton\<device>\<key>" suffix) plus Triton's long fused kernel names
+# (~130 chars) exceeds Windows MAX_PATH (260 chars), so open() fails with
+# FileNotFoundError during torch.compile. Project-local short dirs keep paths
+# well under the limit and persist compiled kernels across runs.
+from research.paths import TORCH_CACHE_DIR  # noqa: E402
+os.environ.setdefault("TRITON_CACHE_DIR", str(TORCH_CACHE_DIR / "triton"))
+os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(TORCH_CACHE_DIR))
+os.environ.setdefault("TORCHINDUCTOR_PERSISTENT_AUTOTUNE_DIR", str(TORCH_CACHE_DIR))
+
 # Enable TensorFloat32 tensor cores for float32 matmuls (RTX 5070 supports this).
 # Free ~8x speedup on fp32 matmuls with negligible precision loss (~1e-5).
 torch.set_float32_matmul_precision("high")
@@ -167,8 +177,11 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
     construction that was duplicated across self_play and inference modules.
     """
     cfg = model.config
-    n_kv_heads = cfg.n_kv_heads if cfg.attn_type == "gqa" else cfg.n_heads
+    n_kv_heads = cfg.n_kv_heads if cfg.n_kv_heads is not None else cfg.n_heads
     head_dim = cfg.d_model // cfg.n_heads
+    if getattr(cfg, 'use_diff_attn', False) or cfg.attn_type == "diff":
+        # Differential attention stores two q/k groups per head slot.
+        head_dim *= 2
     dtype = next(model.parameters()).dtype
     if device is None:
         device = next(model.parameters()).device
@@ -606,9 +619,31 @@ class ModularBlock(nn.Module):
         self.ln2 = norm(config.d_model)
         self.ffn = build_ffn(config)
         # Cache whether attn supports pre-allocated KV cache (avoids inspect.signature per forward).
-        self._supports_prealloc_cache = isinstance(self.attn, GroupedQueryAttention)
+        self._supports_prealloc_cache = isinstance(self.attn, GroupedQueryAttention) or \
+            type(self.attn).__name__ == "DifferentialAttention"
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
         self._gradient_checkpointing = False
+        # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
+        # only FFN — biggest activation consumer, ~2-4x VRAM savings on
+        # intermediates with minimal compute penalty), "attn" (recompute only
+        # attention), "none" (no recomputation).
+        self._gradient_checkpointing_strategy = getattr(
+            config, 'selective_gradient_checkpointing', 'all')
+
+        # TITAN neural memory + MoD token router (zero-init => lossless at
+        # start; the ported checkpoint loads and behaves identically).
+        self._memory = None
+        self._mod = None
+        if getattr(config, 'use_titan_memory', False):
+            from research.keys.architecture.titan_memory_key import TitanMemory
+            self._memory = TitanMemory(
+                config.d_model,
+                rank=getattr(config, 'titan_memory_rank', 0))
+        if getattr(config, 'use_mod', False):
+            from research.keys.architecture.mod_router_key import ModRouter
+            self._mod = ModRouter(
+                config.d_model,
+                keep_fraction=getattr(config, 'mod_keep_fraction', 1.0))
 
     def forward(
         self,
@@ -620,21 +655,82 @@ class ModularBlock(nn.Module):
         attention_bias: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, KVCache | None]:
+        x0 = x  # pre-update residual (for TITAN read + MoD gating)
         # Activation checkpointing: recompute forward during backward to save VRAM.
         # Only applies during training (use_cache=False); inference materializes normally.
         if self.training and not use_cache and self._gradient_checkpointing:
-            def custom_forward(x_inner):
-                attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False)
-                x_inner = x_inner + attn_out
-                ffn_out = self.ffn(self.ln2(x_inner))
-                aux = None
+            strategy = self._gradient_checkpointing_strategy
+            if strategy == "all":
+                def custom_forward(x_inner):
+                    attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False)
+                    x_inner = x_inner + attn_out
+                    ffn_out = self.ffn(self.ln2(x_inner))
+                    aux = None
+                    if isinstance(ffn_out, tuple):
+                        aux = ffn_out[1]
+                        ffn_out = ffn_out[0]
+                    x_inner = x_inner + ffn_out
+                    return x_inner, present, aux
+                x, present, aux = torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=False)
+                self._last_aux_loss = aux
+            elif strategy == "ffn":
+                # Keep attention activations (cheap: ~2*d_model per token),
+                # recompute only the FFN (hidden_dim >> d_model) during backward.
+                if preallocated_cache is not None and self._supports_prealloc_cache:
+                    attn_out, present = self.attn(
+                        self.ln1(x), past_key_value=past_key_value, use_cache=False,
+                        preallocated_cache=preallocated_cache, layer_idx=layer_idx,
+                        attention_bias=attention_bias, position_ids=position_ids,
+                    )
+                else:
+                    attn_out, present = self.attn(
+                        self.ln1(x), past_key_value=past_key_value, use_cache=False,
+                        attention_bias=attention_bias, position_ids=position_ids,
+                    )
+                x = x + attn_out
+                ffn_out = torch.utils.checkpoint.checkpoint(
+                    self.ffn, self.ln2(x), use_reentrant=False)
+                self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
-                    aux = ffn_out[1]
+                    self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
-                x_inner = x_inner + ffn_out
-                return x_inner, present, aux
-            x, present, aux = torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=False)
-            self._last_aux_loss = aux
+                x = x + ffn_out
+            elif strategy == "attn":
+                # Recompute only attention; FFN activations stay materialized.
+                def _attn_forward(x_inner):
+                    return self.attn(
+                        x_inner, past_key_value=past_key_value, use_cache=False,
+                        preallocated_cache=preallocated_cache if self._supports_prealloc_cache else None,
+                        layer_idx=layer_idx, attention_bias=attention_bias,
+                        position_ids=position_ids)
+                attn_out, present = torch.utils.checkpoint.checkpoint(
+                    _attn_forward, self.ln1(x), use_reentrant=False)
+                x = x + attn_out
+                ffn_out = self.ffn(self.ln2(x))
+                self._last_aux_loss = None
+                if isinstance(ffn_out, tuple):
+                    self._last_aux_loss = ffn_out[1]
+                    ffn_out = ffn_out[0]
+                x = x + ffn_out
+            else:  # "none" — no recomputation this block
+                if preallocated_cache is not None and self._supports_prealloc_cache:
+                    attn_out, present = self.attn(
+                        self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                        preallocated_cache=preallocated_cache, layer_idx=layer_idx,
+                        attention_bias=attention_bias, position_ids=position_ids,
+                    )
+                else:
+                    attn_out, present = self.attn(
+                        self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                        attention_bias=attention_bias, position_ids=position_ids,
+                    )
+                x = x + attn_out
+                ffn_out = self.ffn(self.ln2(x))
+                self._last_aux_loss = None
+                if isinstance(ffn_out, tuple):
+                    self._last_aux_loss = ffn_out[1]
+                    ffn_out = ffn_out[0]
+                x = x + ffn_out
         else:
             if preallocated_cache is not None and self._supports_prealloc_cache:
                 attn_out, present = self.attn(
@@ -654,6 +750,23 @@ class ModularBlock(nn.Module):
                 self._last_aux_loss = ffn_out[1]
                 ffn_out = ffn_out[0]
             x = x + ffn_out
+
+        # TITAN memory read + MoD token gating (zero-init => lossless).
+        # Applied on the combined block update for every branch above.
+        if self._memory is not None or self._mod is not None:
+            # Fast lossless path: TITAN gate closed + MoD keep-all => no-op,
+            # return x untouched (bit-exact vs. a plain block).
+            mem_noop = (self._memory is None
+                        or self._memory.gate.item() == 0.0)
+            mod_noop = (self._mod is None
+                        or self._mod.token_mask(x0) is None)
+            if not (mem_noop and mod_noop):
+                update = x - x0
+                if self._memory is not None and not mem_noop:
+                    update = update + self._memory(x0)
+                if self._mod is not None and not mod_noop:
+                    update = self._mod.apply(x0, update)
+                x = x0 + update
         return x, present
 
 
@@ -663,14 +776,35 @@ def build_attention(config: ModelConfig) -> nn.Module:
     if config.attn_type == "gqa":
         return GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False))
+    if config.attn_type == "diff":
+        # Differential Attention (Diff-Transformer): dual-softmax subtraction.
+        from research.keys.attention.differential_attn_key import DifferentialAttention
+        return DifferentialAttention(
+            d_model=config.d_model, n_heads=config.n_heads,
+            n_kv_heads=getattr(config, 'n_kv_heads', None),
+            max_seq_len=config.max_seq_len, base=config.rope_base,
+            rope_scaling=config.rope_scaling,
+            use_qk_norm=getattr(config, 'use_qk_norm', False),
+            attn_bias=getattr(config, 'attn_bias', False),
+            n_layers=config.n_layers, layer_idx=0,
+            lambda_init=getattr(config, 'diff_attn_lambda_init', None))
     raise ValueError(
         f"Unknown attention type: '{config.attn_type}'. "
-        f"Valid options: 'gqa'")
+        f"Valid options: 'gqa', 'diff'")
 
 
 def build_ffn(config: ModelConfig) -> nn.Module:
     if config.ffn_type == "swiglu":
-        return SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
+        ffn = SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
+        if getattr(config, 'use_bitnet', False):
+            # BitNet b1.58 QAT: swap linear layers for ternary-STE versions
+            # (learned per-layer scales; ternary only in training by default).
+            from research.keys.quantization.bitnet_b158_key import build_bitnet_linear
+            hidden = ffn.w_gate.out_features
+            ffn.w_gate = build_bitnet_linear(config, config.d_model, hidden)
+            ffn.w_up = build_bitnet_linear(config, config.d_model, hidden)
+            ffn.w_down = build_bitnet_linear(config, hidden, config.d_model)
+        return ffn
     raise ValueError(
         f"Unknown FFN type: '{config.ffn_type}'. "
         f"Valid options: 'swiglu'")
@@ -704,7 +838,8 @@ class ConfigurableResearchLLM(nn.Module):
 
         self.draft_head: nn.Module | None = None
         if config.use_gradient_checkpointing:
-            self.enable_gradient_checkpointing()
+            self.enable_gradient_checkpointing(
+                strategy=getattr(config, 'selective_gradient_checkpointing', 'all'))
 
         # MTP heads (Nemotron Lightning): shared-weight multi-token prediction
         self.mtp_module: nn.Module | None = None
@@ -724,10 +859,36 @@ class ConfigurableResearchLLM(nn.Module):
         self._use_liger_ce = getattr(config, 'use_liger_ce', False)
         self._liger_fce = None  # lazy-init on first use
 
-    def enable_gradient_checkpointing(self):
-        """Enable activation checkpointing on all transformer blocks."""
+        # Device placement cache — scanning next(param).device per layer per
+        # forward (17+ Python calls) is pure CPU overhead. Placement is fixed
+        # after load/hybrid-offload, so cache it once on first forward.
+        self._embed_device: torch.device | None = None
+        self._ln_f_device: torch.device | None = None
+        self._block_devices: list[torch.device] | None = None
+
+    def cache_devices(self):
+        """Scan and cache module device placement (lazy, on first forward)."""
+        self._embed_device = next(self.embed.parameters()).device
+        self._ln_f_device = next(self.ln_f.parameters()).device
+        self._block_devices = [next(b.parameters()).device for b in self.blocks]
+
+    def invalidate_device_cache(self):
+        """Clear cached device placement (call after moving modules)."""
+        self._embed_device = None
+        self._ln_f_device = None
+        self._block_devices = None
+
+    def enable_gradient_checkpointing(self, strategy: str = "all"):
+        """Enable activation checkpointing on all transformer blocks.
+
+        Args:
+            strategy: "all" (full block recompute), "ffn" (recompute only the
+                FFN — largest activation consumer), "attn" (recompute only
+                attention), "none" (no recomputation).
+        """
         for block in self.blocks:
             block._gradient_checkpointing = True
+            block._gradient_checkpointing_strategy = strategy
 
     def disable_gradient_checkpointing(self):
         """Disable activation checkpointing (e.g., for inference)."""
@@ -828,16 +989,21 @@ class ConfigurableResearchLLM(nn.Module):
                     pad_mask.unsqueeze(1).unsqueeze(1), float('-inf'))
                 attention_bias = causal + pad_add
 
-        # Move input to embed's device (handles hybrid offload)
-        embed_device = next(self.embed.parameters()).device
+        # Move input to embed's device (handles hybrid offload).
+        # Device placement is cached after the first forward (it only changes
+        # via explicit .to() / hybrid_offload, which call invalidate_device_cache).
+        if self._embed_device is None:
+            self.cache_devices()
+        embed_device = self._embed_device
         if idx.device != embed_device:
             idx = idx.to(embed_device)
         x = self.embed(idx)
         presents: list[KVCache | None] = []
         # Track device for hybrid offload: move x to each block's device
         cur_device = x.device
+        block_devices = self._block_devices
         for i, block in enumerate(self.blocks):
-            block_device = next(block.parameters()).device
+            block_device = block_devices[i]
             if block_device != cur_device:
                 x = x.to(block_device)
                 cur_device = block_device
@@ -851,7 +1017,7 @@ class ConfigurableResearchLLM(nn.Module):
         if preallocated_cache is not None:
             preallocated_cache.advance(idx.shape[1])
         # Move x to ln_f's device (GPU for hybrid offload)
-        ln_f_device = next(self.ln_f.parameters()).device
+        ln_f_device = self._ln_f_device
         if x.device != ln_f_device:
             x = x.to(ln_f_device)
         hidden = self.ln_f(x)
@@ -934,7 +1100,13 @@ class ModelLoader:
         """A stable hashable signature for caching blank models."""
         layer_types_sig = tuple(getattr(config, 'layer_types', None) or [])
         mtp_sig = f"mtp{getattr(config, 'use_mtp', False)}_{getattr(config, 'mtp_n_heads', 0)}"
-        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}"
+        arch_sig = (f"{getattr(config, 'use_bitnet', False)}_"
+                    f"{getattr(config, 'use_titan_memory', False)}_"
+                    f"{getattr(config, 'titan_memory_rank', 0)}_"
+                    f"{getattr(config, 'use_mod', False)}_"
+                    f"{getattr(config, 'mod_keep_fraction', 1.0)}_"
+                    f"{getattr(config, 'use_qk_norm', False)}")
+        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}_{arch_sig}"
 
     @staticmethod
     def blank_state_dict(config: ModelConfig) -> dict:
@@ -1168,6 +1340,26 @@ class ModelLoader:
                 state = ModelLoader._remap_hf_keys(state, config)
                 print(f"  [FastBuild] Remapped {len(state)} HF keys to ForgeAI format")
 
+            # Lossless GQA -> DifferentialAttention conversion: when the
+            # config asks for diff attention but the checkpoint has plain
+            # GQA q/k projections, duplicate rows and set lambda=0 (identity
+            # mode) so the loaded model is bit-exact until trained.
+            if config.attn_type == "diff":
+                qk = next((k for k in state
+                           if "attn.q_proj.weight" in k), None)
+                if qk is not None:
+                    exp_rows = config.n_heads * (config.d_model // config.n_heads)
+                    if state[qk].shape[0] == exp_rows:
+                        from research.keys.attention.differential_attn_key import (
+                            DifferentialAttentionKey)
+                        res = DifferentialAttentionKey(
+                            n_layers=config.n_layers,
+                            n_heads=config.n_heads, identity=True).forward(state)
+                        if res.success:
+                            state = res.weights
+                            print("  [FastBuild] GQA -> diff warm start "
+                                  "(lossless, lambda=0)")
+
             t_weights = time.time() - t_weights
 
             # load_state_dict copies weights into model parameters (GPU→GPU
@@ -1191,6 +1383,9 @@ class ModelLoader:
                     q_id = (attn.q_norm.weight == 1.0).all()
                     k_id = (attn.k_norm.weight == 1.0).all()
                     attn._qk_norm_identity = bool(q_id and k_id)
+                # Sync diff-attn identity mode with the loaded lambda weights.
+                if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
+                    attn.set_identity((attn.lambda_param == 0.0).all().item())
             # Log
             n_identity = sum(1 for b in model.blocks if getattr(b.attn, '_qk_norm_identity', True))
             if getattr(config, 'use_qk_norm', False):
@@ -1260,6 +1455,10 @@ class ModelLoader:
                 gpu_count += 1
             else:
                 cpu_count += 1
+
+        # Placement changed — drop any cached device scan from a prior forward.
+        if hasattr(model, 'invalidate_device_cache'):
+            model.invalidate_device_cache()
 
         print(f"  [HybridOffload] {gpu_count} layers on {device}, {cpu_count} on CPU")
         return model
@@ -1367,7 +1566,7 @@ class ModelLoader:
 
 
 def load_default_model(
-    config_name: str = "lfm25_1.2b",
+    config_name: str = "forgelm_v3",
     checkpoint_path: str | None = None,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -1460,7 +1659,7 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
 if __name__ == "__main__":
     from research.config import get_config
 
-    for name in ["lfm25_tiny", "lfm25_1.2b"]:
+    for name in ["lfm25_tiny", "forgelm_v3"]:
         print("\n" + "=" * 50)
         cfg = get_config(name)
         cfg.device = "cpu"

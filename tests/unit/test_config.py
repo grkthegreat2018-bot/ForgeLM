@@ -65,7 +65,7 @@ class TestModelConfigs:
         assert cfg.n_heads == 32
         assert cfg.n_kv_heads == 8
         assert cfg.intermediate_size == 8192
-        assert cfg.attn_type == "gqa"
+        assert cfg.attn_type == "gqa"  # reference LFM2.5 port (no keys)
         assert cfg.attn_bias is False
         assert cfg.norm_type == "rmsnorm"
         assert cfg.rope_base == 1_000_000.0
@@ -79,6 +79,27 @@ class TestModelConfigs:
         assert cfg.layer_types is not None
         assert cfg.layer_types.count("conv") == 10
         assert cfg.layer_types.count("attention") == 6
+
+    def test_forgelm_v3_is_labeled_full_stack(self):
+        """ForgeLM V3 = LFM2.5 base + all 2025/2026 architecture keys."""
+        cfg = MODEL_CONFIGS["forgelm_v3"]
+        assert cfg.d_model == 2048 and cfg.n_layers == 16
+        assert cfg.attn_type == "diff"          # differential attention
+        assert cfg.use_bitnet is True           # BitNet b1.58 QAT
+        assert cfg.use_titan_memory is True     # TITAN neural memory
+        assert cfg.titan_memory_rank == 64      # low-rank (VRAM-friendly)
+        assert cfg.use_mod is True              # Mixture-of-Depths
+        assert cfg.mod_keep_fraction == 1.0     # lossless start
+
+    def test_forgelm_v3_same_base_arch(self):
+        """Same LFM2.5 skeleton (heads, dims, layers) as the reference port."""
+        a = MODEL_CONFIGS["lfm25_1.2b"]
+        b = MODEL_CONFIGS["forgelm_v3"]
+        for f in ("d_model", "n_layers", "n_heads", "n_kv_heads",
+                  "intermediate_size", "vocab_size", "rope_base",
+                  "max_seq_len", "use_qk_norm"):
+            assert getattr(a, f) == getattr(b, f), f
+        assert a.layer_types == b.layer_types
 
     def test_all_configs_pass_validation(self):
         """Every pre-defined config should pass __post_init__ without error."""

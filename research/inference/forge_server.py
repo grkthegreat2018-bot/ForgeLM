@@ -13,7 +13,7 @@ Usage:
     # Or programmatically:
     from research.inference.forge_server import ForgeServer
     server = ForgeServer()
-    server.register("lfm2.5", checkpoint="...", config="lfm25_1.2b")
+    server.register("forgelm-v3", checkpoint="...", config="forgelm_v3")
     server.serve(port=8000)
 """
 import argparse
@@ -280,7 +280,7 @@ class ForgeServer:
 DEFAULT_MODELS = {
     "lfm2.5-1.2b": {
         "checkpoint": str(LFM25_CHECKPOINT),
-        "config": "lfm25_1.2b",
+        "config": "forgelm_v3",
         "tokenizer": str(LFM25_HF_DIR),
         "vram_gb": 2.5,
     },
@@ -295,7 +295,7 @@ def main():
                         help="Comma-separated model IDs to load")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Override checkpoint path")
-    parser.add_argument("--config", type=str, default="lfm25_1.2b",
+    parser.add_argument("--config", type=str, default="forgelm_v3",
                         help="Model config preset")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Override tokenizer path")

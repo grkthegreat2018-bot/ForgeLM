@@ -140,7 +140,7 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     cfg = config or DistillConfig()
 
     # 1. Load teacher (current best or base).
-    teacher, tokenizer = load_default_model("lfm25_1.2b")
+    teacher, tokenizer = load_default_model("forgelm_v3")
     if teacher_checkpoint:
         from research.checkpoint_io import load_checkpoint
         sd = load_checkpoint(teacher_checkpoint)
@@ -169,7 +169,7 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # 4. Fresh student from the BASE checkpoint (no prior bloat).
-    model_cfg = get_config("lfm25_1.2b", device=device)
+    model_cfg = get_config("forgelm_v3", device=device)
     model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
     model_cfg.use_chunked_ce = cfg.use_chunked_ce
     model_cfg.ce_chunk_size = 128

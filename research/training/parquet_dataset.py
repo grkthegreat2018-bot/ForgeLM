@@ -316,6 +316,17 @@ class ParquetDataset:
                     pass
         return json_cols
 
+    def __getstate__(self) -> dict:
+        """Pickle support: pyarrow ParquetFile isn't picklable, so workers
+        re-open the file by path (needed for Windows spawn start method)."""
+        return {"parquet_path": self.parquet_path,
+                "_columns": self._columns,
+                "_json_columns": self._json_columns}
+
+    def __setstate__(self, state: dict) -> None:
+        self.__init__(state["parquet_path"], columns=state["_columns"])
+        self._json_columns = state.get("_json_columns")
+
     @property
     def num_rows(self) -> int:
         """Total number of rows in the dataset."""
@@ -414,6 +425,30 @@ class ParquetDataset:
 # Streaming DataLoader
 # ---------------------------------------------------------------------------
 
+class _ParquetWorkerDataset:
+    """Picklable worker dataset for multi-process DataLoader.
+
+    Module-level so Windows spawn (pickle) can ship it to workers; the local
+    class defined inside ``_worker_iter`` previously broke ``num_workers>0``
+    on Windows (``AttributeError: Can't pickle local object``).
+    """
+
+    def __init__(self, dataset: "ParquetDataset", indices: list[int],
+                 transform_fn: Callable[[dict], dict] | None):
+        self._dataset = dataset
+        self._indices = indices
+        self._transform_fn = transform_fn
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, idx: int) -> dict:
+        row = self._dataset[self._indices[idx]]
+        if self._transform_fn is not None:
+            row = self._transform_fn(row)
+        return row
+
+
 class StreamingDataLoader:
     """PyTorch-compatible streaming DataLoader for ``ParquetDataset``.
 
@@ -468,6 +503,7 @@ class StreamingDataLoader:
         seed: int = 42,
         pin_memory: bool = False,
         device: str | None = None,
+        prefetch_factor: int = 2,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -479,6 +515,9 @@ class StreamingDataLoader:
         self.seed = seed
         self.pin_memory = pin_memory
         self.device = device
+        # Batches prefetched per worker: workers decode the next N batches
+        # while the GPU processes the current one (hides parquet ZSTD CPU cost).
+        self.prefetch_factor = prefetch_factor
         self._epoch = 0
 
     @property
@@ -536,9 +575,11 @@ class StreamingDataLoader:
                 for i, v in enumerate(values):
                     if v is not None:
                         tensor[i, :len(v)] = torch.tensor(v, dtype=torch.long)
-                if self.pin_memory and torch.cuda.is_available():
-                    tensor = tensor.pin_memory()
-                if self.device:
+                if self.device and torch.cuda.is_available() and self.pin_memory:
+                    # Pinned + non-blocking H2D: DMA streams batches to GPU
+                    # while the compute stream is still running.
+                    tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+                elif self.device:
                     tensor = tensor.to(self.device)
                 batch[key] = tensor
             else:
@@ -547,38 +588,23 @@ class StreamingDataLoader:
         return batch
 
     def _worker_iter(self, indices: list[int]) -> Iterator[dict]:
-        """Multi-worker iterator using ``torch.utils.data.DataLoader``."""
-        import torch
-        from torch.utils.data import DataLoader, Dataset as TorchDataset
+        """Multi-worker iterator using ``torch.utils.data.DataLoader``.
 
-        # Wrap our dataset + transform in a lightweight torch Dataset.
-        outer = self
-
-        class _WrappedDataset(TorchDataset):
-            def __init__(self, indices: list[int]):
-                self._indices = indices
-
-            def __len__(self):
-                return len(self._indices)
-
-            def __getitem__(self, idx: int):
-                row = outer.dataset[self._indices[idx]]
-                if outer.transform_fn is not None:
-                    row = outer.transform_fn(row)
-                return row
-
-        def _collate(rows: list[dict]) -> dict:
-            return outer.collate_fn(rows)
+        Workers prefetch + decode the next ``prefetch_factor`` batches while
+        the GPU processes the current one (hides parquet ZSTD CPU cost).
+        """
+        from torch.utils.data import DataLoader
 
         loader = DataLoader(
-            _WrappedDataset(indices),
+            _ParquetWorkerDataset(self.dataset, indices, self.transform_fn),
             batch_size=self.batch_size,
             shuffle=False,  # already shuffled via indices
             num_workers=self.num_workers,
-            collate_fn=_collate,
+            collate_fn=self.collate_fn,
             drop_last=self.drop_last,
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
+            prefetch_factor=self.prefetch_factor,
         )
         yield from loader
 

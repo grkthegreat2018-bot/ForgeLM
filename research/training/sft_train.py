@@ -604,7 +604,7 @@ def main():
                    help="Data format: 'jsonl' (default) or 'parquet'. "
                         "When 'parquet', files are read via ParquetDataset "
                         "(memory-mapped, ZSTD-compressed).")
-    p.add_argument("--config", default="lfm25_1.2b",
+    p.add_argument("--config", default="forgelm_v3",
                    help="Model config name (default: lfm25_1.2b)")
     p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors",
                    help="Base checkpoint to fine-tune from")

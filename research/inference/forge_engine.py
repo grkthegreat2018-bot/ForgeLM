@@ -15,7 +15,7 @@ Usage:
 
     engine = ForgeEngine.from_checkpoint(
         checkpoint="research/checkpoints/xp_full_no_mqa.safetensors",
-        config_name="lfm25_1.2b",
+        config_name="forgelm_v3",
         tokenizer_path="research/checkpoints/lfm25_tokenizer",
     )
     engine.activate(kv_cache="hadamard_int4", decoding="mtp_selfspec")
@@ -89,7 +89,7 @@ class ForgeEngine:
             self._detect_keystack_features()
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: str, config_name: str = "lfm25_1.2b",
+    def from_checkpoint(cls, checkpoint: str, config_name: str = "forgelm_v3",
                         tokenizer_path: str | None = None,
                         device: str = "cuda", **kwargs):
         """Build engine from a KeyStack checkpoint.

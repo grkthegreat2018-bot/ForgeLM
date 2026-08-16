@@ -75,3 +75,7 @@ _inspect_template.py
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local Triton/inductor caches (project-short paths)
+.devin/trc/
+.devin/torch_cache/

@@ -538,7 +538,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         # Load engine fresh with base checkpoint
         engine = ForgeEngine.from_checkpoint(
             checkpoint=base_checkpoint,
-            config_name="lfm25_1.2b",
+            config_name="forgelm_v3",
             tokenizer_path="research/checkpoints/lfm25_tokenizer",
             device=device,
         )
