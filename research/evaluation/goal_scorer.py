@@ -136,9 +136,50 @@ class GoalScorer:
         "confidence": 0.10,
     }
 
-    def __init__(self):
+    # When minimalism is disabled, its weight is redistributed to efficiency
+    # and diversity (prioritizing correctness + creativity over conciseness).
+    # This implements the GRPO-λ principle: don't penalize length/complexity
+    # when the model is still learning to reason correctly.
+    WEIGHTS_NO_MINIMALISM = {
+        "minimalism": 0.0,
+        "efficiency": 0.40,
+        "diversity": 0.25,
+        "consistency": 0.15,
+        "confidence": 0.20,
+    }
+
+    def __init__(self, minimalism_active: bool = True):
+        """Initialize scorer.
+
+        Args:
+            minimalism_active: if True (default), the minimalism (length/AST
+                complexity) penalty is active. Set to False during early
+                training when the model is still learning to produce correct
+                solutions — penalizing conciseness at this stage causes
+                accuracy collapse (the "CoT length penalty trap", arXiv 2509.01155).
+                Toggle via set_minimalism_active() based on the group
+                correctness ratio from GRPOTrainer.
+        """
         # Per-goal accepted fingerprints for diversity tracking
         self._seen: dict[str, list[dict[str, int]]] = {}
+        self._minimalism_active = minimalism_active
+
+    def set_minimalism_active(self, active: bool):
+        """Toggle the minimalism penalty at runtime.
+
+        Called by the training loop based on GRPO-λ correctness ratio:
+        - correctness_ratio < threshold → set_minimalism_active(False)
+        - correctness_ratio >= threshold → set_minimalism_active(True)
+        """
+        self._minimalism_active = active
+
+    @property
+    def minimalism_active(self) -> bool:
+        return self._minimalism_active
+
+    @property
+    def _active_weights(self) -> dict[str, float]:
+        return self.WEIGHTS if self._minimalism_active else self.WEIGHTS_NO_MINIMALISM
 
     def record_fingerprint(self, goal_id: str, fingerprint: dict[str, int]):
         """Record an accepted solution's fingerprint for future diversity scoring."""
@@ -260,7 +301,9 @@ class GoalScorer:
             )
 
         # Composite quality (among correct, non-redundant solutions)
-        w = self.WEIGHTS
+        # Uses dynamic weights — minimalism is disabled when the model is
+        # still learning (GRPO-λ: avoid penalizing length during early training)
+        w = self._active_weights
         quality = (w["minimalism"] * s_min +
                    w["efficiency"] * s_eff +
                    w["diversity"] * s_div +

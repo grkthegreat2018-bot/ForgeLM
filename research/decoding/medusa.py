@@ -235,7 +235,8 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
     input_ids = input_ids.to(device)
 
     with torch.no_grad():
-        while input_ids.shape[1] < input_ids.shape[1] + max_new_tokens:
+        prompt_len = input_ids.shape[1]
+        while input_ids.shape[1] - prompt_len < max_new_tokens:
             # 1. Forward pass through main model.
             out = model(input_ids)
             hidden = out[0] if isinstance(out, tuple) else out
@@ -264,6 +265,10 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
                 # Hidden is actually logits — skip Medusa for this step.
                 input_ids = torch.cat([input_ids, main_token], dim=1)
                 continue
+
+            # Get full Medusa logits for rejection sampling (when temperature > 0).
+            # Each head produces (1, 1, V) logits from the last position.
+            medusa_logits_list = medusa(medusa_input[:, -1:, :])  # list of (1, 1, V)
 
             candidate_tokens, candidate_probs = medusa.predict_candidates(
                 medusa_input, top_k=top_k_candidates
@@ -300,9 +305,34 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
             start_pos = input_ids.shape[1]
             n_heads = min(n_heads, verify_logits.shape[1] - start_pos)
             if n_heads > 0:
-                target_preds = verify_logits[0, start_pos:start_pos + n_heads, :].argmax(-1)
-                matches = (medusa_tokens[:n_heads] == target_preds)
-                n_accepted = matches.cumprod(dim=-1).sum().item()
+                if temperature == 0:
+                    # Greedy: argmax comparison (correct for temperature == 0)
+                    target_preds = verify_logits[0, start_pos:start_pos + n_heads, :].argmax(-1)
+                    matches = (medusa_tokens[:n_heads] == target_preds)
+                    n_accepted = matches.cumprod(dim=-1).sum().item()
+                else:
+                    # Rejection sampling (Leviathan 2023) for temperature > 0
+                    # Target probs: (n_heads, V)
+                    target_probs = F.softmax(
+                        verify_logits[0, start_pos:start_pos + n_heads, :] / temperature, dim=-1)
+                    # Draft probs from Medusa heads: (n_heads, V)
+                    draft_probs = torch.stack(
+                        [F.softmax(ml[:, -1, :] / temperature, dim=-1)
+                         for ml in medusa_logits_list[:n_heads]], dim=0)  # (n_heads, V)
+                    # q(x) and p(x) at the draft token positions
+                    draft_tok = medusa_tokens[:n_heads]  # (n_heads,)
+                    q_x = draft_probs.gather(1, draft_tok.unsqueeze(-1)).squeeze(-1)  # (n_heads,)
+                    p_x = target_probs.gather(1, draft_tok.unsqueeze(-1)).squeeze(-1)  # (n_heads,)
+                    # Acceptance ratios: min(1, p/q)
+                    ratios = (p_x / q_x.clamp(min=1e-8)).clamp(max=1.0)  # (n_heads,)
+                    # Sample randoms on GPU, find first rejection
+                    rand = torch.rand_like(ratios)
+                    accepted_mask = rand < ratios
+                    rejected = ~accepted_mask
+                    if rejected.any().item():
+                        n_accepted = rejected.int().argmax().item()
+                    else:
+                        n_accepted = n_heads
             else:
                 n_accepted = 0
 
@@ -310,8 +340,29 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
             accepted = candidate_seq[:, :n_accepted + 1]  # +1 for main_token
             input_ids = torch.cat([input_ids, accepted], dim=1)
 
+            # For rejection sampling: append resampled/bonus token when temperature > 0.
+            if temperature > 0 and n_heads > 0:
+                if n_accepted < n_heads:
+                    # Rejection: resample from residual distribution
+                    p_at_rej = target_probs[n_accepted]  # (V,)
+                    q_at_rej = draft_probs[n_accepted]  # (V,)
+                    residual = (p_at_rej - q_at_rej).clamp(min=0.0)
+                    residual = residual / residual.sum().clamp(min=1e-8)
+                    resampled = torch.multinomial(
+                        residual, num_samples=1).unsqueeze(0)  # (1, 1)
+                    input_ids = torch.cat([input_ids, resampled], dim=1)
+                else:
+                    # All accepted: bonus token from target
+                    bonus_pos = start_pos + n_heads
+                    if bonus_pos < verify_logits.shape[1]:
+                        bonus_probs = F.softmax(
+                            verify_logits[0, bonus_pos, :] / temperature, dim=-1)
+                        bonus = torch.multinomial(
+                            bonus_probs, num_samples=1).unsqueeze(0)  # (1, 1)
+                        input_ids = torch.cat([input_ids, bonus], dim=1)
+
             # Check if we hit max tokens.
-            if input_ids.shape[1] >= input_ids.shape[1] - input_ids.shape[1] + max_new_tokens:
+            if input_ids.shape[1] - prompt_len >= max_new_tokens:
                 break
 
             # Check for EOS (simplified).

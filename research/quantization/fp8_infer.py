@@ -36,7 +36,12 @@ def _fp8_per_tensor_scale(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, 
     Returns (t_fp8, scale, scale_scalar) where scale is a 0-dim fp32 tensor
     suitable for torch._scaled_mm.
     """
-    scale_val = (t.abs().amax().float() / _E4M3_MAX).clamp(min=1e-12)
+    # Clamp input before amax computation to prevent Inf→NaN:
+    # If t contains Inf, amax()=Inf → scale_val=Inf → t/Inf = 0 or NaN (Inf/Inf).
+    # We clamp only for the scale computation, then apply the scale to the original t.
+    finfo = torch.finfo(t.dtype) if t.is_floating_point() else torch.finfo(torch.float32)
+    t_clamped = t.clamp(min=-finfo.max, max=finfo.max)
+    scale_val = (t_clamped.abs().amax().float() / _E4M3_MAX).clamp(min=1e-12)
     scale = scale_val.to(torch.float32)
     t_fp8 = (t.float() / scale_val).clamp(-_E4M3_MAX, _E4M3_MAX).to(torch.float8_e4m3fn)
     return t_fp8, scale, scale_val
@@ -70,6 +75,10 @@ class FP8Linear(nn.Module):
             hasattr(torch, "_scaled_mm")
             and torch.cuda.is_available()
         )
+        self._cached_w_bf16 = None
+
+    def _invalidate_weight_cache(self):
+        self._cached_w_bf16 = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [..., in]. Reshape to 2D for _scaled_mm.
@@ -94,8 +103,9 @@ class FP8Linear(nn.Module):
             return out.reshape(*orig_shape[:-1], self.out_features)
 
         # Fallback: dequant weight to bf16, standard matmul (CPU / no _scaled_mm).
-        w_bf16 = self.w_fp8.to(torch.bfloat16) * self.w_scale.to(torch.bfloat16)
-        return F.linear(x, w_bf16, bias).reshape(*orig_shape[:-1], self.out_features)
+        if self._cached_w_bf16 is None:
+            self._cached_w_bf16 = self.w_fp8.to(torch.bfloat16) * self.w_scale.to(torch.bfloat16)
+        return F.linear(x, self._cached_w_bf16, bias).reshape(*orig_shape[:-1], self.out_features)
 
     def __repr__(self):
         return f"FP8Linear(in={self.in_features}, out={self.out_features}, fp8_e4m3fn)"

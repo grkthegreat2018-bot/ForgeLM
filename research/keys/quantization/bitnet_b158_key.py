@@ -34,6 +34,151 @@ from research.keys.misc.base import Key, KeyClass, KeyResult
 _TERNARY_EPS = 1e-6
 
 
+# ---------------------------------------------------------------------------
+# True BitNet kernel A: integer-addition ternary GEMM (Triton, fp activations)
+#
+# b1.58-faithful: weights are {-1,0,1}, so the matmul is pure addition
+# (+x where w==+1, -x where w==-1, zeros skipped) — no weight multiplies.
+# NOTE: Triton's tl.broadcast_to / 3D tl.where are known-buggy (issues
+# #2157, #1467, #532 — wrong dim silently broadcast); we use the documented
+# workaround: subscript notation + direct multiply.
+# ---------------------------------------------------------------------------
+
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except Exception:
+    _HAS_TRITON = False
+
+if _HAS_TRITON:
+    @triton.jit
+    def _ternary_add_kernel(
+        X, W, Y,
+        M, N, K,
+        sxm, sxk, swn, swk,
+        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    ):
+        """Raw ternary matmul (x @ W^T) as pure additions, no scale.
+
+        Scaling is applied on the host (kernel-side vector*matrix broadcast
+        hits Triton bugs #2157/#1467)."""
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        offs_m = pid_m * BM + tl.arange(0, BM)
+        offs_n = pid_n * BN + tl.arange(0, BN)
+        offs_k = tl.arange(0, BK)
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            kk = k0 + offs_k
+            xm = (offs_m[:, None] < M) & (kk[None, :] < K)
+            wm = (offs_n[:, None] < N) & (kk[None, :] < K)
+            x = tl.load(X + offs_m[:, None] * sxm + kk[None, :] * sxk,
+                        mask=xm, other=0.0)
+            w = tl.load(W + offs_n[:, None] * swn + kk[None, :] * swk,
+                        mask=wm, other=0)
+            # Add-only accumulation. Convert int8 weights to fp BEFORE the
+            # comparison: int8==int hits a Triton bool-broadcast bug
+            # (#7957 broadcast_bug_bool_mat); subscript broadcast is used
+            # because tl.broadcast_to mis-broadcasts (#2157, #1467).
+            wf = w.to(tl.float32)
+            acc += tl.sum(
+                x[:, None, :] * (wf[None, :, :] == 1.0).to(tl.float32)
+                - x[:, None, :] * (wf[None, :, :] == -1.0).to(tl.float32),
+                axis=2)
+        ym = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        tl.store(Y + offs_m[:, None] * N + offs_n[None, :],
+                 acc.to(Y.dtype.element_ty), mask=ym)
+
+
+def _triton_ternary_linear(x: torch.Tensor, w: torch.Tensor,
+                           scale: torch.Tensor) -> torch.Tensor:
+    """y = (x @ w.T) * scale, w ternary int8 — add-only, zero-skip."""
+    M, K = x.reshape(-1, x.shape[-1]).shape
+    N = w.shape[0]
+    x2 = x.reshape(M, K).contiguous()
+    w2 = w.to(torch.int8).contiguous()
+    y = torch.empty(M, N, dtype=x.dtype, device=x.device)
+    BM, BN, BK = 32, 64, 32
+    grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
+    _ternary_add_kernel[grid](
+        x2, w2, y, M, N, K,
+        x2.stride(0), x2.stride(1), w2.stride(0), w2.stride(1),
+        BM=BM, BN=BN, BK=BK,
+    )
+    y = y * scale.view(1, -1).to(y.dtype)
+    return y.view(*x.shape[:-1], N)
+
+
+# ---------------------------------------------------------------------------
+# True BitNet kernel B: INTEGER GEMM on tensor cores (int8 @ int8)
+# ---------------------------------------------------------------------------
+
+def _int8_ternary_linear(x: torch.Tensor, w: torch.Tensor,
+                         w_scale: torch.Tensor) -> torch.Tensor:
+    """y = (x @ w.T) * (x_scale * w_scale) with w ternary int8.
+
+    REAL integer matmul: activations are quantized to int8 (absmax, BitNet
+    a4.8 style) and multiplied on the GPU's integer tensor cores via
+    torch._int_mm — no floating-point matmul at all. Ternary weights make
+    the int8 weight matrix exact (no weight quantization error).
+    """
+    M, K = x.reshape(-1, x.shape[-1]).shape
+    N = w.shape[0]
+    xf = x.reshape(M, K)
+    x_absmax = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+    x8 = torch.clamp(torch.round(xf * (127.0 / x_absmax)),
+                     -127, 127).to(torch.int8)
+    w8 = w.to(torch.int8).t().contiguous()
+    if M <= 16:
+        # torch._int_mm requires M > 16; pad with zero rows.
+        x8 = torch.cat([x8, torch.zeros(32 - M, K, dtype=torch.int8,
+                                        device=x.device)], dim=0)
+        y = torch._int_mm(x8, w8).float()[:M]
+    else:
+        y = torch._int_mm(x8, w8).float()
+    y = y * ((x_absmax / 127.0) * w_scale.view(1, -1).to(x.device))
+    # Cast back to the activation dtype — fp32 output would poison the
+    # bf16 residual stream downstream (rms_norm/linear dtype mismatch).
+    return y.to(x.dtype).view(*x.shape[:-1], N)
+
+
+class _TernaryLinearFn(torch.autograd.Function):
+    """Ternary forward via integer kernels; STE backward through the
+    full-precision master weights (QAT semantics).
+
+    Kernel selection (CUDA):
+      - "triton" : b1.58 add-only ternary GEMM (fp activations, zero-skip)
+      - default  : int8 @ int8 on tensor cores (a4.8-style activation q)
+    CPU falls back to an fp GEMM on the ternary weights.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, qscale, kernel):
+        q, scale = ternary_quantize(w, qscale)
+        scale = scale.detach().to(x.device)
+        if kernel == "triton" and _HAS_TRITON and x.is_cuda:
+            y = _triton_ternary_linear(x, q, scale)
+        elif kernel == "int8" and x.is_cuda:
+            y = _int8_ternary_linear(x, q, scale)
+        else:
+            y = F.linear(x, q.to(x.dtype), None) * scale.to(x.dtype)
+        ctx.save_for_backward(x, w, y)
+        ctx.scale = scale
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_y):
+        x, w, y = ctx.saved_tensors
+        # y = x @ w.T  ->  grad_x = grad_y @ w (STE: full-precision weights)
+        grad_x = grad_y @ w
+        gx = grad_y.reshape(-1, grad_y.shape[-1])
+        xr = x.reshape(-1, x.shape[-1])
+        grad_w = gx.T @ xr
+        grad_scale = (grad_y * (y / ctx.scale.view(1, -1))).sum()
+        return grad_x, grad_w, grad_scale, None
+
+
 def ternary_quantize(w: torch.Tensor, scale: float | None = None
                      ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize weights to {-1, 0, +1} * scale.
@@ -100,15 +245,31 @@ class BitNetLinear(nn.Module):
         w = self.weight
         # QAT: quantize only in training (or when explicitly deploying).
         if self.quantize and (self.training or self.force_quant):
-            if self.qscale is not None:
-                scale = self.qscale
-            else:
-                scale = self.quantize_scale
+            scale = self.qscale if self.qscale is not None else self.quantize_scale
+            if x.is_cuda and self.bias is None:
+                # TRUE BitNet on CUDA: default = int8 tensor-core GEMM;
+                # FORGE_BITNET_KERNEL=triton selects the b1.58 add-only
+                # kernel (fp activations). STE backward in both.
+                import os
+                kernel = os.environ.get("FORGE_BITNET_KERNEL", "int8")
+                return _TernaryLinearFn.apply(x, w, scale, kernel)
+            # Fallback (CPU): fp GEMM on ternary weights, STE.
             q, _ = ternary_quantize(w, scale)
-            # STE: forward uses ternary weights, backward flows through the
-            # original weights (identity gradient for the rounding step).
             w = w + (q - w).detach()
         return F.linear(x, w, self.bias)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        had_weight = prefix + "weight" in state_dict
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+        if had_weight and self.qscale is not None:
+            # qscale was initialized from the RANDOM init weight; re-anchor
+            # it to the loaded checkpoint's absmean (b1.58 convention).
+            with torch.no_grad():
+                self.qscale.copy_(
+                    self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
 
 
 def apply_bitnet_b158(state: dict[str, torch.Tensor], scale: float | None = None

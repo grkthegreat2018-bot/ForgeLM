@@ -133,6 +133,10 @@ class Eagle3Head(nn.Module):
         else:
             self.embed = nn.Embedding(vocab_size, d_model)
 
+        # Causal mask cache: avoids reallocating torch.triu on every draft_forward
+        # (T is typically 1 during decode, but the allocation is still wasteful)
+        self._causal_mask_cache: dict[int, torch.Tensor] = {}
+
     def fuse_hidden_states(
         self, hidden_states_list: List[torch.Tensor]
     ) -> torch.Tensor:
@@ -180,12 +184,14 @@ class Eagle3Head(nn.Module):
         # Concat features + embeddings: (B, T, 2*d)
         draft_input = torch.cat([fused_features, token_embeds], dim=-1)
 
-        # Self-attention with causal mask
+        # Self-attention with causal mask (cached by T to avoid reallocation)
         T = draft_input.shape[1]
-        causal_mask = torch.triu(
-            torch.full((T, T), float('-inf'), device=draft_input.device, dtype=draft_input.dtype),
-            diagonal=1,
-        )
+        if T not in self._causal_mask_cache:
+            self._causal_mask_cache[T] = torch.triu(
+                torch.full((T, T), float('-inf'), device=draft_input.device, dtype=draft_input.dtype),
+                diagonal=1,
+            )
+        causal_mask = self._causal_mask_cache[T]
 
         attn_out, new_kv = self.draft_attn(
             draft_input, draft_input, draft_input,
@@ -432,10 +438,13 @@ class Eagle3Trainer:
         # draft_logits: (B, T-1, V)
 
         # KL divergence loss: D_KL(target || draft)
+        # Use log_target=True for numerical stability (avoids log(0) when
+        # target probabilities are very small after softmax).
         log_draft_probs = F.log_softmax(draft_logits, dim=-1)
+        log_target_probs = F.log_softmax(target_logits[:, 1:], dim=-1)
         kl_loss = F.kl_div(
-            log_draft_probs, target_p, reduction='batchmean',
-            log_target=False,
+            log_draft_probs, log_target_probs, reduction='batchmean',
+            log_target=True,
         )
 
         # CE loss: standard cross-entropy against ground truth tokens
@@ -574,19 +583,20 @@ def eagle3_generate(
         probs = F.softmax(l, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
 
-    generated = [next_token.item()]
+    eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id else 7
+    generated_tokens = next_token.clone()  # [1, 1] on GPU
     ids = torch.cat([ids, next_token], dim=1)
 
     # KV cache for draft head
     draft_kv = None
 
     # Generation loop
-    while len(generated) < max_new_tokens:
-        if generated[-1] == tokenizer.eos_token_id if tokenizer.eos_token_id else 7:
+    while generated_tokens.shape[1] < max_new_tokens:
+        if generated_tokens[0, -1].item() == eos_id:
             break
 
         # Step 2: Draft — autoregressively predict draft_length tokens
-        draft_tokens = []
+        draft_tokens_gpu = []
         draft_logits_list = []
 
         # Get fused features for the last position
@@ -597,7 +607,7 @@ def eagle3_generate(
             draft_tok, draft_log = head.predict_next(
                 cur_fused, cur_token, temperature=temperature, top_k=top_k,
             )
-            draft_tokens.append(draft_tok.item())
+            draft_tokens_gpu.append(draft_tok)
             draft_logits_list.append(draft_log)
 
             # For next draft step, we need fused features at the new position.
@@ -607,9 +617,11 @@ def eagle3_generate(
             cur_token = draft_tok
 
         # Step 3: Verify — run target model on all draft tokens at once
-        draft_tensor = torch.tensor(
-            [draft_tokens], device=device, dtype=ids.dtype,
-        )  # (1, draft_length)
+        # TODO: EAGLE-3 uses a dynamic draft tree for verification; this
+        # implementation uses a simple linear chain (no tree attention).
+        # Adding tree attention would improve acceptance rates but requires
+        # a custom attention mask and more complex verification logic.
+        draft_tensor = torch.cat(draft_tokens_gpu, dim=1)  # (1, draft_length)
 
         # Run target model with KV cache
         verify_hidden_list, verify_final, presents = extract_hidden_states(
@@ -619,38 +631,79 @@ def eagle3_generate(
         verify_logits = model.head(verify_final)  # (1, draft_len, V)
 
         # Step 4: Accept longest matching prefix
-        n_accepted = 0
-        for i, dt in enumerate(draft_tokens):
-            target_tok = verify_logits[:, i, :].argmax(dim=-1).item()
-            if target_tok == dt:
-                n_accepted += 1
+        if temperature <= 0:
+            # Greedy: argmax comparison (correct for temperature == 0)
+            verify_preds = verify_logits[:, :draft_length, :].argmax(dim=-1)  # (1, draft_length)
+            matches = (verify_preds == draft_tensor)  # (1, draft_length)
+            not_match = ~matches[0]  # (draft_length,)
+            if not_match.any().item():
+                n_accepted = not_match.int().argmax().item()
             else:
-                break
+                n_accepted = draft_length
 
-        # Accept accepted tokens + the token after the last accepted (from target)
-        for i in range(n_accepted):
-            generated.append(draft_tokens[i])
-            if len(generated) >= max_new_tokens:
-                break
+            # Accept accepted tokens + the token after the last accepted (from target)
+            if n_accepted > 0:
+                generated_tokens = torch.cat(
+                    [generated_tokens, draft_tensor[:, :n_accepted]], dim=1)
 
-        # Get the next token from target (either correction or continuation)
-        if n_accepted < draft_length:
-            # Rejection: use target's token at the rejection point
-            next_token = verify_logits[:, n_accepted, :].argmax(dim=-1, keepdim=True)
+            # Get the next token from target (either correction or continuation)
+            if n_accepted < draft_length:
+                # Rejection: use target's token at the rejection point
+                next_token = verify_logits[:, n_accepted, :].argmax(dim=-1, keepdim=True)
+            else:
+                # All accepted: use target's token after the last draft token
+                next_token = verify_logits[:, -1, :].argmax(dim=-1, keepdim=True)
         else:
-            # All accepted: use target's token after the last draft token
-            next_token = verify_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            # Rejection sampling (Leviathan 2023) for temperature > 0
+            n = draft_length
+            # Stack draft logits: list of (1, V) → (1, n, V)
+            draft_logits_stacked = torch.stack(draft_logits_list[:n], dim=1)  # (1, n, V)
+            # Target and draft probability distributions
+            target_probs = F.softmax(verify_logits[:, :n, :] / temperature, dim=-1)  # (1, n, V)
+            draft_probs = F.softmax(draft_logits_stacked / temperature, dim=-1)  # (1, n, V)
+            # q(x) and p(x) at the draft token positions
+            q_x = draft_probs.gather(2, draft_tensor.unsqueeze(-1)).squeeze(-1)  # (1, n)
+            p_x = target_probs.gather(2, draft_tensor.unsqueeze(-1)).squeeze(-1)  # (1, n)
+            # Acceptance ratios: min(1, p/q)
+            ratios = (p_x / q_x.clamp(min=1e-8)).clamp(max=1.0)  # (1, n)
+            # Sample randoms on GPU, find first rejection
+            rand = torch.rand_like(ratios)  # (1, n)
+            accepted_mask = rand < ratios  # (1, n) True = accept
+            rejected = ~accepted_mask[0]  # (n,)
+            if rejected.any().item():
+                n_accepted = rejected.int().argmax().item()
+            else:
+                n_accepted = n
+
+            # Accept accepted draft tokens
+            if n_accepted > 0:
+                generated_tokens = torch.cat(
+                    [generated_tokens, draft_tensor[:, :n_accepted]], dim=1)
+
+            # Get the next token (resampled or bonus)
+            if n_accepted < n:
+                # Rejection: resample from residual distribution
+                # residual = norm(max(0, p - q))
+                p_at_rej = target_probs[0, n_accepted]  # (V,)
+                q_at_rej = draft_probs[0, n_accepted]  # (V,)
+                residual = (p_at_rej - q_at_rej).clamp(min=0.0)
+                residual = residual / residual.sum().clamp(min=1e-8)
+                next_token = torch.multinomial(residual, num_samples=1).unsqueeze(0)  # (1, 1)
+            else:
+                # All accepted: bonus token = sample from target_probs at last position
+                bonus_probs = target_probs[0, -1]  # (V,)
+                next_token = torch.multinomial(bonus_probs, num_samples=1).unsqueeze(0)  # (1, 1)
 
         # Update fused features for next iteration
         fused = head.fuse_hidden_states(verify_hidden_list)
 
-        if next_token.item() == (tokenizer.eos_token_id if tokenizer.eos_token_id else 7):
+        if (next_token == eos_id).item():
             break
-        generated.append(next_token.item())
+        generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
         ids = torch.cat([ids, next_token], dim=1)
 
-    # Decode
-    output_ids = generated[:max_new_tokens]
+    # Decode — single CPU sync at the end
+    output_ids = generated_tokens[0, :max_new_tokens].cpu().tolist()
     return tokenizer.decode(output_ids, skip_special_tokens=False)
 
 

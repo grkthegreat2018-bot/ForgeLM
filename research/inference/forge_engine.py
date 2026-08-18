@@ -391,7 +391,8 @@ class ForgeEngine:
         n_kv = getattr(cfg, "n_kv_heads", 2) or 12
         head_dim = getattr(cfg, "d_model", 1536) // 12
         max_seq = getattr(cfg, "max_seq_len", 4096)
-        kv_bytes = n_layers * 2 * max_seq * n_kv * head_dim * dtype_bytes
+        batch_size = 1
+        kv_bytes = n_layers * 2 * max_seq * n_kv * head_dim * dtype_bytes * batch_size
 
         total_needed = model_bytes + kv_bytes
 
@@ -677,6 +678,92 @@ class ForgeEngine:
                                      skip_special_tokens=skip_special_tokens)
 
     @torch.no_grad()
+    def generate_stream(
+        self,
+        prompt: str,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        top_k: int = 80,
+        repetition_penalty: float = 1.05,
+        skip_special_tokens: bool = True,
+    ):
+        """Token-by-token streaming generator.
+
+        Yields decoded text chunks (one per generated token) as they are
+        produced, enabling true token-level SSE streaming with low
+        time-to-first-token.
+
+        Mirrors :meth:`generate_raw` decoding logic but yields each token's
+        decoded text incrementally instead of collecting all tokens first.
+        """
+        ids = self.tokenizer(prompt, return_tensors="pt",
+                             add_special_tokens=False).input_ids.to(self.device)
+
+        # EOS set: LFM2.5 <|im_end|>=7, Qwen2.5 <|im_end|>=151645, <|endoftext|>=151643
+        eos_set = {7, 151643, 151645}
+        eos_attr = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_attr is not None:
+            eos_set.add(eos_attr)
+        eos_tensor = torch.tensor(list(eos_set), device=self.device)
+
+        generated_ids: list[int] = []
+        tok_vocab = len(self.tokenizer)
+
+        # Prefill with KV cache
+        with torch.inference_mode():
+            out = self.model(ids, use_cache=True)
+            logits, past_kv = unpack_output_with_kv(out)
+
+        for _ in range(max_new_tokens):
+            next_logits = logits[:, -1, :] / max(temperature, 1e-5)
+
+            if temperature <= 0:
+                next_token = next_logits.argmax(-1, keepdim=True)
+            else:
+                # Repetition penalty (last 64 tokens)
+                if generated_ids:
+                    for tid in set(generated_ids[-64:]):
+                        next_logits[:, tid] /= repetition_penalty
+                # Top-k filtering
+                if top_k > 0:
+                    k = min(top_k, next_logits.shape[-1])
+                    thresh = torch.topk(next_logits, k)[0][..., -1, None]
+                    next_logits = next_logits.masked_fill(
+                        next_logits < thresh, float("-inf"))
+                # Top-p filtering
+                if top_p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(next_logits, descending=False)
+                    cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    remove = cum_probs <= (1 - top_p)
+                    remove[..., -1] = False
+                    next_logits = next_logits.scatter(
+                        -1, sorted_idx, remove.to(next_logits.dtype) * float("-inf"))
+
+                next_token = torch.multinomial(
+                    F.softmax(next_logits, dim=-1), num_samples=1)
+
+            tok_id = next_token.item()
+            generated_ids.append(tok_id)
+
+            # Yield the decoded text for this token
+            safe_id = tok_id if tok_id < tok_vocab else tok_vocab - 1
+            chunk = self.tokenizer.decode([safe_id],
+                                          skip_special_tokens=skip_special_tokens)
+            if chunk:
+                yield chunk
+
+            if (next_token == eos_tensor).any().item():
+                break
+
+            with torch.inference_mode():
+                out = self.model(next_token, past_key_values=past_kv, use_cache=True)
+                logits, past_kv = unpack_output_with_kv(out)
+
+        self.generation_count += 1
+        self.total_tokens_generated += len(generated_ids)
+
+    @torch.no_grad()
     def _decode_with_kv(self, ids, logits, past_kv,
                         max_new_tokens, temperature, top_p,
                         top_k: int = 80, repetition_penalty: float = 1.05):
@@ -686,7 +773,7 @@ class ForgeEngine:
         """
         device = ids.device
         eos = getattr(self.model, "eos_token_id", None)
-        eos_set = {151643, 151645}
+        eos_set = {7, 151643, 151645}  # LFM2.5 <|im_end|>=7 + Qwen2.5
         if eos is not None:
             eos_set.add(eos)
         eos_tensor = torch.tensor(list(eos_set), device=device)

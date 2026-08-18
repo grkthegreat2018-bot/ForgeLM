@@ -83,14 +83,17 @@ class ChunkedLinearCrossEntropy(Function):
         loss = loss_total / max(n_valid, 1)
 
         ctx.save_for_backward(grad_input, grad_weight)
+        ctx.n_valid = max(n_valid, 1)
         return loss.to(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
         grad_input, grad_weight = ctx.saved_tensors
-        # Scale by grad_output (dL/dloss = 1.0 for scalar loss, but handle chain rule)
-        grad_input = grad_input * grad_output
-        grad_weight = grad_weight * grad_output
+        # Forward accumulated d(loss_total)/dx (sum reduction); loss = loss_total / n_valid.
+        # Scale by 1/n_valid to get d(loss)/dx, then by grad_output for chain rule.
+        scale = grad_output / ctx.n_valid
+        grad_input = grad_input * scale
+        grad_weight = grad_weight * scale
         return grad_input, grad_weight, None, None
 
 

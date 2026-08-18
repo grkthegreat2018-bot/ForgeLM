@@ -115,7 +115,11 @@ class BatchedDecoding(DecodingStrategy):
             # Check EOS (GPU op)
             for eid in self.eos_set:
                 eos_mask_gpu = eos_mask_gpu | (next_tokens == eid)
-            is_eos_cpu = eos_mask_gpu.cpu().clone()
+            # Single scalar sync — only transfer full tensor when EOS occurs
+            if eos_mask_gpu.any().item():
+                is_eos_cpu = eos_mask_gpu.cpu()
+            else:
+                is_eos_cpu = torch.zeros(B, dtype=torch.bool)
             eos_mask_gpu.zero_()
 
             # Update active state

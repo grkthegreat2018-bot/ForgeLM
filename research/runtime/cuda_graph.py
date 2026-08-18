@@ -53,7 +53,7 @@ class CudaGraphRunner:
     def _forward(self):
         """Forward pass with static buffers."""
         if self.use_cache:
-            out = self.model(self.static_input_ids, use_cache=False)
+            out = self.model(self.static_input_ids, use_cache=True)
         else:
             out = self.model(self.static_input_ids)
         return out

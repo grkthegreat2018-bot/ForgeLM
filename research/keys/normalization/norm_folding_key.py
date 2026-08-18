@@ -86,11 +86,6 @@ class NormFoldingKey(Key):
                         if rk in state:
                             w = state[rk].float()
                             state[rk] = (w * gamma.unsqueeze(0)).to(state[rk].dtype)
-                    # Also scale bias if present
-                    for reader in ["q_proj", "kv_down_proj"]:
-                        rk = f"blocks.{i}.attn.{reader}.bias"
-                        if rk in state:
-                            state[rk] = (state[rk].float() * gamma).to(state[rk].dtype)
                     del state[ln1_key]
 
                 # ln2 (pre-FFN): fold into w_gate, w_up (column scale)
@@ -103,7 +98,16 @@ class NormFoldingKey(Key):
                             w = state[rk].float()
                             state[rk] = (w * gamma.unsqueeze(0)).to(state[rk].dtype)
                     # MoE experts also read from normed x
-                    for ei in range(4):  # up to 4 experts
+                    expert_prefix = f"blocks.{i}.ffn.experts."
+                    n_experts = 0
+                    for k in state:
+                        if k.startswith(expert_prefix):
+                            try:
+                                ei = int(k[len(expert_prefix):].split(".")[0])
+                                n_experts = max(n_experts, ei + 1)
+                            except ValueError:
+                                pass
+                    for ei in range(n_experts):
                         for part in ["w_gate", "w_up"]:
                             rk = f"blocks.{i}.ffn.experts.{ei}.{part}.weight"
                             if rk in state:

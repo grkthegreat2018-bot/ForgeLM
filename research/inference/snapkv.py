@@ -53,6 +53,29 @@ class SnapKVCache:
         otherwise return the configured dtype."""
         return torch.bfloat16 if self.dtype == torch.bfloat16 else self.dtype
 
+    def _ensure_buffer(self, B: int, T: int, dtype: torch.dtype):
+        """Ensure pre-allocated buffer is large enough for B batch, T new tokens."""
+        needed = max(self.max_capacity + T, self.seq_len + T)
+        if self.k_cache is None:
+            self.k_cache = torch.zeros(B, self.n_kv, needed, self.head_dim,
+                                       device=self.device, dtype=dtype)
+            self.v_cache = torch.zeros_like(self.k_cache)
+            self.attention_scores = torch.zeros(B, self.n_kv, needed,
+                                                device=self.device, dtype=self.bf16_or_dtype())
+        elif self.k_cache.shape[2] < needed:
+            new_size = max(needed, self.k_cache.shape[2] * 2)
+            new_k = torch.zeros(B, self.n_kv, new_size, self.head_dim,
+                                device=self.device, dtype=self.k_cache.dtype)
+            new_v = torch.zeros_like(new_k)
+            new_scores = torch.zeros(B, self.n_kv, new_size,
+                                     device=self.device, dtype=self.attention_scores.dtype)
+            new_k[:, :, :self.seq_len] = self.k_cache[:, :, :self.seq_len]
+            new_v[:, :, :self.seq_len] = self.v_cache[:, :, :self.seq_len]
+            new_scores[:, :, :self.seq_len] = self.attention_scores[:, :, :self.seq_len]
+            self.k_cache = new_k
+            self.v_cache = new_v
+            self.attention_scores = new_scores
+
     def append(self, k: torch.Tensor, v: torch.Tensor, position: int,
                attention_weights: torch.Tensor | None = None):
         """Append K/V and optionally update importance scores.
@@ -64,41 +87,25 @@ class SnapKVCache:
                               attention computation (for importance scoring)
         """
         B, _, T, _ = k.shape
-
-        if self.k_cache is None:
-            self.k_cache = k.clone()
-            self.v_cache = v.clone()
-            self.seq_len = T
-            self.attention_scores = torch.zeros(B, self.n_kv, T,
-                                                device=self.device, dtype=self.bf16_or_dtype())
-            return
+        self._ensure_buffer(B, T, k.dtype)
 
         # Update attention scores from observation window
-        if attention_weights is not None:
+        if attention_weights is not None and self.seq_len > 0:
             # attention_weights: [B, n_kv, T, cache_size]
             # Accumulate: each cached token's importance = sum of attention it receives
             scores = attention_weights.sum(dim=2)  # [B, n_kv, cache_size]
-            if self.attention_scores is not None:
-                # Pad scores to match current cache
-                cs = scores.shape[-1]
-                as_ = self.attention_scores.shape[-1]
-                if cs == as_:
-                    self.attention_scores = self.attention_scores + scores
-                elif cs > as_:
-                    self.attention_scores = torch.cat([
-                        self.attention_scores + scores[:, :, :as_],
-                        scores[:, :, as_:]
-                    ], dim=-1)
-                else:
-                    self.attention_scores = self.attention_scores[:, :, :cs] + scores
+            cs = scores.shape[-1]
+            if cs <= self.seq_len:
+                self.attention_scores[:, :, :cs] += scores
+            else:
+                self.attention_scores[:, :, :self.seq_len] += scores[:, :, :self.seq_len]
 
-        # Append new tokens
-        self.k_cache = torch.cat([self.k_cache, k], dim=2)
-        self.v_cache = torch.cat([self.v_cache, v], dim=2)
-        new_scores = torch.zeros(B, self.n_kv, T,
-                                 device=self.device, dtype=self.bf16_or_dtype())
-        self.attention_scores = torch.cat([self.attention_scores, new_scores], dim=-1)
-        self.seq_len = self.k_cache.shape[2]
+        # Write new tokens to buffer at current position (no torch.cat)
+        end = self.seq_len + T
+        self.k_cache[:, :, self.seq_len:end].copy_(k)
+        self.v_cache[:, :, self.seq_len:end].copy_(v)
+        self.attention_scores[:, :, self.seq_len:end].zero_()
+        self.seq_len = end
 
         # Evict if over capacity
         if self.seq_len > self.max_capacity:
@@ -106,7 +113,7 @@ class SnapKVCache:
 
     def _evict(self):
         """Evict lowest-importance tokens, keeping observation window."""
-        total = self.k_cache.shape[2]
+        total = self.seq_len
         n_to_evict = total - self.max_capacity
 
         # Observation window = last obs_window tokens (protected)
@@ -117,28 +124,31 @@ class SnapKVCache:
         # Average across batch
         candidate_scores = candidate_scores.mean(dim=0)  # [obs_start]
 
-        # Find lowest-scoring tokens to evict
-        _, indices = torch.sort(candidate_scores)
-        evict_indices = indices[:n_to_evict].sort()[0]  # sorted for indexing
+        # Use topk to find highest-scoring tokens to keep (O(n log k) vs O(n log n) sort)
+        n_keep = obs_start - n_to_evict
+        _, keep_indices = torch.topk(candidate_scores, n_keep)
+        keep_indices = keep_indices.sort()[0]
 
         # Keep mask: True for retained tokens
-        keep = torch.ones(total, dtype=torch.bool, device=self.device)
-        keep[evict_indices] = False
+        keep = torch.zeros(total, dtype=torch.bool, device=self.device)
+        keep[keep_indices] = True
+        keep[obs_start:] = True  # always keep observation window
 
-        # Apply eviction
-        self.k_cache = self.k_cache[:, :, keep]
-        self.v_cache = self.v_cache[:, :, keep]
-        self.attention_scores = self.attention_scores[:, :, keep]
-        self.seq_len = self.k_cache.shape[2]
+        # Compact buffer: copy kept entries to front (no reallocation)
+        new_seq_len = keep.sum().item()
+        self.k_cache[:, :, :new_seq_len] = self.k_cache[:, :, keep]
+        self.v_cache[:, :, :new_seq_len] = self.v_cache[:, :, keep]
+        self.attention_scores[:, :, :new_seq_len] = self.attention_scores[:, :, keep]
+        self.seq_len = new_seq_len
 
     def get(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Get current KV cache."""
-        return self.k_cache, self.v_cache
+        return self.k_cache[:, :, :self.seq_len], self.v_cache[:, :, :self.seq_len]
 
     def get_past_kv(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         if self.k_cache is None or self.seq_len == 0:
             return None
-        return (self.k_cache, self.v_cache)
+        return (self.k_cache[:, :, :self.seq_len], self.v_cache[:, :, :self.seq_len])
 
     def clear(self):
         self.k_cache = None
@@ -147,7 +157,7 @@ class SnapKVCache:
         self.seq_len = 0
 
     def info(self) -> dict:
-        current_size = self.k_cache.shape[2] if self.k_cache is not None else 0
+        current_size = self.seq_len
         return {
             "type": "snapkv",
             "observation_window": self.obs_window,

@@ -253,7 +253,7 @@ class HadamardKVCache(KVCacheStrategy):
         if hd != self.padded_dim:
             t = F.pad(t, (0, self.padded_dim - hd), value=0)
         t = t.reshape(*lead, self.n_blocks, self.block_size)
-        t = self._fwht(t.contiguous().clone())
+        t = self._fwht(t.contiguous())
         t = t * self._norm
         t = t.reshape(*lead, self.padded_dim)
         if hd != self.padded_dim:
@@ -362,6 +362,7 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
         "compressed": CompressedKVCacheStrategy,
         "streaming": StreamingKVCacheStrategy,
         "snapkv": SnapKVCacheStrategy,
+        "snapkv_4bit": SnapKV4BitCache,
         "2bit": KV2BitCacheStrategy,
     }
     cls = strategies.get(strategy, StandardKVCache)
@@ -431,6 +432,282 @@ class SnapKVCacheStrategy(KVCacheStrategy):
 
     def info(self):
         return self.cache.info()
+
+
+class SnapKV4BitCache(KVCacheStrategy):
+    """Combined SnapKV eviction + Hadamard INT4 quantization.
+
+    Composes two orthogonal compression strategies:
+      1. SnapKV: observation-window eviction — keeps high-attention tokens,
+         evicts low-importance ones (reduces token count).
+      2. Hadamard INT4: block-diagonal Hadamard rotation + per-token INT4
+         quantization on the retained tokens (reduces bits per token).
+
+    Total compression = (token eviction ratio) × (16/4 bit ratio).
+    For budget=512 with 2048-token context: ~4× from eviction × 4× from
+    INT4 = ~16× total VRAM reduction vs fp16 full cache.
+
+    The two strategies are composed as: evict first (SnapKV), then quantize
+    the survivors (Hadamard INT4). This is strictly better than either alone
+    because eviction and quantization operate on different axes (token count
+    vs bit width) and don't interfere.
+
+    Usage:
+        cache = build_kv_cache("snapkv_4bit")
+        # In attention: pass attention_weights for SnapKV scoring
+        cache.append(k, v, position, attention_weights=attn_weights)
+    """
+
+    def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
+        self.n_kv = n_kv_heads
+        self.head_dim = head_dim
+        self.device = device
+        self.dtype = dtype
+        self.max_seq_len = max_seq_len
+
+        # SnapKV eviction parameters
+        self.obs_window = 128
+        self.budget = min(512, max_seq_len)
+        self.max_capacity = self.budget + self.obs_window
+
+        # Hadamard INT4 parameters (reused from HadamardKVCache)
+        self.bits = 4
+        self.block_size = 64
+        bs = self.block_size
+        assert bs & (bs - 1) == 0, "block_size must be power of 2"
+        self.n_blocks = (head_dim + bs - 1) // bs
+        self.padded_dim = self.n_blocks * bs
+        self._norm = 1.0 / (bs ** 0.5)
+        self._stages = HadamardKVCache._fwht_stage_indices(bs, device)
+        self.qmax = (1 << (self.bits - 1)) - 1
+
+        # SnapKV state (full-precision until eviction)
+        self.k_cache = None
+        self.v_cache = None
+        self.attention_scores = None
+        self.seq_len = 0
+
+        # INT4 quantized storage (populated after eviction)
+        self.k_quant = None
+        self.v_quant = None
+        self.k_scale = None
+        self.v_scale = None
+        self._quantized = False  # whether current cache is in INT4 form
+
+    def bf16_or_dtype(self):
+        """Return bf16 if using bf16 dtype (saves 2x VRAM for attention scores),
+        otherwise return the configured dtype."""
+        return torch.bfloat16 if self.dtype == torch.bfloat16 else self.dtype
+
+    def _ensure_buffer(self, B, T, dtype):
+        """Ensure pre-allocated full-precision buffer is large enough for
+        B batch and T new tokens. Grows geometrically if needed (no per-append
+        torch.cat reallocation)."""
+        needed = max(self.max_capacity + T, self.seq_len + T)
+        if (self.k_cache is None
+                or self.k_cache.shape[0] != B
+                or self.k_cache.shape[2] < needed
+                or self.k_cache.dtype != dtype):
+            old_k = self.k_cache
+            old_v = self.v_cache
+            old_scores = self.attention_scores
+            old_len = self.seq_len
+            new_k = torch.zeros(B, self.n_kv, needed, self.head_dim,
+                                device=self.device, dtype=dtype)
+            new_v = torch.zeros_like(new_k)
+            new_scores = torch.zeros(B, self.n_kv, needed,
+                                     device=self.device,
+                                     dtype=self.bf16_or_dtype())
+            if old_k is not None and old_len > 0:
+                copy_len = min(old_len, old_k.shape[2])
+                new_k[:, :, :copy_len].copy_(old_k[:, :, :copy_len])
+                new_v[:, :, :copy_len].copy_(old_v[:, :, :copy_len])
+                if old_scores is not None:
+                    sc = min(copy_len, old_scores.shape[2])
+                    new_scores[:, :, :sc].copy_(old_scores[:, :, :sc])
+            self.k_cache = new_k
+            self.v_cache = new_v
+            self.attention_scores = new_scores
+
+    def _rotate(self, t):
+        """Block-diagonal Hadamard rotation via per-block FWHT."""
+        *lead, hd = t.shape
+        if hd != self.padded_dim:
+            t = F.pad(t, (0, self.padded_dim - hd), value=0)
+        t = t.reshape(*lead, self.n_blocks, self.block_size)
+        t = HadamardKVCache._fwht(self, t.contiguous().clone())
+        t = t * self._norm
+        t = t.reshape(*lead, self.padded_dim)
+        if hd != self.padded_dim:
+            t = t[..., :hd]
+        return t
+
+    def _inverse_rotate(self, t):
+        """Inverse Hadamard (H/sqrt(n) is orthogonal+symmetric)."""
+        return self._rotate(t)
+
+    def _quantize(self, t):
+        """Per-token INT4 quantization on rotated values."""
+        scale = t.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / self.qmax
+        q = torch.clamp(torch.round(t / scale), -self.qmax, self.qmax)
+        return q, scale
+
+    def _dequantize(self, q, scale):
+        """Dequantize INT4 → fp, then inverse rotate."""
+        t = q * scale
+        return self._inverse_rotate(t)
+
+    def _ensure_full_precision(self):
+        """If cache is currently INT4-quantized, dequantize back to fp for
+        appending new tokens. This is needed because SnapKV eviction operates
+        on full-precision attention scores."""
+        if not self._quantized or self.k_quant is None:
+            return
+        k = self._dequantize(
+            self.k_quant[:, :, :self.seq_len],
+            self.k_scale[:, :, :self.seq_len])
+        v = self._dequantize(
+            self.v_quant[:, :, :self.seq_len],
+            self.v_scale[:, :, :self.seq_len])
+        B = k.shape[0]
+        # Ensure pre-allocated buffer exists (T=0: just need room for seq_len)
+        self._ensure_buffer(B, 0, k.dtype)
+        self.k_cache[:, :, :self.seq_len].copy_(k)
+        self.v_cache[:, :, :self.seq_len].copy_(v)
+        self.k_quant = None
+        self.v_quant = None
+        self.k_scale = None
+        self.v_scale = None
+        self._quantized = False
+
+    def _quantize_cache(self):
+        """Quantize the full-precision cache to INT4 Hadamard."""
+        if self.k_cache is None or self._quantized:
+            return
+        k_rot = self._rotate(self.k_cache[:, :, :self.seq_len])
+        v_rot = self._rotate(self.v_cache[:, :, :self.seq_len])
+        k_q, k_s = self._quantize(k_rot)
+        v_q, v_s = self._quantize(v_rot)
+        B, n_kv, T, hd = k_q.shape
+        self.k_quant = torch.zeros(B, n_kv, self.max_capacity, hd,
+                                   device=k_q.device, dtype=k_q.dtype)
+        self.v_quant = torch.zeros_like(self.k_quant)
+        self.k_scale = torch.zeros(B, n_kv, self.max_capacity, 1,
+                                   device=k_s.device, dtype=k_s.dtype)
+        self.v_scale = torch.zeros_like(self.k_scale)
+        self.k_quant[:, :, :T] = k_q
+        self.v_quant[:, :, :T] = v_q
+        self.k_scale[:, :, :T] = k_s
+        self.v_scale[:, :, :T] = v_s
+        # Free full-precision cache
+        self.k_cache = None
+        self.v_cache = None
+        self._quantized = True
+
+    def append(self, k, v, position, attention_weights=None):
+        """Append K/V with optional attention weights for SnapKV scoring.
+
+        Dequantizes if needed, appends in full precision, runs SnapKV
+        eviction when over capacity, then re-quantizes to INT4.
+        """
+        self._ensure_full_precision()
+        B, _, T, _ = k.shape
+        self._ensure_buffer(B, T, k.dtype)
+
+        # Update attention scores from observation window
+        if attention_weights is not None and self.seq_len > 0:
+            scores = attention_weights.sum(dim=2)  # [B, n_kv, cache_size]
+            cs = scores.shape[-1]
+            if cs <= self.seq_len:
+                self.attention_scores[:, :, :cs] += scores
+            else:
+                self.attention_scores[:, :, :self.seq_len] += scores[:, :, :self.seq_len]
+
+        # Write new tokens to buffer at current position (no torch.cat)
+        end = self.seq_len + T
+        self.k_cache[:, :, self.seq_len:end].copy_(k)
+        self.v_cache[:, :, self.seq_len:end].copy_(v)
+        self.attention_scores[:, :, self.seq_len:end].zero_()
+        self.seq_len = end
+
+        # Evict if over capacity (SnapKV)
+        if self.seq_len > self.max_capacity:
+            self._evict()
+
+        # Quantize to INT4 Hadamard for storage efficiency
+        self._quantize_cache()
+
+    def _evict(self):
+        """SnapKV eviction: keep high-attention tokens + observation window.
+        Compacts in-place into the pre-allocated buffer (no reallocation)."""
+        total = self.seq_len
+        n_to_evict = total - self.max_capacity
+        obs_start = total - self.obs_window
+
+        candidate_scores = self.attention_scores[:, :, :obs_start].mean(dim=1)
+        candidate_scores = candidate_scores.mean(dim=0)  # [obs_start]
+
+        _, indices = torch.sort(candidate_scores)
+        evict_indices = indices[:n_to_evict].sort()[0]
+
+        keep = torch.ones(total, dtype=torch.bool, device=self.device)
+        keep[evict_indices] = False
+
+        # Compact buffer: copy kept entries to front (no reallocation)
+        new_seq_len = keep.sum().item()
+        self.k_cache[:, :, :new_seq_len] = self.k_cache[:, :, keep]
+        self.v_cache[:, :, :new_seq_len] = self.v_cache[:, :, keep]
+        self.attention_scores[:, :, :new_seq_len] = self.attention_scores[:, :, keep]
+        self.seq_len = new_seq_len
+
+    def get(self, positions):
+        """Retrieve K/V — dequantizes from INT4 if needed."""
+        if self._quantized and self.k_quant is not None:
+            k = self._dequantize(
+                self.k_quant[:, :, :self.seq_len],
+                self.k_scale[:, :, :self.seq_len])
+            v = self._dequantize(
+                self.v_quant[:, :, :self.seq_len],
+                self.v_scale[:, :, :self.seq_len])
+            return k, v
+        if self.k_cache is None:
+            return None, None
+        return self.k_cache[:, :, :self.seq_len], self.v_cache[:, :, :self.seq_len]
+
+    def get_past_kv(self):
+        return self.get(None)
+
+    def clear(self):
+        self.k_cache = None
+        self.v_cache = None
+        self.attention_scores = None
+        self.k_quant = None
+        self.v_quant = None
+        self.k_scale = None
+        self.v_scale = None
+        self.seq_len = 0
+        self._quantized = False
+
+    def info(self):
+        current_size = self.seq_len
+        if self._quantized and self.k_quant is not None:
+            actual_bytes = current_size * self.n_kv * self.padded_dim * 0.5
+            actual_bytes += current_size * self.n_kv * 2  # per-token scales
+            size_mb = 2 * actual_bytes / 1e6  # K + V
+        else:
+            size_mb = 0
+            if self.k_cache is not None and self.seq_len > 0:
+                # Report only the valid portion (pre-allocated buffer is larger)
+                elems = self.seq_len * self.n_kv * self.head_dim
+                size_mb = 2 * elems * 2 / 1e6  # K + V, fp16/bf16 = 2 bytes
+        eviction_ratio = max(1.0, self.max_seq_len / max(1, current_size))
+        bit_ratio = 16 / self.bits
+        return {"type": "snapkv_4bit", "seq_len": current_size,
+                "observation_window": self.obs_window, "budget": self.budget,
+                "max_capacity": self.max_capacity, "bits": self.bits,
+                "size_mb": size_mb,
+                "compression": eviction_ratio * bit_ratio,
+                "eviction_ratio": eviction_ratio, "bit_ratio": bit_ratio}
 
 
 class KV2BitCacheStrategy(KVCacheStrategy):

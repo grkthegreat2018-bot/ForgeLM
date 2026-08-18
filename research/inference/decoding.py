@@ -55,14 +55,16 @@ class StandardDecoding(DecodingStrategy):
             cfg = getattr(model, "config", None)
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
         # Qwen2.5 EOS tokens: <|endoftext|>=151643, <|im_end|>=151645
-        eos_set = {151643, 151645}
+        eos_set = {7, 151643, 151645}  # LFM2.5 <|im_end|>=7 + Qwen2.5
         if eos is not None:
             eos_set.add(eos)
         eos_tensor = torch.tensor(list(eos_set), device=device)
         # Pinned memory for async D2H (reduces CPU sync spikes).
         token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
-        # Track generated token ids for repetition penalty
+        # Track generated token ids for repetition penalty + degeneration
         generated_ids: list[int] = []
+        # Degeneration guard: stop if same token repeats too many times.
+        MAX_REPEAT = 8  # same token 8x in a row = degenerate
 
         # Prefill — model returns (logits, loss, presents) when use_cache=True
         with torch.inference_mode():
@@ -96,6 +98,16 @@ class StandardDecoding(DecodingStrategy):
             token_pinned.copy_(next_token, non_blocking=True)
             if is_eos.item():
                 break
+
+            # Degeneration guard: detect repetitive garbage and stop early.
+            # Critical for base models that haven't learned to emit EOS.
+            if len(generated_ids) >= MAX_REPEAT:
+                if all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                    break  # same token repeated 8x = degenerate
+            if len(generated_ids) >= 20:
+                recent = generated_ids[-20:]
+                if len(set(recent)) / len(recent) < 0.4:
+                    break  # <40% unique tokens = degenerate
 
             ids = torch.cat([ids, next_token], dim=-1)
             with torch.inference_mode():

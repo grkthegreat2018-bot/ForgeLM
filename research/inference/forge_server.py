@@ -17,7 +17,6 @@ Usage:
     server.serve(port=8000)
 """
 import argparse
-import asyncio
 import json
 import time
 import uuid
@@ -217,47 +216,39 @@ class ForgeServer:
 
     async def _stream_response(self, model_id: str, prompt: str,
                                req: ChatCompletionRequest):
-        """SSE streaming generator."""
+        """SSE streaming generator — true token-level streaming.
+
+        Uses the engine's ``generate_stream`` generator to yield decoded
+        text chunks one token at a time as they are produced, giving low
+        time-to-first-token instead of waiting for full generation.
+        """
         resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
 
-        # For streaming, we generate in chunks by calling generate()
-        # with small max_new_tokens repeatedly. A real implementation
-        # would use token-level streaming from the engine.
-        try:
-            # Generate all tokens at once (future: token-level streaming)
-            full_output = self.registry.generate(
-                model_id, prompt,
-                max_new_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                finish_sentence=False,
-            )
-
-            # Stream token by token (split on spaces for word-level chunks)
-            words = full_output.split(" ")
-            for i, word in enumerate(words):
-                chunk = word + (" " if i < len(words) - 1 else "")
-                delta = {"content": chunk}
-                chunk_data = {
-                    "id": resp_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_id,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk_data)}\n\n"
-                await asyncio.sleep(0.01)  # Simulate token-level timing
-
-            # Final chunk with finish_reason
-            final_data = {
+        def _sse_chunk(delta: dict, finish_reason: str | None = None) -> str:
+            chunk_data = {
                 "id": resp_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model_id,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": delta,
+                             "finish_reason": finish_reason}],
             }
-            yield f"data: {json.dumps(final_data)}\n\n"
+            return f"data: {json.dumps(chunk_data)}\n\n"
+
+        try:
+            # Stream tokens one at a time from the engine
+            for text_chunk in self.registry.generate_stream(
+                model_id, prompt,
+                max_new_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+            ):
+                if text_chunk:
+                    yield _sse_chunk({"content": text_chunk})
+
+            # Final chunk with finish_reason
+            yield _sse_chunk({}, finish_reason="stop")
             yield "data: [DONE]\n\n"
 
         except Exception as e:

@@ -267,7 +267,8 @@ class DSparkHead(nn.Module):
     @torch.no_grad()
     def generate_block(self, model: nn.Module, input_ids: torch.Tensor,
                        max_block_size: int = 4,
-                       temperature: float = 0.0) -> list[tuple[int, float]]:
+                       temperature: float = 0.0,
+                       return_probs: bool = False) -> list[tuple[int, float]] | tuple:
         """Generate a block of up to max_block_size tokens using semi-AR generation.
 
         Algorithm:
@@ -282,9 +283,12 @@ class DSparkHead(nn.Module):
             input_ids: (1, T) current token sequence
             max_block_size: maximum tokens to draft (capped by n_predict)
             temperature: 0 for greedy, >0 for sampling
+            return_probs: if True, also return the refined probability
+                distributions (list of (1, V) tensors) for rejection sampling
 
         Returns:
-            list of (token_id, confidence) pairs, length ≤ max_block_size
+            list of (token_id, confidence) pairs, length ≤ max_block_size.
+            If return_probs=True, returns (results, refined_probs_list).
         """
         model.eval()
         self.eval()
@@ -309,7 +313,7 @@ class DSparkHead(nn.Module):
             elif hasattr(model, "embed_tokens"):
                 hidden = model.embed_tokens(hidden.argmax(-1))
             else:
-                return []
+                return ([], []) if return_probs else []
 
         # Use the last position's hidden state as the anchor context.
         anchor_hidden = hidden[:, -1:, :]  # (1, 1, d_model)
@@ -321,6 +325,7 @@ class DSparkHead(nn.Module):
         # 3. Sequential sampling: left-to-right within the block.
         anchor_token = input_ids[:, -1]  # (1,) last token = anchor x_0
         results: list[tuple[int, float]] = []
+        refined_probs_list: list[torch.Tensor] = []
         state = None  # RNN state
         prev_token = anchor_token  # x_{k-1}, starts with anchor
 
@@ -340,8 +345,12 @@ class DSparkHead(nn.Module):
             # Sample token.
             if temperature == 0:
                 token = refined.argmax(dim=-1)  # (1,)
+                if return_probs:
+                    refined_probs_list.append(F.softmax(refined, dim=-1))
             else:
                 probs = F.softmax(refined / temperature, dim=-1)
+                if return_probs:
+                    refined_probs_list.append(probs)
                 token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # (1,)
 
             # Confidence score c_k.
@@ -352,6 +361,8 @@ class DSparkHead(nn.Module):
             results.append((tok_conf[0], tok_conf[1]))
             prev_token = token  # x_k becomes x_{k-1} for next step
 
+        if return_probs:
+            return results, refined_probs_list
         return results
 
     # ──────────────────────────────────────────────────────────────────
@@ -644,25 +655,42 @@ class DSparkTrainer:
                     all_labels[k].append(accept)
 
         # Sequential temperature scaling: left-to-right.
+        # Temperature scaling is applied in logit space: σ(logit/T) not σ(logit)/T.
+        # Confidence c = σ(z) → logit z = log(c / (1-c)) → scaled c' = σ(z / T).
         temps = []
         for k in range(gamma):
             if not all_preds[k]:
                 temps.append(1.0)
                 continue
 
-            preds = torch.cat(all_preds[k])
+            preds = torch.cat(all_preds[k]).clamp(1e-6, 1 - 1e-6)
             labels = torch.cat(all_labels[k])
 
-            # Apply already-calibrated temperatures for positions < k.
+            # Convert confidence to logit space for already-calibrated positions.
+            # σ(z/T_j) = c' → z/T_j = log(c'/(1-c')) → z = T_j * log(c'/(1-c'))
+            # For position k, apply cumulative temperature: z_eff = z / (∏_{j<k} T_j)
+            logit_preds = torch.log(preds / (1 - preds))
             for j in range(k):
-                preds = preds / max(temps[j], 1e-6)
+                logit_preds = logit_preds / max(temps[j], 1e-6)
 
             # Grid search for optimal temperature at position k.
             best_temp, best_ece = 1.0, float("inf")
             for t_val in torch.linspace(0.1, 5.0, n_grid):
-                scaled = (preds / t_val).clamp(1e-6, 1 - 1e-6)
-                # ECE for this position's conditional probability.
-                ece = ((scaled - labels).abs()).mean().item()
+                scaled = torch.sigmoid(logit_preds / t_val)
+                # Binned ECE: group predictions into bins, compare avg confidence
+                # to empirical accuracy per bin.
+                n_bins = 10
+                bin_bounds = torch.linspace(0, 1, n_bins + 1)
+                ece = 0.0
+                for bi in range(n_bins):
+                    mask = (scaled >= bin_bounds[bi]) & (scaled < bin_bounds[bi + 1])
+                    if bi == n_bins - 1:
+                        mask = (scaled >= bin_bounds[bi]) & (scaled <= bin_bounds[bi + 1])
+                    if mask.any():
+                        bin_conf = scaled[mask].mean()
+                        bin_acc = labels[mask].mean()
+                        bin_frac = mask.float().mean()
+                        ece += bin_frac * (bin_conf - bin_acc).abs().item()
                 if ece < best_ece:
                     best_ece = ece
                     best_temp = t_val.item()
@@ -756,10 +784,14 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         # ── Step 2: DSpark generates a draft block ──
         # Temp append anchor to get hidden states for drafting.
         draft_input = torch.cat([input_ids, anchor_token], dim=1)
-        block = dspark_head.generate_block(
+        block_result = dspark_head.generate_block(
             model, draft_input, max_block_size=max_block_size,
-            temperature=temperature,
+            temperature=temperature, return_probs=(temperature > 0),
         )
+        if temperature > 0:
+            block, draft_probs_list = block_result
+        else:
+            block = block_result
 
         if not block:
             # No draft possible — just accept the anchor token.
@@ -813,21 +845,64 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         # GPU-side: compare all draft tokens with model predictions at once.
         n_check = min(n_verify, verify_logits.shape[1] - 1 - anchor_pos)
         if n_check > 0:
-            target_preds = verify_logits[0, anchor_pos:anchor_pos + n_check, :].argmax(-1)
-            verify_tensor = torch.tensor(verify_tokens[:n_check], device=dev)
-            matches = (verify_tensor == target_preds)
-            n_accepted = matches.cumprod(dim=-1).sum().item()
+            if temperature == 0:
+                # Greedy: argmax comparison (correct for temperature == 0)
+                target_preds = verify_logits[0, anchor_pos:anchor_pos + n_check, :].argmax(-1)
+                verify_tensor = torch.tensor(verify_tokens[:n_check], device=dev)
+                matches = (verify_tensor == target_preds)
+                n_accepted = matches.cumprod(dim=-1).sum().item()
 
-            if n_accepted < n_check:
-                # Rejection at position n_accepted — bonus is model's prediction.
-                bonus_token = target_preds[n_accepted:n_accepted + 1].unsqueeze(-1)
-            else:
-                # All verified tokens accepted — bonus = model's prediction after last.
-                pos = anchor_pos + n_verify
-                if pos < verify_logits.shape[1]:
-                    bonus_token = verify_logits[:, pos, :].argmax(-1, keepdim=True)
+                if n_accepted < n_check:
+                    # Rejection at position n_accepted — bonus is model's prediction.
+                    bonus_token = target_preds[n_accepted:n_accepted + 1].unsqueeze(-1)
                 else:
-                    bonus_token = anchor_token  # fallback
+                    # All verified tokens accepted — bonus = model's prediction after last.
+                    pos = anchor_pos + n_verify
+                    if pos < verify_logits.shape[1]:
+                        bonus_token = verify_logits[:, pos, :].argmax(-1, keepdim=True)
+                    else:
+                        bonus_token = anchor_token  # fallback
+            else:
+                # Rejection sampling (Leviathan 2023) for temperature > 0
+                verify_tensor = torch.tensor(verify_tokens[:n_check], device=dev)
+                # Target probs: (n_check, V)
+                target_probs = F.softmax(
+                    verify_logits[0, anchor_pos:anchor_pos + n_check, :] / temperature, dim=-1)
+                # Draft probs: stack refined_probs → (n_check, V)
+                draft_probs = torch.stack(
+                    [p.squeeze(0) for p in draft_probs_list[:n_check]], dim=0)  # (n_check, V)
+                # q(x) and p(x) at the draft token positions
+                q_x = draft_probs.gather(1, verify_tensor.unsqueeze(-1)).squeeze(-1)  # (n_check,)
+                p_x = target_probs.gather(1, verify_tensor.unsqueeze(-1)).squeeze(-1)  # (n_check,)
+                # Acceptance ratios: min(1, p/q)
+                ratios = (p_x / q_x.clamp(min=1e-8)).clamp(max=1.0)  # (n_check,)
+                # Sample randoms on GPU, find first rejection
+                rand = torch.rand_like(ratios)
+                accepted_mask = rand < ratios
+                rejected = ~accepted_mask
+                if rejected.any().item():
+                    n_accepted = rejected.int().argmax().item()
+                else:
+                    n_accepted = n_check
+
+                if n_accepted < n_check:
+                    # Rejection: resample from residual distribution
+                    p_at_rej = target_probs[n_accepted]  # (V,)
+                    q_at_rej = draft_probs[n_accepted]  # (V,)
+                    residual = (p_at_rej - q_at_rej).clamp(min=0.0)
+                    residual = residual / residual.sum().clamp(min=1e-8)
+                    bonus_token = torch.multinomial(
+                        residual, num_samples=1).unsqueeze(0)  # (1, 1)
+                else:
+                    # All accepted: bonus = sample from target at last verified position
+                    pos = anchor_pos + n_verify
+                    if pos < verify_logits.shape[1]:
+                        bonus_probs = F.softmax(
+                            verify_logits[0, pos, :] / temperature, dim=-1)
+                        bonus_token = torch.multinomial(
+                            bonus_probs, num_samples=1).unsqueeze(0)
+                    else:
+                        bonus_token = anchor_token  # fallback
         else:
             n_accepted = 0
             bonus_token = anchor_token  # fallback

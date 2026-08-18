@@ -28,6 +28,7 @@ Usage (training)::
 """
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import random
@@ -303,6 +304,11 @@ class ParquetDataset:
         # JSON dict/list, we treat it as JSON-encoded.
         self._json_columns: set[str] | None = None
 
+        # Cache the last-read row group to avoid re-reading millions of rows
+        # for repeated accesses to the same group.
+        self._cached_rg_idx: int | None = None
+        self._cached_rg_table: pa.Table | None = None
+
     def _detect_json_columns(self, sample_row: dict) -> set[str]:
         """Detect which string columns contain JSON-encoded complex values."""
         json_cols: set[str] = set()
@@ -326,6 +332,7 @@ class ParquetDataset:
     def __setstate__(self, state: dict) -> None:
         self.__init__(state["parquet_path"], columns=state["_columns"])
         self._json_columns = state.get("_json_columns")
+        # Row group cache is reset on unpickle (worker re-opens file).
 
     @property
     def num_rows(self) -> int:
@@ -346,21 +353,22 @@ class ParquetDataset:
 
     def _row_to_dict(self, row_idx: int) -> dict[str, Any]:
         """Read a single row by global index, returning a plain dict."""
-        # Binary search / linear scan for the right row group.
-        # (Linear scan is fine — num_row_groups is typically small.)
-        rg_idx = 0
-        for i, (off, cnt) in enumerate(zip(self._row_group_offsets,
-                                           self._rg_row_counts)):
-            if off <= row_idx < off + cnt:
-                rg_idx = i
-                break
-        else:
+        # Binary search for the right row group (offsets are sorted).
+        rg_idx = bisect.bisect_right(self._row_group_offsets, row_idx) - 1
+        if rg_idx < 0 or rg_idx >= len(self._row_group_offsets):
             raise IndexError(f"Row {row_idx} out of range (len={self._num_rows})")
 
         local_idx = row_idx - self._row_group_offsets[rg_idx]
 
-        # Read just this row from the row group.
-        table = self._read_row_group(rg_idx)
+        # Use cached row group table if available (avoids re-reading
+        # millions of rows for repeated accesses to the same group).
+        if self._cached_rg_idx == rg_idx and self._cached_rg_table is not None:
+            table = self._cached_rg_table
+        else:
+            table = self._read_row_group(rg_idx)
+            self._cached_rg_idx = rg_idx
+            self._cached_rg_table = table
+
         row = {col: table.column(col)[local_idx].as_py()
                for col in table.column_names}
 
@@ -504,6 +512,9 @@ class StreamingDataLoader:
         pin_memory: bool = False,
         device: str | None = None,
         prefetch_factor: int = 2,
+        # Default pad_id=0 is a fallback; callers with a tokenizer should pass
+        # pad_id=tokenizer.pad_token_id (or tokenizer.eos_token_id if pad is None).
+        pad_id: int = 0,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -518,6 +529,7 @@ class StreamingDataLoader:
         # Batches prefetched per worker: workers decode the next N batches
         # while the GPU processes the current one (hides parquet ZSTD CPU cost).
         self.prefetch_factor = prefetch_factor
+        self.pad_id = pad_id
         self._epoch = 0
 
     @property
@@ -571,7 +583,8 @@ class StreamingDataLoader:
                             for x in v)):
                 # Pad to max length and stack into tensor.
                 max_len = max(len(v) for v in values if v is not None)
-                tensor = torch.full((len(values), max_len), 0, dtype=torch.long)
+                tensor = torch.full((len(values), max_len), self.pad_id,
+                                    dtype=torch.long)
                 for i, v in enumerate(values):
                     if v is not None:
                         tensor[i, :len(v)] = torch.tensor(v, dtype=torch.long)

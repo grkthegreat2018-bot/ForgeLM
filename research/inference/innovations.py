@@ -27,6 +27,7 @@ XP model checkpoint:
 from typing import Dict, Optional, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -66,9 +67,9 @@ class MRLAdaptiveContext:
         d_k = self.d_keep
 
         # Truncate embedding and head
-        model.embed.weight.data = model.embed.weight.data[:, :d_k]
+        model.embed.weight = nn.Parameter(model.embed.weight.data[:, :d_k].clone())
         if hasattr(model, 'head'):
-            model.head.weight.data = model.head.weight.data[:, :d_k]
+            model.head.weight = nn.Parameter(model.head.weight.data[:, :d_k].clone())
             if model.head.bias is not None:
                 model.head.bias.data = model.head.bias.data[:d_k]
 

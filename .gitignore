@@ -39,6 +39,7 @@ data/
 research/data/
 research/tasks/
 research/runtime/tasks/
+research/distillation/hf_datasets/
 wandb/
 runs/
 

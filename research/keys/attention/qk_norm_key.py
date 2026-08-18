@@ -19,26 +19,14 @@ Usage:
 from typing import Dict
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from research.keys.misc.base import Key, KeyClass, KeyResult
+from research.model_loader import RMSNorm
 
-
-class QKNorm(nn.Module):
-    """RMSNorm for Q/K vectors. Identity at init (weight=1).
-
-    Uses F.rms_norm for a single fused kernel instead of 3 separate ops.
-    """
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-        self.normalized_shape = [dim]
-
-    def forward(self, x):
-        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
+# QKNorm was identical to RMSNorm (same eps=1e-6, same torch.ones init,
+# same F.rms_norm forward). Removed the duplicate and reuse RMSNorm from
+# model_loader to avoid code bloat.
+QKNorm = RMSNorm
 
 
 class QKNormKey(Key):

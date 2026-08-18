@@ -158,8 +158,9 @@ class PersistentCodeExecutor:
 
             # Send code to worker.
             code_bytes = code.encode('utf-8')
-            self._proc.stdin.write(struct.pack('<I', len(code_bytes)))
-            self._proc.stdin.write(code_bytes)
+            header = struct.pack('<I', len(code_bytes))
+            self._write_all(header)
+            self._write_all(code_bytes)
             self._proc.stdin.flush()
 
             # Read result with timeout.
@@ -229,6 +230,21 @@ class PersistentCodeExecutor:
             return None
 
         return result[0]
+
+    def _write_all(self, data: bytes):
+        """Write all data to stdin, handling partial writes on Windows pipes.
+
+        On Windows, pipe writes >64KB may not complete in a single write() call.
+        Writes in chunks and flushes each to avoid pipe buffer overflow.
+        """
+        total = len(data)
+        written = 0
+        chunk_size = 16384  # 16KB — well under the 64KB Windows pipe buffer limit
+        while written < total:
+            end = min(written + chunk_size, total)
+            self._proc.stdin.write(data[written:end])
+            self._proc.stdin.flush()
+            written = end
 
     def _kill_worker(self):
         """Kill the current worker process."""

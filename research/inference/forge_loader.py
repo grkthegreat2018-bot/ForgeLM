@@ -167,12 +167,13 @@ class GGUFInfo:
         self.alignment = GGUF_DEFAULT_ALIGNMENT
         self._mmap_obj = None
         self._data = None
+        self._data_section_offset = 0
         self._parse()
 
     def _parse(self):
         """Parse GGUF header, metadata, and tensor info."""
-        with open(self.path, "rb") as f:
-            # Read magic + header
+        f = open(self.path, "rb")
+        try:
             magic = f.read(4)
             if magic != GGUF_MAGIC:
                 raise ValueError(f"Not a GGUF file: {self.path} (magic={magic!r})")
@@ -181,14 +182,15 @@ class GGUFInfo:
             tensor_count = struct.unpack("<Q", f.read(8))[0]
             kv_count = struct.unpack("<Q", f.read(8))[0]
 
-            # Read the rest of the file into memory for metadata parsing
-            # (metadata is small: typically <100KB for KV pairs + tensor info)
-            remaining = f.read()
-            data = remaining
+            file_size = os.path.getsize(self.path)
+            self._mmap_obj = mmap.mmap(f.fileno(), file_size, access=mmap.ACCESS_READ)
+        finally:
+            f.close()
 
-        offset = 0
+        data = self._mmap_obj
 
-        # Parse key-value metadata
+        offset = 24
+
         for _ in range(kv_count):
             key, offset = _read_string(data, offset)
             value_type = struct.unpack_from("<I", data, offset)[0]
@@ -196,10 +198,8 @@ class GGUFInfo:
             value, offset = _read_metadata_value(data, offset, value_type)
             self.metadata[key] = value
 
-        # Read alignment
         self.alignment = self.metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT)
 
-        # Parse tensor info
         for _ in range(tensor_count):
             name, offset = _read_string(data, offset)
             n_dims = struct.unpack_from("<I", data, offset)[0]
@@ -220,22 +220,25 @@ class GGUFInfo:
                 "offset": tensor_offset,
             })
 
-        # Open mmap for zero-copy tensor access
-        file_size = os.path.getsize(self.path)
-        self._mmap_obj = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        data_section_offset = offset
+        if self.alignment > 1:
+            remainder = data_section_offset % self.alignment
+            if remainder != 0:
+                data_section_offset += self.alignment - remainder
+        self._data_section_offset = data_section_offset
 
     def get_tensor(self, name: str) -> torch.Tensor:
         """Get a tensor via mmap (zero-copy view into the file)."""
         for t in self.tensors:
             if t["name"] == name:
                 torch_dtype, elem_size = GGML_DTYPE_MAP.get(t["dtype"], (None, 0))
+                file_offset = self._data_section_offset + t["offset"]
                 if torch_dtype is None:
-                    # Quantized tensor — return raw bytes as uint8
                     total_elements = 1
                     for d in t["dims"]:
                         total_elements *= d
-                    # Quantized types: use the block size to compute bytes
-                    raw = self._mmap_obj[t["offset"]:t["offset"] + total_elements]
+                    n_bytes = total_elements
+                    raw = self._mmap_obj[file_offset:file_offset + n_bytes]
                     return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(t["dims"])
 
                 total_bytes = 1
@@ -243,8 +246,7 @@ class GGUFInfo:
                     total_bytes *= d
                 total_bytes *= elem_size
 
-                # Create tensor from mmap buffer
-                raw = self._mmap_obj[t["offset"]:t["offset"] + total_bytes]
+                raw = self._mmap_obj[file_offset:file_offset + total_bytes]
                 tensor = torch.frombuffer(bytearray(raw), dtype=torch_dtype)
                 return tensor.reshape(t["dims"])
 
@@ -432,6 +434,9 @@ class ForgeLoader:
     @staticmethod
     def _download_hf_file(model_id: str, dest: Path, filename: str = None):
         """Download a single file from HuggingFace Hub."""
+        import ipaddress
+        import socket
+        import urllib.parse
         import urllib.request
 
         if filename is None:
@@ -440,6 +445,24 @@ class ForgeLoader:
 
         repo_id = model_id.replace(".gguf", "") if model_id.endswith(".gguf") else model_id
         url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"URL scheme '{parsed.scheme}' not allowed; only http/https permitted")
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ValueError(f"URL has no hostname: {url}")
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            raise ValueError(f"URL hostname '{hostname}' is blocked (SSRF protection)")
+        try:
+            addr = socket.getaddrinfo(hostname, None)
+            for family, _, _, _, sockaddr in addr:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                    raise ValueError(f"URL hostname '{hostname}' resolves to private/reserved IP {ip} (SSRF protection)")
+        except socket.gaierror:
+            pass
+
         print(f"  [ForgeLoader] Downloading: {url}")
 
         dest.parent.mkdir(parents=True, exist_ok=True)

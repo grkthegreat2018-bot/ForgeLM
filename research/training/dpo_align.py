@@ -58,6 +58,12 @@ def _logp_for_completion(model, input_ids, completion_start, device):
     completion_start: int index where completion begins
     Returns scalar logp on device.
     """
+    if completion_start <= 0:
+        raise ValueError(
+            f"completion_start must be > 0 (got {completion_start}); "
+            "the completion must be preceded by at least one prompt token so "
+            "its first token can be predicted by the preceding prompt position."
+        )
     ids = input_ids.unsqueeze(0).to(device)  # [1, T]
     out = model(ids)
     logits = out[0] if isinstance(out, tuple) else out  # [1, T, V]

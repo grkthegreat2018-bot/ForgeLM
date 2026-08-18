@@ -199,6 +199,12 @@ class PagedKVCache:
             for _ in range(n_needed):
                 if not self.free_blocks:
                     self._evict_oldest()
+                if not self.free_blocks:
+                    raise RuntimeError(
+                        "Out of KV cache blocks: all blocks are pinned and "
+                        "eviction failed. Increase num_blocks or reduce "
+                        "concurrent sequences."
+                    )
                 bid = self.free_blocks.pop(0)
                 state.block_ids.append(bid)
 

@@ -76,6 +76,14 @@ class ModelConfig:
     # (all tokens processed). <1.0 skips tokens in training (FLOPs ceiling).
     use_mod: bool = False
     mod_keep_fraction: float = 1.0
+    # FFN-SkipLLM: skip FFN blocks during inference when input norm is small
+    # (saturated layers contribute little). 0.0 = skip none, 0.3 = skip ~30%.
+    # Only active during eval (not training). Based on EMNLP 2024 paper.
+    # NOTE: Calibration on ForgeLM V3 (1.2B, 16 layers) shows NO FFN saturation
+    # — cosine similarities are all low/negative (FFN actively transforms in all
+    # layers). This technique requires 32+ layer models to have a non-cold region.
+    # Kept in config for future larger models. See docs/FFN_RESEARCH.md.
+    ffn_skip_threshold: float = 0.0  # 0.0 = disabled
 
     # === Training ===
     dropout: float = 0.0
@@ -127,6 +135,39 @@ class ModelConfig:
     def __post_init__(self):
         if self.d_model % self.n_heads != 0:
             raise ValueError(f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads}).")
+        # GQA: n_heads must be a multiple of n_kv_heads (or n_kv_heads == n_heads).
+        n_kv = self.n_kv_heads if self.n_kv_heads is not None else self.n_heads
+        if n_kv <= 0 or self.n_heads % n_kv != 0:
+            raise ValueError(
+                f"n_heads ({self.n_heads}) must be a positive multiple of "
+                f"n_kv_heads ({n_kv}) for GQA."
+            )
+        # Per-layer type list must match n_layers when provided.
+        # If n_layers is overridden but layer_types isn't, auto-resize by
+        # truncating or cycling the existing pattern to match n_layers.
+        if self.layer_types is not None:
+            n_lt = len(self.layer_types)
+            if n_lt != self.n_layers:
+                if n_lt > self.n_layers:
+                    # Truncate to first n_layers entries.
+                    self.layer_types = list(self.layer_types[: self.n_layers])
+                else:
+                    # Cycle existing pattern to fill n_layers.
+                    base = list(self.layer_types)
+                    self.layer_types = [
+                        base[i % n_lt] for i in range(self.n_layers)
+                    ]
+        # FFN intermediate size: positive when explicitly set.
+        if self.intermediate_size is not None and self.intermediate_size <= 0:
+            raise ValueError(
+                f"intermediate_size ({self.intermediate_size}) must be > 0."
+            )
+        # head_dim must be consistent (d_model / n_heads) and >= 1.
+        head_dim = self.d_model // self.n_heads
+        if head_dim < 1:
+            raise ValueError(
+                f"head_dim (d_model/n_heads = {head_dim}) must be >= 1."
+            )
 
 
 # Pre-defined architecture targets.
@@ -194,6 +235,14 @@ MODEL_CONFIGS = {
         titan_memory_rank=64,
         use_mod=True,
         mod_keep_fraction=1.0,
+        # FFN-SkipLLM: NOT applicable to V3 (16 layers, no saturation region).
+        # See docs/FFN_RESEARCH.md. Kept for future 32+ layer models.
+        ffn_skip_threshold=0.0,
+        # Additional lossless keys (gate=0 / identity init):
+        use_mhc=True,             # DeepSeek-V4 hyper-connections
+        mhc_rank=0,               # 0 = auto (d_model // 4)
+        use_attn_residual=True,   # Kimi K3 cross-layer retrieval
+        attn_res_k=4,             # retrieve from last 4 layers
         batch_size=2,
         seq_len=1024,
     ),

@@ -74,6 +74,25 @@ class ModRouter(nn.Module):
         gate = soft + (hard - soft).detach()
         return gate * update
 
+    def aux_loss(self, x: torch.Tensor,
+                 mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Load-balancing-ish auxiliary loss for the TRUE-SKIP path.
+
+        In the skip path the hard top-k selection is non-differentiable, so
+        the router would never receive gradients. This loss pushes the soft
+        scores of SKIPPED tokens toward 0 (be confident about skipping) and
+        kept tokens toward 1. Attached via the block's `_last_aux_loss` and
+        aggregated into the model loss like the MoE aux term.
+        """
+        scores = self.router(x).squeeze(-1)  # (B, T)
+        if mask is None:
+            return scores.sigmoid().mean() * 0.0
+        kept = mask
+        skipped = ~mask
+        aux = (scores[skipped].sigmoid().mean()
+               + (1.0 - scores[kept].sigmoid()).mean())
+        return 0.5 * aux
+
 
 class ModRouterKey(Key):
     """Adds/removes the MoD router parameter on a state dict.

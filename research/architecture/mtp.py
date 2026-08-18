@@ -213,22 +213,18 @@ class MTPModule(nn.Module):
         total_loss = torch.tensor(0.0, device=hidden.device, dtype=hidden.dtype)
         all_logits = []
 
-        # For head k: predict token t+k+1 using h_t + embed(token_{t+k})
-        # We need targets shifted by (k+1) and embeddings shifted by k
+        # For head k (0-indexed): predict token t+k+2 from h_t + embed(token_{t+k+1}).
+        # Main head predicts t+1; each MTP head adds one more step of lookahead.
         for k in range(self.n_heads):
-            # Input: hidden[t] + embed(token[t+k])
-            # Target: token[t+k+1]
+            # Head k (0-indexed) predicts token t+k+2 from h_t + embed(token_{t+k+1}).
+            # targets[i] = idx[i+1] (already shifted by 1), so the target for input
+            # position t is targets[t+k+1] = idx[t+k+2].
             if T - k - 2 < 1:
                 continue  # not enough tokens for this head
 
-            h_input = hidden[:, :T - k - 1, :]  # (B, T-k-1, d)
-            embed_input = token_embeds[:, k + 1:T - 1, :] if k > 0 else token_embeds[:, 1:T - k, :]
-            # Actually: for head k, we use embed(token[t+k]) to predict token[t+k+1]
-            # hidden[t] + embed(token[t+1+k]) → predict token[t+2+k]
-            # Simpler: shift everything by k+1
-            h_input = hidden[:, :T - k - 2, :]
-            embed_input = token_embeds[:, k + 1:T - 1, :]
-            target_k = targets[:, k + 2:T, :].squeeze(-1) if targets.dim() == 3 else targets[:, k + 2:T]
+            h_input = hidden[:, :T - k - 2, :]           # (B, T-k-2, d)
+            embed_input = token_embeds[:, k + 1:T - 1, :]  # (B, T-k-2, d)
+            target_k = targets[:, k + 1:T - 1, :].squeeze(-1) if targets.dim() == 3 else targets[:, k + 1:T - 1]
 
             if h_input.shape[1] < 1 or target_k.shape[1] < 1:
                 continue

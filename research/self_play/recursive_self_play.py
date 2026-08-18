@@ -33,6 +33,7 @@ Usage:
     engine = RecursiveSelfPlay(model, tokenizer, log_dir="research/data/recursive_self_play")
     engine.run_recursive_task("Check if 17 is prime", max_rounds=5)
 """
+import ast
 import json
 import os
 import re
@@ -958,7 +959,7 @@ class RecursiveSelfPlay(SelfPlaySandbox):
         ])
 
         wrapper_code = f'''
-import json, time, sys
+import json, time, sys, ast
 
 # User code defines solve()
 {code}
@@ -978,7 +979,7 @@ for i, tc in enumerate(_test_data):
             _stress_ms = (time.perf_counter() - t0) * 1000
         else:
             actual = {solve_name}(*args)
-        expected = eval(tc["expected"])
+        expected = ast.literal_eval(tc["expected"])
         match = (actual == expected)
         if not match:
             _all_pass = False

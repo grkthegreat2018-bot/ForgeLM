@@ -174,6 +174,7 @@ class SandboxExecutor:
 
         wrapper = f'''
 import sys, os, time
+import subprocess
 {"import resource" if HAS_RESOURCE else ""}
 
 # Set memory limit (Unix only)
@@ -192,7 +193,20 @@ def _restricted_import(name, *args, **kwargs):
 builtins.__import__ = _restricted_import
 
 # Execute user code
-exec(open(r"{temp_path}", encoding='utf-8').read())
+try:
+    _proc = subprocess.run(
+        [sys.executable, r"{temp_path}"],
+        capture_output=True, text=True,
+        timeout={self.timeout_s},
+        cwd=self.temp_dir,
+        encoding='utf-8', errors='replace',
+    )
+    sys.stdout.write(_proc.stdout)
+    sys.stderr.write(_proc.stderr)
+    sys.exit(_proc.returncode)
+except subprocess.TimeoutExpired:
+    sys.stderr.write(f"Execution timed out after {self.timeout_s}s")
+    sys.exit(124)
 '''
 
         wrapper_path = temp_path + '_wrapper.py'

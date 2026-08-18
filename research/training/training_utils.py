@@ -198,6 +198,31 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
             print(f"Muon unavailable ({e}); falling back to fused AdamW.")
             return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
+    if optimizer_name == "muon_sf":
+        # MuonSFBlockwise: Muon + ScheduleFree + per-block sharpness-scaled LR.
+        # Novel combo: high sharpness → HIGH LR for Muon (opposite of Sophia
+        # clipping). ScheduleFree eliminates LR schedule via iterate averaging.
+        # Tested in .devin/test_muon_sf.py: 1.05x vs AdamW, 1.12x vs Muon+AdamW.
+        # OPTIMAL for standard architecture (no BitNet).
+        try:
+            from research.training.muon_sf_blockwise import build_muon_sf_blockwise
+            return build_muon_sf_blockwise(model, max_lr, weight_decay)
+        except Exception as e:
+            print(f"MuonSFBlockwise unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "muon_sf_plain":
+        # MuonScheduleFree: Muon + ScheduleFree, NO blockwise sharpness.
+        # OPTIMAL for V3 architecture (BitNet + MHC + AttnRes).
+        # Blockwise sharpness conflicts with BitNet's weight normalization.
+        # Tested in .devin/test_full_stack.py: 2.24x vs AdamW cosine on V3.
+        try:
+            from research.training.muon_sf_blockwise import build_muon_sf_plain
+            return build_muon_sf_plain(model, max_lr, weight_decay)
+        except Exception as e:
+            print(f"MuonScheduleFree unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
     # Unknown optimizer name — safe default.
     print(f"Unknown optimizer '{optimizer_name}'; using fused AdamW.")
     return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())

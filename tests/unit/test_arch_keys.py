@@ -3,6 +3,7 @@
 BitNet b1.58 QAT, Differential Attention, TITAN neural memory, MoD routing.
 All run on CPU with the tiny_test config.
 """
+import pytest
 import torch
 
 from research.config import ModelConfig, get_config
@@ -112,6 +113,83 @@ class TestBitNet:
         q, _ = ternary_quantize(ffn.w_gate.weight, ffn.w_gate.qscale)
         vals = set(q.unique().tolist())
         assert vals <= {-1.0, 0.0, 1.0}
+
+    def test_qscale_reanchored_on_load(self):
+        """qscale must follow the LOADED weight, not the random init."""
+        lin = BitNetLinear(16, 32, quantize=True)
+        w = torch.randn(32, 16) * 0.5
+        lin.load_state_dict({"weight": w}, strict=False)
+        expected = w.abs().mean().clamp(min=1e-6) / 0.7
+        assert torch.allclose(lin.qscale, expected, atol=1e-6)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_int8_kernel_matches_fp_path(self):
+        """Integer tensor-core GEMM ≈ fp ternary path (a4.8 activation q)."""
+        from research.keys.quantization.bitnet_b158_key import (
+            _int8_ternary_linear,
+        )
+        torch.manual_seed(0)
+        x = torch.randn(2, 8, 64, device="cuda", dtype=torch.bfloat16)
+        w = torch.randn(128, 64, device="cuda") * 0.1
+        q, scale = ternary_quantize(w)
+        y_k = _int8_ternary_linear(x, q, scale)
+        y_fp = torch.nn.functional.linear(x, q.to(x.dtype)) * scale.to(x.dtype)
+        assert y_k.shape == y_fp.shape
+        # activation int8 quantization error is ~1% relative
+        rel = (y_k - y_fp.float()).abs() / (y_fp.float().abs() + 1e-6)
+        assert rel.mean().item() < 0.05
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_triton_add_kernel_matches_fp(self):
+        """b1.58 add-only Triton kernel (fp activations) ≈ fp ternary path."""
+        from research.keys.quantization.bitnet_b158_key import (
+            _HAS_TRITON,
+            _triton_ternary_linear,
+        )
+        if not _HAS_TRITON:
+            pytest.skip("triton not installed")
+        torch.manual_seed(0)
+        x = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16)
+        w = torch.randn(128, 64, device="cuda") * 0.1
+        q, scale = ternary_quantize(w)
+        y_k = _triton_ternary_linear(x, q, scale)
+        y_fp = torch.nn.functional.linear(x, q.to(x.dtype)) * scale.to(x.dtype)
+        assert torch.equal(y_k, y_fp)  # fp32 accum, exact ternary weights
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_triton_path_trains(self):
+        """FORGE_BITNET_KERNEL=triton: end-to-end QAT step on the kernel."""
+        from research.keys.quantization.bitnet_b158_key import _HAS_TRITON
+        if not _HAS_TRITON:
+            pytest.skip("triton not installed")
+        import os
+        os.environ["FORGE_BITNET_KERNEL"] = "triton"
+        try:
+            cfg = _tiny()
+            cfg.use_bitnet = True
+            model = ConfigurableResearchLLM(cfg).to("cuda")
+            model.train()
+            x = torch.randint(0, 256, (2, 8), device="cuda")
+            loss = model(x, targets=x)[1]
+            loss.backward()
+            assert torch.isfinite(loss).item()
+            assert model.blocks[0].ffn.w_gate.weight.grad is not None
+        finally:
+            os.environ.pop("FORGE_BITNET_KERNEL", None)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_kernel_used_in_training(self):
+        cfg = _tiny()
+        cfg.use_bitnet = True
+        model = ConfigurableResearchLLM(cfg).to("cuda")
+        model.train()
+        x = torch.randint(0, 256, (2, 8), device="cuda")
+        loss = model(x, targets=x)[1]
+        loss.backward()
+        ffn = model.blocks[0].ffn
+        assert ffn.w_gate.weight.grad is not None
+        assert ffn.w_gate.qscale.grad is not None
+        assert torch.isfinite(loss).item()
 
 
 # ── Differential Attention ───────────────────────────────────────────────────
@@ -306,6 +384,39 @@ class TestMod:
         assert res.weights["blocks.0.mod.router.weight"].shape == (1, 128)
         rev = key.reverse(res.weights)
         assert not any(".mod.router.weight" in k for k in rev.weights)
+
+    def test_true_skip_processes_fewer_tokens(self):
+        """keep_fraction<1 in training: attention sees ONLY kept tokens."""
+        cfg = _tiny()
+        cfg.use_mod = True
+        cfg.mod_keep_fraction = 0.5
+        model = ConfigurableResearchLLM(cfg)
+        model.train()
+        # Count tokens actually processed by the attention block (layer 2).
+        counted = {"tokens": 0}
+        attn = model.blocks[2].attn
+        orig_forward = attn.forward
+
+        def counting_forward(*args, **kwargs):
+            x_in = args[0]
+            counted["tokens"] += x_in.shape[0] * x_in.shape[1]
+            return orig_forward(*args, **kwargs)
+
+        attn.forward = counting_forward
+        x = torch.randint(0, 256, (2, 16))
+        loss = model(x, targets=x)[1]
+        loss.backward()
+        # 2 rows x ceil(16*0.5)=8 kept = 16 tokens, vs 32 without skip
+        assert counted["tokens"] == 16, counted
+        # router got gradient through the aux loss
+        assert model.blocks[2]._mod.router.weight.grad is not None
+        # skipped tokens pass through unchanged (residual bypass)
+        with torch.inference_mode():
+            x_in = torch.randn(1, 8, 128)
+            out = model.blocks[2]._forward_mod_skip(
+                x_in, 2, None, None)
+            mask = model.blocks[2]._mod.token_mask(x_in)
+            assert torch.equal(out[0][~mask[0]], x_in[0][~mask[0]])
 
 
 # ── Main model (LFM2.5-1.2B) sanity: lossless flags enabled ──────────────────

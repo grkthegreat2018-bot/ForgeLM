@@ -43,7 +43,12 @@ class ForwardCache:
 
     def _key(self, input_ids: torch.Tensor) -> int:
         """Hash the input token IDs for cache key."""
-        return hash(tuple(input_ids[0].cpu().tolist()))
+        tokens = input_ids[0]
+        L = tokens.shape[0]
+        powers = torch.arange(L, device=tokens.device, dtype=torch.int64)
+        powers = torch.pow(torch.tensor(31, device=tokens.device, dtype=torch.int64), powers)
+        h = torch.sum(tokens.to(torch.int64) * powers).item()
+        return h
 
     def forward(self, model, input_ids: torch.Tensor,
                 use_cache: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:

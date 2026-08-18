@@ -43,6 +43,7 @@ import os
 import random
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -331,20 +332,27 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
 
 
 # Tokenization cache — avoids re-tokenizing repeated prompts (2-3x speedup)
-# Bounded LRU cache: evicts oldest entries when exceeding _CACHE_MAX entries.
-_tokenize_cache: dict[str, list[int]] = {}
+# Bounded LRU cache: evicts least recently used entries when exceeding _CACHE_MAX.
+#
+# NOTE: This cache is distinct from research/tokenizer_cache.py.
+#   - tokenizer_cache.py caches the *tokenizer object* (singleton, lru_cache
+#     maxsize=8) to avoid the 4.3s AutoTokenizer load overhead across call sites.
+#   - This cache (_tokenize_cache) caches *tokenization results* (text→token IDs,
+#     OrderedDict maxsize=10000) to avoid re-encoding repeated training texts.
+#   They serve different purposes and should NOT be consolidated.
+_tokenize_cache: OrderedDict[str, list[int]] = OrderedDict()
 _CACHE_MAX = 10000  # max 10K entries (~50MB typical)
 
 def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None:
     """Tokenize text with caching. Returns None on error.
 
-    Uses a bounded dict with manual LRU eviction to prevent unbounded RAM growth.
+    Uses a bounded OrderedDict with proper LRU eviction (move_to_end on
+    access, popitem(last=False) for eviction) to prevent unbounded RAM growth.
     """
     if text in _tokenize_cache:
-        # Move to end (most recently used) by re-inserting
-        val = _tokenize_cache.pop(text)
-        _tokenize_cache[text] = val
-        return val
+        # Move to end (most recently used)
+        _tokenize_cache.move_to_end(text)
+        return _tokenize_cache[text]
     try:
         enc = tokenizer(text, add_special_tokens=False, return_tensors=None)
         ids = enc["input_ids"] if isinstance(enc, dict) else enc
@@ -352,9 +360,9 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
             ids = list(ids)
         # Only cache if reasonable size (don't blow up memory)
         if len(text) < 10000:
-            # Evict oldest entries if cache is full
+            # Evict least recently used entries if cache is full
             while len(_tokenize_cache) >= _CACHE_MAX:
-                _tokenize_cache.pop(next(iter(_tokenize_cache)))
+                _tokenize_cache.popitem(last=False)
             _tokenize_cache[text] = ids
         return ids
     except Exception:
@@ -468,10 +476,7 @@ def compute_loss(model, input_ids, labels, attn_mask,
     if entropy_alpha == 0.0 and sample_weights is None:
         # Shift labels for causal LM: hidden[i] predicts token i+1.
         # Pad with -100 to match hidden [B, T] (last position has no target).
-        shift_labels = labels[:, 1:].contiguous()
-        pad = torch.full((shift_labels.size(0), 1), -100,
-                         dtype=shift_labels.dtype, device=shift_labels.device)
-        shift_labels = torch.cat([shift_labels, pad], dim=1)  # [B, T]
+        shift_labels = F.pad(labels[:, 1:], (0, 1), value=-100)  # [B, T]
         out = model(input_ids, attention_mask=attn_mask, targets=shift_labels)
         if isinstance(out, tuple):
             loss = out[1] if out[1] is not None else out[0]
@@ -482,6 +487,11 @@ def compute_loss(model, input_ids, labels, attn_mask,
             # to the manual path below.
             pass
         else:
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite training loss ({loss.item()}). "
+                    f"Check for NaN in inputs, exploding gradients, or lr too high."
+                )
             return loss
 
     # ── Manual path: full logits for per-position control ──
@@ -534,6 +544,11 @@ def compute_loss(model, input_ids, labels, attn_mask,
         per_example_loss = per_example_loss * sample_weights
 
     loss = per_example_loss.mean()
+    if not torch.isfinite(loss):
+        raise RuntimeError(
+            f"Non-finite training loss ({loss.item()}). "
+            f"Check for NaN in inputs, exploding gradients, or lr too high."
+        )
     return loss
 
 
@@ -620,7 +635,12 @@ def main():
     p.add_argument("--warmup-steps", type=int, default=20)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--optimizer", default="fused", choices=["fused", "bnb", "lion"])
+    p.add_argument("--optimizer", default="fused", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain"])
+    p.add_argument("--grad-mixup", type=int, default=1,
+                   help="Grad mixup: average gradients from N batches before optimizer step "
+                        "(1=disabled, 2=two-batch, 3=three-batch). "
+                        "Tested: 3-way mixup + muon_sf = 1.25x better convergence vs AdamW. "
+                        "Cost: N× forward+backward per step, but fewer steps needed.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Enable gradient checkpointing to save VRAM")
@@ -802,6 +822,8 @@ def main():
     print(f"\nTraining {args.max_steps} steps | batch {args.batch_size} | "
           f"grad_accum {grad_accum} | eff_batch {eff_batch} | "
           f"lr {args.lr} | seq_len {args.seq_len} | {len(dataset)} examples")
+    if args.grad_mixup > 1:
+        print(f"  Grad mixup: {args.grad_mixup}-way (averaging {args.grad_mixup} batches' gradients per step)")
     if args.entropy_alpha > 0:
         print(f"  Token entropy weighting: alpha={args.entropy_alpha} (WeFT/VCORE 2025)")
     print(f"Save: {args.save}")
@@ -883,6 +905,47 @@ def main():
                 (loss / grad_accum).backward()
                 accum_count += 1
                 last_loss = ce_loss.item()  # log CE only for comparability
+
+                # ── Grad Mixup (novel: average gradients from N batches) ──
+                # Tested in .devin/test_stack_winners.py: 3-way mixup + muon_sf
+                # = 1.25x better convergence vs AdamW. Averages gradients from
+                # N-1 additional batches before the optimizer step.
+                if args.grad_mixup > 1 and accum_count >= grad_accum:
+                    # Save current grads from first batch
+                    saved_grads = {}
+                    for n, p in model.named_parameters():
+                        if p.grad is not None:
+                            saved_grads[n] = p.grad.clone()
+
+                    # Fetch N-1 more batches and accumulate their grads
+                    mixup_batch_start = batch_start + args.batch_size
+                    for mixup_i in range(args.grad_mixup - 1):
+                        mixup_bs = mixup_batch_start + mixup_i * args.batch_size
+                        if mixup_bs + args.batch_size > len(indices):
+                            break  # not enough data for full mixup, use what we have
+                        mixup_idx = indices[mixup_bs:mixup_bs + args.batch_size]
+                        mixup_batch = [dataset[i] for i in mixup_idx]
+                        mi, ml, mm, _ = collate_batch(mixup_batch, pad_id, device)
+                        msw = sample_weights[mixup_idx].to(device) if sample_weights is not None else None
+                        mce = compute_loss(model, mi, ml, mm,
+                                           entropy_alpha=args.entropy_alpha,
+                                           sample_weights=msw)
+                        if anchor_named_params is not None:
+                            mloss = mce + compute_l2_sp_loss(model, anchor_named_params, args.l2_lambda)
+                        else:
+                            mloss = mce
+                        optimizer.zero_grad()
+                        (mloss / grad_accum).backward()
+                        # Accumulate: running average
+                        for n, p in model.named_parameters():
+                            if p.grad is not None and n in saved_grads:
+                                saved_grads[n] = (saved_grads[n] * (mixup_i + 1) + p.grad) / (mixup_i + 2)
+
+                    # Restore averaged grads
+                    optimizer.zero_grad()
+                    for n, p in model.named_parameters():
+                        if n in saved_grads:
+                            p.grad = saved_grads[n]
 
                 # Only step optimizer when we've accumulated enough gradients.
                 if accum_count < grad_accum:

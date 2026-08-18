@@ -134,6 +134,8 @@ def save_checkpoint(state: dict[str, Any], path: str) -> str:
                     # Map safetensors short names to torch short names.
                     _DTYPE_MAP = {"F32": "float32", "F64": "float64",
                                   "BF16": "bfloat16", "F16": "float16",
+                                  "F8_E4M3": "float8_e4m3fn",
+                                  "F8_E5M2": "float8_e5m2",
                                   "I64": "int64", "I32": "int32",
                                   "I16": "int16", "I8": "int8",
                                   "U8": "uint8", "BOOL": "bool"}
@@ -165,7 +167,7 @@ def save_checkpoint(state: dict[str, Any], path: str) -> str:
     return path
 
 
-def load_checkpoint(path: str, map_location=None) -> dict[str, Any]:
+def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) -> dict[str, Any]:
     """Load a checkpoint dict written by save_checkpoint.
 
     For .safetensors, merges the sidecar meta JSON back into the result.
@@ -219,11 +221,18 @@ def load_checkpoint(path: str, map_location=None) -> dict[str, Any]:
         return result
 
     # Legacy .pt path. Try weights_only=True first (safer).
-    # If it fails, warn the user before falling back to unsafe pickle,
+    # If it fails, only fall back to unsafe pickle if allow_unsafe=True,
     # since weights_only=False enables arbitrary code execution.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except Exception as e:
+        if not allow_unsafe:
+            raise RuntimeError(
+                f"Could not load {path} with weights_only=True ({e}). "
+                f"Pass allow_unsafe=True to fall back to weights_only=False "
+                f"(UNSAFE — enables arbitrary code execution from the "
+                f"checkpoint file). Only do this if you trust the source."
+            ) from e
         import warnings
         warnings.warn(
             f"Could not load {path} with weights_only=True ({e}). "
@@ -379,7 +388,7 @@ def save_training_checkpoint(
     return path
 
 
-def load_training_state(path: str, optimizer=None, restore_rng: bool = True) -> dict[str, Any]:
+def load_training_state(path: str, optimizer=None, restore_rng: bool = True, allow_unsafe: bool = False) -> dict[str, Any]:
     """Load the training-state sidecar for a checkpoint.
 
     Returns {"step": int|None, "ema": dict|None, "has_optimizer": bool}.
@@ -399,10 +408,17 @@ def load_training_state(path: str, optimizer=None, restore_rng: bool = True) -> 
     if not os.path.exists(ts_path):
         return result
     try:
-        ts = torch.load(ts_path, map_location="cpu", weights_only=False)
+        ts = torch.load(ts_path, map_location="cpu", weights_only=True)
     except Exception as e:
-        print(f"Warning: could not load training state {ts_path}: {e}")
-        return result
+        if not allow_unsafe:
+            print(f"Warning: could not load training state {ts_path} with weights_only=True ({e}); "
+                  f"pass allow_unsafe=True to retry with weights_only=False.")
+            return result
+        try:
+            ts = torch.load(ts_path, map_location="cpu", weights_only=False)
+        except Exception as e2:
+            print(f"Warning: could not load training state {ts_path}: {e2}")
+            return result
     if optimizer is not None and "optimizer" in ts:
         try:
             optimizer.load_state_dict(ts["optimizer"])

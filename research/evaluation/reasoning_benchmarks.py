@@ -29,6 +29,7 @@ Usage:
     # Or via CLI:
     # python -m research.reasoning_benchmarks --benchmarks arc_agi2,neocoder --n-problems 20
 """
+import ast
 import json
 import os
 import re
@@ -209,8 +210,8 @@ def _parse_grid_output(text: str) -> list[list[int]] | None:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Match rows of single-digit numbers separated by spaces
-        nums = re.findall(r"\b(\d)\b", line)
+        # Match rows of numbers separated by spaces (supports multi-digit)
+        nums = re.findall(r"\b(\d+)\b", line)
         if nums and len(nums) > 1:
             grid.append([int(n) for n in nums])
 
@@ -219,7 +220,7 @@ def _parse_grid_output(text: str) -> list[list[int]] | None:
 
     # Try parsing as Python list literal
     try:
-        result = eval(text.split("\n")[0])
+        result = ast.literal_eval(text.split("\n")[0])
         if isinstance(result, list) and all(isinstance(r, list) for r in result):
             return result
     except Exception as e:
@@ -801,19 +802,19 @@ def run_finereason(model, tokenizer, device: str = "cuda",
             model, tokenizer, prompt, device=device,
             max_tokens=max_tokens, temperature=0.0)
 
-        correct, n_steps, technique = _evaluate_finereason(response, puzzle)
+        correct, n_matched, technique = _evaluate_finereason(response, puzzle)
         if correct:
             n_correct += 1
-        total_steps += n_steps
+        total_steps += n_matched
 
         status = "CORRECT" if correct else "INCORRECT"
-        print(f"    {status} | {n_steps} reasoning steps | {technique}")
+        print(f"    {status} | {n_matched} reasoning steps | {technique}")
 
         results.append({
             "puzzle_id": pid,
             "correct": correct,
             "n_patterns_matched": n_matched,
-            "n_reasoning_steps": n_steps,
+            "n_reasoning_steps": n_matched,
             "gen_time_ms": telemetry["gen_time_ms"],
             "tokens_generated": telemetry["tokens_generated"],
         })

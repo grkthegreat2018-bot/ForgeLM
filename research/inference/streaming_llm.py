@@ -46,8 +46,10 @@ class StreamingKVCache:
         self.k_cache = None
         self.v_cache = None
 
-        # Position tracking: which logical positions are in the cache
-        self.positions = []  # list of logical positions
+        # Pre-allocated positions tensor (updated in-place, no per-get() alloc).
+        # Maps physical cache index → logical position (for RoPE).
+        self._pos_tensor = torch.zeros(self.max_capacity, dtype=torch.long,
+                                       device=self.device)
         self.seq_len = 0  # total logical positions seen
 
     def append(self, k: torch.Tensor, v: torch.Tensor, position: int):
@@ -65,32 +67,24 @@ class StreamingKVCache:
                                        dtype=self.dtype)
             self.v_cache = torch.zeros_like(self.k_cache)
 
-        for i in range(T):
-            pos = position + i
-            self.seq_len = max(self.seq_len, pos + 1)
+        # Vectorized index computation (replaces per-token Python loop).
+        offsets = torch.arange(T, device=self.device)
+        positions = position + offsets  # [T] logical positions
+        self.seq_len = max(self.seq_len, position + T)
 
-            if pos < self.n_sinks:
-                # Sink token — store at its position index
-                idx = pos
-                self.k_cache[:, :, idx] = k[:, :, i]
-                self.v_cache[:, :, idx] = v[:, :, i]
-                if pos not in self.positions:
-                    self.positions.append(pos)
-            else:
-                # Non-sink token — store in window region
-                # Window starts at n_sinks, cycles through
-                window_idx = (pos - self.n_sinks) % self.window_size
-                idx = self.n_sinks + window_idx
-                self.k_cache[:, :, idx] = k[:, :, i]
-                self.v_cache[:, :, idx] = v[:, :, i]
+        # Physical cache indices: sinks stay at their position, window tokens
+        # cycle through the window region.
+        sink_mask = positions < self.n_sinks
+        window_idx = (positions - self.n_sinks) % self.window_size
+        indices = torch.where(sink_mask, positions,
+                              self.n_sinks + window_idx)  # [T]
 
-                # Update position tracking
-                # Remove old position at this slot, add new
-                old_pos = self.n_sinks + window_idx
-                if len(self.positions) > old_pos:
-                    self.positions[old_pos] = pos
-                else:
-                    self.positions.append(pos)
+        # Write K/V at computed indices (vectorized, no Python loop).
+        self.k_cache[:, :, indices] = k
+        self.v_cache[:, :, indices] = v
+
+        # Update positions tensor in-place (no per-get() allocation).
+        self._pos_tensor[indices] = positions
 
     def get(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get current KV cache and position indices.
@@ -103,7 +97,8 @@ class StreamingKVCache:
         current_size = min(self.seq_len, self.max_capacity)
         k = self.k_cache[:, :, :current_size]
         v = self.v_cache[:, :, :current_size]
-        pos = torch.tensor(self.positions[:current_size], device=self.device)
+        # Return a view of the pre-allocated positions tensor (no allocation).
+        pos = self._pos_tensor[:current_size]
         return k, v, pos
 
     def get_past_kv(self) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -117,7 +112,7 @@ class StreamingKVCache:
     def clear(self):
         self.k_cache = None
         self.v_cache = None
-        self.positions = []
+        self._pos_tensor.zero_()
         self.seq_len = 0
 
     def info(self) -> dict:

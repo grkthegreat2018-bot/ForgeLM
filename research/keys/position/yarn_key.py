@@ -78,13 +78,8 @@ class YaRNKey(Key):
             # No — inv_freq = 1/base^(2i/d), so wavelength = 2*pi/inv_freq = 2*pi*base^(2i/d)
             # But YaRN uses the ratio of original context to extended context
 
-            # NTK-aware: modify base to base' = base * s^(d/(d-2))
-            # This is the "NTK-aware" part
-            ntk_base = base * (scale ** (head_dim / (head_dim - 2)))
-
-            # NTK-by-parts: blend between NTK-aware and linear interpolation
+            # NTK-by-parts: blend between extrapolation and linear interpolation
             # based on frequency
-            inv_freq_ntk = 1.0 / (ntk_base ** (torch.arange(0, head_dim, 2).float() / head_dim))
             inv_freq_orig = freqs
 
             # Compute the "ramp" function for blending
@@ -119,11 +114,8 @@ class YaRNKey(Key):
 
             # Compute per-dimension scaling
             # inv_freq_yarn[i] = inv_freq_orig[i] / scale  (interpolation)
-            #                   or inv_freq_ntk[i]          (extrapolation)
+            #                   or inv_freq_orig[i]          (extrapolation)
             # blended by the ramp
-
-            # Simplified YaRN: use the NTK-aware base for high-freq dims,
-            # linear scaling for low-freq dims, smooth ramp in between
 
             # Compute the wavelength in terms of original context length
             # wavelen = 2 * pi / inv_freq
@@ -139,19 +131,15 @@ class YaRNKey(Key):
 
             # Ramp: 0 for interpolate, 1 for extrapolate
             ramp = torch.zeros_like(freqs)
-            for i in range(len(freqs)):
-                if wavelen[i] <= alpha_wavelen:
-                    ramp[i] = 1.0  # extrapolate
-                elif wavelen[i] >= beta_wavelen:
-                    ramp[i] = 0.0  # interpolate
-                else:
-                    # Smooth ramp (linear in log space)
-                    t = (math.log(beta_wavelen) - math.log(wavelen[i].item())) / \
-                        (math.log(beta_wavelen) - math.log(alpha_wavelen))
-                    ramp[i] = 1.0 - t  # smooth transition
+            ramp = torch.where(wavelen <= alpha_wavelen, torch.ones_like(freqs), ramp)
+            mask_mid = (wavelen > alpha_wavelen) & (wavelen < beta_wavelen)
+            log_beta = math.log(beta_wavelen)
+            log_alpha = math.log(alpha_wavelen)
+            t = (log_beta - torch.log(wavelen)) / (log_beta - log_alpha)
+            ramp = torch.where(mask_mid, 1.0 - t, ramp)
 
-            # Blend: inv_freq_yarn = ramp * inv_freq_ntk + (1-ramp) * inv_freq_orig / scale
-            inv_freq_yarn = ramp * inv_freq_ntk + (1 - ramp) * (inv_freq_orig / scale)
+            # Blend: inv_freq_yarn = ramp * inv_freq_orig + (1-ramp) * inv_freq_orig / scale
+            inv_freq_yarn = ramp * inv_freq_orig + (1 - ramp) * (inv_freq_orig / scale)
 
             # YaRN attention scaling
             # Scale attention scores by a temperature factor
@@ -162,7 +150,7 @@ class YaRNKey(Key):
                 weights={"inv_freq": inv_freq_yarn, "attn_scale": attn_scale},
                 metadata={
                     "scale": scale, "base": base, "head_dim": head_dim,
-                    "ntk_base": ntk_base, "method": "ntk_by_parts",
+                    "method": "ntk_by_parts",
                 },
             )
         except Exception as e:

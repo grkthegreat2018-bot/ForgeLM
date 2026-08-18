@@ -154,18 +154,17 @@ class DifferentialAttention(nn.Module):
                 past_len = preallocated_cache.position
                 q = self.rope(q, offset=past_len, position_ids=position_ids)
                 k = self.rope(k, offset=past_len, position_ids=position_ids)
-                # Cache slots are 2*hd wide; group2 == group1 in identity
-                # mode, so store the pair for layout compatibility. Reads are
-                # made contiguous to keep SDPA kernels identical to GQA.
-                # (cat, not repeat_interleave: the latter interleaves columns
-                # and corrupts the group-1 half.)
-                preallocated_cache.append(
-                    layer_idx, torch.cat([k, k], dim=-1),
-                    torch.cat([v, v], dim=-1))
-                k_cache = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-                v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
-                k = k_cache[..., :hd].contiguous()
-                v = v[..., :hd].contiguous()
+                # Identity mode only ever reads group 1 (the first hd of the
+                # 2*hd slot); write just that half — avoids 2 cats/layer
+                # (the biggest per-token CPU overhead in decode). Full mode
+                # overwrites both halves when lambda != 0.
+                pos = past_len
+                kc = preallocated_cache.k_caches[layer_idx]
+                vc = preallocated_cache.v_caches[layer_idx]
+                kc[:, :, pos:pos + T, :hd] = k
+                vc[:, :, pos:pos + T, :hd] = v
+                k = kc[:, :, :past_len + T, :hd].contiguous()
+                v = vc[:, :, :past_len + T, :hd].contiguous()
             else:
                 past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
                 q = self.rope(q, offset=past_len, position_ids=position_ids)

@@ -195,8 +195,8 @@ class StreamedGenerator:
         # Issue async D2H for first token (non-blocking, pinned memory).
         # .item() below performs the (single) sync — no explicit synchronize
         # needed; the copy runs on the DMA engine while the CPU prepares.
-        lp = torch.log_softmax(next_logits.float(), dim=-1)[next_token]
-        token_pinned.copy_(next_token, non_blocking=True)
+        lp = torch.log_softmax(next_logits.float(), dim=-1).gather(0, next_token.unsqueeze(0))
+        token_pinned.copy_(next_token.unsqueeze(0), non_blocking=True)
         logprob_pinned.copy_(lp, non_blocking=True)
 
         token_id = token_pinned.item()
@@ -220,8 +220,8 @@ class StreamedGenerator:
             next_token = next_logits.argmax()
 
             # Issue async D2H (non-blocking, pinned memory — DMA engine handles it).
-            lp = torch.log_softmax(next_logits.float(), dim=-1)[next_token]
-            token_pinned.copy_(next_token, non_blocking=True)
+            lp = torch.log_softmax(next_logits.float(), dim=-1).gather(0, next_token.unsqueeze(0))
+            token_pinned.copy_(next_token.unsqueeze(0), non_blocking=True)
             logprob_pinned.copy_(lp, non_blocking=True)
 
             # .item() performs the single required sync (the copy has usually

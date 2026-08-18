@@ -480,48 +480,99 @@ def run_tests(code: str, func_name: str) -> tuple[bool, str]:
     if not tests:
         return False, f"no tests registered for '{func_name}'"
 
-    namespace: dict[str, Any] = {}
+    import json
+    import subprocess
+    import sys
+
+    runner_code = code + "\n\n"
+    runner_code += "import json as _json, sys as _sys, math as _math\n"
+    runner_code += f"_tests = {tests!r}\n"
+    runner_code += f"_func_name = {func_name!r}\n"
+    runner_code += (
+        'def _values_equal(actual, expected, approx=False):\n'
+        '    if approx:\n'
+        '        try:\n'
+        '            return _math.isclose(float(actual), float(expected), rel_tol=1e-9, abs_tol=1e-9)\n'
+        '        except (TypeError, ValueError):\n'
+        '            return False\n'
+        '    return actual == expected\n'
+        '\n'
+        '_results = []\n'
+        'if _func_name not in dir():\n'
+        '    print("__TEST_RESULTS__" + _json.dumps({"error": f"{_func_name!r} not found in executed code"}))\n'
+        '    _sys.exit(0)\n'
+        '_obj = eval(_func_name)\n'
+        'for _i, _test in enumerate(_tests):\n'
+        '    try:\n'
+        '        if _test.get("type") == "class":\n'
+        '            _instance = _obj(*_test["init_args"])\n'
+        '            _method = getattr(_instance, _test["method"])\n'
+        '            if _test.get("expected_chain"):\n'
+        '                _chained = _method(*_test["method_args"])\n'
+        '                _chain_attr = getattr(_chained, _test["chain_method"])\n'
+        '                if callable(_chain_attr):\n'
+        '                    _actual = _chain_attr(*_test["chain_args"])\n'
+        '                else:\n'
+        '                    _actual = _chain_attr\n'
+        '            else:\n'
+        '                if callable(_method):\n'
+        '                    _actual = _method(*_test["method_args"])\n'
+        '                else:\n'
+        '                    _actual = _method\n'
+        '            _expected = _test["expected"]\n'
+        '        else:\n'
+        '            _args = _test["args"]\n'
+        '            _expected = _test["expected"]\n'
+        '            _actual = _obj(*_args)\n'
+        '    except Exception as _e:\n'
+        '        _results.append({"index": _i, "error": f"test {_i} raised: {type(_e).__name__}: {_e}"})\n'
+        '        continue\n'
+        '    if not _values_equal(_actual, _expected, approx=_test.get("approx", False)):\n'
+        '        _results.append({"index": _i, "error": f"test {_i} failed: expected {_expected!r} got {_actual!r}"})\n'
+        '        continue\n'
+        '    _results.append({"index": _i, "pass": True})\n'
+        'print("__TEST_RESULTS__" + _json.dumps(_results))\n'
+    )
+
     try:
-        exec(code, namespace)
+        proc = subprocess.run(
+            [sys.executable, "-c", runner_code],
+            timeout=10,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "code execution timed out (10s)"
     except Exception as e:
         return False, f"code execution failed: {type(e).__name__}: {e}"
 
-    if func_name not in namespace:
-        return False, f"'{func_name}' not found in executed code"
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip()
+        return False, f"code execution failed (exit {proc.returncode}): {err}"
 
-    obj = namespace[func_name]
+    output = proc.stdout.strip()
+    if not output:
+        return False, "no output from test runner"
 
-    for i, test in enumerate(tests):
-        try:
-            if test.get("type") == "class":
-                # Build instance
-                instance = obj(*test["init_args"])
-                # Invoke method (or attribute access)
-                method = getattr(instance, test["method"])
-                if test.get("expected_chain"):
-                    # method returns self (or instance) for chaining
-                    chained = method(*test["method_args"])
-                    chain_attr = getattr(chained, test["chain_method"])
-                    if callable(chain_attr):
-                        actual = chain_attr(*test["chain_args"])
-                    else:
-                        actual = chain_attr  # attribute access
-                else:
-                    if callable(method):
-                        actual = method(*test["method_args"])
-                    else:
-                        # attribute access
-                        actual = method
-                expected = test["expected"]
-            else:
-                args = test["args"]
-                expected = test["expected"]
-                actual = obj(*args)
-        except Exception as e:
-            return False, f"test {i} raised: {type(e).__name__}: {e}"
+    result_line = None
+    for line in output.split("\n"):
+        if line.startswith("__TEST_RESULTS__"):
+            result_line = line[len("__TEST_RESULTS__"):]
+            break
+    if result_line is None:
+        return False, "no test results in output"
 
-        if not _values_equal(actual, expected, approx=test.get("approx", False)):
-            return False, f"test {i} failed: expected {test['expected']!r} got {actual!r}"
+    try:
+        results = json.loads(result_line)
+    except json.JSONDecodeError as e:
+        return False, f"could not parse test results: {e}"
+
+    if isinstance(results, dict) and "error" in results:
+        return False, results["error"]
+
+    for r in results:
+        if "error" in r:
+            return False, r["error"]
 
     return True, ""
 

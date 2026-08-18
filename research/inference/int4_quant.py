@@ -62,9 +62,12 @@ class INT4Linear(nn.Module):
 
         # Original dtype for output casting
         self._compute_dtype = torch.float16
+        self._cached_weight = None
 
     def _dequantize_weight(self) -> torch.Tensor:
         """Unpack int4 → fp16 weight matrix. [out, in]"""
+        if self._cached_weight is not None:
+            return self._cached_weight
         # Unpack: each byte → 2 int4 values
         packed = self.weight_packed  # [out, in//2] uint8
         low = (packed & 0x0F).to(torch.int8)  # lower 4 bits
@@ -82,11 +85,17 @@ class INT4Linear(nn.Module):
         # Trim to actual in_features (in case of padding)
         scales_expanded = scales_expanded[:, :self.in_features]
         w = w[:, :self.in_features] * scales_expanded
+        self._cached_weight = w
         return w
+
+    def _invalidate_weight_cache(self):
+        self._cached_weight = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Dequantize weight and apply linear."""
-        w = self._dequantize_weight().to(x.dtype)
+        w = self._dequantize_weight()
+        if w.dtype != x.dtype:
+            w = w.to(x.dtype)
         return F.linear(x, w, self.bias.to(x.dtype) if self.bias is not None else None)
 
     @property

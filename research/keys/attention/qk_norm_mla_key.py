@@ -150,7 +150,7 @@ def absorb_qk_norm_into_projections(state: dict[str, torch.Tensor],
             n_heads = w.shape[0] // head_dim
             # Reshape to (n_heads, head_dim, d_model), scale each head
             w = w.view(n_heads, head_dim, -1)
-            w = w * gamma_q.unsqueeze(1).unsqueeze(0)  # broadcast
+            w = w * gamma_q.view(1, head_dim, 1)  # broadcast
             state[q_proj_key] = w.reshape(state[q_proj_key].shape).to(state[q_proj_key].dtype)
 
         # Absorb into k_up_proj: scale each head_dim block of rows
@@ -158,7 +158,7 @@ def absorb_qk_norm_into_projections(state: dict[str, torch.Tensor],
             w = state[k_up_key].float()  # (d_model, kv_compression_dim)
             n_heads = w.shape[0] // head_dim
             w = w.view(n_heads, head_dim, -1)
-            w = w * gamma_k.unsqueeze(1).unsqueeze(0)
+            w = w * gamma_k.view(1, head_dim, 1)
             state[k_up_key] = w.reshape(state[k_up_key].shape).to(state[k_up_key].dtype)
 
         # Remove norm weights (now absorbed)

@@ -74,6 +74,24 @@ class GRPOConfig:
     # (format, execution, answer quality) instead of binary code pass/fail.
     # When True, the trainer expects rewards from tool_use_loop.compute_reward.
     use_tool_use_rewards: bool = False
+    # Golden trajectory injection: inject replayed golden (high-quality,
+    # previously successful) trajectories into each training batch to prevent
+    # catastrophic forgetting. The replay buffer stores successful completions
+    # with forgetting-curve scheduling (FOREVER-style). 10-20% of each batch
+    # is golden replays; the rest is fresh self-play data.
+    replay_ratio: float = 0.15          # fraction of batch from golden replays
+    replay_min_buffer_size: int = 50    # don't inject until buffer has enough
+    # GRPO-λ: dynamic length penalty based on group correctness ratio.
+    # When the correctness ratio in a group is LOW (model is still learning),
+    # length penalty is DISABLED — pure 0/1 outcome rewards prioritize
+    # reasoning capability. When correctness ratio is HIGH (model has matured),
+    # length penalty activates to encourage efficiency without destroying logic.
+    # This prevents the "CoT length penalty trap" where static penalties cause
+    # accuracy collapse early in training (arXiv 2509.01155).
+    use_grpo_lambda: bool = False       # enable GRPO-λ dynamic length penalty
+    length_penalty_coeff: float = 0.01  # λ: penalty per token of completion
+    length_penalty_threshold: float = 0.6  # correctness ratio to activate penalty
+    length_penalty_warmup: int = 0      # steps before penalty can activate
 
 
 @dataclass
@@ -87,6 +105,9 @@ class GRPOStats:
     advantage_collapse_count: int = 0  # ACR numerator
     # Advantage Collapse Rate (ACR): fraction of groups where all advantages ≈ 0
     # Alert if ACR > 0.3 (AVSPO paper)
+    # GRPO-λ: track correctness ratios and length penalty activation
+    correctness_ratios: list[float] = field(default_factory=list)
+    length_penalty_active_count: int = 0  # how many groups had penalty active
 
     @property
     def mean_reward(self) -> float:
@@ -119,13 +140,15 @@ class GRPOTrainer:
 
     def __init__(self, model, tokenizer, ref_model,
                  device: str = "cuda",
-                 config: GRPOConfig | None = None):
+                 config: GRPOConfig | None = None,
+                 replay_buffer=None):
         self.model = model
         self.tokenizer = tokenizer
         self.ref_model = ref_model  # frozen reference model for KL penalty
         self.device = device
         self.config = config or GRPOConfig()
         self.stats = GRPOStats()
+        self.replay_buffer = replay_buffer  # FOREVER-style replay buffer
 
         # Freeze reference model
         for param in self.ref_model.parameters():
@@ -174,6 +197,63 @@ class GRPOTrainer:
             self.stats.advantage_collapse_count += 1
 
         return advantages
+
+    def _group_correctness_ratio(self, rewards: list[float]) -> float:
+        """Compute the correctness ratio for a group of completions.
+
+        correctness_ratio = fraction of completions with reward >= 0.99
+        (i.e., passed verification). This drives the GRPO-λ dynamic
+        length penalty: penalty only activates when the model is mature
+        enough (high correctness ratio) to prioritize efficiency.
+        """
+        if not rewards:
+            return 0.0
+        n_correct = sum(1 for r in rewards if r >= 0.99)
+        return n_correct / len(rewards)
+
+    def _apply_grpo_lambda_penalty(self, rewards: list[float],
+                                   completions: list[str],
+                                   correctness_ratio: float) -> list[float]:
+        """Apply GRPO-λ dynamic length penalty to rewards.
+
+        When correctness_ratio < threshold: NO penalty (pure 0/1 rewards).
+          The model is still learning to reason — penalizing length would
+          destroy accuracy (the "CoT length penalty trap").
+
+        When correctness_ratio >= threshold: apply length penalty.
+          The model has matured — encourage shorter, more efficient solutions
+          without destroying logic. Penalty = -λ * n_tokens for correct solutions.
+
+        The warmup parameter delays penalty activation for the first N steps
+        regardless of correctness ratio (lets the model stabilize).
+
+        Returns adjusted rewards (original rewards if penalty inactive).
+        """
+        if not self.config.use_grpo_lambda:
+            return rewards
+
+        # Warmup: don't activate penalty during early training
+        if self.stats.total_steps < self.config.length_penalty_warmup:
+            return rewards
+
+        # Only apply penalty when the group is mature enough
+        if correctness_ratio < self.config.length_penalty_threshold:
+            return rewards
+
+        # Penalty active for this group
+        self.stats.length_penalty_active_count += 1
+        lam = self.config.length_penalty_coeff
+        adjusted = []
+        for reward, completion in zip(rewards, completions):
+            if reward >= 0.99:
+                # Correct solution: penalize by length
+                # n_tokens ≈ len(completion) / 4 (rough token estimate)
+                n_tokens = max(1, len(completion) // 4)
+                adjusted.append(reward - lam * n_tokens)
+            else:
+                # Incorrect: no length penalty (already got 0)
+                adjusted.append(reward)
+        return adjusted
 
     def compute_turn_level_advantages(
         self, turn_rewards: list[list[float]]
@@ -255,10 +335,84 @@ class GRPOTrainer:
         kl_per_token = (curr_probs * (curr_log_probs - ref_log_probs)).sum(dim=-1)
         return kl_per_token.mean()
 
+    # -----------------------------------------------------------------------
+    # Golden trajectory injection (anti-regression via replay buffer)
+    # -----------------------------------------------------------------------
+
+    def _inject_golden_replays(self, prompts: list[str],
+                               completions: list[list[str]],
+                               rewards: list[list[float]]
+                               ) -> tuple[list, list, list, int]:
+        """Inject golden (previously successful) trajectories from the replay
+        buffer into the current batch.
+
+        Replaces `replay_ratio` fraction of the batch with golden replays.
+        Golden trajectories get reward=1.0 (they were verified successful in
+        the past) and are treated as a separate group within GRPO advantage
+        computation. This prevents catastrophic forgetting by ensuring the
+        model continuously revisits skills it has already mastered.
+
+        Returns (prompts, completions, rewards, n_injected).
+        """
+        if (self.replay_buffer is None or
+                len(self.replay_buffer) < self.config.replay_min_buffer_size):
+            return prompts, completions, rewards, 0
+
+        n_groups = len(prompts)
+        n_inject = max(1, int(n_groups * self.config.replay_ratio))
+        replays = self.replay_buffer.sample(
+            n_inject, self.replay_buffer.cumulative_magnitude)
+
+        injected_prompts = []
+        injected_completions = []
+        injected_rewards = []
+        for r in replays:
+            p = r.get("prompt", "")
+            c = r.get("solution", r.get("completion", ""))
+            if not p or not c:
+                continue
+            # Golden trajectories are single-completion groups with reward=1.0.
+            # GRPO needs >=2 completions for advantage computation, so we
+            # duplicate the golden completion as a "twin" — both get reward 1.0,
+            # producing zero advantage (no gradient from golden alone). The
+            # real benefit comes from mixing golden data into the KL penalty
+            # and the forward pass, keeping the model's distribution anchored
+            # on previously mastered skills.
+            injected_prompts.append(p)
+            injected_completions.append([c, c])  # twin for group >= 2
+            injected_rewards.append([1.0, 1.0])
+
+        if not injected_prompts:
+            return prompts, completions, rewards, 0
+
+        # Append golden replays to the batch
+        return (prompts + injected_prompts,
+                completions + injected_completions,
+                rewards + injected_rewards,
+                len(injected_prompts))
+
+    def _record_golden_trajectories(self, prompts: list[str],
+                                    completions: list[list[str]],
+                                    rewards: list[list[float]],
+                                    grad_norm: float = 0.0):
+        """Record successful (reward=1.0) trajectories into the replay buffer
+        for future golden injection. Only stores completions that passed
+        verification (the strict data gate)."""
+        if self.replay_buffer is None:
+            return
+        for prompt, comps, rews in zip(prompts, completions, rewards):
+            for comp, reward in zip(comps, rews):
+                if reward >= 0.99:  # verified successful
+                    self.replay_buffer.add(
+                        {"prompt": prompt, "solution": comp,
+                         "quality": float(reward), "test_passed": True},
+                        optimizer_magnitude=grad_norm)
+
     def train_step(self, prompts: list[str],
                    completions: list[list[str]],
                    rewards: list[list[float]],
-                   prompt_token_lens: list[int] | None = None) -> dict:
+                   prompt_token_lens: list[int] | None = None,
+                   old_log_probs: list[list[torch.Tensor]] | None = None) -> dict:
         """One GRPO training step.
 
         Args:
@@ -266,12 +420,22 @@ class GRPOTrainer:
             completions: list of lists — completions[g] for each prompt (G per prompt)
             rewards: list of lists — rewards[g] for each completion (binary from executor)
             prompt_token_lens: optional pre-computed prompt lengths
+            old_log_probs: optional per-prompt, per-completion log-prob tensors
+                collected during rollout (detached, no grad). When provided,
+                the PPO ratio uses these instead of the current policy's
+                log-probs (which would make ratio=1.0).
 
         Returns:
             stats dict with loss, reward, KL, ACR
         """
         if not self.optimizer:
             return {"error": "no trainable parameters"}
+
+        # Golden trajectory injection: mix in replayed successful trajectories
+        n_injected = 0
+        if self.replay_buffer is not None:
+            prompts, completions, rewards, n_injected = \
+                self._inject_golden_replays(prompts, completions, rewards)
 
         self.model.train()
         total_loss = 0.0
@@ -283,6 +447,12 @@ class GRPOTrainer:
         for prompt_idx, (prompt, comps, rews) in enumerate(zip(prompts, completions, rewards)):
             if not comps or len(comps) < 2:
                 continue
+
+            # GRPO-λ: dynamic length penalty based on group correctness ratio
+            if self.config.use_grpo_lambda:
+                cr = self._group_correctness_ratio(rews)
+                self.stats.correctness_ratios.append(cr)
+                rews = self._apply_grpo_lambda_penalty(rews, comps, cr)
 
             # Compute group-relative advantages
             advantages = self.compute_advantages(rews)
@@ -323,13 +493,25 @@ class GRPOTrainer:
                 log_probs = F.log_softmax(solution_logits, dim=-1)
                 token_log_probs = log_probs.gather(1, solution_targets.unsqueeze(0)).squeeze(0)
 
-                # Compute old log probs (for PPO ratio) — use current as "old" for first pass
-                # In a full implementation, this would be from the rollout model
-                with torch.no_grad():
-                    old_log_probs = token_log_probs.detach()
-
-                # PPO ratio
-                ratio = (token_log_probs - old_log_probs).exp()
+                # Compute old log probs (for PPO ratio)
+                if (old_log_probs is not None
+                        and prompt_idx < len(old_log_probs)
+                        and comp_idx < len(old_log_probs[prompt_idx])):
+                    old_lp = old_log_probs[prompt_idx][comp_idx]
+                    old_lp = old_lp[:token_log_probs.shape[0]]
+                    ratio = (token_log_probs - old_lp).exp()
+                else:
+                    if old_log_probs is None and prompt_idx == 0 and comp_idx == 0:
+                        import warnings
+                        warnings.warn(
+                            "old_log_probs not provided to train_step; "
+                            "PPO ratio will be 1.0 (no off-policy correction). "
+                            "Pass log-probs collected during rollout for proper PPO.",
+                            stacklevel=2,
+                        )
+                    with torch.no_grad():
+                        old_lp = token_log_probs.detach()
+                    ratio = (token_log_probs - old_lp).exp()
 
                 # Clipped policy gradient loss
                 clipped_ratio = ratio.clamp(1 - self.config.clip_range,
@@ -377,6 +559,12 @@ class GRPOTrainer:
         acr = self.stats.advantage_collapse_rate
         acr_alert = " [WARNING: ACR>0.3]" if acr > 0.3 else ""
 
+        # Record successful trajectories into replay buffer for future injection
+        if self.replay_buffer is not None:
+            grad_norm_val = 0.0
+            self._record_golden_trajectories(
+                prompts, completions, rewards, grad_norm=grad_norm_val)
+
         return {
             "n_updates": n_updates,
             "mean_loss": total_loss / max(n_updates, 1),
@@ -384,7 +572,65 @@ class GRPOTrainer:
             "mean_kl": total_kl / max(n_updates, 1),
             "advantage_collapse_rate": acr,
             "acr_alert": acr_alert,
+            "n_golden_injected": n_injected,
+            "mean_correctness_ratio": (sum(self.stats.correctness_ratios[-10:]) /
+                                       max(len(self.stats.correctness_ratios[-10:]), 1))
+                                      if self.config.use_grpo_lambda else None,
+            "length_penalty_active": self.config.use_grpo_lambda and
+                                      self.stats.length_penalty_active_count > 0,
         }
+
+    def collect_log_probs(self, prompts: list[str],
+                          completions: list[list[str]],
+                          prompt_token_lens: list[int] | None = None
+                          ) -> list[list[torch.Tensor]]:
+        """Collect per-token log-probs from the current policy (no grad).
+
+        Call this during rollout (before train_step) to capture the policy's
+        log-probs at collection time. Pass the returned list as
+        ``old_log_probs`` to ``train_step`` so the PPO ratio reflects the
+        gap between the collection policy and the updated policy.
+
+        Args:
+            prompts: list of prompt strings (B prompts).
+            completions: list of lists — completions[g] for each prompt.
+            prompt_token_lens: optional pre-computed prompt lengths.
+
+        Returns:
+            list[list[Tensor]] — old_log_probs[prompt_idx][comp_idx] is a
+            1-D tensor of log-probs for the solution tokens (detached).
+        """
+        self.model.eval()
+        all_log_probs: list[list[torch.Tensor]] = []
+        with torch.no_grad():
+            for prompt_idx, (prompt, comps) in enumerate(zip(prompts, completions)):
+                group_lps: list[torch.Tensor] = []
+                for comp_idx, completion in enumerate(comps):
+                    full_text = prompt + completion
+                    enc = self.tokenizer(
+                        full_text, return_tensors="pt",
+                        truncation=True, max_length=self.config.max_seq_len)
+                    input_ids = enc.input_ids.to(self.device)
+                    if prompt_token_lens:
+                        prompt_len = prompt_token_lens[prompt_idx]
+                    else:
+                        prompt_len = self.tokenizer(
+                            prompt, return_tensors="pt").input_ids.shape[1]
+                    if input_ids.shape[1] <= prompt_len + 1:
+                        group_lps.append(torch.tensor([], device=self.device))
+                        continue
+                    logits, _ = self.model(input_ids)
+                    solution_logits = logits[0, prompt_len - 1:-1, :]
+                    solution_targets = input_ids[0, prompt_len:].long()
+                    if solution_logits.shape[0] == 0:
+                        group_lps.append(torch.tensor([], device=self.device))
+                        continue
+                    log_probs = F.log_softmax(solution_logits, dim=-1)
+                    token_log_probs = log_probs.gather(
+                        1, solution_targets.unsqueeze(0)).squeeze(0)
+                    group_lps.append(token_log_probs.detach())
+                all_log_probs.append(group_lps)
+        return all_log_probs
 
     def get_stats(self) -> dict:
         """Return cumulative training stats for monitoring."""
@@ -398,6 +644,10 @@ class GRPOTrainer:
             ),
             "advantage_collapse_rate": self.stats.advantage_collapse_rate,
             "acr_alert": self.stats.advantage_collapse_rate > 0.3,
+            "mean_correctness_ratio": (sum(self.stats.correctness_ratios) /
+                                       max(len(self.stats.correctness_ratios), 1))
+                                      if self.stats.correctness_ratios else None,
+            "length_penalty_active_count": self.stats.length_penalty_active_count,
         }
 
     # -----------------------------------------------------------------------
@@ -596,6 +846,12 @@ class GRPOTrainer:
         if not self.optimizer:
             return {"error": "no trainable parameters"}
 
+        # Golden trajectory injection
+        n_injected = 0
+        if self.replay_buffer is not None:
+            prompts, completions, rewards, n_injected = \
+                self._inject_golden_replays(prompts, completions, rewards)
+
         self.model.train()
         total_loss = 0.0
         total_kl = 0.0
@@ -608,6 +864,12 @@ class GRPOTrainer:
                 zip(prompts, completions, rewards)):
             if not comps or len(comps) < 2:
                 continue
+
+            # GRPO-λ: dynamic length penalty based on group correctness ratio
+            if self.config.use_grpo_lambda:
+                cr = self._group_correctness_ratio(rews)
+                self.stats.correctness_ratios.append(cr)
+                rews = self._apply_grpo_lambda_penalty(rews, comps, cr)
 
             # Compute advantages (GVPO if enabled, else standard GRPO).
             if self.config.use_gvpo and process_rewards is not None:
@@ -736,4 +998,10 @@ class GRPOTrainer:
             "acr_alert": " [WARNING: ACR>0.3]" if acr > 0.3 else "",
             "mode": mode_str,
             "mean_sc_weight": total_sc_weight / max(n_updates, 1) if self.config.use_sc_grpo else 1.0,
+            "n_golden_injected": n_injected,
+            "mean_correctness_ratio": (sum(self.stats.correctness_ratios[-10:]) /
+                                       max(len(self.stats.correctness_ratios[-10:]), 1))
+                                      if self.config.use_grpo_lambda else None,
+            "length_penalty_active": self.config.use_grpo_lambda and
+                                      self.stats.length_penalty_active_count > 0,
         }

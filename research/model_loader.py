@@ -127,6 +127,11 @@ class PreAllocatedKVCache:
             return  # conv layer, no cache
         T = k_new.shape[-2]
         pos = self.position
+        if pos + T > self.max_seq_len:
+            raise ValueError(
+                f"KV cache overflow: pos={pos} + T={T} > max_seq_len={self.max_seq_len}. "
+                f"Increase max_seq_len or use a paged/evicting KV cache strategy."
+            )
         if self.quantize == "int8":
             # Quantize: scale = max(abs(x)) / 127, q = round(x / scale)
             k_scale = k_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
@@ -413,28 +418,52 @@ class GroupedQueryAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # QK-norm: normalize Q and K per-head before RoPE (LFM2 style).
-        # When weights are identity (all 1.0), skip — no-op.
-        if self.use_qk_norm and not self._qk_norm_identity:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+        # Fused QK-Norm + RoPE path (opt-in via FORGE_FUSED_ROPE_QKNORM=1).
+        # Fuses RMSNorm and RoPE into a single Triton kernel, halving HBM
+        # traffic for Q/K preprocessing. Only used when QK-norm is active
+        # (non-identity weights) and position_ids is None (offset path).
+        _use_fused = (
+            os.environ.get("FORGE_FUSED_ROPE_QKNORM", "0") == "1"
+            and self.use_qk_norm and not self._qk_norm_identity
+            and position_ids is None and q.is_cuda
+        )
+        if _use_fused:
+            from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
+            if preallocated_cache is not None:
+                past_len = preallocated_cache.position
+            else:
+                past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
+            # Slice cos/sin tables to the current sequence positions
+            cos_slice = self.rope.cos_cached[past_len:past_len + T, :].to(q.dtype)
+            sin_slice = self.rope.sin_cached[past_len:past_len + T, :].to(q.dtype)
+            q, k = fused_qk_norm_rope(
+                q, k, self.q_norm.weight, self.k_norm.weight,
+                cos_slice, sin_slice, eps=self.q_norm.eps)
+        else:
+            # QK-norm: normalize Q and K per-head before RoPE (LFM2 style).
+            # When weights are identity (all 1.0), skip — no-op.
+            if self.use_qk_norm and not self._qk_norm_identity:
+                q = self.q_norm(q)
+                k = self.k_norm(k)
 
-        # Pre-allocated cache path: O(1) append, no torch.cat.
+            # Pre-allocated cache path: O(1) append, no torch.cat.
+            if preallocated_cache is not None:
+                past_len = preallocated_cache.position
+                q = self.rope(q, offset=past_len, position_ids=position_ids)
+                k = self.rope(k, offset=past_len, position_ids=position_ids)
+            else:
+                past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
+                q = self.rope(q, offset=past_len, position_ids=position_ids)
+                k = self.rope(k, offset=past_len, position_ids=position_ids)
+
+        # Cache append + KV retrieval (same for both paths)
         if preallocated_cache is not None:
-            past_len = preallocated_cache.position
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k = self.rope(k, offset=past_len, position_ids=position_ids)
             preallocated_cache.append(layer_idx, k, v)
             k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
             v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
-        else:
-            past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k = self.rope(k, offset=past_len, position_ids=position_ids)
-
-            if past_key_value is not None:
-                k = torch.cat([past_key_value[0], k], dim=-2)
-                v = torch.cat([past_key_value[1], v], dim=-2)
+        elif past_key_value is not None and not _use_fused:
+            k = torch.cat([past_key_value[0], k], dim=-2)
+            v = torch.cat([past_key_value[1], v], dim=-2)
 
         new_kv = (k, v) if use_cache else None
 
@@ -558,6 +587,12 @@ class DoubleGatedConvLayer(nn.Module):
         # Input gate: raw multiply (NO sigmoid — LFM2 uses multiplicative gates)
         Bx = B_gate * x_proj  # (B, T, D)
 
+        # New sequence (no KV cache carried over): stale conv state from a
+        # previous sequence must not be reused. Prefill (T>1) re-initializes
+        # state below, but a T==1-first call would silently reuse old state.
+        if past_key_value is None and T == 1:
+            self._conv_state = None
+
         if T == 1 and self._conv_state is not None:
             conv_out = self._incremental_conv(Bx)
         else:
@@ -630,10 +665,19 @@ class ModularBlock(nn.Module):
         self._gradient_checkpointing_strategy = getattr(
             config, 'selective_gradient_checkpointing', 'all')
 
+        # FFN-SkipLLM: skip FFN on saturated layers during eval.
+        # Disabled by default — calibration shows no saturation in V3 (16 layers).
+        # See docs/FFN_RESEARCH.md. Infrastructure kept for future 32+ layer models.
+        self._ffn_skip_threshold = getattr(config, 'ffn_skip_threshold', 0.0)
+        self._ffn_skip_count = 0
+        self._static_skip_layers: set[int] = set()  # populated when threshold > 0
+
         # TITAN neural memory + MoD token router (zero-init => lossless at
         # start; the ported checkpoint loads and behaves identically).
         self._memory = None
         self._mod = None
+        self._mhc = None
+        self._mem_gate_zero: bool | None = None  # cached eval gate state
         if getattr(config, 'use_titan_memory', False):
             from research.keys.architecture.titan_memory_key import TitanMemory
             self._memory = TitanMemory(
@@ -644,6 +688,15 @@ class ModularBlock(nn.Module):
             self._mod = ModRouter(
                 config.d_model,
                 keep_fraction=getattr(config, 'mod_keep_fraction', 1.0))
+        # MHC: Manifold Hyper-Connections (gate=0 → lossless at start).
+        if getattr(config, 'use_mhc', False):
+            from research.keys.architecture.mhc_key import MHCModule
+            mhc_rank = getattr(config, 'mhc_rank', 0)
+            # rank=0 means "auto" (d_model // 4); MHCModule needs None for auto.
+            self._mhc = MHCModule(
+                config.d_model,
+                rank=mhc_rank if mhc_rank > 0 else None)
+            self._mhc_gate_zero: bool | None = None
 
     def forward(
         self,
@@ -654,8 +707,23 @@ class ModularBlock(nn.Module):
         layer_idx: int = 0,
         attention_bias: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
+        # DiffusionBlocks: AdaLN modulation (shift_msa, scale_msa, gate_msa,
+        # shift_mlp, scale_mlp, gate_mlp) — 6 * d_model values
+        modulation: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, KVCache | None]:
         x0 = x  # pre-update residual (for TITAN read + MoD gating)
+
+        # TRUE Mixture-of-Depths: in training (no KV cache, no attention
+        # mask) router-skipped tokens genuinely BYPASS attention + FFN —
+        # the block only computes the top-k kept tokens, so FLOPs scale
+        # with keep_fraction instead of T. (Inference keeps all tokens to
+        # preserve KV cache position alignment.)
+        if (self.training and not use_cache and self._mod is not None
+                and self._mod.keep_fraction < 1.0
+                and attention_bias is None and position_ids is None):
+            return self._forward_mod_skip(
+                x, layer_idx, attention_bias, position_ids), None
+
         # Activation checkpointing: recompute forward during backward to save VRAM.
         # Only applies during training (use_cache=False); inference materializes normally.
         if self.training and not use_cache and self._gradient_checkpointing:
@@ -732,23 +800,49 @@ class ModularBlock(nn.Module):
                     ffn_out = ffn_out[0]
                 x = x + ffn_out
         else:
+            # DiffusionBlocks: extract AdaLN modulation (4 * d_model)
+            # No gates — shift/scale only (zero-init = identity, gradients flow)
+            shift_msa = scale_msa = shift_mlp = scale_mlp = None
+            if modulation is not None:
+                # Cast modulation to x's dtype (AdaLN may be float32, x may be bf16)
+                mod = modulation.to(x.dtype)
+                chunks = mod.chunk(4, dim=-1)
+                shift_msa, scale_msa, shift_mlp, scale_mlp = chunks
+
+            # Attention path
+            attn_in = self.ln1(x)
+            if shift_msa is not None:
+                attn_in = attn_in * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
             if preallocated_cache is not None and self._supports_prealloc_cache:
                 attn_out, present = self.attn(
-                    self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                    attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                     attention_bias=attention_bias, position_ids=position_ids,
                 )
             else:
                 attn_out, present = self.attn(
-                    self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                    attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     attention_bias=attention_bias, position_ids=position_ids,
                 )
             x = x + attn_out
-            ffn_out = self.ffn(self.ln2(x))
-            self._last_aux_loss = None
-            if isinstance(ffn_out, tuple):
-                self._last_aux_loss = ffn_out[1]
-                ffn_out = ffn_out[0]
+            # FFN-SkipLLM: skip FFN on saturated layers during eval.
+            # Uses a static skip set (calibrated via cosine similarity).
+            # Safe with KV cache: FFN doesn't touch KV state, only attention.
+            # Disabled by default — V3 has no saturation region (see docs/FFN_RESEARCH.md).
+            if (self._ffn_skip_threshold > 0.0 and not self.training
+                    and self.layer_idx in self._static_skip_layers):
+                self._ffn_skip_count += 1
+                ffn_out = torch.zeros_like(x)
+                self._last_aux_loss = None
+            else:
+                ffn_in = self.ln2(x)
+                if shift_mlp is not None:
+                    ffn_in = ffn_in * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
+                ffn_out = self.ffn(ffn_in)
+                self._last_aux_loss = None
+                if isinstance(ffn_out, tuple):
+                    self._last_aux_loss = ffn_out[1]
+                    ffn_out = ffn_out[0]
             x = x + ffn_out
 
         # TITAN memory read + MoD token gating (zero-init => lossless).
@@ -756,8 +850,19 @@ class ModularBlock(nn.Module):
         if self._memory is not None or self._mod is not None:
             # Fast lossless path: TITAN gate closed + MoD keep-all => no-op,
             # return x untouched (bit-exact vs. a plain block).
-            mem_noop = (self._memory is None
-                        or self._memory.gate.item() == 0.0)
+            # The gate .item() check is a GPU->CPU sync; the gate value is
+            # static (zero-init, only changed by optimizer steps), so it is
+            # cached after the first check (16 syncs/token otherwise — the
+            # biggest decode overhead on V3). Caching applies to both training
+            # and eval: the gate parameter only changes via optimizer weight
+            # updates, not during forward passes.
+            if self._memory is None:
+                mem_noop = True
+            elif self._mem_gate_zero is None:
+                self._mem_gate_zero = (self._memory.gate.item() == 0.0)
+                mem_noop = self._mem_gate_zero
+            else:
+                mem_noop = self._mem_gate_zero
             mod_noop = (self._mod is None
                         or self._mod.token_mask(x0) is None)
             if not (mem_noop and mod_noop):
@@ -767,19 +872,66 @@ class ModularBlock(nn.Module):
                 if self._mod is not None and not mod_noop:
                     update = self._mod.apply(x0, update)
                 x = x0 + update
+
+        # MHC: Manifold Hyper-Connection (gate=0 → lossless at start).
+        # Wraps the full block update: x = x0 + update + gate * proj(update).
+        # At gate=0, this is x = x0 + update (standard residual, bit-exact).
+        if self._mhc is not None:
+            if self._mhc_gate_zero is None:
+                self._mhc_gate_zero = (self._mhc.gate.item() == 0.0)
+            if not self._mhc_gate_zero:
+                update = x - x0
+                x = self._mhc(x0, update)
+
         return x, present
+
+    def _forward_mod_skip(self, x: torch.Tensor, layer_idx: int,
+                          attention_bias: torch.Tensor | None,
+                          position_ids: torch.Tensor | None
+                          ) -> torch.Tensor:
+        """Run the block only on router-kept tokens (per batch row).
+
+        Matches the MoD paper: at this depth, skipped tokens are absent from
+        attention entirely (causal within the kept subsequence). Kept tokens
+        still get the full attention + FFN + TITAN update. The hard top-k
+        selection is non-differentiable, so the router is trained by the
+        aux loss attached to `_last_aux_loss` (see ModRouter.aux_loss).
+        """
+        mask = self._mod.token_mask(x)
+        out = x.clone()
+        for b in range(x.shape[0]):
+            idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
+            x_k = x[b][idx].unsqueeze(0)  # (1, T_k, D)
+            attn_out, _ = self.attn(
+                self.ln1(x_k), past_key_value=None, use_cache=False,
+                preallocated_cache=None, layer_idx=layer_idx,
+                attention_bias=attention_bias, position_ids=position_ids)
+            h = x_k + attn_out
+            ffn_out = self.ffn(self.ln2(h))
+            self._last_aux_loss = None
+            if isinstance(ffn_out, tuple):
+                self._last_aux_loss = ffn_out[1]
+                ffn_out = ffn_out[0]
+            h = h + ffn_out
+            if self._memory is not None:
+                h = h + self._memory(x_k)
+            out[b][idx] = h[0]
+        if self._last_aux_loss is None:
+            self._last_aux_loss = self._mod.aux_loss(x, mask)
+        return out
 
 
 def build_attention(config: ModelConfig) -> nn.Module:
     kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
                   use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None))
     if config.attn_type == "gqa":
-        return GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
+        attn = GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False))
+        return _maybe_bitnet_attention(config, attn)
     if config.attn_type == "diff":
         # Differential Attention (Diff-Transformer): dual-softmax subtraction.
         from research.keys.attention.differential_attn_key import DifferentialAttention
-        return DifferentialAttention(
+        attn = DifferentialAttention(
             d_model=config.d_model, n_heads=config.n_heads,
             n_kv_heads=getattr(config, 'n_kv_heads', None),
             max_seq_len=config.max_seq_len, base=config.rope_base,
@@ -788,9 +940,29 @@ def build_attention(config: ModelConfig) -> nn.Module:
             attn_bias=getattr(config, 'attn_bias', False),
             n_layers=config.n_layers, layer_idx=0,
             lambda_init=getattr(config, 'diff_attn_lambda_init', None))
+        return _maybe_bitnet_attention(config, attn)
     raise ValueError(
         f"Unknown attention type: '{config.attn_type}'. "
         f"Valid options: 'gqa', 'diff'")
+
+
+def _maybe_bitnet_attention(config: ModelConfig, attn: nn.Module) -> nn.Module:
+    """Swap attention projections for BitNet b1.58 QAT linears (when enabled).
+
+    Eval stays full-precision (ternary only in training) so the lossless
+    checkpoint load is preserved; QAT then quantizes q/k/v/o matmuls too.
+    """
+    if not getattr(config, 'use_bitnet', False):
+        return attn
+    from research.keys.quantization.bitnet_b158_key import build_bitnet_linear
+    for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+        lin = getattr(attn, name, None)
+        if lin is None:
+            continue
+        setattr(attn, name, build_bitnet_linear(
+            config, config.d_model, lin.out_features,
+            bias=lin.bias is not None))
+    return attn
 
 
 def build_ffn(config: ModelConfig) -> nn.Module:
@@ -816,15 +988,32 @@ class ConfigurableResearchLLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.embed = nn.Embedding(config.vocab_size, config.d_model)
+        # PIT: Pseudo-Inverse Tying (L=I → standard weight tying, lossless).
+        if getattr(config, 'use_pit', False):
+            from research.keys.misc.pit_key import PITEmbedding, PITLMHead
+            self.embed = PITEmbedding(config.vocab_size, config.d_model)
+            self.head = PITLMHead.from_embedding(self.embed)
+        else:
+            self.embed = nn.Embedding(config.vocab_size, config.d_model)
+            self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         self.ln_f = norm(config.d_model)
-        self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         # Weight tying: skip if PIT is enabled (PIT replaces tying),
         # or if config explicitly disables it (e.g., Qwen2.5).
         if not getattr(config, 'use_pit', False) and getattr(config, 'tie_word_embeddings', True):
             self.embed.weight = self.head.weight  # Weight tying
+
+        # AttnRes: cross-layer retrieval (shared module, gates=0 → lossless).
+        # Applied after each block; maintains a buffer of past layer outputs.
+        self._attn_res: nn.Module | None = None
+        if getattr(config, 'use_attn_residual', False):
+            from research.keys.architecture.attn_residual_key import AttnResModule
+            self._attn_res = AttnResModule(
+                config.d_model, config.n_layers,
+                k=getattr(config, 'attn_res_k', 4),
+                n_heads=min(4, config.n_heads))
+            self._attn_res_gate_zero: bool | None = None
 
         # Zero-init residual: output projections start at zero so the residual
         # stream is unchanged at init — cleaner gradient flow early in training
@@ -950,6 +1139,10 @@ class ConfigurableResearchLLM(nn.Module):
         return_hidden: bool = False,
         preallocated_cache: Optional["PreAllocatedKVCache"] = None,
         attention_mask: torch.Tensor | None = None,
+        # DiffusionBlocks support: run only specific layers, with noise conditioning
+        layer_indices: list[int] | None = None,
+        noisy_embeds: torch.Tensor | None = None,
+        modulation: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[KVCache | None]]:
         # Compute position_ids and attention_bias ONCE from attention_mask.
         # These are shared across all 28 layers to avoid per-layer allocation (CPU spike fix).
@@ -998,11 +1191,34 @@ class ConfigurableResearchLLM(nn.Module):
         if idx.device != embed_device:
             idx = idx.to(embed_device)
         x = self.embed(idx)
+        # DiffusionBlocks: add noisy target embeddings to the input
+        if noisy_embeds is not None:
+            # noisy_embeds: (B, T, d_model) — added to input embeddings
+            if noisy_embeds.shape[:2] == x.shape[:2]:
+                x = x + noisy_embeds.to(x.dtype).to(x.device)
+            else:
+                # Broadcast (B, d_model) → (B, T, d_model)
+                x = x + noisy_embeds.unsqueeze(1).expand(-1, x.shape[1], -1).to(x.dtype).to(x.device)
+        # DiffusionBlocks: convert layer_indices to a set for O(1) lookup
+        active_layers = set(layer_indices) if layer_indices is not None else None
         presents: list[KVCache | None] = []
         # Track device for hybrid offload: move x to each block's device
         cur_device = x.device
         block_devices = self._block_devices
+        # AttnRes: only build past_outputs buffer when gates are non-zero.
+        # At init (gates=0), skip entirely — zero overhead, bit-exact.
+        use_attn_res = self._attn_res is not None
+        if use_attn_res and self._attn_res_gate_zero is None:
+            self._attn_res_gate_zero = (
+                self._attn_res.gates.abs().max().item() == 0.0)
+        attn_res_active = use_attn_res and not self._attn_res_gate_zero
+        past_outputs: list[torch.Tensor] = [] if attn_res_active else None
         for i, block in enumerate(self.blocks):
+            # DiffusionBlocks: skip layers not in the active set
+            if active_layers is not None and i not in active_layers:
+                if use_cache:
+                    presents.append(past_key_values[i] if past_key_values is not None else None)
+                continue
             block_device = block_devices[i]
             if block_device != cur_device:
                 x = x.to(block_device)
@@ -1010,7 +1226,12 @@ class ConfigurableResearchLLM(nn.Module):
             past = past_key_values[i] if past_key_values is not None else None
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
-                               attention_bias=attention_bias, position_ids=position_ids)
+                               attention_bias=attention_bias, position_ids=position_ids,
+                               modulation=modulation)
+            # AttnRes: cross-layer retrieval (gates=0 → lossless at start).
+            if attn_res_active:
+                x = x + self._attn_res(x, i, past_outputs)
+                past_outputs.append(x)
             if use_cache:
                 presents.append(present)
         # Advance the pre-allocated cache position after all layers processed.
@@ -1105,7 +1326,11 @@ class ModelLoader:
                     f"{getattr(config, 'titan_memory_rank', 0)}_"
                     f"{getattr(config, 'use_mod', False)}_"
                     f"{getattr(config, 'mod_keep_fraction', 1.0)}_"
-                    f"{getattr(config, 'use_qk_norm', False)}")
+                    f"{getattr(config, 'use_qk_norm', False)}_"
+                    f"{getattr(config, 'use_mhc', False)}_"
+                    f"{getattr(config, 'mhc_rank', 0)}_"
+                    f"{getattr(config, 'use_attn_residual', False)}_"
+                    f"{getattr(config, 'attn_res_k', 4)}")
         return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}_{arch_sig}"
 
     @staticmethod
@@ -1164,8 +1389,17 @@ class ModelLoader:
                         state[key] = f.get_tensor(key).clone()
                 return state
             except Exception as e:
-                print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
-                      f"using safetensors direct device loading")
+                # fastsafetensors may fail on Windows (missing DirectStorage
+                # DLLs or CUDA runtime version mismatch). The standard
+                # safetensors path still loads directly to GPU
+                # (SAFETENSORS_FAST_CUDA=1). Suppress expected errors.
+                err = str(e).lower()
+                if any(kw in err for kw in ("directstorage", "dstorage",
+                        "gpu runtime", "cudart", "libcudart")):
+                    pass  # expected — fallback handles it
+                else:
+                    print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
+                          f"using safetensors direct device loading")
 
         # Fallback: safetensors safe_open with direct device loading.
         # SAFETENSORS_FAST_CUDA=1 (set at module import) enables pinned async.
@@ -1203,8 +1437,13 @@ class ModelLoader:
                         state[key] = f.get_tensor(key).clone()
                 return state
             except Exception as e:
-                print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
-                      f"using safetensors direct device loading")
+                err = str(e).lower()
+                if any(kw in err for kw in ("directstorage", "dstorage",
+                        "gpu runtime", "cudart", "libcudart")):
+                    pass
+                else:
+                    print(f"  [FastBuild] fastsafetensors unavailable ({e}), "
+                          f"using safetensors direct device loading")
 
         # Fallback: safetensors safe_open with direct device loading
         from safetensors import safe_open

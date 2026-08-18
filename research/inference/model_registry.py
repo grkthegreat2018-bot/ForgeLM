@@ -156,6 +156,31 @@ class ModelRegistry:
         entry.total_tokens += entry.engine.total_tokens_generated
         return output
 
+    def generate_stream(self, model_id: str, prompt: str, max_new_tokens: int = 256,
+                        temperature: float = 0.0, top_p: float = 1.0):
+        """Token-by-token streaming generator. Auto-wakes if asleep.
+
+        Yields decoded text chunks (one per token) as they are generated.
+        """
+        with self._lock:
+            if model_id not in self._entries:
+                raise KeyError(f"Model '{model_id}' not registered. "
+                               f"Available: {list(self._entries.keys())}")
+            self._ensure_awake(model_id)
+            entry = self._entries[model_id]
+            entry.last_used = time.time()
+            engine = entry.engine
+
+        for chunk in engine.generate_stream(
+            prompt, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p,
+        ):
+            yield chunk
+
+        with self._lock:
+            entry.generation_count += 1
+            entry.total_tokens += engine.total_tokens_generated
+
     def sleep(self, model_id: str, level: int = 1):
         """Put a model to sleep to free VRAM."""
         with self._lock:
