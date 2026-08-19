@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from research.inference.async_d2h import AsyncTokenReader
+from research.inference.scheduler.async_d2h import AsyncTokenReader
 from research.json_compat import dumps, loads
 
 # Pre-compiled regex patterns (avoids 450+ recompilations per session).

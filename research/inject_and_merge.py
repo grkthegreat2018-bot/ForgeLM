@@ -532,7 +532,7 @@ def main():
     p.add_argument("--target", required=True,
                    help="Target model checkpoint (the main model)")
     p.add_argument("--config", default="forgelm_v3",
-                   help="Model config name (lfm25_1.2b, lfm25_tiny, qwen25_3b)")
+                   help="Model config name (lfm25_1.2b, lfm25_tiny, forgelm_v3, forgelm_v4)")
     p.add_argument("--inject-type", required=True,
                    choices=list(INJECT_HANDLERS.keys()),
                    help="Which knowledge injection key to run")

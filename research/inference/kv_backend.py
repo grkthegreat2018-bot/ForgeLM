@@ -369,19 +369,19 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     }
     # Lazy imports for new strategies (avoid circular imports)
     if strategy == "paged_eviction":
-        from research.inference.paged_eviction import PagedEvictionKVCache
+        from research.inference.kv.paged_eviction import PagedEvictionKVCache
         return PagedEvictionKVCache()
     if strategy == "xquant":
-        from research.inference.xquant_kv import XQuantKVCache
+        from research.inference.kv.xquant_kv import XQuantKVCache
         return XQuantKVCache()
     if strategy == "cpu_offload":
-        from research.inference.cpu_kv_offload import CPUKVCache
+        from research.inference.kv.cpu_kv_offload import CPUKVCache
         return CPUKVCache()
     if strategy == "s4r":
-        from research.inference.s4r_kv import S4RKVCache
+        from research.inference.kv.s4r_kv import S4RKVCache
         return S4RKVCache()
     if strategy == "hqe_kv":
-        from research.inference.hqe_kv import HqeKVCache
+        from research.inference.kv.hqe_kv import HqeKVCache
         return HqeKVCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
@@ -393,7 +393,7 @@ class StreamingKVCacheStrategy(KVCacheStrategy):
     """StreamingLLM: attention sinks + sliding window. Wraps streaming_llm.py."""
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
-        from research.inference.streaming_llm import StreamingKVCache
+        from research.inference.kv.streaming_llm import StreamingKVCache
         n_sinks = 4
         window = min(512, max_seq_len)
         self.cache = StreamingKVCache(
@@ -426,7 +426,7 @@ class SnapKVCacheStrategy(KVCacheStrategy):
     """SnapKV: observation-window eviction. Wraps snapkv.py."""
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
-        from research.inference.snapkv import SnapKVCache
+        from research.inference.kv.snapkv import SnapKVCache
         obs_window = 128
         budget = min(512, max_seq_len)
         self.cache = SnapKVCache(

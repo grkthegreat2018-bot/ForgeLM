@@ -307,31 +307,6 @@ MODEL_CONFIGS = {
         batch_size=2,
         seq_len=1024,
     ),
-    # Qwen2.5-3B-Instruct: standard GQA transformer.
-    #   - 36 layers, all attention (no conv/mamba)
-    #   - d_model=2048, 16 Q heads, 2 KV heads (GQA 8x), head_dim=128
-    #   - SwiGLU FFN (intermediate=11008), RMSNorm
-    #   - RoPE theta=1M, 32K context, Q/K/V projection bias
-    #   - Vocab=151936, no tied embeddings
-    "qwen25_3b": ModelConfig(
-        vocab_size=151936,
-        d_model=2048,
-        n_layers=36,
-        n_heads=16,
-        n_kv_heads=2,
-        intermediate_size=11008,
-        attn_type="gqa",
-        attn_bias=True,  # Qwen2.5 uses bias in Q/K/V projections
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,
-        max_seq_len=32768,
-        use_qk_norm=False,
-        layer_types=["attention"] * 36,  # all attention, no conv
-        tie_word_embeddings=True,  # Qwen2.5-3B ties embed_tokens to lm_head
-        batch_size=2,
-        seq_len=1024,
-    ),
     # Tiny LFM2.5 for fast testing
     "lfm25_tiny": ModelConfig(
         vocab_size=256,

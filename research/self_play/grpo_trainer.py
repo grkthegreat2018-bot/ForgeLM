@@ -174,19 +174,19 @@ class GRPOTrainer:
         # Advanced RL algorithm (2026 research)
         self._rl_algo = None
         if self.config.rl_algorithm == "sppo":
-            from research.training.advanced_rl import SPPO, SPPOConfig
+            from research.training.losses.advanced_rl import SPPO, SPPOConfig
             self._rl_algo = SPPO(SPPOConfig(lr=self.config.learning_rate))
             print("  [GRPOTrainer] Using SPPO (Sequence-Level PPO)")
         elif self.config.rl_algorithm == "psppo":
-            from research.training.advanced_rl import PSPPO, PSPPOConfig
+            from research.training.losses.advanced_rl import PSPPO, PSPPOConfig
             self._rl_algo = PSPPO(PSPPOConfig(lr=self.config.learning_rate))
             print("  [GRPOTrainer] Using PS-PPO (Prefix-Sampling PPO)")
         elif self.config.rl_algorithm == "evpo":
-            from research.training.advanced_rl import EVPO, EVPOConfig
+            from research.training.losses.advanced_rl import EVPO, EVPOConfig
             self._rl_algo = EVPO(EVPOConfig(lr=self.config.learning_rate))
             print("  [GRPOTrainer] Using EVPO (Explained Variance PO)")
         elif self.config.rl_algorithm == "grpo_or":
-            from research.training.advanced_rl import GRPOOR, GRPOORConfig
+            from research.training.losses.advanced_rl import GRPOOR, GRPOORConfig
             self._rl_algo = GRPOOR(GRPOORConfig(lr=self.config.learning_rate))
             print("  [GRPOTrainer] Using GRPO-OR (Output Reset trust region)")
 

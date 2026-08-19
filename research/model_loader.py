@@ -1344,7 +1344,7 @@ class ConfigurableResearchLLM(nn.Module):
         if self.config.use_chunked_ce and targets is not None and not use_cache:
             ent_alpha = getattr(self.config, 'entropy_alpha', 0.0)
             if ent_alpha > 0.0:
-                from research.training.chunked_ce import chunked_entropy_weighted_ce
+                from research.training.losses.chunked_ce import chunked_entropy_weighted_ce
                 loss = chunked_entropy_weighted_ce(
                     hidden.view(-1, hidden.size(-1)),
                     self.head.weight,
@@ -1353,7 +1353,7 @@ class ConfigurableResearchLLM(nn.Module):
                     entropy_alpha=ent_alpha,
                 )
             else:
-                from research.training.chunked_ce import chunked_linear_cross_entropy
+                from research.training.losses.chunked_ce import chunked_linear_cross_entropy
                 loss = chunked_linear_cross_entropy(
                     hidden.view(-1, hidden.size(-1)),
                     self.head.weight,

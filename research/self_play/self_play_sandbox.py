@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from research.inference.async_d2h import AsyncTokenReader, StreamedGenerator
+from research.inference.scheduler.async_d2h import AsyncTokenReader, StreamedGenerator
 from research.json_compat import dumps, loads
 from research.self_play.io_match import io_match, io_similarity
 

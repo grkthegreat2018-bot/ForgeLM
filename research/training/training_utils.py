@@ -205,7 +205,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
         # Tested in .devin/test_muon_sf.py: 1.05x vs AdamW, 1.12x vs Muon+AdamW.
         # OPTIMAL for standard architecture (no BitNet).
         try:
-            from research.training.muon_sf_blockwise import build_muon_sf_blockwise
+            from research.training.optim.muon_sf_blockwise import build_muon_sf_blockwise
             return build_muon_sf_blockwise(model, max_lr, weight_decay)
         except Exception as e:
             print(f"MuonSFBlockwise unavailable ({e}); falling back to fused AdamW.")
@@ -217,7 +217,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
         # Blockwise sharpness conflicts with BitNet's weight normalization.
         # Tested in .devin/test_full_stack.py: 2.24x vs AdamW cosine on V3.
         try:
-            from research.training.muon_sf_blockwise import build_muon_sf_plain
+            from research.training.optim.muon_sf_blockwise import build_muon_sf_plain
             return build_muon_sf_plain(model, max_lr, weight_decay)
         except Exception as e:
             print(f"MuonScheduleFree unavailable ({e}); falling back to fused AdamW.")
@@ -225,7 +225,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "flash_adamw":
         try:
-            from research.training.flash_optim import FlashAdamW
+            from research.training.optim.flash_optim import FlashAdamW
             print("Using FlashAdamW (8-bit states, companding quantization, 57% memory cut).")
             return FlashAdamW(param_groups, lr=max_lr, weight_decay=weight_decay)
         except Exception as e:
@@ -234,7 +234,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "flash_lion":
         try:
-            from research.training.flash_optim import FlashLion
+            from research.training.optim.flash_optim import FlashLion
             print("Using FlashLion (8-bit sign-momentum, 58% memory cut).")
             return FlashLion(param_groups, lr=max_lr / 10.0, weight_decay=weight_decay * 10.0)
         except Exception as e:
@@ -243,7 +243,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "forge":
         try:
-            from research.training.forge_optimizer import ForgeOptimizer
+            from research.training.optim.forge_optimizer import ForgeOptimizer
             print("Using FORGE (fused on-register gradient elimination, 53% memory cut).")
             opt = ForgeOptimizer(param_groups, lr=max_lr, weight_decay=weight_decay)
             return opt
@@ -253,7 +253,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "sf_normuon":
         try:
-            from research.training.sf_spectral_optimizers import SFNorMuon
+            from research.training.optim.sf_spectral_optimizers import SFNorMuon
             print("Using SF-NorMuon (schedule-free spectral, per-neuron norm, anytime).")
             return SFNorMuon(param_groups, lr=max_lr, weight_decay=weight_decay)
         except Exception as e:
@@ -262,7 +262,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "amuse":
         try:
-            from research.training.sf_spectral_optimizers import AMUSE
+            from research.training.optim.sf_spectral_optimizers import AMUSE
             print("Using AMUSE (anytime Muon + stable eval, no LR schedule).")
             return AMUSE(param_groups, lr=max_lr)
         except Exception as e:
@@ -271,7 +271,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
 
     if optimizer_name == "mona":
         try:
-            from research.training.sf_spectral_optimizers import MONA
+            from research.training.optim.sf_spectral_optimizers import MONA
             print("Using MONA (Muon + Nesterov acceleration, escapes sharp minima).")
             return MONA(param_groups, lr=max_lr)
         except Exception as e:

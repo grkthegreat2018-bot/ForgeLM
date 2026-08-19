@@ -43,7 +43,7 @@ Four configs:
 - `research/inference/decoding.py` — Decoding strategies (standard, speculative, MTP, **batched**)
 - `research/inference/batched_decoding.py` — BatchedDecoding: multiple prompts in single forward pass (GEMV→GEMM, 3-5x throughput)
 - `research/inference/kv_backend.py` — KV cache strategies (standard, paged, rotorquant, hadamard, compressed, streaming, snapkv)
-- `research/inference/int4_quant.py` — INT4 weight-only quantization
+- `research/inference/quant/int4_quant.py` — INT4 weight-only quantization
 - `research/inference/innovations.py` — Runtime innovations (MRL, QuaRot, V0, ProgressiveKV)
 
 ### Decoding implementations
@@ -113,16 +113,16 @@ mini-infer, Zerfoo, vLLM, DeepSeek-V3 MLA, PagedEviction, XQuant). All wired int
    - Lossless (same math, just fused weight matrix)
 
 ### Inference Optimizations (opt-in via ForgeEngine.activate())
-4. **W8A8 INT8 Quantization** — `research/inference/w8a8_quant.py`
+4. **W8A8 INT8 Quantization** — `research/inference/quant/w8a8_quant.py`
    - `W8A8Linear`: weight + activation INT8 with `torch._int_mm` tensor-core GEMM
    - 2-3× decode speedup at batch=1 (shifts to compute-bound on tensor cores)
    - `quantize="w8a8"` in `activate()`; `FP8Linear` for Blackwell FP8 E4M3
-5. **PagedEviction KV Cache** — `research/inference/paged_eviction.py`
+5. **PagedEviction KV Cache** — `research/inference/kv/paged_eviction.py`
    - Block-wise eviction (entire 16-token blocks, not individual tokens)
    - Compatible with PagedAttention (no fragmentation), FlashAttention (no scores needed)
    - L2-norm-based scoring (attention-score-free); 3020 tok/s on LLaMA-1B (37% over full)
    - `kv_cache="paged_eviction"` in `activate()`
-6. **XQuant KV Rematerialization** — `research/inference/xquant_kv.py`
+6. **XQuant KV Rematerialization** — `research/inference/kv/xquant_kv.py`
    - Caches layer-input activations X (INT4) instead of K/V; rematerializes K=W_K@X, V=W_V@X
    - 2× memory savings (INT4 X vs bf16 KV); up to 16× with SVD compression
    - `kv_cache="xquant"` in `activate()`
@@ -130,7 +130,7 @@ mini-infer, Zerfoo, vLLM, DeepSeek-V3 MLA, PagedEviction, XQuant). All wired int
    - `CompiledMegakernelDecode`: CUDA graph capture of entire decode step + torch.compile
    - Single graph replay per token (1 API call vs dozens of kernel launches)
    - `acceleration="megakernel"` in `activate()`
-8. **Chunked Prefill** — `research/inference/chunked_prefill.py`
+8. **Chunked Prefill** — `research/inference/prefill/chunked_prefill.py`
    - `ChunkedPrefiller`: splits long prompts into 512-token chunks
    - Interleaves with decode steps (prevents long prompts from blocking decode queue)
    - `use_chunked_prefill=True` in `activate()`
@@ -139,19 +139,19 @@ mini-infer, Zerfoo, vLLM, DeepSeek-V3 MLA, PagedEviction, XQuant). All wired int
 
 Five additional techniques from latest 2026 research, all opt-in via `ForgeEngine.activate()`:
 
-### FlexDecoding (research/inference/flex_decoding.py)
+### FlexDecoding (research/inference/attention/flex_decoding.py)
 - PyTorch 2.5+ FlexAttention with dedicated decode backend (FlashDecoding)
 - Splits KV cache across all 192 SMs (vs 8 SMs with standard SDPA for 8 KV heads)
 - `acceleration="flex_decoding"` — auto-switches to FlexDecoding kernel for q_len=1
 - Expected: 1.5-3× decode speedup for batch=1 (SM utilization 4% → 100%)
 
-### NVFP4 Quantization (research/inference/nvfp4_quant.py)
+### NVFP4 Quantization (research/inference/quant/nvfp4_quant.py)
 - Native FP4 (E2M1) on Blackwell 5th-gen tensor cores with block scaling
 - 2× throughput vs FP8, 4× memory vs FP16. ~99% quality with calibration
 - RTX 5070 (SM120) supports `mxf8f6f4.block_scale` in MMA instructions
 - `quantize="nvfp4"` — ForgeLM V4 (1.2B): 2.34GB → ~0.66GB (3.6× compression)
 
-### ATFlash Wavelength Pruning (research/inference/atflash.py)
+### ATFlash Wavelength Pruning (research/inference/attention/atflash.py)
 - Per-RoPE-wavelength distance windows: each frequency pair prunes beyond its wavelength
 - Prunes 37-48% of QK inner-product terms, 96-98% top-1 match rate (near-lossless)
 - Input-independent (closed-form, no dynamic search), orthogonal to token-level sparsity
@@ -163,7 +163,7 @@ Five additional techniques from latest 2026 research, all opt-in via `ForgeEngin
 - Up to 4.9× on code-editing, 2.89× average (MLSys 2026 production benchmarks)
 - `use_adaptive_spec=True` — composes with existing EAGLE-3/MTP heads
 
-### POD-Attention (research/inference/pod_attention.py)
+### POD-Attention (research/inference/attention/pod_attention.py)
 - Prefill-decode overlap: runs prefill (compute-bound) and decode (BW-bound) concurrently
 - Uses CUDA streams to overlap on separate SMs (28% mean speedup for hybrid batches)
 - `use_pod_attention=True` — pairs with BatchQueue's mixed prefill+decode batches
@@ -172,7 +172,7 @@ Five additional techniques from latest 2026 research, all opt-in via `ForgeEngin
 
 Five more techniques from latest 2026 research, all opt-in via `ForgeEngine.activate()`:
 
-### CoSA Sparse Attention (research/inference/cosa.py)
+### CoSA Sparse Attention (research/inference/attention/cosa.py)
 - Proxy-kernel co-designed sparse attention for long-context decode
 - KAP scores KV blocks by key-norm × position-decay; OSK visits top-scored blocks
 - 4.93× attention speedup at 128K, 2.53× TTFT, negligible quality loss
@@ -185,19 +185,19 @@ Five more techniques from latest 2026 research, all opt-in via `ForgeEngine.acti
 - `use_suffix_spec=True` — `ComboSpeculativeDecoder` combines all three drafters
 - 1.5-2× on code/RAG workloads, zero training cost
 
-### Sequence-Aware Split (research/inference/seq_aware_split.py)
+### Sequence-Aware Split (research/inference/attention/seq_aware_split.py)
 - Splits KV cache across SMs for low-head-count decode (8 KV heads → 192 SMs)
 - Auto-computes optimal split count based on seq_len and SM count
 - Split-merge attention with online softmax (log-sum-exp trick)
 - `use_seq_split=True` — 21-24% decoder kernel efficiency improvement
 
-### CPU KV Cache Offloading (research/inference/cpu_kv_offload.py)
+### CPU KV Cache Offloading (research/inference/kv/cpu_kv_offload.py)
 - Two-tier KV cache: GPU hot window (8K tokens) + CPU cold storage (rest)
 - Extends effective KV cache to 128K+ within 12GB VRAM budget
 - Async prefetch via CUDA stream for overlap with compute
 - `kv_cache="cpu_offload"` — 32K hot window = 1.07GB GPU, 128K total = 4.3GB CPU
 
-### CompactAttention (research/inference/compact_attention.py)
+### CompactAttention (research/inference/attention/compact_attention.py)
 - Block-union KV selection for efficient chunked prefill
 - Unions selected KV blocks across Q positions and GQA groups
 - In-place sparse attention on selected blocks (no KV compaction)
@@ -207,34 +207,34 @@ Five more techniques from latest 2026 research, all opt-in via `ForgeEngine.acti
 
 Five more techniques from latest 2026 research, all opt-in via `ForgeEngine.activate()`:
 
-### Fused QK-Norm+RoPE+Cache-Write (research/inference/fused_qk_norm_rope_cache.py)
+### Fused QK-Norm+RoPE+Cache-Write (research/inference/attention/fused_qk_norm_rope_cache.py)
 - Fuses RMSNorm + RoPE + KV cache append into single kernel (vLLM #38621 pattern)
 - Eliminates 2 kernel launches per attention layer (32 fewer launches per decode step)
 - Warp-per-head design: V written first (fire-and-forget) while K norm runs
 - Optional FP8/INT4 KV quantization fused into the same kernel
 - `use_fused_qk_norm_rope_cache=True` — 5-10% decode speedup
 
-### S4R Low-Rank KV (research/inference/s4r_kv.py)
+### S4R Low-Rank KV (research/inference/kv/s4r_kv.py)
 - Selective Sampling + Subspaces + Sparse Reconstruction for KV cache
 - Builds low-rank basis from sampled prompt tokens (no external calibration)
 - Sink tokens preserved full precision, rest stored as low-rank coefficients
 - Sparse reconstruction during decode (only top-k relevant entries)
 - `kv_cache="s4r"` — up to 15× KV compression with near full-cache accuracy
 
-### HqeKV Hybrid Quant+Eviction (research/inference/hqe_kv.py)
+### HqeKV Hybrid Quant+Eviction (research/inference/kv/hqe_kv.py)
 - Combines quantization AND eviction in a single KV cache (ACL Findings 2026)
 - Three tiers: full precision (10%), INT8 (30%), INT4 (50%), evicted (10%)
 - Joint K-V importance metric: ||K|| × ||V|| × recency_decay
 - Integrated optimizer auto-selects compression action per token
 - `kv_cache="hqe_kv"` — 7.9× KV memory reduction with minimal quality loss
 
-### torch.compile Auto-Tuner (research/inference/compile_autotune.py)
+### torch.compile Auto-Tuner (research/inference/graphs/compile_autotune.py)
 - Benchmarks all torch.compile modes (default, reduce-overhead, max-autotune, etc.)
 - Picks fastest mode per model, caches results to .devin/compile_mode_cache.json
 - Heuristic fallback: get_recommended_mode() without benchmarking
 - `use_compile_autotune=True` — avoids mode selection guesswork
 
-### Block Fusion (research/inference/block_fusion.py)
+### Block Fusion (research/inference/graphs/block_fusion.py)
 - Per-block CUDA graph capture + torch.compile for full transformer block fusion
 - Each block gets its own graph (supports MoD skip — skip entire block graph)
 - CompiledBlockFusion: combines per-block graphs with torch.compile intra-block fusion
@@ -244,27 +244,27 @@ Five more techniques from latest 2026 research, all opt-in via `ForgeEngine.acti
 
 Four more techniques from latest 2026 research on prefix caching and batch scheduling:
 
-### Feather Scheduler (research/inference/feather_scheduler.py)
+### Feather Scheduler (research/inference/scheduler/feather_scheduler.py)
 - Prefix-homogeneity-aware batch scheduling (2-10× throughput for prefix-sharing)
 - Groups requests by shared prefix → smaller homogeneous batches outperform
   larger heterogeneous ones (better KV cache locality)
 - Chunked Hash Tree (CHT): O(1) prefix detection vs O(depth) radix trees
 - `BatchQueue(use_feather_scheduler=True)` — integrates with existing batching
 
-### Learned Prefix Cache (research/inference/learned_prefix_cache.py)
+### Learned Prefix Cache (research/inference/kv/learned_prefix_cache.py)
 - ML-guided prefix cache eviction (NeurIPS 2025)
 - Online logistic regression predicts continuation probability
 - Features: recency, frequency, length, is_conversation
 - 18-47% cache size reduction at equivalent hit ratios, 11% prefill throughput
 - `use_learned_prefix_cache=True` — replaces LRU dict with learned policy
 
-### Hybrid Chunked Prefill (research/inference/hybrid_prefill.py)
+### Hybrid Chunked Prefill (research/inference/prefill/hybrid_prefill.py)
 - Adaptive: chunk only when decode is active, continuous prefill otherwise
 - Eliminates throughput tax of unconditional chunking (vLLM #26625)
 - +2-5% total token throughput, 10-20% lower TTFT under low concurrency
 - `use_hybrid_prefill=True` — extends ChunkedPrefiller with decode awareness
 
-### HotPrefix (research/inference/hotprefix.py)
+### HotPrefix (research/inference/scheduler/hotprefix.py)
 - Hotness-aware GPU/CPU prefix KV promotion (SIGMOD 2026)
 - Tracks prefix access frequency × recency × length → hotness score
 - Hot prefixes → GPU (fast), cold → CPU (saves VRAM), periodic rebalancing
@@ -274,21 +274,21 @@ Four more techniques from latest 2026 research on prefix caching and batch sched
 
 Six training-side techniques from latest 2026 research, all opt-in via `sft_train.py` CLI flags:
 
-### FlashOptim 8-bit Optimizers (research/training/flash_optim.py)
+### FlashOptim 8-bit Optimizers (research/training/optim/flash_optim.py)
 - `FlashAdamW`: 8-bit optimizer states with companding quantization (sqrt transform)
 - `FlashLion`: 8-bit sign-momentum (single state, even more memory-efficient)
 - 57% memory reduction vs standard AdamW (16→7 bytes/param, 5 with gradient release)
 - Block-wise quantization isolates outliers, companding reduces small-value error
 - `--optimizer flash_adamw` or `--optimizer flash_lion`
 
-### FORGE Fused Gradient Elimination (research/training/forge_optimizer.py)
+### FORGE Fused Gradient Elimination (research/training/optim/forge_optimizer.py)
 - Folds optimizer step INTO backward pass via gradient hooks
 - Each gradient tile consumed in registers the instant it's produced
 - 53% peak memory reduction, 1.5× faster at small batch sizes
 - No gradient tensor materialized (zero gradient returned from hook)
 - `--optimizer forge` (auto-registers hooks on model parameters)
 
-### OOMB Chunk-Recurrent Training (research/training/oomb_trainer.py)
+### OOMB Chunk-Recurrent Training (research/training/runners/oomb_trainer.py)
 - O(1) activation memory regardless of sequence length
 - Processes sequences in chunks, recomputes activations on-the-fly in backward
 - Paged KV cache with gradient support (no fragmentation)
@@ -296,21 +296,21 @@ Six training-side techniques from latest 2026 research, all opt-in via `sft_trai
 - Enables 128K+ context training on 12GB GPU (10MB overhead per 10K tokens)
 - `--oomb` flag
 
-### LazyTrain Scheduler (research/training/lazy_train.py)
+### LazyTrain Scheduler (research/training/runners/lazy_train.py)
 - Mixed-integer scheduling for checkpoint selection + activation placement
 - Greedy: checkpoint layers with best memory_saving / recompute_cost ratio
 - Hybrid8BitOperator: fused 8-bit optimizer + fast gradient clipping (EMA norm)
 - 1.24× sustained TFLOPS, +1 batch size at each model scale
 - `--lazy-train` or `--checkpoint-strategy lazy`; `--hybrid-clip` for fast clipping
 
-### Streaming Parquet Prefetch Loader (research/training/streaming_loader.py)
+### Streaming Parquet Prefetch Loader (research/training/data/streaming_loader.py)
 - SlidingWindowCache: NVMe/disk cache with sliding window eviction
 - BatchPlanProvider: precomputes epoch batch ordering (enables prefetch)
 - PrefetchingLoader: wraps DataLoader with automatic prefetch triggers
 - 10× data loading speedup (50→500 samples/s), zero worker crashes
 - Integrates with existing ParquetDataset
 
-### Optimal Checkpoint Planner (research/training/optimal_checkpoint.py)
+### Optimal Checkpoint Planner (research/training/runners/optimal_checkpoint.py)
 - Sliding-window Hirschberg knapsack for optimal checkpoint selection
 - O(W) memory (vs O(nW) for dp_knapsack) — handles n=2000 (vs n=100)
 - 25-28% runtime speedup over PyTorch's default solver
@@ -320,7 +320,7 @@ Six training-side techniques from latest 2026 research, all opt-in via `sft_trai
 
 Five more techniques from latest 2026 research:
 
-### Improved Loss Functions (research/training/improved_losses.py)
+### Improved Loss Functions (research/training/losses/improved_losses.py)
 - `FocalCrossEntropy`: down-weights easy tokens, focuses on hard ones (γ=2.0)
 - `LabelSmoothingCE`: prevents μ-singularity collapse (ε=0.1), better calibration
 - `LovaszSoftmax`: directly optimizes Jaccard/exact-match (+36% EM on math/QA)
@@ -340,13 +340,13 @@ Five more techniques from latest 2026 research:
 - Outperforms AWQ, GPTQ, QuIP# at orders-of-magnitude less quantization time
 - `AAACQuantizer` — 3-30 min calibration on single GPU
 
-### MoSA Mixture of Sparse Attention (research/inference/mosa.py)
+### MoSA Mixture of Sparse Attention (research/inference/kv/mosa.py)
 - Expert-choice routing: each head selects k tokens to attend to
 - Content-based, head-specific, perfectly balanced sparse attention
 - 27% better perplexity at same compute, smaller KV cache
 - `use_mosa=True` — activates for sequences > 512 tokens
 
-### TriRoute Unified Routing (research/inference/triroute.py)
+### TriRoute Unified Routing (research/inference/scheduler/triroute.py)
 - Single controller emits joint policy: attention mode (skip/local/full) + KV bits (4/8/16)
 - Gumbel-Softmax + STE for categorical, load-balanced top-k for experts
 - Better quality-compute tradeoff than independent MoD + KV quantization
@@ -356,20 +356,20 @@ Five more techniques from latest 2026 research:
 
 Seven more techniques from latest 2026 research:
 
-### Breakable CUDA Graph (research/inference/breakable_cuda_graph.py)
+### Breakable CUDA Graph (research/inference/graphs/breakable_cuda_graph.py)
 - SGLang BCG: segmented graph capture for dynamic shapes
 - 1.70× faster prefill, 1.93× with full capture, 3.8-5.2× faster graph building
 - Captures decode graphs for batch sizes [1, 2, 4, 8], pads at runtime
 - `use_breakable_cuda_graph=True`
 
-### CoRun Deterministic Inference (research/inference/corun.py)
+### CoRun Deterministic Inference (research/inference/scheduler/corun.py)
 - Padding-based determinism: isolate prefill + fixed-shape batched decode
 - Position-invariant kernels → pad to fixed shape → one CUDA graph
 - 15-324% throughput over batch-invariant, -51.8% TTFT, -48.6% TPOT
 - Per-request RNG state (reproducible sampling for RL/eval)
 - `use_corun=True`
 
-### Foundry Template-Based Cold Start (research/inference/foundry.py)
+### Foundry Template-Based Cold Start (research/inference/graphs/foundry.py)
 - Persists CUDA graph context (topology + kernel binaries + memory layout)
 - Online materialization <1s vs 10-30s for fresh capture → 10× faster startup
 - `use_foundry=True` — auto-captures or loads templates from `.devin/graph_templates/`
@@ -402,53 +402,53 @@ Seven more techniques from latest 2026 research:
 
 Eight more techniques from latest 2026 research:
 
-### FlashAttention-4 Blackwell Backend (research/inference/fa4_attention.py)
+### FlashAttention-4 Blackwell Backend (research/inference/attention/fa4_attention.py)
 - FA4: algorithm + kernel pipelining co-design for asymmetric Blackwell scaling
 - 1.3× faster prefill, 1.6-1.9× faster decode (with FP8 KV cache)
 - Software-emulated exponential, TMEM, 2-CTA MMA, ping-pong tiles
 - Auto-detects sm_120 (RTX 5070), falls back to FA2/SDPA
 - `use_fa4=True`
 
-### SF-NorMuon (research/training/sf_spectral_optimizers.py)
+### SF-NorMuon (research/training/optim/sf_spectral_optimizers.py)
 - Schedule-free spectral optimizer with per-neuron normalization
 - Matches tuned AdamW across 1-8× Chinchilla horizons (no LR schedule)
 - Weight decay at fast iterate Z, iterate averaging for anytime checkpoints
 - `--optimizer sf_normuon`
 
-### AMUSE (research/training/sf_spectral_optimizers.py)
+### AMUSE (research/training/optim/sf_spectral_optimizers.py)
 - Anytime Muon + Stable gradient Evaluation
 - Time-varying interpolation: fast Muon → stable averaged (suppresses oscillations)
 - No LR schedule, anytime training, improves Pareto over Muon + SF-AdamW
 - `--optimizer amuse`
 
-### MONA (research/training/sf_spectral_optimizers.py)
+### MONA (research/training/optim/sf_spectral_optimizers.py)
 - Muon + Nesterov Acceleration (EMA of gradient differences)
 - Escapes sharp minima while preserving spectral-norm regularization
 - SOTA on MoE pretraining 1B-68B params, 1T tokens
 - `--optimizer mona`
 
-### KARA KV Compression (research/inference/kara_kv.py)
+### KARA KV Compression (research/inference/kv/kara_kv.py)
 - Sliding-window compression: only compress recent context (bounded work/step)
 - Bidirectional attention scoring for token importance
 - Token2Chunk: expand selected tokens into flexible-size chunks
 - 8× KV reduction at 32K context
 - `use_kara_kv=True`
 
-### MomentKV (research/inference/moment_kv.py)
+### MomentKV (research/inference/kv/moment_kv.py)
 - Moment statistics over evicted tokens (count, key/value mean, VK covariance)
 - Closes the directional gap: evicted tokens near-orthogonal to retained → big error
 - Geometric regularity: evict tokens already aligned with moment summary
 - Closed-form first-order approximation of evicted attention output
 - `use_moment_kv=True`
 
-### KVpop (research/inference/kvpop.py)
+### KVpop (research/inference/kv/kvpop.py)
 - Predictive online pruning with learned scoring module
 - Supervision: future attention mass (transposed-attention pass during training)
 - Delays eviction DECISION (not just eviction) until token leaves protected window
 - Sink + protected window + long-range top-k cache
 - `use_kvpop=True`
 
-### CONF-KV (research/inference/conf_kv.py)
+### CONF-KV (research/inference/kv/conf_kv.py)
 - Confidence-aware dynamic budget from next-token entropy
 - High confidence → prune aggressively; low confidence → retain more
 - Mixed FP16/INT8 storage (important → FP16, rest → INT8)
@@ -485,26 +485,26 @@ Eight more techniques from latest 2026 research:
 - 11% fewer tokens than BPE/WordPiece/UnigramLM at vocab ≥ 40K
 - +2.6-7.6% CORE score on 1.5B models
 
-### Jet-Long Dynamic Bifocal RoPE (research/inference/jet_long.py)
+### Jet-Long Dynamic Bifocal RoPE (research/inference/scheduler/jet_long.py)
 - Local RoPE-faithful window + long-range dynamically rescaled window
 - Parameter-free analytic schedule: recovers base at short, extrapolates at long
 - +4.79 pp RULER at 128K (1.7B), 1.39× FA2 throughput, ≤4% overhead
 - Zero-shot: no retraining needed
 - `use_jet_long=True`
 
-### RoPE-ID In-Distribution Rotation (research/inference/rope_id.py)
+### RoPE-ID In-Distribution Rotation (research/inference/position/rope_id.py)
 - High-frequency rotation on a SUBSET of channels (rest unchanged)
 - Maintains key/query cluster separation across lengths (geometric analysis)
 - Enables length generalization without retraining
 - `use_rope_id=True`
 
-### LeRoPE Learnable RoPE Frequencies (research/inference/lerope.py)
+### LeRoPE Learnable RoPE Frequencies (research/inference/position/lerope.py)
 - One learnable scalar per frequency band (32 params total)
 - Initialized to 1.0 = standard RoPE (lossless checkpoint loading)
 - 3.4% less compute to match RoPE performance at 2.5B scale
 - `use_lerope=True` (auto-replaces RoPE in all attention layers)
 
-### LaMPE Length-Aware Multi-Grained PE (research/inference/lampe.py)
+### LaMPE Length-Aware Multi-Grained PE (research/inference/scheduler/lampe.py)
 - Dynamic mapping via scaled sigmoid (adaptive positional capacity)
 - Multi-grained: fine resolution for local, coarse for long-range
 - Training-free: applies to any RoPE-based LLM
@@ -514,64 +514,64 @@ Eight more techniques from latest 2026 research:
 
 Nine more techniques from latest 2026 research:
 
-### FastServe Skip-Join MLFQ (research/inference/fastserve.py)
+### FastServe Skip-Join MLFQ (research/inference/scheduler/fastserve.py)
 - Iteration-level preemptive scheduling with skip-join Multi-Level Feedback Queue
 - Token-granularity preemption (not request-granularity)
 - Proactive GPU↔host memory offloading for preempted requests
 - 6.1× throughput improvement over vLLM
 - `use_fastserve=True`
 
-### Libra Micro-Request Partitioning (research/inference/libra.py)
+### Libra Micro-Request Partitioning (research/inference/scheduler/libra.py)
 - Flexible partitioning: split requests at ANY token boundary into cooperating segments
 - Two-level scheduling: global (split points) + local (SLO-aware batches)
 - Chunked KV cache transfers for cross-instance execution
 - 1.91× goodput, 1.15-3.07× serving capacity
 - `use_libra=True`
 
-### FASER Fine-Grained SD Phase Management (research/inference/faser.py)
+### FASER Fine-Grained SD Phase Management (research/inference/attention/faser.py)
 - Dynamic speculative length per-request (based on acceptance rate)
 - Token-wise early exit: stop verification at first rejection
 - Frontier execution: overlap verification chunks with next draft
 - 53% higher throughput, 1.92× lower latency
 - `use_faser=True`
 
-### Kairos SLO-Aware Scheduling (research/inference/kairos.py)
+### Kairos SLO-Aware Scheduling (research/inference/scheduler/kairos.py)
 - Prefill: urgency-based priority (closest to missing TTFT deadline first)
 - Decode: slack-guided adaptive batching (pack more when under TPOT SLO)
 - +23.9% TTFT SLO, +27.1% TPOT SLO, +33.8% e2e SLO, +19.3% decode throughput
 - `use_kairos=True`
 
-### Curriculum Learning (research/training/curriculum_augment.py)
+### Curriculum Learning (research/training/data/curriculum_augment.py)
 - Orders training data easy→hard using compression ratio, MTLD, Flesch readability
 - Strategies: vanilla, pacing, interleaved, warmup
 - 18-45% fewer steps to reach baseline, 3.5% sustained improvement as warmup
 - `--curriculum pacing|vanilla|interleaved|warmup`
 
-### Training-Time Data Augmentation (research/training/curriculum_augment.py)
+### Training-Time Data Augmentation (research/training/data/curriculum_augment.py)
 - Three orthogonal categories: token-level noise, sequence permutations (FIM), target offset
 - Regularizes against overfitting in multi-epoch data-constrained training
 - `--augment`
 
-### SYNPRO Synthetic Data Generation (research/training/curriculum_augment.py)
+### SYNPRO Synthetic Data Generation (research/training/data/curriculum_augment.py)
 - Rephrasing + reformat operations (RL-optimized generators)
 - 3.7-5.2× effective tokens from same organic data
 - Surpasses non-data-bound oracle at 1.1B scale
 - `--synpro`
 
-### SeeDNorm Self-Rescaled Dynamic Normalization (research/training/advanced_norm.py)
+### SeeDNorm Self-Rescaled Dynamic Normalization (research/training/optim/advanced_norm.py)
 - Dynamically adjusts scaling coefficient based on input norm
 - Preserves input norm information (RMSNorm discards it)
 - Minimal params (1 per layer), negligible efficiency impact
 - Consistently superior to RMSNorm and LayerNorm
 - `--norm-type seednorm`
 
-### Dynamic Tanh (DyT) (research/training/advanced_norm.py)
+### Dynamic Tanh (DyT) (research/training/optim/advanced_norm.py)
 - Bounded normalizer: γ * tanh(α * x) + β (no normalization needed)
 - Compatible with Muon optimizers (no normalization-optimizer coupling penalty)
 - Simpler than RMSNorm, competitive performance
 - `--norm-type dyt`
 
-### Keel Post-LN Highway Connection (research/training/advanced_norm.py)
+### Keel Post-LN Highway Connection (research/training/optim/advanced_norm.py)
 - Post-LN with Highway-style residual (replaces ResNet residual pathway)
 - Prevents gradient vanishing in deep networks (1000+ layers)
 - Better perplexity and depth-scaling than Pre-LN
@@ -581,52 +581,52 @@ Nine more techniques from latest 2026 research:
 
 Eight more techniques from latest 2026 research:
 
-### Unified Radix Cache (research/inference/unified_radix.py)
+### Unified Radix Cache (research/inference/scheduler/unified_radix.py)
 - One tree for hybrid models: full-attn KV + sliding window + recurrent states
 - Component-based: each component controls its own matching/splitting/eviction
 - HiCache: 3-level hierarchy (GPU L1, Host L2, External L3)
 - Eliminates code duplication across cache variants
 - `use_unified_radix=True`
 
-### Elbow MoE Routing (research/inference/moe_optim.py)
+### Elbow MoE Routing (research/inference/scheduler/moe_optim.py)
 - Training-free inference-time dynamic top-k
 - Identifies elbow point in sorted router probabilities (max curvature)
 - Per-token expert count: confident tokens get fewer, ambiguous get more
 - 5.3% latency reduction, maintains accuracy + load balance
 - `use_elbow_moe=True`
 
-### Alloc-MoE Budget-Aware Activation (research/inference/moe_optim.py)
+### Alloc-MoE Budget-Aware Activation (research/inference/scheduler/moe_optim.py)
 - Alloc-L: sensitivity profiling + DP for per-layer expert allocation
 - Alloc-T: token-level dynamic redistribution by routing entropy
 - 1.15× prefill, 1.34× decode at half budget
 - `use_alloc_moe=True`
 
-### LDA Distribution-Consistent MoE (research/inference/moe_optim.py)
+### LDA Distribution-Consistent MoE (research/inference/scheduler/moe_optim.py)
 - Corrects RMS scale/variance mismatch when reducing activated experts
 - Layer-wise calibration statistics (default vs reduced routing)
 - Recovers performance lost to distributional shift
 - `use_lda_moe=True`
 
-### SPPO Sequence-Level PPO (research/training/advanced_rl.py)
+### SPPO Sequence-Level PPO (research/training/losses/advanced_rl.py)
 - Reformulates reasoning as Sequence-Level Contextual Bandit
 - Decoupled scalar value function (no token-level critic, no multi-sampling)
 - Low-variance advantage for long-horizon CoT
 - Matches GRPO quality with PPO sample efficiency
 - `rl_algorithm="sppo"`
 
-### PS-PPO Prefix-Sampling PPO (research/training/advanced_rl.py)
+### PS-PPO Prefix-Sampling PPO (research/training/losses/advanced_rl.py)
 - Samples cutoff timestep per trajectory, backprops only through prefix
 - Importance-weighting correction → unbiased truncated gradient
 - Large compute and memory savings for long reasoning traces
 - `rl_algorithm="psppo"`
 
-### EVPO Explained Variance PO (research/training/advanced_rl.py)
+### EVPO Explained Variance PO (research/training/losses/advanced_rl.py)
 - Monitors batch-level explained variance (EV) to adaptively switch
 - Positive EV → critic-based (PPO); zero/negative EV → batch-mean (GRPO)
 - Provably no greater variance than the better of the two
 - `rl_algorithm="evpo"`
 
-### GRPO-OR Output Reset Trust Region (research/training/advanced_rl.py)
+### GRPO-OR Output Reset Trust Region (research/training/losses/advanced_rl.py)
 - Replaces clipped surrogate with smooth one-sided saturation (OR)
 - Advantage sign determines direction; zero residual after favorable margin
 - Smaller observed spread than GRPO-clip
@@ -654,24 +654,24 @@ Seven more techniques from latest 2026 research:
 - Near-FP16 accuracy, 1.24× speedup over W16A16
 - `use_mosaic_quant=True`
 
-### AoH Autonomy-of-Heads (research/inference/aoh_retmask.py)
+### AoH Autonomy-of-Heads (research/inference/kv/aoh_retmask.py)
 - Data-free head classification from frozen QK geometry (effective rank of M_h)
 - Low rank → retrieval head (full attention), high rank → streaming (sink+window)
 - 50% sparsity: 96.5% of full attention, 66% decode latency reduction
 - `use_aoh=True`
 
-### RetMask Retrieval Head Optimization (research/inference/aoh_retmask.py)
+### RetMask Retrieval Head Optimization (research/inference/kv/aoh_retmask.py)
 - Contrastive masking: train by contrasting normal vs retrieval-masked outputs
 - +2.28 HELMET at 128K, +70% citation generation, +32% passage re-ranking
 - Gains correlate with retrieval score sparsity
 
-### Offline Top-K Logits + Chunked KL (research/training/efficient_distillation.py)
+### Offline Top-K Logits + Chunked KL (research/training/runners/efficient_distillation.py)
 - Cache teacher's top-K logits once → train against cache (no teacher in loop)
 - 29% faster per iteration, 41% higher throughput
 - Fused chunked KL: peak memory linear in seq length (4× context on same GPU)
 - `--distill --teacher-checkpoint <path>`
 
-### Sequence Truncation + Prefix OPD (research/training/efficient_distillation.py)
+### Sequence Truncation + Prefix OPD (research/training/runners/efficient_distillation.py)
 - Train on first 50% of tokens → 91% of full-sequence performance
 - On-policy prefix distillation: distill only reasoning prefixes
 - 2-40× FLOP reduction, early-terminate sampling

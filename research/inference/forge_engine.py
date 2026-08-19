@@ -381,7 +381,7 @@ class ForgeEngine:
         elif acceleration == "flex_decoding" and self.device.type == "cuda":
             # FlexDecoding: PyTorch's fused FlashDecoding backend for decode.
             # Splits KV cache across SMs (1.5-3x for batch=1, low head count).
-            from research.inference.flex_decoding import FlexDecodingWrapper
+            from research.inference.attention.flex_decoding import FlexDecodingWrapper
             self._flex_decoding = FlexDecodingWrapper()
             if self._flex_decoding.apply(self.model):
                 self.acceleration = "flex_decoding"
@@ -418,7 +418,7 @@ class ForgeEngine:
         # 10b. Chunked prefill
         self._chunked_prefill = None
         if use_chunked_prefill:
-            from research.inference.chunked_prefill import ChunkedPrefiller
+            from research.inference.prefill.chunked_prefill import ChunkedPrefiller
             self._chunked_prefill = ChunkedPrefiller(
                 self.model, chunk_size=512, device=str(self.device))
             print("  [ForgeEngine] Chunked prefill: active (chunk_size=512)")
@@ -426,7 +426,7 @@ class ForgeEngine:
         # 10c. ATFlash wavelength pruning (37-48% attention compute cut)
         self._wavelength_pruner = None
         if use_wavelength_pruning:
-            from research.inference.atflash import WavelengthPrunedAttention
+            from research.inference.attention.atflash import WavelengthPrunedAttention
             rope_base = getattr(getattr(self.model, 'config', None), 'rope_base', 1_000_000.0)
             self._wavelength_pruner = WavelengthPrunedAttention(
                 rope_base=rope_base, prune_factor=1.0)
@@ -436,7 +436,7 @@ class ForgeEngine:
         # 10d. POD-Attention prefill-decode overlap (28% mean for hybrid batches)
         self._pod_attention = None
         if use_pod_attention and self.device.type == "cuda":
-            from research.inference.pod_attention import PODAttentionScheduler
+            from research.inference.attention.pod_attention import PODAttentionScheduler
             self._pod_attention = PODAttentionScheduler(device=str(self.device))
             print("  [ForgeEngine] POD-Attention: active (prefill-decode overlap)")
 
@@ -453,21 +453,21 @@ class ForgeEngine:
         # 10f. CoSA sparse attention for long-context decode (4.93x at 128K)
         self._cosa = None
         if use_cosa:
-            from research.inference.cosa import CoSAWrapper
+            from research.inference.attention.cosa import CoSAWrapper
             self._cosa = CoSAWrapper(block_size=16, budget_ratio=0.5, min_seq_len=2048)
             self._cosa.apply(self.model)
 
         # 10g. Sequence-aware split for low-head-count decode (21-24% SM util)
         self._seq_split = None
         if use_seq_split and self.device.type == "cuda":
-            from research.inference.seq_aware_split import SequenceAwareSplitWrapper
+            from research.inference.attention.seq_aware_split import SequenceAwareSplitWrapper
             self._seq_split = SequenceAwareSplitWrapper(min_seq_len=512)
             self._seq_split.apply(self.model, self.device)
 
         # 10h. CompactAttention for chunked prefill (2.72x at 128K)
         self._compact_attn = None
         if use_compact_attn:
-            from research.inference.compact_attention import CompactAttentionWrapper
+            from research.inference.attention.compact_attention import CompactAttentionWrapper
             self._compact_attn = CompactAttentionWrapper(
                 block_size=16, budget_ratio=0.5, min_kv_len=2048)
             self._compact_attn.apply(self.model)
@@ -482,14 +482,14 @@ class ForgeEngine:
         # 10j. Fused QK-Norm + RoPE + KV cache write (5-10% decode speedup)
         self._fused_qk_cache = None
         if use_fused_qk_norm_rope_cache:
-            from research.inference.fused_qk_norm_rope_cache import FusedQKNormRopeCacheWrapper
+            from research.inference.attention.fused_qk_norm_rope_cache import FusedQKNormRopeCacheWrapper
             self._fused_qk_cache = FusedQKNormRopeCacheWrapper(kv_quant_bits=None)
             self._fused_qk_cache.apply(self.model)
 
         # 10k. Block fusion: per-block CUDA graph + torch.compile (1.3-1.5x)
         self._block_fusion = None
         if use_block_fusion and self.device.type == "cuda":
-            from research.inference.block_fusion import CompiledBlockFusion
+            from research.inference.graphs.block_fusion import CompiledBlockFusion
             try:
                 self._block_fusion = CompiledBlockFusion(
                     self.model, device=str(self.device))
@@ -501,7 +501,7 @@ class ForgeEngine:
 
         # 10l. torch.compile auto-tuner
         if use_compile_autotune and self.device.type == "cuda":
-            from research.inference.compile_autotune import auto_tune_compile
+            from research.inference.graphs.compile_autotune import auto_tune_compile
             sample_input = torch.zeros(1, 1, dtype=torch.long, device=self.device)
             model_id = getattr(getattr(self.model, 'config', None), 'name', 'default')
             best_mode, self.model = auto_tune_compile(
@@ -510,7 +510,7 @@ class ForgeEngine:
 
         # 10m. Hybrid chunked prefill (adaptive: chunk only when decode active)
         if use_hybrid_prefill:
-            from research.inference.hybrid_prefill import HybridChunkedPrefiller
+            from research.inference.prefill.hybrid_prefill import HybridChunkedPrefiller
             self._chunked_prefill = HybridChunkedPrefiller(
                 self.model, chunk_size=512, device=str(self.device))
             print("  [ForgeEngine] Hybrid chunked prefill: active (adaptive chunking)")
@@ -518,7 +518,7 @@ class ForgeEngine:
         # 10n. Learned prefix cache (ML-guided eviction)
         self._learned_prefix_cache = None
         if use_learned_prefix_cache:
-            from research.inference.learned_prefix_cache import LearnedPrefixCache
+            from research.inference.kv.learned_prefix_cache import LearnedPrefixCache
             self._learned_prefix_cache = LearnedPrefixCache(max_entries=256)
             self._prefix_cache = self._learned_prefix_cache  # replace LRU dict
             print("  [ForgeEngine] Learned prefix cache: active (ML eviction, 18-47% size cut)")
@@ -526,28 +526,28 @@ class ForgeEngine:
         # 10o. HotPrefix hotness-aware GPU/CPU prefix promotion
         self._hotprefix = None
         if use_hotprefix:
-            from research.inference.hotprefix import HotPrefixManager
+            from research.inference.scheduler.hotprefix import HotPrefixManager
             self._hotprefix = HotPrefixManager(gpu_capacity=8)
             print("  [ForgeEngine] HotPrefix: active (hotness-aware GPU/CPU promotion)")
 
         # 10p. MoSA: Mixture of Sparse Attention (27% better perplexity, smaller KV)
         self._mosa = None
         if use_mosa:
-            from research.inference.mosa import MoSAWrapper
+            from research.inference.kv.mosa import MoSAWrapper
             self._mosa = MoSAWrapper(k_ratio=0.5, min_seq_len=512)
             self._mosa.apply(self.model)
 
         # 10q. TriRoute: unified attention mode + KV bits routing
         self._triroute = None
         if use_triroute:
-            from research.inference.triroute import TriRouteWrapper
+            from research.inference.scheduler.triroute import TriRouteWrapper
             self._triroute = TriRouteWrapper(local_window=256, min_seq_len=512)
             self._triroute.apply(self.model)
 
         # 10r. Breakable CUDA Graph (BCG): segmented graph capture (1.7-1.93x)
         self._bcg = None
         if use_breakable_cuda_graph and torch.cuda.is_available():
-            from research.inference.breakable_cuda_graph import BreakableCudaGraph
+            from research.inference.graphs.breakable_cuda_graph import BreakableCudaGraph
             self._bcg = BreakableCudaGraph(self.model, device=str(self.device))
             self._bcg.capture_decode(batch_sizes=[1, 2, 4, 8])
             print(f"  [ForgeEngine] Breakable CUDA Graph: {self._bcg.stats()}")
@@ -555,7 +555,7 @@ class ForgeEngine:
         # 10s. CoRun: deterministic inference via padding + fixed-shape graph
         self._corun = None
         if use_corun and torch.cuda.is_available():
-            from research.inference.corun import CoRunScheduler
+            from research.inference.scheduler.corun import CoRunScheduler
             self._corun = CoRunScheduler(self.model, max_concurrency=8,
                                           device=str(self.device), dtype=self.dtype)
             self._corun.capture_decode_graph()
@@ -564,7 +564,7 @@ class ForgeEngine:
         # 10t. Foundry: template-based CUDA graph cold start (10x faster startup)
         self._foundry = None
         if use_foundry and torch.cuda.is_available():
-            from research.inference.foundry import FoundryRunner
+            from research.inference.graphs.foundry import FoundryRunner
             self._foundry = FoundryRunner(self.model, device=str(self.device))
             # Try to materialize from saved templates; if none, capture new ones
             templates = self._foundry.list_templates()
@@ -580,14 +580,14 @@ class ForgeEngine:
         # 10u. FA4: FlashAttention-4 for Blackwell (1.3x prefill, 1.6-1.9x decode)
         self._fa4 = None
         if use_fa4 and torch.cuda.is_available():
-            from research.inference.fa4_attention import FA4Attention
+            from research.inference.attention.fa4_attention import FA4Attention
             self._fa4 = FA4Attention(use_fp8_kv=False)
             print(f"  [ForgeEngine] FA4: {self._fa4.stats()}")
 
         # 10v. KARA: sliding-window KV compression with Token2Chunk
         self._kara_kv = None
         if use_kara_kv:
-            from research.inference.kara_kv import KARAKVCache
+            from research.inference.kv.kara_kv import KARAKVCache
             n_kv = getattr(self.config, 'n_kv_heads', 8)
             head_dim = getattr(self.config, 'head_dim', 64)
             self._kara_kv = KARAKVCache(n_kv, head_dim, target_budget=2048)
@@ -596,7 +596,7 @@ class ForgeEngine:
         # 10w. MomentKV: moment-statistics KV eviction (directional gap fix)
         self._moment_kv = None
         if use_moment_kv:
-            from research.inference.moment_kv import MomentKVCache
+            from research.inference.kv.moment_kv import MomentKVCache
             n_kv = getattr(self.config, 'n_kv_heads', 8)
             head_dim = getattr(self.config, 'head_dim', 64)
             self._moment_kv = MomentKVCache(n_kv, head_dim, max_budget=2048)
@@ -605,7 +605,7 @@ class ForgeEngine:
         # 10x. KVpop: predictive online pruning with learned scoring
         self._kvpop = None
         if use_kvpop:
-            from research.inference.kvpop import KVpopCache
+            from research.inference.kv.kvpop import KVpopCache
             n_kv = getattr(self.config, 'n_kv_heads', 8)
             head_dim = getattr(self.config, 'head_dim', 64)
             self._kvpop = KVpopCache(n_kv, head_dim, long_range_budget=1024)
@@ -614,7 +614,7 @@ class ForgeEngine:
         # 10y. CONF-KV: confidence-aware KV eviction + mixed-precision storage
         self._conf_kv = None
         if use_conf_kv:
-            from research.inference.conf_kv import ConfKVCache
+            from research.inference.kv.conf_kv import ConfKVCache
             n_kv = getattr(self.config, 'n_kv_heads', 8)
             head_dim = getattr(self.config, 'head_dim', 64)
             self._conf_kv = ConfKVCache(n_kv, head_dim, min_budget=256, max_budget=4096)
@@ -623,7 +623,7 @@ class ForgeEngine:
         # 10z. Jet-Long: dynamic bifocal RoPE (zero-shot 128K context)
         self._jet_long = None
         if use_jet_long:
-            from research.inference.jet_long import JetLongAttention
+            from research.inference.scheduler.jet_long import JetLongAttention
             n_heads = getattr(self.config, 'n_heads', 32)
             n_kv = getattr(self.config, 'n_kv_heads', 8)
             head_dim = getattr(self.config, 'head_dim', 64)
@@ -635,7 +635,7 @@ class ForgeEngine:
         # 10aa. RoPE-ID: in-distribution high-freq rotation (length generalization)
         self._rope_id = None
         if use_rope_id:
-            from research.inference.rope_id import RoPEID
+            from research.inference.position.rope_id import RoPEID
             head_dim = getattr(self.config, 'head_dim', 64)
             self._rope_id = RoPEID(head_dim, rotation_fraction=0.25)
             print(f"  [ForgeEngine] RoPE-ID: {self._rope_id.stats()}")
@@ -643,14 +643,14 @@ class ForgeEngine:
         # 10ab. LeRoPE: learnable RoPE frequencies (3.4% less compute)
         self._lerope = None
         if use_lerope:
-            from research.inference.lerope import integrate_lerope_into_model
+            from research.inference.position.lerope import integrate_lerope_into_model
             n_replaced = integrate_lerope_into_model(self.model)
             print(f"  [ForgeEngine] LeRoPE: replaced RoPE in {n_replaced} layers")
 
         # 10ac. LaMPE: length-aware multi-grained positional encoding
         self._lampe = None
         if use_lampe:
-            from research.inference.lampe import LaMPE
+            from research.inference.scheduler.lampe import LaMPE
             head_dim = getattr(self.config, 'head_dim', 64)
             self._lampe = LaMPE(head_dim, train_length=32768)
             print(f"  [ForgeEngine] LaMPE: {self._lampe.stats()}")
@@ -675,21 +675,21 @@ class ForgeEngine:
         # 10af. FastServe: skip-join MLFQ preemptive scheduler (6.1x throughput)
         self._fastserve = None
         if use_fastserve:
-            from research.inference.fastserve import FastServeScheduler
+            from research.inference.scheduler.fastserve import FastServeScheduler
             self._fastserve = FastServeScheduler(max_batch_size=8)
             print("  [ForgeEngine] FastServe: skip-join MLFQ + token-level preemption")
 
         # 10ag. Libra: micro-request flexible partitioning (1.91x goodput)
         self._libra = None
         if use_libra:
-            from research.inference.libra import LibraScheduler
+            from research.inference.scheduler.libra import LibraScheduler
             self._libra = LibraScheduler(max_batch_size=8, chunk_size=512)
             print("  [ForgeEngine] Libra: micro-request partitioning + SLO-aware batching")
 
         # 10ah. FASER: fine-grained SD phase management (53% throughput, 1.92x latency)
         self._faser = None
         if use_faser:
-            from research.inference.faser import FASERController, FASEREarlyExit, FASERFrontier
+            from research.inference.attention.faser import FASERController, FASEREarlyExit, FASERFrontier
             self._faser = FASERController()
             self._faser_exit = FASEREarlyExit()
             self._faser_frontier = FASERFrontier()
@@ -698,28 +698,28 @@ class ForgeEngine:
         # 10ai. Kairos: SLO-aware prefill+decode scheduling (33.8% SLO attainment)
         self._kairos = None
         if use_kairos:
-            from research.inference.kairos import KairosScheduler
+            from research.inference.scheduler.kairos import KairosScheduler
             self._kairos = KairosScheduler(max_batch_size=8)
             print("  [ForgeEngine] Kairos: urgency-based prefill + slack-guided decode")
 
         # 10aj. Unified Radix Cache: hybrid prefix caching (HiCache L1/L2/L3)
         self._unified_radix = None
         if use_unified_radix:
-            from research.inference.unified_radix import UnifiedRadixCache
+            from research.inference.scheduler.unified_radix import UnifiedRadixCache
             self._unified_radix = UnifiedRadixCache(max_gpu_tokens=32768)
             print("  [ForgeEngine] Unified Radix Cache: hybrid prefix caching + HiCache")
 
         # 10ak. Elbow MoE routing: training-free dynamic top-k (5.3% latency cut)
         self._elbow_moe = None
         if use_elbow_moe:
-            from research.inference.moe_optim import ElbowRouter
+            from research.inference.scheduler.moe_optim import ElbowRouter
             self._elbow_moe = ElbowRouter(min_experts=1, max_experts=4)
             print("  [ForgeEngine] Elbow MoE: training-free dynamic top-k routing")
 
         # 10al. Alloc-MoE: budget-aware expert activation (1.34x decode)
         self._alloc_moe = None
         if use_alloc_moe:
-            from research.inference.moe_optim import AllocMoE
+            from research.inference.scheduler.moe_optim import AllocMoE
             n_layers = getattr(self.config, 'n_layers', 16)
             self._alloc_moe = AllocMoE(n_layers, n_experts=8, total_budget=0.5)
             print(f"  [ForgeEngine] Alloc-MoE: {self._alloc_moe.stats()}")
@@ -727,7 +727,7 @@ class ForgeEngine:
         # 10am. LDA MoE: distribution-consistent inference (reduced routing correction)
         self._lda_moe = None
         if use_lda_moe:
-            from research.inference.moe_optim import LDACalibrator
+            from research.inference.scheduler.moe_optim import LDACalibrator
             n_layers = getattr(self.config, 'n_layers', 16)
             self._lda_moe = LDACalibrator(n_layers)
             print("  [ForgeEngine] LDA MoE: distribution-consistent reduced routing")
@@ -756,7 +756,7 @@ class ForgeEngine:
         # 10aq. AoH: Autonomy-of-Heads data-free sparse attention (66% decode cut)
         self._aoh = None
         if use_aoh:
-            from research.inference.aoh_retmask import AutonomyOfHeads
+            from research.inference.kv.aoh_retmask import AutonomyOfHeads
             n_heads = getattr(self.config, 'n_heads', 32)
             head_dim = getattr(self.config, 'head_dim', 64)
             d_model = getattr(self.config, 'd_model', 2048)
@@ -765,7 +765,7 @@ class ForgeEngine:
 
         # 10ar. FlexDecoding: PyTorch fused FlashDecoding backend (1.5-3x batch=1)
         if use_flex_decoding and self.device.type == "cuda":
-            from research.inference.flex_decoding import FlexDecodingAttention
+            from research.inference.attention.flex_decoding import FlexDecodingAttention
             print("  [ForgeEngine] FlexDecoding: fused FlashDecoding (SM-split decode)")
 
         # 11. L1 Speculative Attention (lossless, 57% attn compute cut)
@@ -930,7 +930,7 @@ class ForgeEngine:
         elif mode == "w8a8":
             # W8A8: weight + activation INT8 quantization with tensor-core GEMM.
             # 2-3x decode speedup at batch=1 via torch._int_mm.
-            from research.inference.w8a8_quant import quantize_model_w8a8
+            from research.inference.quant.w8a8_quant import quantize_model_w8a8
             w8a8_mode = getattr(self.model, 'config', None)
             w8a8_mode = getattr(w8a8_mode, 'w8a8_mode', 'int8') if w8a8_mode else 'int8'
             quantize_model_w8a8(self.model, mode=w8a8_mode)
@@ -938,7 +938,7 @@ class ForgeEngine:
         elif mode == "nvfp4":
             # NVFP4: native FP4 on Blackwell 5th-gen tensor cores.
             # 2x throughput vs FP8, 4x memory vs FP16. ~99% quality.
-            from research.inference.nvfp4_quant import quantize_model_nvfp4
+            from research.inference.quant.nvfp4_quant import quantize_model_nvfp4
             quantize_model_nvfp4(self.model)
             print(f"  [ForgeEngine] NVFP4 quantization: active (Blackwell native FP4)")
 

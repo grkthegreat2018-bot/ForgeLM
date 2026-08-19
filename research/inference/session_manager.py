@@ -377,7 +377,7 @@ class BatchQueue:
         # Feather prefix-homogeneity scheduler (2-10x for prefix-sharing workloads)
         self._feather = None
         if use_feather_scheduler:
-            from research.inference.feather_scheduler import FeatherScheduler
+            from research.inference.scheduler.feather_scheduler import FeatherScheduler
             self._feather = FeatherScheduler(
                 max_batch_size=max_batch_size,
                 homogeneity_threshold=0.5)
@@ -582,7 +582,7 @@ class BatchQueue:
             if (hasattr(engine, '_chunked_prefill') and
                     engine._chunked_prefill is not None and
                     input_ids.shape[1] > 1024):
-                from research.inference.chunked_prefill import should_chunk
+                from research.inference.prefill.chunked_prefill import should_chunk
                 if should_chunk(input_ids.shape[1]):
                     # For chunked prefill, we handle this request separately
                     # (not batched) — long prompts don't batch well anyway.

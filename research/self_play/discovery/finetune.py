@@ -281,7 +281,7 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
                     loss = compute_ce_loss(logits, tgt)
                 # L2-SP anchor regularization
                 if anchor_named_params is not None:
-                    from research.training.sft_train import compute_l2_sp_loss
+                    from research.training.runners.sft_train import compute_l2_sp_loss
                     l2_sp = compute_l2_sp_loss(model, anchor_named_params, cfg.l2_sp_lambda)
                     loss = loss + l2_sp
                 (loss / cfg.grad_accum).backward()

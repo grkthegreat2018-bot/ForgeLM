@@ -39,6 +39,8 @@ data/
 research/data/
 research/tasks/
 research/runtime/tasks/
+research/runtime/graph_templates/
+research/runtime/compile_mode_cache.json
 research/distillation/hf_datasets/
 wandb/
 runs/
@@ -46,12 +48,12 @@ runs/
 # Published model directory (lives on HuggingFace, not GitHub)
 forgelm_hf/
 
-# Devin agent caches (keep scripts, exclude large caches)
-.devin/hf_cache/
-.devin/cmp_muon2/
-.devin/tmp/
-.devin/bench_cache/
-.devin/torch_cache/
+# Devin agent dir: ignore everything except legit config (scratchpad, skills, rules, config.json)
+.devin/*
+!.devin/scratchpad.md
+!.devin/skills/
+!.devin/rules/
+!.devin/config.json
 
 # Runtime app data directories
 Logs/
@@ -65,7 +67,6 @@ compare_*.txt
 dedup_run.log
 _inspect_template.py
 *.log
-.devin/profile_trace.json
 
 # IDE / OS
 .vscode/
@@ -76,7 +77,3 @@ _inspect_template.py
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Local Triton/inductor caches (project-short paths)
-.devin/trc/
-.devin/torch_cache/

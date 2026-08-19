@@ -376,7 +376,7 @@ class InfiniteSelfPlayLoop:
             os.path.abspath(__file__))))
 
         cmd = [
-            os.sys.executable, "-m", "research.training.sft_train",
+            os.sys.executable, "-m", "research.training.runners.sft_train",
             "--data", data_path,
             "--checkpoint", self.best_checkpoint,
             "--save", save_path,
