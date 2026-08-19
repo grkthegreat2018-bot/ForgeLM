@@ -59,7 +59,7 @@ def top_p_filter_logits(logits: torch.Tensor, top_p: float,
 
     # Step 4: Map removal back to topk indices, then to original vocab indices.
     sorted_remove = torch.zeros_like(sorted_probs)
-    sorted_remove.scatter_(-1, sorted_idx, remove.float())
+    sorted_remove.scatter_(-1, sorted_idx, remove.to(sorted_remove.dtype))
     # Map back to topk space
     topk_remove = torch.zeros_like(topk_probs)
     topk_remove.scatter_(-1, sorted_idx, sorted_remove)

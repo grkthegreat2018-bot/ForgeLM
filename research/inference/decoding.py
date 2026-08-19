@@ -387,7 +387,11 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
         "dspark": DSparkDecoding,
         "eagle3": Eagle3Decoding,
         "mtp_selfspec": MTPSelfSpecDecoding,
+        "batched": None,  # set below to avoid circular import
     }
+    if strategy == "batched":
+        from research.inference.batched_decoding import BatchedDecoding
+        return BatchedDecoding(**kwargs)
     cls = strategies.get(strategy, StandardDecoding)
     return cls(**kwargs)
 

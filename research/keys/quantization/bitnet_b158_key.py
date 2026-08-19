@@ -170,12 +170,14 @@ class _TernaryLinearFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_y):
         x, w, y = ctx.saved_tensors
-        # y = x @ w.T  ->  grad_x = grad_y @ w (STE: full-precision weights)
-        grad_x = grad_y @ w
+        # Cast everything to grad_y's dtype for consistent matmuls
+        # (model may be bf16 but loss/grad can be fp32)
+        gdt = grad_y.dtype
+        grad_x = grad_y @ w.to(gdt)
         gx = grad_y.reshape(-1, grad_y.shape[-1])
-        xr = x.reshape(-1, x.shape[-1])
+        xr = x.reshape(-1, x.shape[-1]).to(gdt)
         grad_w = gx.T @ xr
-        grad_scale = (grad_y * (y / ctx.scale.view(1, -1))).sum()
+        grad_scale = (grad_y * (y.to(gdt) / ctx.scale.view(1, -1).to(gdt))).sum()
         return grad_x, grad_w, grad_scale, None
 
 

@@ -1,0 +1,25 @@
+[
+  {
+    "A_imports_setup": 7.999988156370819e-07,
+    "B_config_fetch": 0.0022955000022193417,
+    "D_arch_build": 6.688707500004966,
+    "E_dtype_convert": 0.013974000001326203,
+    "F_weights_load": 1.2826382999992347,
+    "G_diff_convert": 2.660000609466806e-05,
+    "H_load_state_dict": 0.037515299998631235,
+    "I_post_load_scan": 0.01990769999974873,
+    "J_tokenizer_load": 2.7199697000032756,
+    "K_kv_cache_alloc": 0.0024057000046013854,
+    "L_first_forward": 0.37640420000388985,
+    "M_first_decode": 0.1352608000015607,
+    "TOTAL": 11.279106100024364,
+    "config": "forgelm_v3",
+    "checkpoint": "research/checkpoints/ForgeLM_V3_Base.safetensors",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "clear_cache": true,
+    "vram_gb": 5.249161728,
+    "vram_reserved_gb": 5.446303744,
+    "n_params_m": 1256.357304
+  }
+]

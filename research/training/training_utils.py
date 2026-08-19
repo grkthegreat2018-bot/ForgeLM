@@ -223,6 +223,61 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
             print(f"MuonScheduleFree unavailable ({e}); falling back to fused AdamW.")
             return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
+    if optimizer_name == "flash_adamw":
+        try:
+            from research.training.flash_optim import FlashAdamW
+            print("Using FlashAdamW (8-bit states, companding quantization, 57% memory cut).")
+            return FlashAdamW(param_groups, lr=max_lr, weight_decay=weight_decay)
+        except Exception as e:
+            print(f"FlashAdamW unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "flash_lion":
+        try:
+            from research.training.flash_optim import FlashLion
+            print("Using FlashLion (8-bit sign-momentum, 58% memory cut).")
+            return FlashLion(param_groups, lr=max_lr / 10.0, weight_decay=weight_decay * 10.0)
+        except Exception as e:
+            print(f"FlashLion unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "forge":
+        try:
+            from research.training.forge_optimizer import ForgeOptimizer
+            print("Using FORGE (fused on-register gradient elimination, 53% memory cut).")
+            opt = ForgeOptimizer(param_groups, lr=max_lr, weight_decay=weight_decay)
+            return opt
+        except Exception as e:
+            print(f"FORGE unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "sf_normuon":
+        try:
+            from research.training.sf_spectral_optimizers import SFNorMuon
+            print("Using SF-NorMuon (schedule-free spectral, per-neuron norm, anytime).")
+            return SFNorMuon(param_groups, lr=max_lr, weight_decay=weight_decay)
+        except Exception as e:
+            print(f"SF-NorMuon unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "amuse":
+        try:
+            from research.training.sf_spectral_optimizers import AMUSE
+            print("Using AMUSE (anytime Muon + stable eval, no LR schedule).")
+            return AMUSE(param_groups, lr=max_lr)
+        except Exception as e:
+            print(f"AMUSE unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "mona":
+        try:
+            from research.training.sf_spectral_optimizers import MONA
+            print("Using MONA (Muon + Nesterov acceleration, escapes sharp minima).")
+            return MONA(param_groups, lr=max_lr)
+        except Exception as e:
+            print(f"MONA unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
     # Unknown optimizer name — safe default.
     print(f"Unknown optimizer '{optimizer_name}'; using fused AdamW.")
     return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
@@ -966,5 +1021,5 @@ def add_safeguard_args(parser):
                         help="Abort with an emergency checkpoint before exceeding this VRAM (0 = disabled)")
     parser.add_argument("--ram-limit-percent", type=float, default=90.0,
                         help="Throttle if system RAM exceeds this percent (default 90, 0=disabled). "
-                             "Emergency abort at threshold+10%. Prevents OOMKilled / freezing.")
+                             "Emergency abort at threshold+10 percent. Prevents OOMKilled / freezing.")
     return parser

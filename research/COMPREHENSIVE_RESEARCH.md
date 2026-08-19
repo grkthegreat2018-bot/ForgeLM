@@ -3087,3 +3087,40 @@ Three levels of causal reasoning:
 ---
 
 *Document compiled August 2026. Sources: 150+ research papers from 2023-2026, verified benchmark data, third-party consumer GPU benchmarks.*
+
+---
+
+## 38. Consumer Blackwell (sm_120) Specifics — Native Windows
+
+### 38.1 Triton Consumer Blackwell Patch (sm_120a → sm_120)
+
+**Problem**: `triton-windows==3.4.0.post21` generates `sm_120a` PTX targets for consumer Blackwell (RTX 5070/5080/5090), but consumer Blackwell has NO tensor memory (tcgen05). This causes `illegal memory access` in EVERY Triton kernel, rendering `torch.compile`, Liger Kernel, and custom Triton kernels completely unusable.
+
+**Fix** (from upstream PR #9734, which was reverted): three changes to `triton/backends/nvidia/compiler.py`:
+1. `sm_arch_from_capability` only adds "a" suffix for `90 <= capability < 120`
+2. PTX `.target` regex handles the "a" suffix
+3. `make_ttgir` pipeline routes sm_120 away from tensor memory passes
+
+After patching, basic Triton kernels work and `torch.compile` delivers 13,240 tok/s (unchanged from pre-patch on working paths). Clear `~/.triton/cache` after patching so kernels recompile with correct `sm_120` target.
+
+**Scope**: The bug only manifests on consumer Blackwell (sm_120). Datacenter Blackwell (sm_100a, B100/B200) and Hopper (sm_90a) are unaffected.
+
+### 38.2 Gigatoken — Rust BPE Tokenizer
+
+~1000x faster than HuggingFace tokenizers for bulk pre-tokenization. A Rust BPE tokenizer with Python bindings that encodes text at GB/s (24.53 GB/s on 144-core EPYC, 8.79 GB/s on M4 Max). Supports 23 tokenizer families including GPT-2, Llama 3/4, Qwen 2/2.5/3, DeepSeek V3/R1, GLM 4/5, Phi-4, and Gemma.
+
+Speedup comes from SIMD-optimized pre-tokenization (replacing regex engines), minimized branching, and efficient caching of pre-token mappings. Critical for pre-training pipelines where 100M+ tokens must be tokenized offline before training begins.
+
+**Win11**: Ships as a pip wheel (`gigatoken==0.9.0`) with pre-compiled Rust binaries for Windows. No WSL2 required. Verified on RTX 5070 box: ~35x speedup in compatibility mode (HFCompat wrapper), ~17x in native batched mode (`encode_batch_list`). Note: `encode_files` (disk-spill API) returns a flat token stream with no document boundaries, making per-document EOS insertion impossible — use `encode_batch_list` for streaming pipelines instead.
+
+### 38.3 Native FP8 on Consumer Blackwell
+
+RTX 5070 (sm_120, consumer Blackwell) supports FP8 tensor core matmul via `torch._scaled_mm`. Benchmarked at 2.02x faster than BF16 for a [2048, 1024] × [151680, 1024] matmul (4.65 ms vs 9.40 ms). FP8 elementwise ops are NOT supported (FP8 is matmul-only). Full FP8 training integration requires per-tensor scaling factors and vocab dimension padding to multiples of 16. FP8 is most valuable for inference (2x throughput, 50% weight memory) rather than training (stability concerns).
+
+`torch.float8_e4m3fn` and `torch.float8_e5m2` dtypes are available in PyTorch 2.8.0+cu128. `torch._scaled_mm` works on sm_120 without any patches. Matmul dimensions must be divisible by 16 for FP8 (pad vocab from 151665 to 151680).
+
+### 38.4 Liger Kernel v0.8.1 Blackwell Status
+
+Liger v0.8.1 (released July 2026) added Blackwell-specific hardware gating for cross-entropy and SwiGLU tuning, plus an experimental CuTe DSL backend (`LIGER_KERNEL_IMPL=cutedsl`) for Blackwell / B200. The CuTe DSL cross-entropy scaffolding targets datacenter Blackwell (sm_100a) and requires the `cutlass` Python package.
+
+On consumer Blackwell (sm_120, RTX 5070), the Triton CE kernel still crashes even after the sm_120a compiler patch — there are additional Triton issues beyond the "a" suffix. Liger is left installed (`pip install --no-deps liger-kernel`) for future use but is NOT wired into the ForgeAI training loop. The pure-PyTorch Chunked CE (section 12.3) serves as the working alternative.

@@ -364,8 +364,28 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
         "snapkv": SnapKVCacheStrategy,
         "snapkv_4bit": SnapKV4BitCache,
         "2bit": KV2BitCacheStrategy,
+        "paged_eviction": None,  # lazy import
+        "xquant": None,          # lazy import
     }
+    # Lazy imports for new strategies (avoid circular imports)
+    if strategy == "paged_eviction":
+        from research.inference.paged_eviction import PagedEvictionKVCache
+        return PagedEvictionKVCache()
+    if strategy == "xquant":
+        from research.inference.xquant_kv import XQuantKVCache
+        return XQuantKVCache()
+    if strategy == "cpu_offload":
+        from research.inference.cpu_kv_offload import CPUKVCache
+        return CPUKVCache()
+    if strategy == "s4r":
+        from research.inference.s4r_kv import S4RKVCache
+        return S4RKVCache()
+    if strategy == "hqe_kv":
+        from research.inference.hqe_kv import HqeKVCache
+        return HqeKVCache()
     cls = strategies.get(strategy, StandardKVCache)
+    if cls is None:
+        return StandardKVCache()
     return cls()
 
 

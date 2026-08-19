@@ -85,6 +85,21 @@ class ModelConfig:
     # Kept in config for future larger models. See docs/FFN_RESEARCH.md.
     ffn_skip_threshold: float = 0.0  # 0.0 = disabled
 
+    # === V4: Hardware-efficient inference keys (2026-08) ===
+    # GLA (Grouped Latent Attention, arXiv 2505.21487): latent-compressed KV,
+    # shifts decode from BW-bound to compute-bound. Identity warm start (lossless).
+    # attn_type="gla" activates this; gla_latent_dim sets compression (0=full=lossless).
+    gla_latent_dim: int = 0  # 0 = full KV dim (lossless), >0 = compressed latent
+    # GTA (Grouped-Tied Attention, arXiv 2505.21487): ties V to K, halves KV cache.
+    # attn_type="gta" activates this. V=K at init (lossless), training unties.
+    # Fused QKV + Gate-Up GEMM: single GEMM for Q/K/V and for gate/up projections.
+    # Halves kernel launches. Lossless (same math, just fused).
+    use_fused_gemm: bool = False
+    # W8A8 INT8 quantization: weight + activation INT8 with tensor-core GEMM.
+    # 2-3x decode speedup at batch=1. Applied at inference (not training).
+    use_w8a8: bool = False
+    w8a8_mode: str = "int8"  # "int8" or "fp8"
+
     # === Training ===
     dropout: float = 0.0
     device: str = "cpu"
@@ -107,6 +122,10 @@ class ModelConfig:
     # Chunked cross-entropy: fuses head + CE without materializing full logits.
     use_chunked_ce: bool = False
     ce_chunk_size: int = 256
+    # Entropy-weighted CE alpha (WeFT/VCORE 2025). When > 0, the chunked CE
+    # path uses ChunkedEntropyWeightedCE instead of plain ChunkedLinearCrossEntropy.
+    # 0 = disabled (plain CE), 0.5 = production default.
+    entropy_alpha: float = 0.0
     # Liger-Kernel fused linear cross-entropy (requires liger-kernel).
     use_liger_ce: bool = False
     # Gradient checkpointing: recompute forward during backward to save VRAM.
@@ -243,6 +262,48 @@ MODEL_CONFIGS = {
         mhc_rank=0,               # 0 = auto (d_model // 4)
         use_attn_residual=True,   # Kimi K3 cross-layer retrieval
         attn_res_k=4,             # retrieve from last 4 layers
+        batch_size=2,
+        seq_len=1024,
+    ),
+    # ForgeLM V4 — hardware-efficient evolution of V3:
+    #   - GTA (Grouped-Tied Attention): V=K at init (lossless), halves KV cache
+    #     bandwidth. Training unties V from K. Replaces Differential Attention.
+    #   - Fused QKV + Gate-Up GEMM: single GEMM for Q/K/V and gate/up, halving
+    #     kernel launches per layer.
+    #   - All V3 keys preserved: BitNet b1.58, TITAN memory, MoD, mHC, AttnRes.
+    #   - W8A8 INT8 quantization available at inference (not training).
+    # Loads ForgeLM_V2_BSP.safetensors losslessly via GTA identity warm start
+    # (V=K, v_mix_gate=0). All mechanisms lossless at load; training activates them.
+    "forgelm_v4": ModelConfig(
+        vocab_size=65536,
+        d_model=2048,
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        intermediate_size=8192,
+        attn_type="gta",
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=32768,
+        conv_kernel_size=3,
+        use_qk_norm=True,
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        use_fused_gemm=True,          # Fused QKV + Gate-Up GEMM
+        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
+                     "conv", "conv", "attention", "conv", "attention", "conv",
+                     "attention", "conv", "attention", "conv"],
+        use_titan_memory=True,
+        titan_memory_rank=64,
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        ffn_skip_threshold=0.0,
+        use_mhc=True,
+        mhc_rank=0,
+        use_attn_residual=True,
+        attn_res_k=4,
         batch_size=2,
         seq_len=1024,
     ),

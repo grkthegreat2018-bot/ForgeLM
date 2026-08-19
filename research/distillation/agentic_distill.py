@@ -50,11 +50,9 @@ from research.distillation.distill_client import (
 from research.self_play.discovery.discovery_tools import ToolRegistry
 from research.self_play.discovery.discovery_db import DiscoveryDB
 
-# tool_use_loop.py was removed in the AZR loop merge.
-# agentic_distill.py is legacy tool-use distillation — compute_reward
-# is only needed if running teacher-model tool-use distillation. Keep the
-# module importable (other code may import helpers without scoring), but
-# fail clearly at the call site instead of an opaque AttributeError.
+# compute_reward was in tool_use_loop.py, which was removed in the AZR loop
+# merge. The reward-scoring path is legacy — keep the module importable (other
+# code imports helpers without scoring), but fail clearly at the call site.
 try:
     from research.self_play.discovery.tool_use_loop import compute_reward
 except ImportError:

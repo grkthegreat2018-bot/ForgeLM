@@ -93,6 +93,14 @@ class GRPOConfig:
     length_penalty_threshold: float = 0.6  # correctness ratio to activate penalty
     length_penalty_warmup: int = 0      # steps before penalty can activate
 
+    # Advanced RL algorithm selection (2026 research):
+    # "grpo" = standard GRPO (default)
+    # "sppo" = Sequence-Level PPO (long-horizon reasoning, no multi-sampling)
+    # "psppo" = Prefix-Sampling PPO (compute-efficient, prefix backprop only)
+    # "evpo" = Explained Variance PO (adaptive critic/batch-mean switching)
+    # "grpo_or" = GRPO with Output Reset trust region (smooth saturation)
+    rl_algorithm: str = "grpo"
+
 
 @dataclass
 class GRPOStats:
@@ -162,6 +170,25 @@ class GRPOTrainer:
                 trainable, lr=self.config.learning_rate, weight_decay=0.01)
         else:
             self.optimizer = None
+
+        # Advanced RL algorithm (2026 research)
+        self._rl_algo = None
+        if self.config.rl_algorithm == "sppo":
+            from research.training.advanced_rl import SPPO, SPPOConfig
+            self._rl_algo = SPPO(SPPOConfig(lr=self.config.learning_rate))
+            print("  [GRPOTrainer] Using SPPO (Sequence-Level PPO)")
+        elif self.config.rl_algorithm == "psppo":
+            from research.training.advanced_rl import PSPPO, PSPPOConfig
+            self._rl_algo = PSPPO(PSPPOConfig(lr=self.config.learning_rate))
+            print("  [GRPOTrainer] Using PS-PPO (Prefix-Sampling PPO)")
+        elif self.config.rl_algorithm == "evpo":
+            from research.training.advanced_rl import EVPO, EVPOConfig
+            self._rl_algo = EVPO(EVPOConfig(lr=self.config.learning_rate))
+            print("  [GRPOTrainer] Using EVPO (Explained Variance PO)")
+        elif self.config.rl_algorithm == "grpo_or":
+            from research.training.advanced_rl import GRPOOR, GRPOORConfig
+            self._rl_algo = GRPOOR(GRPOORConfig(lr=self.config.learning_rate))
+            print("  [GRPOTrainer] Using GRPO-OR (Output Reset trust region)")
 
     def compute_advantages(self, rewards: list[float]) -> list[float]:
         """Compute GRPO group-relative advantages.

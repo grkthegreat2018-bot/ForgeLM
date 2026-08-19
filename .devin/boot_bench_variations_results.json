@@ -1,0 +1,31 @@
+[
+  {
+    "A_imports_setup": 0.0,
+    "B_config_fetch": 0.0,
+    "J_tokenizer_load": 1.0800000382005237e-05,
+    "D_arch_build": 0.2602993000000424,
+    "F_weights_load": 1.2177778000004764,
+    "G_diff_convert": 2.7099999897473026e-05,
+    "E_dtype_convert": 0.051544700000704324,
+    "H_load_state_dict": 0.03467670000009093,
+    "I_post_load_scan": 0.021660899999915273,
+    "J_tokenizer_total": 1.6646178999999393,
+    "K_kv_cache_alloc": 0.0007760999997117324,
+    "L_first_forward": 0.17315429999962362,
+    "M_first_decode": 0.020837099999880593,
+    "TOTAL": 2.679851000000781,
+    "variation": "V8",
+    "config": "forgelm_v3",
+    "device": "cuda",
+    "vram_gb": 2.735291904,
+    "n_params_m": 1256.357304,
+    "correctness_tokens": [
+      5242,
+      523,
+      509,
+      1098,
+      5706
+    ],
+    "correctness_text": " Paris.\n\nThe capital"
+  }
+]

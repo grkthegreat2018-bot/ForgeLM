@@ -2,6 +2,12 @@
 
 Shifts matmul from GEMV (memory-bound at batch=1) to GEMM (compute-bound
 at batch>1), delivering 3-5x throughput on RTX 5070 for 1.2B models.
+
+Supports per-sequence generation settings:
+  - temperature, top_p, top_k (sampling)
+  - repetition_penalty
+  - seed (per-sequence torch.Generator for reproducible generation)
+  - stop sequences (string-based, checked after decode)
 """
 import torch
 import torch.nn.functional as F
@@ -16,6 +22,10 @@ class BatchedDecoding(DecodingStrategy):
 
     Finished sequences stay in the batch (masked) so KV cache dimensions
     remain stable. Sampling happens on the full batch at once.
+
+    Per-sequence settings (temperature, top_k, repetition_penalty, seed,
+    stop) are applied independently — each sequence in the batch can have
+    completely different generation parameters.
     """
 
     def __init__(self, eos_token_id: int = 7):
@@ -45,11 +55,36 @@ class BatchedDecoding(DecodingStrategy):
         max_tokens_list: list[int],
         temperatures: list[float],
         top_ps: list[float],
+        top_k_list: list[int] | None = None,
+        repetition_penalty_list: list[float] | None = None,
+        seed_list: list[int | None] | None = None,
+        stop_list: list[list[str] | None] | None = None,
+        tokenizer=None,
     ) -> list[torch.Tensor]:
         B = len(prompts)
         if B == 0:
             return []
         device = prompts[0].device
+
+        # Default per-sequence settings
+        if top_k_list is None:
+            top_k_list = [0] * B
+        if repetition_penalty_list is None:
+            repetition_penalty_list = [1.0] * B
+        if seed_list is None:
+            seed_list = [None] * B
+        if stop_list is None:
+            stop_list = [None] * B
+
+        # Per-sequence generators for reproducible sampling
+        generators = []
+        for seed in seed_list:
+            if seed is not None:
+                gen = torch.Generator(device=device)
+                gen.manual_seed(seed)
+                generators.append(gen)
+            else:
+                generators.append(None)
 
         # Pad prompts to same length (right-pad)
         max_prompt_len = max(p.shape[1] for p in prompts)
@@ -78,10 +113,19 @@ class BatchedDecoding(DecodingStrategy):
 
         # Decode — one batched step per token
         next_ids = torch.zeros(B, 1, dtype=torch.long, device=device)
-        # CPU-side state for control flow
         temps_cpu = [max(t, 1e-5) for t in temperatures]
         active_cpu = torch.ones(B, dtype=torch.bool)
         eos_mask_gpu = torch.zeros(B, dtype=torch.bool, device=device)
+
+        # Pre-compute stop token IDs per sequence
+        stop_token_ids = [set() for _ in range(B)]
+        if tokenizer is not None:
+            for i, stops in enumerate(stop_list):
+                if stops:
+                    for s in stops:
+                        ids = tokenizer(s, add_special_tokens=False).input_ids
+                        if ids:
+                            stop_token_ids[i].add(ids[-1])
 
         for step in range(max_tokens):
             if not active_cpu.any():
@@ -94,6 +138,26 @@ class BatchedDecoding(DecodingStrategy):
             temp_t = torch.tensor(temps_cpu, device=device, dtype=next_logits_all.dtype)
             next_logits_all = next_logits_all / temp_t.unsqueeze(1)
 
+            # Repetition penalty (per-sequence)
+            for i in range(B):
+                if repetition_penalty_list[i] != 1.0 and active_cpu[i]:
+                    # Penalize tokens already in generated[i]
+                    gen_ids = generated[i][0]
+                    for tid in gen_ids.unique():
+                        next_logits_all[i, tid] /= repetition_penalty_list[i]
+
+            # Top-k filtering (per-sequence)
+            for i in range(B):
+                if top_k_list[i] > 0 and active_cpu[i]:
+                    k = min(top_k_list[i], next_logits_all.shape[-1])
+                    topk_vals, _ = next_logits_all[i].topk(k)
+                    threshold = topk_vals[-1]
+                    next_logits_all[i] = torch.where(
+                        next_logits_all[i] < threshold,
+                        torch.full_like(next_logits_all[i], float('-inf')),
+                        next_logits_all[i],
+                    )
+
             # Mask finished sequences
             next_logits_all[~active] = float('-inf')
 
@@ -102,19 +166,32 @@ class BatchedDecoding(DecodingStrategy):
                 next_tokens = next_logits_all.argmax(-1)  # [B]
             else:
                 probs = F.softmax(next_logits_all, dim=-1).clamp(min=1e-10)
-                # Ensure no NaN rows (finished sequences masked to uniform)
                 probs = torch.nan_to_num(probs, nan=1.0 / probs.shape[-1])
-                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
-                # Greedy override: where temp=0, use argmax
-                greedy_mask = torch.tensor(
-                    [t == 0 for t in temperatures], device=device)
-                if greedy_mask.any():
-                    greedy_tokens = next_logits_all.argmax(-1)
-                    next_tokens = torch.where(greedy_mask, greedy_tokens, next_tokens)
+                # Per-sequence sampling with independent generators
+                next_tokens = torch.zeros(B, dtype=torch.long, device=device)
+                for i in range(B):
+                    if not active_cpu[i]:
+                        next_tokens[i] = 0
+                        continue
+                    if temps_cpu[i] == 0:
+                        # Greedy for this sequence
+                        next_tokens[i] = next_logits_all[i].argmax()
+                    elif generators[i] is not None:
+                        # Seeded sampling
+                        next_tokens[i] = torch.multinomial(
+                            probs[i], num_samples=1, generator=generators[i])[0]
+                    else:
+                        # Unseeded sampling
+                        next_tokens[i] = torch.multinomial(probs[i], num_samples=1)[0]
 
             # Check EOS (GPU op)
             for eid in self.eos_set:
                 eos_mask_gpu = eos_mask_gpu | (next_tokens == eid)
+            # Check stop sequences (per-sequence)
+            for i in range(B):
+                if stop_token_ids[i] and active_cpu[i]:
+                    if next_tokens[i].item() in stop_token_ids[i]:
+                        eos_mask_gpu[i] = True
             # Single scalar sync — only transfer full tensor when EOS occurs
             if eos_mask_gpu.any().item():
                 is_eos_cpu = eos_mask_gpu.cpu()
