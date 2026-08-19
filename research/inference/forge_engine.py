@@ -30,6 +30,12 @@ import torch
 import torch.nn.functional as F
 
 from research.inference.decoding import DecodingStrategy, StandardDecoding, build_decoding
+from research.inference.diagnostics import (
+    EngineProfiler,
+    EventLog,
+    OutputHistory,
+    build_health_report,
+)
 from research.inference.innovations import (
     MRLAdaptiveContext,
     ProgressiveKV,
@@ -76,6 +82,14 @@ class ForgeEngine:
         self.total_tokens_generated = 0
         self._prefix_cache = None
         self._graph_runner = None
+
+        # Built-in diagnostics (replaces need for one-off scripts)
+        self.events = EventLog(capacity=500)
+        self.outputs = OutputHistory(capacity=100)
+        self._profiler = EngineProfiler(self.model, self.device)
+        self.events.log("ForgeEngine initialized", source="engine",
+                        device=str(self.device),
+                        checkpoint=checkpoint_path or "none")
 
         # Move model to device (unless it's on meta — streaming mode)
         self._needs_streaming = False
@@ -958,6 +972,7 @@ class ForgeEngine:
                 continue generating up to 32 extra tokens to reach a natural
                 stopping point (period, newline, code block close, EOS).
         """
+        _t0 = time.perf_counter()
         ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
 
         # Prefix caching: check if we've seen this prompt prefix before
@@ -1029,11 +1044,24 @@ class ForgeEngine:
                 self._prefix_cache[str(cache_key)] = (ids[:, :key_len], prefix_kv)
 
         self.generation_count += 1
-        self.total_tokens_generated += output_ids.shape[1] - ids.shape[1]
+        n_gen = output_ids.shape[1] - ids.shape[1]
+        self.total_tokens_generated += n_gen
         # Decode only the generated tokens (not the prompt)
         prompt_len = ids.shape[1]
         generated_ids = output_ids[0, prompt_len:]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        result = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        # Record output + event for built-in diagnostics
+        _gen_ms = (time.perf_counter() - _t0) * 1000
+        self.outputs.record(prompt, result, n_gen, _gen_ms,
+                            temperature=temperature,
+                            kv_cache=self.kv_cache.info()["name"] if self.kv_cache and hasattr(self.kv_cache, "info") else "none",
+                            decoding=self.decoding.name)
+        self.events.log(f"generate: {n_gen} tokens in {_gen_ms:.0f}ms",
+                        source="engine", level="profile",
+                        tokens=n_gen, time_ms=round(_gen_ms, 1),
+                        tok_s=round(n_gen / (_gen_ms / 1000), 1) if _gen_ms > 0 else 0)
+        return result
 
     @torch.no_grad()
     def generate_raw(
@@ -1511,6 +1539,65 @@ class ForgeEngine:
             "progressive_kv": self.progressive_kv.info() if self.progressive_kv else None,
             "vram": vram_info,
         }
+
+    # ── Built-in diagnostics ────────────────────────────────────────────
+    # These methods eliminate the need for one-off profiling/log-reading scripts.
+
+    def bottleneck(self, prompt: str = "The quick brown fox",
+                   max_new_tokens: int = 16) -> dict:
+        """Profile a generation pass and identify the slowest transformer layers.
+
+        Runs a short generation with per-layer forward hooks to measure
+        wall-clock time per block. Returns a dict with per-layer timings,
+        top-5 bottlenecks, and overall throughput.
+
+        No external profiling script needed — call this directly:
+            report = engine.bottleneck()
+            print(report["bottlenecks"])
+        """
+        self.events.log("Starting bottleneck profiling", source="profile",
+                        max_new_tokens=max_new_tokens)
+        ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        result = self._profiler.profile_generate(ids, max_new_tokens=max_new_tokens)
+        self.events.log(f"Bottleneck: {result.get('tok_s', 0)} tok/s, "
+                        f"slowest={result['bottlenecks'][0]['type']}#{result['bottlenecks'][0]['index']} "
+                        f"({result['bottlenecks'][0]['time_ms']}ms)",
+                        source="profile", level="profile",
+                        bottlenecks=result["bottlenecks"])
+        return result
+
+    def read_log(self, n: int = 50, level: str | None = None,
+                 source: str | None = None) -> list[dict]:
+        """Read recent engine events as structured dicts.
+
+        Replaces log-tailing scripts. Optional filters by level/source:
+            engine.read_log(n=20, level="error")  # recent errors
+            engine.read_log(n=10, source="profile")  # recent timings
+        """
+        return self.events.read_log(n=n, level=level, source=source)
+
+    def read_output(self, n: int = 10) -> list[dict]:
+        """Read recent generation outputs with metadata.
+
+        Replaces output-capture scripts. Returns last n generations:
+            engine.read_output(n=5)  # last 5 generations with tok/s, timing
+        """
+        return self.outputs.read_output(n=n)
+
+    def diagnose(self) -> dict:
+        """Full health report: stats + VRAM + warnings + recent errors.
+
+        Non-invasive (does not run generation). Combines everything a
+        debugging script would check into one call:
+            report = engine.diagnose()
+            if report["status"] != "healthy":
+                print(report["warnings"])
+        """
+        report = build_health_report(self)
+        self.events.log(f"Diagnose: {report['status']}",
+                        source="engine",
+                        warnings=len(report.get("warnings", [])))
+        return report
 
     def sleep(self, level: int = 1):
         """Release GPU memory by offloading model weights.

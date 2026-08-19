@@ -1102,7 +1102,8 @@ def main():
 
                 batch_idx = indices[batch_start:batch_start + args.batch_size]
                 batch = [dataset[i] for i in batch_idx]
-                input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
+                with log.time_phase("data_load"):
+                    input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
 
                 # ── Training-time data augmentation ──
                 if args.augment:
@@ -1158,9 +1159,10 @@ def main():
 
                 # Forward + backward (accumulate gradients).
                 # Token entropy weighting (WeFT/VCORE 2025) applied inside compute_loss.
-                ce_loss = compute_loss(model, input_ids, labels, attn_mask,
-                                       entropy_alpha=args.entropy_alpha,
-                                       sample_weights=sw)
+                with log.time_phase("forward"):
+                    ce_loss = compute_loss(model, input_ids, labels, attn_mask,
+                                           entropy_alpha=args.entropy_alpha,
+                                           sample_weights=sw)
 
                 # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
                 # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
@@ -1170,7 +1172,8 @@ def main():
                 else:
                     loss = ce_loss
 
-                (loss / grad_accum).backward()
+                with log.time_phase("backward"):
+                    (loss / grad_accum).backward()
                 accum_count += 1
                 last_loss = ce_loss.item()  # log CE only for comparability
 
@@ -1220,15 +1223,16 @@ def main():
                     continue
 
                 # Optimizer step.
-                if hybrid_clipper is not None:
-                    hybrid_clipper.clip(model.parameters())
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                lr = get_lr(step, args.max_steps, args.lr, args.min_lr, args.warmup_steps)
-                for g in optimizer.param_groups:
-                    g["lr"] = lr
-                optimizer.step()
-                optimizer.zero_grad()
+                with log.time_phase("optimizer"):
+                    if hybrid_clipper is not None:
+                        hybrid_clipper.clip(model.parameters())
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                    lr = get_lr(step, args.max_steps, args.lr, args.min_lr, args.warmup_steps)
+                    for g in optimizer.param_groups:
+                        g["lr"] = lr
+                    optimizer.step()
+                    optimizer.zero_grad()
                 accum_count = 0
 
                 # EMA update.
