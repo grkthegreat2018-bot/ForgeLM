@@ -1752,18 +1752,34 @@ class ModelLoader:
                                   "(lossless, lambda=0)")
 
             # GQA -> GTA warm start (V=K, v_mix_gate=0, lossless)
+            # Also handles V3 (diff) -> V4 (GTA) auto-conversion.
             if config.attn_type == "gta":
                 qk = next((k for k in state
                            if "attn.q_proj.weight" in k), None)
                 if qk is not None:
-                    from research.keys.attention.gta_key import GTAKey
-                    res = GTAKey(
-                        n_layers=config.n_layers,
-                        n_heads=config.n_heads).forward(state)
-                    if res.success:
-                        state = res.weights
-                        print("  [FastBuild] GQA -> GTA warm start "
-                              "(lossless, V=K, gate=0)")
+                    # Check if checkpoint is V3 (diff) — q_proj rows are doubled
+                    exp_gqa_rows = config.n_heads * (config.d_model // config.n_heads)
+                    if state[qk].shape[0] == 2 * exp_gqa_rows:
+                        # V3 diff checkpoint → reverse diff + forward GTA
+                        from research.architecture.v3_to_v4 import convert_v3_to_v4_state
+                        state = convert_v3_to_v4_state(
+                            state,
+                            n_heads=config.n_heads,
+                            n_kv_heads=config.n_kv_heads,
+                            head_dim=config.d_model // config.n_heads,
+                        )
+                        print("  [FastBuild] V3 (diff) -> V4 (GTA) auto-convert "
+                              "(reverse diff + GTA warm start)")
+                    else:
+                        # Plain GQA checkpoint → forward GTA only
+                        from research.keys.attention.gta_key import GTAKey
+                        res = GTAKey(
+                            n_layers=config.n_layers,
+                            n_heads=config.n_heads).forward(state)
+                        if res.success:
+                            state = res.weights
+                            print("  [FastBuild] GQA -> GTA warm start "
+                                  "(lossless, V=K, gate=0)")
 
             # GQA -> GLA warm start (kv_down_proj=k_proj, identity up-projs, lossless)
             if config.attn_type == "gla":
@@ -1914,18 +1930,34 @@ class ModelLoader:
                                   "(lossless, lambda=0)")
 
             # GQA -> GTA warm start (V=K, v_mix_gate=0, lossless)
+            # Also handles V3 (diff) -> V4 (GTA) auto-conversion.
             if config.attn_type == "gta":
                 qk = next((k for k in state
                            if "attn.q_proj.weight" in k), None)
                 if qk is not None:
-                    from research.keys.attention.gta_key import GTAKey
-                    res = GTAKey(
-                        n_layers=config.n_layers,
-                        n_heads=config.n_heads).forward(state)
-                    if res.success:
-                        state = res.weights
-                        print("  [FastBuild] GQA -> GTA warm start "
-                              "(lossless, V=K, gate=0)")
+                    # Check if checkpoint is V3 (diff) — q_proj rows are doubled
+                    exp_gqa_rows = config.n_heads * (config.d_model // config.n_heads)
+                    if state[qk].shape[0] == 2 * exp_gqa_rows:
+                        # V3 diff checkpoint → reverse diff + forward GTA
+                        from research.architecture.v3_to_v4 import convert_v3_to_v4_state
+                        state = convert_v3_to_v4_state(
+                            state,
+                            n_heads=config.n_heads,
+                            n_kv_heads=config.n_kv_heads,
+                            head_dim=config.d_model // config.n_heads,
+                        )
+                        print("  [FastBuild] V3 (diff) -> V4 (GTA) auto-convert "
+                              "(reverse diff + GTA warm start)")
+                    else:
+                        # Plain GQA checkpoint → forward GTA only
+                        from research.keys.attention.gta_key import GTAKey
+                        res = GTAKey(
+                            n_layers=config.n_layers,
+                            n_heads=config.n_heads).forward(state)
+                        if res.success:
+                            state = res.weights
+                            print("  [FastBuild] GQA -> GTA warm start "
+                                  "(lossless, V=K, gate=0)")
 
             # GQA -> GLA warm start (identity up-projs, lossless)
             if config.attn_type == "gla":

@@ -96,7 +96,11 @@ class GroupedTiedAttention(nn.Module):
         q = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, hd).transpose(1, 2)
 
-        if self._identity:
+        # Check gate dynamically (not cached _identity) so load_state_dict
+        # with a non-zero gate correctly activates the V_proj path.
+        is_identity = self.v_mix_gate.item() == 0.0
+
+        if is_identity:
             # ── Lossless V=K path ────────────────────────────────────────
             # Skip v_proj entirely; V = K. Halves KV cache write bandwidth.
             v = k
@@ -117,7 +121,7 @@ class GroupedTiedAttention(nn.Module):
             k = self.rope(k, offset=past_len, position_ids=position_ids)
             # In identity mode, only write K to cache (V=K, so V cache
             # slot is unused — saves 50% KV write bandwidth).
-            if self._identity:
+            if is_identity:
                 preallocated_cache.append(layer_idx, k, k)  # V=K
             else:
                 preallocated_cache.append(layer_idx, k, v)
@@ -184,11 +188,20 @@ class GTAKey(Key):
                 base = f"blocks.{i}.attn"
                 kw = f"{base}.k_proj.weight"
                 vw = f"{base}.v_proj.weight"
-                if kw in state:
-                    # Set v_proj = k_proj (V=K warm start)
-                    state[vw] = state[kw].clone()
-                # V mix gate = 0 (lossless)
-                state[f"{base}.v_mix_gate"] = torch.zeros(1, dtype=torch.float32)
+
+                # Check if V is already tied to K in this checkpoint
+                v_tied = False
+                if kw in state and vw in state and state[kw].shape == state[vw].shape:
+                    v_tied = (state[kw] - state[vw]).abs().max().item() < 1e-6
+
+                if v_tied:
+                    # V=K already: gate=0 (V=K, halves KV cache BW)
+                    state[f"{base}.v_mix_gate"] = torch.zeros(1, dtype=torch.float32)
+                else:
+                    # V separate from K: preserve original V_proj, use large gate
+                    # so sigmoid(gate)~1.0 -> V=V_proj (bit-exact with GQA).
+                    # Training can move gate toward 0 for V=K KV savings.
+                    state[f"{base}.v_mix_gate"] = torch.tensor([100.0], dtype=torch.float32)
 
             return KeyResult(success=True, weights=state,
                              metadata={"n_layers": n_layers, "identity": True})
