@@ -1,27 +1,35 @@
 """Grouped Latent Attention (GLA) — hardware-efficient latent attention.
 
-Based on "Hardware-Efficient Attention for Fast Decoding" (arXiv 2505.21487).
-GLA is a parallel-friendly variant of MLA (Multi-head Latent Attention,
-DeepSeek-V2) that is easier to shard and up to 2× faster than FlashMLA.
+Based on "Hardware-Efficient Attention for Fast Decoding" (arXiv 2505.21487)
+and DeepSeek-V2 MLA with Decoupled RoPE.
 
-Key idea: project Q/K/V into a compact latent space, cache only the latent
+Key idea: project K/V into a compact latent space, cache only the latent
 vector per token (not full per-head K/V), and absorb the up-projections into
 Q and the output projection at inference. This cuts KV cache traffic ~57×
 while paying ~4.5× more FLOPs — shifting decode from bandwidth-bound to
 compute-bound, where modern GPUs have headroom.
+
+Decoupled RoPE (from DeepSeek-V2 MLA):
+  Standard RoPE applies rotation to all head_dim dimensions, which breaks
+  the low-rank projection invariance needed for latent compression. The
+  solution: split the key into a semantic part (NoPE, compressed via latent)
+  and a positional part (RoPE, kept separate and uncompressed).
+
+  - head_dim = nope_dim + rope_dim (e.g., 64 = 32 + 32)
+  - Q is split: q_nope (semantic) + q_rope (positional, gets RoPE)
+  - K from latent up-projection: nope_dim per head (semantic, NoPE)
+  - K from k_rope_proj: rope_dim (positional, RoPE applied, shared across heads)
+  - Attention: q = [q_nope; q_rope], k = [k_nope; k_rope], both head_dim
+  - V from latent up-projection: full head_dim (no RoPE needed)
 
 Lossless warm start (identity mode):
   - latent_dim = n_kv_heads * head_dim (full KV dim, no compression)
   - W_DKV (down-projection) = identity
   - W_UK, W_UV (up-projections) = identity
   - compression gate = 0 (no low-rank compression)
+  - k_rope_proj = 0 (no positional signal at init; standard RoPE used instead)
   => bit-exact vs GQA at load; training moves gate off 0 to activate
-     latent compression, shrinking KV cache.
-
-When compression activates (gate > 0):
-  - latent_dim < n_kv_heads * head_dim (e.g., 256 vs 512)
-  - KV cache stores only latent_dim floats per token per layer
-  - Up-projections absorbed into Q and O for inference
+     latent compression + decoupled RoPE, shrinking KV cache.
 """
 from __future__ import annotations
 
@@ -36,7 +44,7 @@ from research.model_loader import GroupedQueryAttention, RotaryEmbedding
 
 
 class GroupedLatentAttention(nn.Module):
-    """GLA: latent-compressed attention with identity warm start.
+    """GLA: latent-compressed attention with decoupled RoPE and identity warm start.
 
     Config-compatible with the GQA slot (same forward signature).
     """
@@ -46,7 +54,8 @@ class GroupedLatentAttention(nn.Module):
                  base: float = 1_000_000.0, rope_scaling: dict | None = None,
                  use_qk_norm: bool = False, attn_bias: bool = False,
                  latent_dim: int | None = None,
-                 n_layers: int = 16, layer_idx: int = 0):
+                 n_layers: int = 16, layer_idx: int = 0,
+                 rope_dim: int | None = None):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -54,6 +63,12 @@ class GroupedLatentAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.n_rep = n_heads // self.n_kv_heads
         self.layer_idx = layer_idx
+
+        # Decoupled RoPE: split head_dim into semantic (nope) + positional (rope)
+        # Default: half the dimensions carry positional info, half carry semantic.
+        # The positional part is NOT compressed (RoPE breaks low-rank projections).
+        self.rope_dim = rope_dim if rope_dim is not None else self.head_dim // 2
+        self.nope_dim = self.head_dim - self.rope_dim
 
         # Full KV dim (what GQA would store)
         self.full_kv_dim = self.n_kv_heads * self.head_dim
@@ -71,9 +86,13 @@ class GroupedLatentAttention(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-        # RoPE on the decoupled RoPE branch (like MLA)
+        # Standard RoPE (for identity/warm-start path — applies to all head_dim dims)
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len,
                                     base=base, rope_scaling=rope_scaling)
+        # Decoupled RoPE (for full GLA path — applies only to rope_dim dims)
+        self.rope_decoupled = RotaryEmbedding(
+            self.rope_dim, max_seq_len=max_seq_len,
+            base=base, rope_scaling=rope_scaling)
 
         # QK-norm
         self.use_qk_norm = use_qk_norm
@@ -86,18 +105,27 @@ class GroupedLatentAttention(nn.Module):
         # Compression gate: 0 = identity (lossless), >0 = latent compression
         # When gate=0, up-projections are identity and we store full KV.
         # When gate>0, we store only the latent and up-project on read.
-        self._identity = True  # start lossless
         self.compression_gate = nn.Parameter(torch.zeros(1, dtype=torch.float32))
 
-        # Decoupled RoPE key: a separate small projection for RoPE-applied K
-        # (MLA design: RoPE doesn't compress well, so keep it separate)
+        # Decoupled RoPE key: separate small projection for positional K
+        # Outputs head_dim (sliced to rope_dim in forward) for backward compat.
+        # Zero-initialized so it doesn't affect the warm start.
         self.k_rope_proj = nn.Linear(d_model, self.head_dim, bias=attn_bias)
-        # Initialize k_rope to zero so it doesn't affect the warm start
         nn.init.zeros_(self.k_rope_proj.weight)
+
+    @property
+    def _identity(self) -> bool:
+        """Check dynamically so load_state_dict with gate>0 activates full path."""
+        return self.compression_gate.item() == 0.0
 
     def set_identity(self, identity: bool):
         """Toggle identity (lossless) vs. full GLA mode."""
-        self._identity = bool(identity)
+        if identity:
+            with torch.no_grad():
+                self.compression_gate.fill_(0.0)
+        else:
+            with torch.no_grad():
+                self.compression_gate.fill_(1.0)
 
     def _repeat_kv(self, x):
         if self.n_rep == 1:
@@ -114,12 +142,8 @@ class GroupedLatentAttention(nn.Module):
         hd = self.head_dim
 
         if self._identity:
-            # ── Bit-exact GQA-equivalent path ────────────────────────────
-            # kv_down_proj is identity (latent_dim = full_kv_dim),
-            # k_up_proj and v_up_proj are identity.
-            # So K = V = kv_down_proj(x), same as separate k_proj/v_proj
-            # with identical weights. This is bit-exact if the checkpoint
-            # was converted with k_proj = v_proj = kv_down_proj.
+            # ── Bit-exact GQA-equivalent path (warm start) ───────────────
+            # Standard RoPE on all dims, no decoupling, no compression.
             q = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)
             kv_latent = self.kv_down_proj(x)  # (B, T, full_kv_dim)
             k = self.k_up_proj(kv_latent).view(
@@ -157,67 +181,63 @@ class GroupedLatentAttention(nn.Module):
             out = out.transpose(1, 2).reshape(B, T, C)
             return self.out_proj(out), new_kv
 
-        # ── Full GLA path (latent compression active) ───────────────────
-        q = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)
+        # ── Full GLA path with Decoupled RoPE ───────────────────────────
+        # Split Q into semantic (nope) + positional (rope)
+        q_full = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)
+        q_nope = q_full[..., :self.nope_dim]   # (B, n_heads, T, nope_dim)
+        q_rope = q_full[..., self.nope_dim:]   # (B, n_heads, T, rope_dim)
 
         # Compress K/V into latent space
         kv_latent = self.kv_down_proj(x)  # (B, T, latent_dim)
 
-        # Decoupled RoPE branch: a single head_dim-sized K for RoPE
-        k_rope = self.k_rope_proj(x).view(B, T, 1, hd).transpose(1, 2)
-        # Repeat rope key across all heads
-        k_rope = k_rope.expand(B, self.n_heads, T, hd)
+        # Decoupled RoPE key: shared across all heads, positional only
+        k_rope = self.k_rope_proj(x)[..., :self.rope_dim]  # (B, T, rope_dim)
+        k_rope = k_rope.view(B, T, 1, self.rope_dim).transpose(1, 2)
+        k_rope = k_rope.expand(B, self.n_heads, T, self.rope_dim)
 
         if self.use_qk_norm and not self._qk_norm_identity:
-            q = self.q_norm(q)
+            q_nope = self.q_norm(q_nope)
 
-        # Apply RoPE to Q and the decoupled K
+        # Apply RoPE ONLY to positional parts (decoupled — doesn't break latent)
         if preallocated_cache is not None:
             past_len = preallocated_cache.position
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k_rope = self.rope(k_rope, offset=past_len, position_ids=position_ids)
+            q_rope = self.rope_decoupled(q_rope, offset=past_len, position_ids=position_ids)
+            k_rope = self.rope_decoupled(k_rope, offset=past_len, position_ids=position_ids)
         else:
             past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-            q = self.rope(q, offset=past_len, position_ids=position_ids)
-            k_rope = self.rope(k_rope, offset=past_len, position_ids=position_ids)
+            q_rope = self.rope_decoupled(q_rope, offset=past_len, position_ids=position_ids)
+            k_rope = self.rope_decoupled(k_rope, offset=past_len, position_ids=position_ids)
 
-        # Cache the latent (not full K/V) — this is the KV bandwidth saving
-        # For the preallocated cache path, we store latent in K slot and
-        # derive V from the same latent (GTA-style tying in latent space).
-        gate = torch.sigmoid(self.compression_gate).to(x.dtype)
-
-        # Up-project latent to full K and V
-        k_full = self.k_up_proj(kv_latent).view(
+        # Up-project latent to semantic K (nope part) and full V
+        k_nope = self.k_up_proj(kv_latent).view(
             B, T, self.n_kv_heads, hd).transpose(1, 2)
+        k_nope = k_nope[..., :self.nope_dim]  # slice to semantic dims only
         v_full = self.v_up_proj(kv_latent).view(
             B, T, self.n_kv_heads, hd).transpose(1, 2)
 
-        # Blend: gate=0 → full up-projected KV; gate=1 → pure latent path
-        # At gate=0, this is identity (lossless). As gate opens, the model
-        # learns to rely on the compressed latent.
+        # Concatenate [k_nope; k_rope] for full head_dim attention
+        k_nope_rep = self._repeat_kv(k_nope)  # (B, n_heads, T, nope_dim)
+        k_attn = torch.cat([k_nope_rep, k_rope], dim=-1)  # (B, n_heads, T, hd)
+        q_attn = torch.cat([q_nope, q_rope], dim=-1)      # (B, n_heads, T, hd)
+        v = self._repeat_kv(v_full)
+
+        # Cache: store reconstructed K (nope+rope) and V for compatibility
+        # In production, would cache only latent + k_rope (much smaller).
         if preallocated_cache is not None:
-            # Store full KV in cache (for compatibility with PreAllocatedKVCache)
-            # In a production GLA, we'd store only the latent and up-project on read.
-            preallocated_cache.append(layer_idx, k_full, v_full)
-            k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
+            preallocated_cache.append(layer_idx, k_attn, v)
+            k_attn = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
             v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
         else:
             if past_key_value is not None:
-                k_full = torch.cat([past_key_value[0], k_full], dim=-2)
-                v_full = torch.cat([past_key_value[1], v_full], dim=-2)
+                k_attn = torch.cat([past_key_value[0], k_attn], dim=-2)
+                v = torch.cat([past_key_value[1], v], dim=-2)
 
-        new_kv = (k_full, v_full) if use_cache else None
-        k = self._repeat_kv(k_full)
-        v = self._repeat_kv(v_full)
+        new_kv = (k_attn, v) if use_cache else None
 
-        # Append decoupled RoPE key to K (concatenated, MLA-style)
-        # k_rope is (B, n_heads, T, hd), k is (B, n_heads, S, hd)
-        # For simplicity in the warm-start path, we use standard attention
-        # without the decoupled RoPE concat (k_rope_proj is zero at init).
         if attention_bias is not None:
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
+            out = F.scaled_dot_product_attention(q_attn, k_attn, v, attn_mask=attention_bias)
         else:
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=T > 1)
+            out = F.scaled_dot_product_attention(q_attn, k_attn, v, is_causal=T > 1)
         out = out.transpose(1, 2).reshape(B, T, C)
         return self.out_proj(out), new_kv
 

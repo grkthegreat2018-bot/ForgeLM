@@ -12,14 +12,18 @@ Training modes:
 1. Standard MTP: predict tokens t+1, t+2, ..., t+N from hidden state at t
 2. L-MTP (leap): predict t+1, t+3, t+5 (non-adjacent, captures longer dependencies)
 3. Curriculum: gradually increase N during training (small models benefit most)
+4. MTP-D: gradient-detached self-distillation — aligns MTP head logits toward
+   the main head's logits with stop-gradient on the main head, preventing
+   MTP training from degrading the main output head (zero negative interference).
 
 Usage:
     from research.decoding.mtp import MTPHead, MTPTrainer
 
     # Add MTP head to model
     head = MTPHead(d_model=1024, vocab_size=151665, n_predict=4)
-    # Train
-    trainer = MTPTrainer(model, head, n_predict=4, curriculum=True)
+    # Train with MTP-D distillation (prevents MTP from degrading main head)
+    trainer = MTPTrainer(model, head, n_predict=4, curriculum=True,
+                         mtp_d_weight=0.3)
     loss = trainer.compute_loss(input_ids)
 """
 from typing import Optional
@@ -131,7 +135,19 @@ class MTPTrainer:
 
     def __init__(self, model, mtp_head, n_predict=4,
                  curriculum=True, curriculum_steps=1000,
-                 mtp_weight=0.5, leap=False):
+                 mtp_weight=0.5, leap=False,
+                 mtp_d_weight: float = 0.0,
+                 mtp_d_temperature: float = 2.0):
+        """Initialize MTP trainer.
+
+        Args:
+            mtp_d_weight: weight of MTP-D distillation loss (default 0 = disabled).
+                When >0, adds KL(MTP_logits || main_head_logits.detach()) to align
+                MTP heads toward the main head's distribution. Stop-gradient on the
+                main head ensures zero negative interference with the primary NTP loss.
+            mtp_d_temperature: temperature for softmax in distillation (default 2.0).
+                Higher temperature softens the distribution, making it easier to learn.
+        """
         self.model = model
         self.mtp_head = mtp_head
         self.n_predict = n_predict
@@ -139,6 +155,8 @@ class MTPTrainer:
         self.curriculum_steps = curriculum_steps
         self.mtp_weight = mtp_weight
         self.leap = leap
+        self.mtp_d_weight = mtp_d_weight
+        self.mtp_d_temperature = mtp_d_temperature
         self.current_step = 0
         self.current_n = 1 if curriculum else n_predict
 
@@ -207,6 +225,7 @@ class MTPTrainer:
         # MTP loss: predict tokens t+2, t+3, ..., t+N from hidden at t.
         mtp_logits_list = self.mtp_head(mtp_input)  # list of (B, T, vocab)
         mtp_loss = 0.0
+        mtp_d_loss = 0.0  # MTP-D distillation loss
         n_active = min(self.current_n, len(mtp_logits_list))
 
         for k in range(n_active):
@@ -228,14 +247,48 @@ class MTPTrainer:
             )
             mtp_loss = mtp_loss + loss_k
 
+            # MTP-D: distill main head's logits into MTP head (stop-grad on main).
+            # Aligns MTP head k's distribution at position t with the main head's
+            # distribution at position t+offset-1 (which predicts the same target).
+            # Stop-gradient on the teacher (main head) ensures zero interference
+            # with the primary NTP objective.
+            if self.mtp_d_weight > 0:
+                # Teacher: main head logits at position (t + offset - 1), predicting
+                # the same target token as MTP head k at position t.
+                teacher_logits = ntp_logits[:, offset - 1:ntp_logits.size(1) - 1, :].contiguous()
+                teacher_logits = teacher_logits[:, :mtp_logits_k.shape[1], :].contiguous()
+
+                if teacher_logits.shape[1] == mtp_logits_k.shape[1]:
+                    T_d = self.mtp_d_temperature
+                    # KL(student || teacher.detach()) — student learns teacher's distribution
+                    student_log_probs = F.log_softmax(mtp_logits_k / T_d, dim=-1)
+                    teacher_probs = F.softmax(teacher_logits.detach() / T_d, dim=-1)
+                    # KL = sum(teacher * (log(teacher) - log(student)))
+                    # = cross_entropy(student, teacher) - entropy(teacher)
+                    # We use the cross-entropy part (entropy is constant w.r.t. student)
+                    kl = F.kl_div(
+                        student_log_probs.reshape(-1, student_log_probs.size(-1)),
+                        teacher_probs.reshape(-1, teacher_probs.size(-1)),
+                        reduction="batchmean",
+                    ) * (T_d * T_d)  # scale by T^2 as in Hinton et al.
+                    mtp_d_loss = mtp_d_loss + kl
+
         if n_active > 0:
             mtp_loss = mtp_loss / n_active  # average over heads
+            if self.mtp_d_weight > 0:
+                mtp_d_loss = mtp_d_loss / n_active
 
         total_loss = ntp_loss + self.mtp_weight * mtp_loss
+        if self.mtp_d_weight > 0:
+            total_loss = total_loss + self.mtp_d_weight * mtp_d_loss
 
-        return total_loss, {"ntp_loss": ntp_loss.item(),
-                           "mtp_loss": float(mtp_loss) if isinstance(mtp_loss, float) else mtp_loss.item(),
-                           "current_n": self.current_n}
+        metrics = {"ntp_loss": ntp_loss.item(),
+                   "mtp_loss": float(mtp_loss) if isinstance(mtp_loss, float) else mtp_loss.item(),
+                   "current_n": self.current_n}
+        if self.mtp_d_weight > 0:
+            metrics["mtp_d_loss"] = float(mtp_d_loss) if isinstance(mtp_d_loss, float) else mtp_d_loss.item()
+
+        return total_loss, metrics
 
     def stats(self):
         return {"step": self.current_step, "current_n": self.current_n,

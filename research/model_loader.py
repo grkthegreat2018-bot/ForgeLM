@@ -1045,7 +1045,16 @@ def _maybe_fuse_qkv(config: ModelConfig, attn: nn.Module) -> nn.Module:
 
 def build_ffn(config: ModelConfig) -> nn.Module:
     if config.ffn_type == "swiglu":
-        ffn = SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
+        # Smooth-SwiGLU: per-channel RMSNorm on gate output for FP8 stability.
+        # When use_smooth_swiglu=True, uses SmoothSwiGLUFFN (bounds SiLU outliers).
+        # Otherwise standard SwiGLUFFN.
+        if getattr(config, 'use_smooth_swiglu', False):
+            from research.training.optim.fp8_training import SmoothSwiGLUFFN
+            ffn = SmoothSwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None))
+        else:
+            ffn = SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
         if getattr(config, 'use_bitnet', False):
             # BitNet b1.58 QAT: swap linear layers for ternary-STE versions
             # (learned per-layer scales; ternary only in training by default).
@@ -1233,8 +1242,33 @@ class ConfigurableResearchLLM(nn.Module):
         noisy_embeds: torch.Tensor | None = None,
         modulation: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[KVCache | None]]:
-        # Compute position_ids and attention_bias ONCE from attention_mask.
-        # These are shared across all 28 layers to avoid per-layer allocation (CPU spike fix).
+        # FP8 training autocast: wrap forward in FP8 for 2x throughput on
+        # Hopper/Blackwell. Falls back to BF16 on older GPUs.
+        if getattr(self.config, 'use_fp8_training', False):
+            from research.training.optim.fp8_training import enable_fp8_training
+            with enable_fp8_training():
+                return self._forward_impl(
+                    idx, targets, past_key_values, use_cache, return_hidden,
+                    preallocated_cache, attention_mask, layer_indices,
+                    noisy_embeds, modulation)
+        return self._forward_impl(
+            idx, targets, past_key_values, use_cache, return_hidden,
+            preallocated_cache, attention_mask, layer_indices,
+            noisy_embeds, modulation)
+
+    def _forward_impl(
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        past_key_values: list[KVCache | None] | None = None,
+        use_cache: bool = False,
+        return_hidden: bool = False,
+        preallocated_cache: Optional["PreAllocatedKVCache"] = None,
+        attention_mask: torch.Tensor | None = None,
+        layer_indices: list[int] | None = None,
+        noisy_embeds: torch.Tensor | None = None,
+        modulation: torch.Tensor | None = None,
+    ):
         position_ids = None
         attention_bias = None  # additive mask for SDPA: (B, 1, T, total_len)
         if attention_mask is not None:
@@ -1850,6 +1884,11 @@ class ModelLoader:
         if sig not in ModelLoader._model_cache:
             t_arch = time.time()
             model = ConfigurableResearchLLM(config).to(device)
+            # μScaling: unit-variance init for FP8 training stability.
+            # Only applies to fresh models (not checkpoint loading).
+            if getattr(config, 'use_mu_scaling', False):
+                from research.training.optim.fp8_training import mu_scale_init
+                mu_scale_init(model, verbose=True)
             # Cache on CPU to avoid VRAM duplication on deepcopy
             ModelLoader._model_cache[sig] = model.cpu()
             ModelLoader._model_cache.move_to_end(sig)

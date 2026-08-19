@@ -100,6 +100,17 @@ class ModelConfig:
     use_w8a8: bool = False
     w8a8_mode: str = "int8"  # "int8" or "fp8"
 
+    # === FP8 Training (Blackwell/Hopper) ===
+    # Smooth-SwiGLU: per-channel RMSNorm on FFN gate output to prevent FP8
+    # overflow from SiLU outliers. Required for stable FP8 training.
+    use_smooth_swiglu: bool = False
+    # μScaling: unit-variance weight init (std=1/sqrt(d_in)) keeps all tensors
+    # within FP8 range without dynamic scaling overhead. Applied at init only.
+    use_mu_scaling: bool = False
+    # FP8 autocast: enables torch.autocast with FP8 (E4M3) for forward pass.
+    # Requires SM90+ (Hopper/Blackwell). Falls back to BF16 on older GPUs.
+    use_fp8_training: bool = False
+
     # === Training ===
     dropout: float = 0.0
     device: str = "cpu"
