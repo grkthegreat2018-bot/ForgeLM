@@ -7,7 +7,7 @@ state_dict match with no runtime conversion needed.
 Usage:
     python -m research.architecture.port_to_v3 \\
         --input research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors \\
-        --output research/checkpoints/ForgeLM_V3_Base.safetensors
+        --output research/checkpoints/forgelm_v7_Base.safetensors
 """
 import argparse
 import os
@@ -25,7 +25,7 @@ from research.model_loader import ConfigurableResearchLLM
 from safetensors.torch import load_file as load_safetensors
 
 
-def port_to_v3(input_path: str, output_path: str, config_name: str = "forgelm_v3"):
+def port_to_v3(input_path: str, output_path: str, config_name: str = "forgelm_v7"):
     """Port base LFM2.5 weights into V3 architecture checkpoint.
 
     1. Build blank V3 model (diff-attn, BitNet, TITAN, MoD initialized)
@@ -131,7 +131,7 @@ if __name__ == "__main__":
                         help="Input LFM2.5 safetensors checkpoint")
     parser.add_argument("--output", type=str, required=True,
                         help="Output V3 safetensors checkpoint")
-    parser.add_argument("--config", type=str, default="forgelm_v3",
+    parser.add_argument("--config", type=str, default="forgelm_v7",
                         help="V3 config preset name")
     args = parser.parse_args()
 

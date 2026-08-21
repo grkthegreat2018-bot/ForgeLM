@@ -121,7 +121,9 @@ class VRAMManager:
     def empty_cache(self) -> None:
         """Release cached memory back to OS."""
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     def force_cleanup(self) -> None:
         """Aggressive cleanup: GC + empty cache + reset peak.

@@ -61,6 +61,14 @@ from research.config import get_config
 from research.model_loader import ModelLoader
 from research.runtime.task_logger import task_scope
 from research.tokenizer_cache import get_tokenizer
+from research.training.data.efficient_pipeline import (
+    DiskTokenCache,
+    AsyncPrefetcher,
+    PackedSequenceDataset,
+    ModelDataCache,
+    get_disk_cache,
+    get_model_cache,
+)
 from research.training.training_utils import (
     add_safeguard_args,
     configure_optimizer,
@@ -68,6 +76,7 @@ from research.training.training_utils import (
     grad_accum_for_effective_batch,
     has_nan_params,
     init_ema,
+    oom_guard,
     update_ema,
     patch_triton_cache_for_windows,
     ram_exceeded,
@@ -76,6 +85,25 @@ from research.training.training_utils import (
     write_heartbeat,
     write_status_json,
 )
+
+_ANCHOR_CACHE: OrderedDict[tuple[str, float], dict] = OrderedDict()
+_ANCHOR_CACHE_MAX = 8  # anchor checkpoints are large; keep only recent few
+
+
+def _load_anchor_cached(path: str) -> dict:
+    """Load anchor checkpoint with module-level LRU caching by (path, mtime)."""
+    import os
+    from safetensors.torch import load_file as safetensors_load
+    mtime = os.path.getmtime(path)
+    key = (path, mtime)
+    if key not in _ANCHOR_CACHE:
+        _ANCHOR_CACHE[key] = safetensors_load(path)
+        while len(_ANCHOR_CACHE) > _ANCHOR_CACHE_MAX:
+            _ANCHOR_CACHE.popitem(last=False)
+    else:
+        _ANCHOR_CACHE.move_to_end(key)
+    return _ANCHOR_CACHE[key]
+
 
 # Special token ids from the LFM2.5 tokenizer (Qwen-style).
 IM_START = 6
@@ -222,38 +250,39 @@ def load_examples(paths: list[str]) -> list[dict]:
         n_loaded = 0
         n_skipped = 0
         with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+            content = f.read()
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                n_skipped += 1
+                continue
+            # Normalize: either messages list or prompt/response.
+            if "messages" in obj and isinstance(obj["messages"], list):
+                key = json.dumps(obj["messages"], ensure_ascii=False, sort_keys=True)
+                if key in seen:
                     continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    n_skipped += 1
+                seen.add(key)
+                ex = {"type": "multi_turn", "messages": obj["messages"]}
+                # Carry reward for reward-weighted SFT (if present)
+                if "reward" in obj:
+                    ex["reward"] = float(obj["reward"])
+                examples.append(ex)
+                n_loaded += 1
+            elif "prompt" in obj and "response" in obj:
+                key = obj["prompt"][:200]
+                if key in seen:
                     continue
-                # Normalize: either messages list or prompt/response.
-                if "messages" in obj and isinstance(obj["messages"], list):
-                    key = json.dumps(obj["messages"], ensure_ascii=False, sort_keys=True)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    ex = {"type": "multi_turn", "messages": obj["messages"]}
-                    # Carry reward for reward-weighted SFT (if present)
-                    if "reward" in obj:
-                        ex["reward"] = float(obj["reward"])
-                    examples.append(ex)
-                    n_loaded += 1
-                elif "prompt" in obj and "response" in obj:
-                    key = obj["prompt"][:200]
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    examples.append({"type": "single_turn",
-                                     "prompt": obj["prompt"],
-                                     "response": obj["response"]})
-                    n_loaded += 1
-                else:
-                    n_skipped += 1
+                seen.add(key)
+                examples.append({"type": "single_turn",
+                                 "prompt": obj["prompt"],
+                                 "response": obj["response"]})
+                n_loaded += 1
+            else:
+                n_skipped += 1
         print(f"  {path}: {n_loaded} loaded, {n_skipped} skipped")
     return examples
 
@@ -332,38 +361,65 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
 
 
 # Tokenization cache — avoids re-tokenizing repeated prompts (2-3x speedup)
-# Bounded LRU cache: evicts least recently used entries when exceeding _CACHE_MAX.
+# Uses a tiered cache: in-memory LRU + disk-backed cache (DiskTokenCache).
+# The disk cache persists across runs, eliminating re-tokenization on restart.
 #
 # NOTE: This cache is distinct from research/tokenizer_cache.py.
 #   - tokenizer_cache.py caches the *tokenizer object* (singleton, lru_cache
 #     maxsize=8) to avoid the 4.3s AutoTokenizer load overhead across call sites.
-#   - This cache (_tokenize_cache) caches *tokenization results* (text→token IDs,
-#     OrderedDict maxsize=10000) to avoid re-encoding repeated training texts.
-#   They serve different purposes and should NOT be consolidated.
+#   - This cache (_tokenize_cache) caches *tokenization results* (text→token IDs)
+#     to avoid re-encoding repeated training texts, with disk persistence.
 _tokenize_cache: OrderedDict[str, list[int]] = OrderedDict()
-_CACHE_MAX = 10000  # max 10K entries (~50MB typical)
+_CACHE_MAX = 10000  # max 10K entries in memory (~50MB typical)
+_disk_tok_cache: DiskTokenCache | None = None
+
+
+def _get_disk_tok_cache() -> DiskTokenCache:
+    """Get the global disk tokenization cache (lazy init)."""
+    global _disk_tok_cache
+    if _disk_tok_cache is None:
+        _disk_tok_cache = DiskTokenCache()
+    return _disk_tok_cache
+
 
 def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None:
-    """Tokenize text with caching. Returns None on error.
+    """Tokenize text with tiered caching (memory LRU + disk). Returns None on error.
 
-    Uses a bounded OrderedDict with proper LRU eviction (move_to_end on
-    access, popitem(last=False) for eviction) to prevent unbounded RAM growth.
+    Cache hierarchy:
+      1. In-memory LRU (fastest, bounded to _CACHE_MAX entries)
+      2. Disk-backed cache (persists across runs, memory-mapped reads)
+      3. Tokenizer (slowest, result cached in both layers)
     """
+    # Layer 1: in-memory LRU
     if text in _tokenize_cache:
-        # Move to end (most recently used)
         _tokenize_cache.move_to_end(text)
         return _tokenize_cache[text]
+
+    # Layer 2: disk cache
+    disk = _get_disk_tok_cache()
+    cached = disk.get(text, getattr(tokenizer, "_tokenizer_hash", "default"))
+    if cached is not None:
+        # Promote to in-memory cache
+        if len(text) < 10000:
+            while len(_tokenize_cache) >= _CACHE_MAX:
+                _tokenize_cache.popitem(last=False)
+            _tokenize_cache[text] = cached
+        return cached
+
+    # Layer 3: tokenize and cache in both layers
     try:
         enc = tokenizer(text, add_special_tokens=False, return_tensors=None)
         ids = enc["input_ids"] if isinstance(enc, dict) else enc
         if not isinstance(ids, list):
             ids = list(ids)
-        # Only cache if reasonable size (don't blow up memory)
-        if len(text) < 10000:
-            # Evict least recently used entries if cache is full
-            while len(_tokenize_cache) >= _CACHE_MAX:
-                _tokenize_cache.popitem(last=False)
-            _tokenize_cache[text] = ids
+        if len(text) < 50000:
+            # In-memory cache
+            if len(text) < 10000:
+                while len(_tokenize_cache) >= _CACHE_MAX:
+                    _tokenize_cache.popitem(last=False)
+                _tokenize_cache[text] = ids
+            # Disk cache (persists across runs)
+            disk.put(text, ids, getattr(tokenizer, "_tokenizer_hash", "default"))
         return ids
     except Exception:
         return None
@@ -484,7 +540,11 @@ def compute_loss(model, input_ids, labels, attn_mask,
         # correct chunked CE variant.
         if hasattr(model, 'config') and hasattr(model.config, 'entropy_alpha'):
             model.config.entropy_alpha = entropy_alpha
-        out = model(input_ids, attention_mask=attn_mask, targets=shift_labels)
+        with torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16,
+            enabled=input_ids.is_cuda,
+        ):
+            out = model(input_ids, attention_mask=attn_mask, targets=shift_labels)
         if isinstance(out, tuple):
             loss = out[1] if out[1] is not None else out[0]
         else:
@@ -504,7 +564,11 @@ def compute_loss(model, input_ids, labels, attn_mask,
     # ── Manual path: full logits for sample weighting ──
     # Only used when sample_weights is provided (requires per-example control).
     # Forward — compute logits manually for per-position control.
-    out = model(input_ids, attention_mask=attn_mask)
+    with torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16,
+        enabled=input_ids.is_cuda,
+    ):
+        out = model(input_ids, attention_mask=attn_mask)
     logits = out[0] if isinstance(out, tuple) else out  # [B, T, V]
     if logits is None:
         raise RuntimeError("model returned None logits; pass targets manually")
@@ -604,7 +668,7 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
     """
     weights = torch.zeros(len(dataset), dtype=torch.float32, device=device)
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(0, len(dataset), batch_size):
             batch = [dataset[j] for j in range(i, min(i + batch_size, len(dataset)))]
             input_ids, labels, attn_mask, _rw = collate_batch(batch, pad_id, device)
@@ -627,8 +691,20 @@ def main():
                    help="Data format: 'jsonl' (default) or 'parquet'. "
                         "When 'parquet', files are read via ParquetDataset "
                         "(memory-mapped, ZSTD-compressed).")
-    p.add_argument("--config", default="forgelm_v3",
-                   help="Model config name (default: lfm25_1.2b)")
+    # ── Data pipeline: disk cache, packed sequences, async prefetch ──
+    p.add_argument("--disk-cache", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use disk-backed tokenization cache (persists across runs, "
+                        "eliminates re-tokenization on restart). Default: True.")
+    p.add_argument("--pack-sequences", action=argparse.BooleanOptionalAction, default=True,
+                   help="Pack variable-length examples into fixed-length sequences "
+                        "(Llama-3 style, eliminates 30-50% padding waste). Default: True.")
+    p.add_argument("--async-prefetch", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use async background prefetcher for data loading (2-3x throughput "
+                        "on I/O-bound workloads). Default: True.")
+    p.add_argument("--prefetch-count", type=int, default=4,
+                   help="Number of batches to prefetch ahead (default 4).")
+    p.add_argument("--config", default="forgelm_v7_moe",
+                   help="Model config name (default: forgelm_v7_moe)")
     p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors",
                    help="Base checkpoint to fine-tune from")
     p.add_argument("--save", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft.safetensors",
@@ -643,15 +719,16 @@ def main():
     p.add_argument("--warmup-steps", type=int, default=20)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--optimizer", default="fused", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona"])
+    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload"])
     p.add_argument("--grad-mixup", type=int, default=1,
                    help="Grad mixup: average gradients from N batches before optimizer step "
                         "(1=disabled, 2=two-batch, 3=three-batch). "
                         "Tested: 3-way mixup + muon_sf = 1.25x better convergence vs AdamW. "
                         "Cost: N× forward+backward per step, but fewer steps needed.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--grad-checkpoint", action="store_true",
-                   help="Enable gradient checkpointing to save VRAM")
+    p.add_argument("--grad-checkpoint", action=argparse.BooleanOptionalAction, default=True,
+                   help="Enable gradient checkpointing to save VRAM (default: True, "
+                        "use --no-grad-checkpoint to disable)")
     p.add_argument("--checkpoint-strategy", default="all",
                    choices=["all", "ffn", "attn", "none", "lazy", "optimal"],
                    help="Selective gradient checkpointing: 'ffn' recomputes only "
@@ -714,14 +791,16 @@ def main():
                    help="Enable EMA (Exponential Moving Average) shadow weights")
     p.add_argument("--ema-decay", type=float, default=0.999,
                    help="EMA decay rate (default 0.999)")
-    p.add_argument("--lora", action="store_true",
-                   help="Use LoRA (PEFT) instead of full fine-tuning. Faster, less VRAM.")
-    p.add_argument("--lora-r", type=int, default=16, help="LoRA rank (default 16)")
-    p.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha (default 32)")
-    p.add_argument("--bitnet-everywhere", action="store_true",
+    p.add_argument("--lora", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use LoRA (PEFT) instead of full fine-tuning. Faster, less VRAM. "
+                        "(default: True, use --no-lora to disable)")
+    p.add_argument("--lora-r", type=int, default=32, help="LoRA rank (default 32)")
+    p.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha (default 64)")
+    p.add_argument("--bitnet-everywhere", action=argparse.BooleanOptionalAction, default=True,
                    help="Convert ALL nn.Linear to BitNetLinear (ternary b1.58 QAT). "
                         "No NF4/bnb needed — BitNet IS the quantization (1.58 bits). "
-                        "Validated on V3 1.2B: 2.39x vs AdamW, 6.32GB VRAM.")
+                        "Validated on V3 1.2B: 2.39x vs AdamW, 6.32GB VRAM. "
+                        "(default: True, use --no-bitnet-everywhere to disable)")
     p.add_argument("--manual-lora", action="store_true",
                    help="Use manual LoRA adapters (BitNet-compatible, unlike PEFT). "
                         "Works with BitNetLinear. Auto-enabled with --bitnet-everywhere.")
@@ -735,6 +814,11 @@ def main():
                         "to fine-tune ALL layers together. 0=disabled.")
     p.add_argument("--compile", action="store_true",
                    help="Use torch.compile on the model (experimental on Windows)")
+    p.add_argument("--use-forge-engine", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use ForgeEngine for model loading (provides unified inference engine "
+                        "with all activation features, crash recovery, KeyStack auto-detection). "
+                        "The engine.model is used for training; engine is used for validation. "
+                        "Default: True (use --no-use-forge-engine for legacy ModelLoader path).")
     # ── Anti-regression techniques ──
     p.add_argument("--entropy-alpha", type=float, default=0.5,
                    help="Token entropy weighting alpha (WeFT/VCORE 2025). "
@@ -815,6 +899,11 @@ def main():
     tokenizer = get_tokenizer()
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
+    # ── Disk tokenization cache info ──
+    if args.disk_cache:
+        cache = _get_disk_tok_cache()
+        print(f"Disk tokenization cache: {cache.stats()}")
+
     if pre_tokenized is not None:
         # Pre-tokenized parquet: skip tokenisation entirely.
         dataset = pre_tokenized
@@ -827,7 +916,7 @@ def main():
             print("No usable examples. Exiting.")
             return
         print(f"Total examples: {len(examples)}")
-        print("Tokenizing...")
+        print("Tokenizing (with disk cache)...")
         dataset = []
         n_dropped = 0
         for ex in examples:
@@ -838,9 +927,23 @@ def main():
             dataset.extend(toks)
         print(f"Tokenized: {len(dataset)} usable examples "
               f"(from {len(examples)} conversations, {n_dropped} dropped)")
+        if args.disk_cache:
+            print(f"  Disk cache after tokenization: {_get_disk_tok_cache().stats()}")
     if not dataset:
         print("No examples after tokenization. Exiting.")
         return
+
+    # ── Packed sequences (Llama-3 style, eliminates 30-50% padding) ──
+    if args.pack_sequences:
+        packed_ds = PackedSequenceDataset(dataset, seq_len=args.seq_len,
+                                          pack_examples=True, pad_id=pad_id)
+        print(f"Packed sequences: {packed_ds.stats()}")
+        dataset = [packed_ds[i] for i in range(len(packed_ds))]
+        # Convert packed dicts to the format expected by collate_batch
+        dataset = [{"input_ids": ex["input_ids"].tolist(),
+                     "labels": ex["labels"].tolist(),
+                     "n_comp": ex["n_comp"],
+                     "reward": 1.0} for ex in dataset]
 
     # ── Validation split ──
     val_dataset = None
@@ -874,7 +977,26 @@ def main():
         print(f"MTP auxiliary loss enabled (weight={args.mtp_weight})")
 
     print(f"Building model ({args.config}) from {args.checkpoint}...")
-    model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint, dtype=dtype)
+    # Use ForgeEngine for model loading (unified inference engine with all
+    # activation features, crash recovery, KeyStack auto-detection).
+    # The engine.model is used for training; engine is used for validation/eval.
+    forge_engine = None
+    if args.use_forge_engine:
+        try:
+            from research.inference.forge_engine import ForgeEngine
+            print("  Loading via ForgeEngine (auto_activate=False for training)...")
+            forge_engine = ForgeEngine.from_checkpoint(
+                args.checkpoint, config_name=args.config,
+                device=device, auto_activate=False)
+            model = forge_engine.model
+            print(f"  ForgeEngine loaded: {type(model).__name__}, "
+                  f"KeyStack features: {forge_engine.keystack_features}")
+        except Exception as e:
+            print(f"  ForgeEngine load failed ({e}), falling back to ModelLoader")
+            forge_engine = None
+            model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint, dtype=dtype)
+    else:
+        model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint, dtype=dtype)
     model.to(device).train()
 
     # ── Advanced normalization: SeeDNorm or DyT ──
@@ -989,10 +1111,19 @@ def main():
     # ── torch.compile (experimental) ──
     if args.compile:
         try:
-            model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+            from research.paths import TORCH_CACHE_DIR
+            model = torch.compile(model, mode="reduce-overhead", dynamic=True,
+                                  cache_dir=str(TORCH_CACHE_DIR / "inductor"))
             print("torch.compile enabled (reduce-overhead)")
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without")
+
+    # Auto-default to CPUAdamW on small GPUs (<15GB) if user didn't override
+    if args.optimizer == "adamw" and torch.cuda.is_available():
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        if total_vram_gb < 15.0:
+            print(f"  [Auto] GPU has {total_vram_gb:.1f}GB VRAM — switching to CPUAdamW optimizer")
+            args.optimizer = "cpu_offload"
 
     optimizer = configure_optimizer(model, args.lr, args.weight_decay, optimizer_name=args.optimizer)
 
@@ -1003,7 +1134,7 @@ def main():
     if args.anchor:
         print(f"Loading anchor checkpoint for L2-SP: {args.anchor}")
         from safetensors.torch import load_file as safetensors_load
-        anchor_sd = safetensors_load(args.anchor)
+        anchor_sd = _load_anchor_cached(args.anchor)
         # Map anchor tensors to model device; match by parameter name.
         anchor_named_params = {}
         model_named = dict(model.named_parameters())
@@ -1062,13 +1193,32 @@ def main():
 
     print(f"Save: {args.save}")
 
+    # ── Async prefetcher info ──
+    if args.async_prefetch:
+        print(f"Async prefetcher: enabled (prefetch_count={args.prefetch_count})")
+
     aborted = False
     with task_scope("sft") as log:
         step = 0
         accum_count = 0
         indices = list(range(len(dataset)))
+
+        # ── Async prefetcher: pre-collate batches in background ──
+        # The prefetcher runs a background thread that pre-loads and collates
+        # the next N batches while the GPU processes the current one.
+        # We use it to pre-collate batches, then consume them in the main loop.
+        prefetcher = None
+        if args.async_prefetch and not args.augment:
+            prefetcher = AsyncPrefetcher(
+                dataset, batch_size=args.batch_size, device=device,
+                collate_fn=collate_batch, prefetch_count=args.prefetch_count,
+                shuffle=True, pad_id=pad_id)
+
         for epoch in range(100):
             random.shuffle(indices)
+            # If using prefetcher, get batches from it; otherwise use indices
+            if prefetcher is not None:
+                batch_iter = iter(prefetcher)
             for batch_start in range(0, len(indices), args.batch_size):
                 if step >= args.max_steps:
                     break
@@ -1101,9 +1251,23 @@ def main():
                     gc.collect()
 
                 batch_idx = indices[batch_start:batch_start + args.batch_size]
-                batch = [dataset[i] for i in batch_idx]
-                with log.time_phase("data_load"):
-                    input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
+                if prefetcher is not None:
+                    # Async prefetcher: batch is already collated and on device
+                    try:
+                        input_ids, labels, attn_mask, reward_weights = next(batch_iter)
+                    except StopIteration:
+                        break  # epoch exhausted
+                else:
+                    # Manual batching fallback (no DataLoader).
+                    # collate_batch already uses pin_memory for GPU transfers.
+                    # Future improvement: wrap dataset in torch.utils.data.DataLoader
+                    # with num_workers=4, pin_memory=True, prefetch_factor=4 for
+                    # multi-process data loading. The AsyncPrefetcher (enabled by
+                    # default via --async-prefetch) provides similar throughput
+                    # using a single background thread.
+                    batch = [dataset[i] for i in batch_idx]
+                    with log.time_phase("data_load"):
+                        input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
 
                 # ── Training-time data augmentation ──
                 if args.augment:
@@ -1159,21 +1323,26 @@ def main():
 
                 # Forward + backward (accumulate gradients).
                 # Token entropy weighting (WeFT/VCORE 2025) applied inside compute_loss.
-                with log.time_phase("forward"):
-                    ce_loss = compute_loss(model, input_ids, labels, attn_mask,
-                                           entropy_alpha=args.entropy_alpha,
-                                           sample_weights=sw)
+                with oom_guard(str(device), label="sft_fwd") as safe:
+                    with log.time_phase("forward"):
+                        ce_loss = compute_loss(model, input_ids, labels, attn_mask,
+                                               entropy_alpha=args.entropy_alpha,
+                                               sample_weights=sw)
 
-                # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
-                # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
-                if anchor_named_params is not None:
-                    l2_sp = compute_l2_sp_loss(model, anchor_named_params, args.l2_lambda)
-                    loss = ce_loss + l2_sp
-                else:
-                    loss = ce_loss
+                    # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
+                    # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
+                    if anchor_named_params is not None:
+                        l2_sp = compute_l2_sp_loss(model, anchor_named_params, args.l2_lambda)
+                        loss = ce_loss + l2_sp
+                    else:
+                        loss = ce_loss
 
-                with log.time_phase("backward"):
-                    (loss / grad_accum).backward()
+                    with log.time_phase("backward"):
+                        (loss / grad_accum).backward()
+                if safe.skipped:
+                    optimizer.zero_grad()
+                    accum_count = 0
+                    continue
                 accum_count += 1
                 last_loss = ce_loss.item()  # log CE only for comparability
 
@@ -1233,6 +1402,16 @@ def main():
                         g["lr"] = lr
                     optimizer.step()
                     optimizer.zero_grad()
+                    # DeepSeek-V3 aux-loss-free: update expert bias after step.
+                    try:
+                        from research.moe.moe import update_moe_biases, disable_dense_bypass
+                        update_moe_biases(model)
+                        # Disable dense_bypass after warmup so router activates.
+                        warmup_steps = getattr(cfg, 'moe_dense_bypass_warmup_steps', 0)
+                        if warmup_steps > 0 and step + 1 == warmup_steps:
+                            disable_dense_bypass(model)
+                    except Exception:
+                        pass  # no-op for dense models
                 accum_count = 0
 
                 # EMA update.
@@ -1242,7 +1421,8 @@ def main():
                 # Periodic save.
                 if args.save_every > 0 and step > 0 and step % args.save_every == 0:
                     ckpt = step_checkpoint_path(args.save, step)
-                    save_training_checkpoint(model, ckpt, optimizer=optimizer, step=step)
+                    save_training_checkpoint(model, ckpt, optimizer=optimizer,
+                                             ema_state=ema_state, step=step)
                     cleanup_step_checkpoints(args.save, args.keep_checkpoints)
 
                 # NaN check.
@@ -1270,9 +1450,9 @@ def main():
                 if val_dataset is not None and step > 0 and step % args.val_every == 0:
                     # Note: don't call model.eval() — BitNet eval mode uses fp32
                     # master weights which causes dtype mismatch with bf16 inputs.
-                    # torch.no_grad() is sufficient for validation.
+                    # torch.inference_mode() is sufficient for validation.
                     val_losses = []
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         n_val_batches = min(10, len(val_dataset) // args.batch_size)
                         for vi in range(n_val_batches):
                             vbatch = val_dataset[vi * args.batch_size:(vi + 1) * args.batch_size]
@@ -1311,7 +1491,8 @@ def main():
             elif args.lora and hasattr(model, "merge_and_unload"):
                 model = model.merge_and_unload()
                 print("Merged LoRA adapters into base model for standalone save.")
-            save_training_checkpoint(model, args.save, optimizer=optimizer, step=step,
+            save_training_checkpoint(model, args.save, optimizer=optimizer,
+                                     ema_state=ema_state, step=step,
                                      meta={"config": cfg.__dict__, "sft": True,
                                            "n_examples": len(dataset)})
             print(f"\nSaved SFT model to {args.save}")

@@ -10,6 +10,7 @@ ORPO loss (Hong et al. 2024):
     L = NLL(chosen) + lambda * log_odds_ratio_penalty(chosen, rejected)
 """
 import argparse
+import json
 import os
 import signal
 import sys
@@ -44,6 +45,7 @@ from research.training.training_utils import (
     configure_optimizer,
     get_lr,
     has_nan_params,
+    oom_guard,
     patch_triton_cache_for_windows,
     vram_exceeded,
     write_heartbeat,
@@ -265,6 +267,8 @@ def main():
     p.add_argument("--config", default="360m_mla")
     p.add_argument("--checkpoint", default="research/checkpoints/pretrained_llm.pt")
     p.add_argument("--dataset", default="trl-lib/ultrafeedback_binarized", help="HF preference dataset")
+    p.add_argument("--data", default="",
+                   help="Local JSONL file with {prompt, chosen, rejected} — overrides --dataset")
     p.add_argument("--split", default="train")
     p.add_argument("--max-samples", type=int, default=200)
     p.add_argument("--max-steps", type=int, default=50)
@@ -275,6 +279,8 @@ def main():
     p.add_argument("--beta", type=float, default=0.1)
     p.add_argument("--lambda-orpo", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=5e-7)
+    p.add_argument("--optimizer", default="bnb",
+                   help="Optimizer: cpu_offload (full precision on 12GB), bnb (8-bit), fused")
     p.add_argument("--save", default="research/checkpoints/dpo_llm.pt")
     # Self-rewarding args.
     p.add_argument("--self-reward-prompts", default=None,
@@ -313,7 +319,7 @@ def main():
         for p_ in ref_model.parameters():
             p_.requires_grad_(False)
 
-    optimizer = configure_optimizer(model, args.lr, cfg.weight_decay, "bnb")
+    optimizer = configure_optimizer(model, args.lr, cfg.weight_decay, args.optimizer)
 
     # Resume training state (optimizer + RNG + step) if requested.
     start_step = 0
@@ -325,9 +331,11 @@ def main():
 
     # Ctrl-C -> emergency checkpoint before dying.
     current = {"step": start_step}
+    _old_sigint = signal.getsignal(signal.SIGINT)
 
     def _sigint_handler(sig, frame):
         emergency_save(model, args.save, "interrupt", current["step"], optimizer=optimizer)
+        signal.signal(signal.SIGINT, _old_sigint)  # restore default before re-raising
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _sigint_handler)
@@ -339,9 +347,10 @@ def main():
         if args.self_reward_prompts:
             import json
             with open(args.self_reward_prompts) as f:
-                for line in f:
-                    d = loads(line)
-                    prompts.append(d.get("prompt", d.get("text", "")))
+                content = f.read()
+            for line in content.splitlines():
+                d = loads(line)
+                prompts.append(d.get("prompt", d.get("text", "")))
         else:
             # Default prompts for self-rewarding.
             default_prompts = [
@@ -370,33 +379,60 @@ def main():
         # Switch to ORPO for actual training (no reference model needed).
         args.method = "orpo"
     else:
-        print(f"Loading preference dataset {args.dataset}[{args.split}]...")
-        try:
-            ds = load_dataset(args.dataset, split=args.split)
-        except Exception as e:
-            print(f"Failed to load {args.dataset}: {e}")
-            print("Falling back to synthetic preference samples for smoke test.")
-            ds = None
-
-        samples = []
-        if ds is not None:
-            for i, row in enumerate(ds):
+        # ── Local JSONL data (from dpo_data_gen.py) takes priority ──
+        if args.data:
+            print(f"Loading local preference data: {args.data}")
+            samples = []
+            with open(args.data, encoding="utf-8") as f:
+                content = f.read()
+            for i, line in enumerate(content.splitlines()):
                 if i >= args.max_samples:
                     break
-                # TRL ultrafeedback_binarized schema: prompt, chosen (list[message]), rejected (list[message])
-                prompt = row.get("prompt", "")
-                chosen = row.get("chosen", "")
-                rejected = row.get("rejected", "")
-                # If chosen/rejected are message lists, extract the assistant content.
-                if isinstance(chosen, list):
-                    chosen = next((m["content"] for m in chosen if m.get("role") == "assistant"), "")
-                if isinstance(rejected, list):
-                    rejected = next((m["content"] for m in rejected if m.get("role") == "assistant"), "")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                prompt = obj.get("prompt", "")
+                chosen = obj.get("chosen", "")
+                rejected = obj.get("rejected", "")
                 if not prompt or not chosen or not rejected:
                     continue
-                samples.append(build_preference_sample(tokenizer, prompt, chosen, rejected,
-                                                      args.max_seq_length,
-                                                      use_chat_template=args.use_chat_template))
+                samples.append(build_preference_sample(
+                    tokenizer, prompt, chosen, rejected,
+                    args.max_seq_length,
+                    use_chat_template=args.use_chat_template))
+            print(f"  Loaded {len(samples)} preference pairs from local file")
+        else:
+            print(f"Loading preference dataset {args.dataset}[{args.split}]...")
+            try:
+                ds = load_dataset(args.dataset, split=args.split)
+            except Exception as e:
+                print(f"Failed to load {args.dataset}: {e}")
+                print("Falling back to synthetic preference samples for smoke test.")
+                ds = None
+
+            samples = []
+            if ds is not None:
+                for i, row in enumerate(ds):
+                    if i >= args.max_samples:
+                        break
+                    # TRL ultrafeedback_binarized schema: prompt, chosen (list[message]), rejected (list[message])
+                    prompt = row.get("prompt", "")
+                    chosen = row.get("chosen", "")
+                    rejected = row.get("rejected", "")
+                    # If chosen/rejected are message lists, extract the assistant content.
+                    if isinstance(chosen, list):
+                        chosen = next((m["content"] for m in chosen if m.get("role") == "assistant"), "")
+                    if isinstance(rejected, list):
+                        rejected = next((m["content"] for m in rejected if m.get("role") == "assistant"), "")
+                    if not prompt or not chosen or not rejected:
+                        continue
+                    samples.append(build_preference_sample(tokenizer, prompt, chosen, rejected,
+                                                          args.max_seq_length,
+                                                          use_chat_template=args.use_chat_template))
     if not samples:
         print("No usable samples; using synthetic smoke-test samples.")
         samples = [
@@ -426,25 +462,29 @@ def main():
                 chosen_ids = torch.tensor(s["chosen_ids"], dtype=torch.long)
                 rejected_ids = torch.tensor(s["rejected_ids"], dtype=torch.long)
 
-                chosen_logp = _logp_for_completion(model, chosen_ids, s["chosen_start"], device)
-                rejected_logp = _logp_for_completion(model, rejected_ids, s["rejected_start"], device)
+                with oom_guard(str(device), label="dpo_fwd") as safe:
+                    chosen_logp = _logp_for_completion(model, chosen_ids, s["chosen_start"], device)
+                    rejected_logp = _logp_for_completion(model, rejected_ids, s["rejected_start"], device)
 
-                if args.method == "dpo":
-                    with torch.no_grad():
-                        chosen_ref = _logp_for_completion(ref_model, chosen_ids, s["chosen_start"], device)
-                        rejected_ref = _logp_for_completion(ref_model, rejected_ids, s["rejected_start"], device)
-                    loss = dpo_loss(chosen_logp, rejected_logp, chosen_ref, rejected_ref, beta=args.beta)
-                else:
-                    # ORPO: per-token average logp + NLL on chosen.
-                    comp_len_c = max(1, len(s["chosen_ids"]) - s["chosen_start"])
-                    comp_len_r = max(1, len(s["rejected_ids"]) - s["rejected_start"])
-                    chosen_logp_pt = chosen_logp / comp_len_c
-                    rejected_logp_pt = rejected_logp / comp_len_r
-                    chosen_nll = -chosen_logp / comp_len_c
-                    loss = orpo_loss(chosen_logp_pt, rejected_logp_pt, chosen_nll, lam=args.lambda_orpo)
+                    if args.method == "dpo":
+                        with torch.no_grad():
+                            chosen_ref = _logp_for_completion(ref_model, chosen_ids, s["chosen_start"], device)
+                            rejected_ref = _logp_for_completion(ref_model, rejected_ids, s["rejected_start"], device)
+                        loss = dpo_loss(chosen_logp, rejected_logp, chosen_ref, rejected_ref, beta=args.beta)
+                    else:
+                        # ORPO: per-token average logp + NLL on chosen.
+                        comp_len_c = max(1, len(s["chosen_ids"]) - s["chosen_start"])
+                        comp_len_r = max(1, len(s["rejected_ids"]) - s["rejected_start"])
+                        chosen_logp_pt = chosen_logp / comp_len_c
+                        rejected_logp_pt = rejected_logp / comp_len_r
+                        chosen_nll = -chosen_logp / comp_len_c
+                        loss = orpo_loss(chosen_logp_pt, rejected_logp_pt, chosen_nll, lam=args.lambda_orpo)
 
-                optimizer.zero_grad()
-                loss.backward()
+                    optimizer.zero_grad()
+                    loss.backward()
+                if safe.skipped:
+                    optimizer.zero_grad()
+                    continue
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 lr = get_lr(step, args.max_steps, args.lr, args.lr * 0.1, max(1, args.max_steps // 10))
                 for g in optimizer.param_groups:

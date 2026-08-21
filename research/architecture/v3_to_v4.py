@@ -6,15 +6,15 @@ Pipeline:
   2. Forward GTAKey: set v_proj = k_proj (V=K warm start), add v_mix_gate=0.
   3. Keep all other weights unchanged (BitNet qscale, TITAN, MoD, MHC, AttnRes).
 
-The result is a V4 checkpoint that loads bit-exact into forgelm_v4 config.
+The result is a V4 checkpoint that loads bit-exact into forgelm_v7 config.
 
 Auto-detects n_heads, n_kv_heads, head_dim, and attention layers from
 checkpoint shapes — no hardcoded params needed.
 
 CLI:
   python -m research.architecture.v3_to_v4 \
-    --input research/checkpoints/ForgeLM_V3_SFT.safetensors \
-    --output research/checkpoints/ForgeLM_V4.safetensors
+    --input research/checkpoints/forgelm_v7_SFT.safetensors \
+    --output research/checkpoints/forgelm_v7.safetensors
 
 Programmatic (used by model_loader for auto-conversion at load time):
   from research.architecture.v3_to_v4 import convert_v3_to_v4_state

@@ -14,7 +14,7 @@ Usage:
     from research.inference.model_registry import ModelRegistry
 
     registry = ModelRegistry()
-    registry.register("forgelm-v3", checkpoint="...", config="forgelm_v3", vram_budget_gb=2.5)
+    registry.register("forgelm-v3", checkpoint="...", config="forgelm_v7", vram_budget_gb=2.5)
     registry.register("qwen2.5", checkpoint="...", config="qwen25_coder", vram_budget_gb=3.5)
 
     # Generate with either model — registry handles wake/sleep automatically
@@ -29,7 +29,7 @@ from typing import Optional
 
 import torch
 
-from research.inference.forge_engine import ForgeEngine
+from research.inference.forge_engine import ForgeEngine, _checkpoint_size_cache
 
 
 @dataclass
@@ -101,7 +101,10 @@ class ModelRegistry:
 
             # Calculate VRAM budget
             if vram_budget_gb <= 0:
-                ckpt_size = Path(checkpoint).stat().st_size
+                ckpt_size = _checkpoint_size_cache.get(checkpoint)
+                if ckpt_size is None:
+                    ckpt_size = Path(checkpoint).stat().st_size
+                    _checkpoint_size_cache[checkpoint] = ckpt_size
                 vram_budget_gb = (ckpt_size * 1.5) / 1e9  # 50% overhead for KV + activations
                 print(f"  [Registry] Auto budget for {model_id}: {vram_budget_gb:.2f} GB")
             budget_bytes = int(vram_budget_gb * 1e9)
@@ -231,6 +234,19 @@ class ModelRegistry:
                 }
                 for e in self._entries.values()
             ]
+
+    def get_engine(self, model_id: str):
+        """Get the ForgeEngine for a registered model (auto-wakes if asleep).
+
+        Returns None if model_id is not registered.
+        """
+        with self._lock:
+            if model_id not in self._entries:
+                return None
+            self._ensure_awake(model_id)
+            entry = self._entries[model_id]
+            entry.last_used = time.time()
+            return entry.engine
 
     def stats(self) -> dict:
         """Aggregate registry statistics."""

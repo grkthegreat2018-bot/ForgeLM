@@ -113,6 +113,112 @@ def _generate_solution(model, tokenizer, prompt: str, device: str = "cuda",
     return generated_text, telemetry
 
 
+def _generate_solution_batch(
+    model, tokenizer, prompts: list[str], device: str = "cuda",
+    max_tokens: int = 512, temperature: float = 0.0, batch_size: int = 8,
+) -> list[tuple[str, dict]]:
+    """Generate text for multiple prompts using batched or parallel generation.
+
+    Tries model.generate with batched input_ids first. Falls back to
+    concurrent.futures.ThreadPoolExecutor if the model doesn't support
+    batched generation (e.g. custom forward signature).
+
+    Returns list of (generated_text, telemetry) tuples, one per prompt.
+    """
+    results: list[tuple[str, dict]] = [None] * len(prompts)  # type: ignore
+
+    # Try batched generation via model.generate if available
+    use_batched = False
+    gen_fn = getattr(model, "generate", None)
+    if gen_fn is not None:
+        use_batched = True
+
+    if use_batched:
+        # Process in sub-batches of batch_size
+        for start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[start:start + batch_size]
+            batch_results = _generate_batched_internal(
+                model, tokenizer, batch_prompts, device=device,
+                max_tokens=max_tokens, temperature=temperature)
+            for j, res in enumerate(batch_results):
+                results[start + j] = res
+    else:
+        # Fallback: concurrent generation
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(batch_size, len(prompts))) as executor:
+            futures = {
+                executor.submit(
+                    _generate_solution, model, tokenizer, p,
+                    device=device, max_tokens=max_tokens, temperature=temperature,
+                ): idx for idx, p in enumerate(prompts)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+
+    return results
+
+
+def _generate_batched_internal(
+    model, tokenizer, prompts: list[str], device: str = "cuda",
+    max_tokens: int = 512, temperature: float = 0.0,
+) -> list[tuple[str, dict]]:
+    """Run batched generation using model.generate with padded input_ids."""
+    # Tokenize all prompts
+    encodings = [tokenizer(p, return_tensors="pt") for p in prompts]
+    max_len = max(enc.input_ids.shape[1] for enc in encodings)
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    batch_ids = torch.full((len(prompts), max_len), pad_id,
+                           dtype=torch.long, device=device)
+    attn_mask = torch.zeros_like(batch_ids)
+    for i, enc in enumerate(encodings):
+        ids = enc.input_ids.to(device)
+        seq_len = ids.shape[1]
+        batch_ids[i, :seq_len] = ids[0]
+        attn_mask[i, :seq_len] = 1
+
+    t0 = time.time()
+    try:
+        with torch.inference_mode():
+            generated = model.generate(
+                batch_ids,
+                attention_mask=attn_mask,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0.0,
+                temperature=temperature if temperature > 0.0 else 1.0,
+                pad_token_id=pad_id,
+            )
+        gen_time_ms = (time.time() - t0) * 1000
+    except Exception:
+        # Fallback to per-prompt generation if batched fails
+        gen_time_ms = (time.time() - t0) * 1000
+        out = []
+        for p in prompts:
+            text, tel = _generate_solution(
+                model, tokenizer, p, device=device,
+                max_tokens=max_tokens, temperature=temperature)
+            out.append((text, tel))
+        return out
+
+    # Build results in order (model.generate preserves batch order)
+    out = []
+    for i, enc in enumerate(encodings):
+        prompt_len = enc.input_ids.shape[1]
+        new_tokens = generated[i, prompt_len:]
+        text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        tokens_generated = new_tokens.shape[0]
+        out.append((
+            text,
+            {
+                "gen_time_ms": gen_time_ms / len(prompts),
+                "tokens_generated": tokens_generated,
+                "mean_logprob": 0.0,
+            },
+        ))
+    return out
+
+
 def _extract_code(text: str) -> str:
     """Extract Python code from markdown fences or raw text."""
     from research.evaluation.code_extract import extract_code
@@ -269,15 +375,20 @@ def run_arc_agi2(model, tokenizer, device: str = "cuda",
     results = []
     n_solved = 0
 
+    # Batched evaluation: collect prompts into batches of 8, generate all
+    # at once, then process results (keeps existing per-task logic).
+    BATCH_SIZE = 8
+    all_prompts = [build_arc_agi2_prompt(task) for task in tasks]
+    batched_outputs = _generate_solution_batch(
+        model, tokenizer, all_prompts, device=device,
+        max_tokens=max_tokens, temperature=0.0, batch_size=BATCH_SIZE)
+
     for i, task in enumerate(tasks):
         tid = task["task_id"]
         if (i + 1) % 10 == 0 or i == 0:
             print(f"\n  [{i+1}/{len(tasks)}] Task {tid}")
 
-        prompt = build_arc_agi2_prompt(task)
-        output, telemetry = _generate_solution(
-            model, tokenizer, prompt, device=device,
-            max_tokens=max_tokens, temperature=0.0)
+        output, telemetry = batched_outputs[i]
 
         predicted = _parse_grid_output(output)
         expected = task["test"][0].get("output")
@@ -446,9 +557,26 @@ def run_neocoder(model, tokenizer, device: str = "cuda",
 
         for rnd in range(denial_rounds + 1):
             prompt = _build_neocoder_prompt(problem, denied_approaches=denied if rnd > 0 else None)
-            code, telemetry = _generate_solution(
-                model, tokenizer, prompt, device=device,
-                max_tokens=max_tokens, temperature=0.3 if rnd > 0 else 0.0)
+
+            # Batched generation: round 0 prompts are batched across problems;
+            # rounds 1+ depend on prior round output, so generate per-problem.
+            if rnd == 0 and i == 0:
+                # First problem, first round: pre-generate all round-0 prompts
+                # in batches of 8 for throughput.
+                _neocoder_round0_prompts = [
+                    _build_neocoder_prompt(p, denied_approaches=None)
+                    for p in problems
+                ]
+                _neocoder_round0_outputs = _generate_solution_batch(
+                    model, tokenizer, _neocoder_round0_prompts, device=device,
+                    max_tokens=max_tokens, temperature=0.0, batch_size=8)
+
+            if rnd == 0:
+                code, telemetry = _neocoder_round0_outputs[i]
+            else:
+                code, telemetry = _generate_solution(
+                    model, tokenizer, prompt, device=device,
+                    max_tokens=max_tokens, temperature=0.3)
 
             # Evaluate
             correct = False

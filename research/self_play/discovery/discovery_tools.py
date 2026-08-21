@@ -1,9 +1,15 @@
 """Tool registry for the discovery self-play loop.
 
+⚠️  THIS IS THE SELF-PLAY DISCOVERY TOOL REGISTRY — NOT the inference tool
+    registry. These tools are used during self-play training only.
+    For inference (model serving), use research/inference/engine_tools.py
+    which has a separate, non-overlapping set of tools (library_*, engine_*,
+    math_eval, web_search via Tavily/Exa, file_*, etc.).
+
 Each tool is a plain function (args dict) -> result dict. The loop parses the
 LLM's tool-call JSON, dispatches here, and feeds the JSON result back.
 
-Tools exposed to the LLM:
+Tools exposed to the LLM during self-play:
   think          — record a train-of-thought entry (theorizing)
   sudo_think     — meta-reasoning about its own process / strategy
   run_script     — execute Python in a sandboxed subprocess (timeout, no net)

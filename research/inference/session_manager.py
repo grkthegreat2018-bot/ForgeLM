@@ -239,12 +239,25 @@ class SessionManager:
             return session
 
     def append_message(self, task_id: str, role: str, content: str):
-        """Append a message to the task's conversation history."""
+        """Append a message to the task's conversation history.
+
+        Trims oldest messages when total token estimate exceeds
+        max_history_tokens to prevent unbounded memory growth in
+        long-running sessions.
+        """
         with self._lock:
             session = self._sessions.get(task_id)
             if session is None:
                 raise KeyError(f"Task '{task_id}' not found")
             session.history.append({"role": role, "content": content})
+            # Trim oldest messages if token budget exceeded (~4 chars/token)
+            char_budget = self.max_history_tokens * 4
+            while len(session.history) > 2:
+                total_chars = sum(len(m["content"]) for m in session.history)
+                if total_chars <= char_budget:
+                    break
+                # Keep at least the system + last user message
+                session.history.pop(0)
             session.last_used = time.time()
             self._sessions.move_to_end(task_id)
 

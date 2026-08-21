@@ -63,6 +63,8 @@ class StandardDecoding(DecodingStrategy):
         token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
         # Track generated token ids for repetition penalty + degeneration
         generated_ids: list[int] = []
+        # Collect generated token tensors for a single final cat (O(n) vs O(n²))
+        _generated_tokens: list[torch.Tensor] = []
         # Degeneration guard: stop if same token repeats too many times.
         MAX_REPEAT = 8  # same token 8x in a row = degenerate
 
@@ -109,13 +111,17 @@ class StandardDecoding(DecodingStrategy):
                 if len(set(recent)) / len(recent) < 0.4:
                     break  # <40% unique tokens = degenerate
 
-            ids = torch.cat([ids, next_token], dim=-1)
+            # Collect tokens for final cat (avoids O(n²) torch.cat per step)
+            _generated_tokens.append(next_token)
             with torch.inference_mode():
                 out = model(next_token, past_key_values=past_kv, use_cache=True)
                 logits, past_kv = unpack_output_with_kv(out)
 
         # Expose final KV cache state for _finish_to_stop fast path
         model._forge_last_kv = past_kv
+        # Single cat at the end instead of per-step (O(n) vs O(n²))
+        if _generated_tokens:
+            ids = torch.cat([ids] + _generated_tokens, dim=-1)
         return ids
 
     def _top_p(self, logits, top_p):
@@ -429,7 +435,7 @@ def _eagle_generate_from_ids(
         next_token = torch.multinomial(probs, num_samples=1)
 
     generated = [next_token.item()]
-    ids = torch.cat([input_ids, next_token], dim=1)
+    _eagle_tokens: list[torch.Tensor] = [next_token]  # collect for final cat
 
     while len(generated) < max_new_tokens:
         if generated[-1] == eos_id:
@@ -475,6 +481,8 @@ def _eagle_generate_from_ids(
         if next_token.item() == eos_id:
             break
         generated.append(next_token.item())
-        ids = torch.cat([ids, next_token], dim=1)
+        _eagle_tokens.append(next_token)
 
+    # Single cat at the end instead of per-step (O(n) vs O(n²))
+    ids = torch.cat([input_ids] + _eagle_tokens, dim=1)
     return ids[:, input_ids.shape[1]:]

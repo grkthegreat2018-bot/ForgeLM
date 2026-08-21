@@ -54,7 +54,7 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 
 def load_model_and_tokenizer(checkpoint: str | None = None,
-                              config_name: str = "forgelm_v3",
+                              config_name: str = "forgelm_v7",
                               device: str = "cuda"):
     """Load ForgeLM model + tokenizer for perplexity computation."""
     import torch

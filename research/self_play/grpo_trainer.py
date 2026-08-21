@@ -38,6 +38,8 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
+from research.training.training_utils import oom_guard
+
 
 @dataclass
 class GRPOConfig:
@@ -52,6 +54,11 @@ class GRPOConfig:
     use_median_baseline: bool = True   # MC-GRPO: median instead of mean
     invalid_penalty: float = -0.1      # penalty for invalid/unverifiable tasks
     grad_accum_steps: int = 2          # gradient accumulation
+    # MoE load-balancing aux loss weight during RL. Without this, the MoE
+    # router gets no balancing signal during RLVR (forward passes don't pass
+    # targets) and can collapse to a single expert. 0.0 = disabled (dense
+    # models), 0.01 = DeepSeek-V3 default.
+    moe_aux_weight: float = 0.01
     # SC-GRPO (Self-Conditioned GRPO, arXiv 2605.22217 extension): use per-token
     # KL between the model's distribution on verified vs unverified trajectories
     # as a multiplicative weight on the GRPO gradient. Pivotal reasoning tokens
@@ -95,11 +102,49 @@ class GRPOConfig:
 
     # Advanced RL algorithm selection (2026 research):
     # "grpo" = standard GRPO (default)
+    # "gtpo" = Group-relative Trajectory-based PO (entropy control + conflict
+    #          masking, no KL/ref model needed — saves ~2GB VRAM)
     # "sppo" = Sequence-Level PPO (long-horizon reasoning, no multi-sampling)
     # "psppo" = Prefix-Sampling PPO (compute-efficient, prefix backprop only)
     # "evpo" = Explained Variance PO (adaptive critic/batch-mean switching)
     # "grpo_or" = GRPO with Output Reset trust region (smooth saturation)
     rl_algorithm: str = "grpo"
+
+    # GTPO-specific config (arXiv 2508.03772):
+    # Entropy regularization weight (γ in the paper). 0.1 recommended.
+    gtpo_entropy_gamma: float = 0.1
+    # Entropy filter threshold (ln(2) ≈ 0.693). Completions with average
+    # entropy above this are filtered if the model's initial entropy is below.
+    gtpo_entropy_threshold: float = 0.6931  # ln(2)
+    # Whether to measure initial entropy on first train_step (auto-calibrate)
+    gtpo_auto_init_entropy: bool = True
+
+    # N-gram repetition penalty (LFM2.5-1.2B-Thinking RLVR recipe):
+    # Discourages doom-looping early in RL training. Applied as a negative
+    # reward when the n-gram repetition ratio exceeds the threshold.
+    # Reduces doom-loop rate from ~4% (DPO) to ~0.36% (RLVR).
+    use_repetition_penalty: bool = False
+    repetition_n: int = 8               # n-gram size for detection
+    repetition_threshold: float = 0.3   # ratio above which penalty applies
+    repetition_penalty: float = -0.5    # penalty value (negative reward)
+    repetition_warmup_steps: int = 50   # only apply penalty after N steps
+
+    def __post_init__(self):
+        """Validate critical hyperparameters to catch config errors early."""
+        if self.learning_rate <= 0:
+            raise ValueError(f"learning_rate must be positive, got {self.learning_rate}")
+        if self.group_size < 2:
+            raise ValueError(f"group_size must be >= 2 for GRPO, got {self.group_size}")
+        if self.clip_range <= 0 or self.clip_range > 1:
+            raise ValueError(f"clip_range must be in (0, 1], got {self.clip_range}")
+        if self.max_seq_len < 64:
+            raise ValueError(f"max_seq_len too small ({self.max_seq_len}), need >= 64")
+        if self.grad_accum_steps < 1:
+            raise ValueError(f"grad_accum_steps must be >= 1, got {self.grad_accum_steps}")
+        if self.repetition_n < 2:
+            raise ValueError(f"repetition_n must be >= 2, got {self.repetition_n}")
+        if not 0 <= self.replay_ratio <= 1:
+            raise ValueError(f"replay_ratio must be in [0, 1], got {self.replay_ratio}")
 
 
 @dataclass
@@ -116,6 +161,19 @@ class GRPOStats:
     # GRPO-λ: track correctness ratios and length penalty activation
     correctness_ratios: list[float] = field(default_factory=list)
     length_penalty_active_count: int = 0  # how many groups had penalty active
+
+    # Maximum items to retain in unbounded lists (prevents memory leak in
+    # long training runs — stats are only used for rolling-window averages)
+    _MAX_LIST_LEN: int = 1000
+
+    def trim(self):
+        """Trim all metric lists to _MAX_LIST_LEN (keep most recent)."""
+        for attr in ("total_rewards", "advantages", "kl_divergences",
+                      "policy_losses", "correctness_ratios"):
+            lst = getattr(self, attr)
+            if len(lst) > self._MAX_LIST_LEN:
+                # Keep the most recent entries (slice from the end)
+                del lst[:len(lst) - self._MAX_LIST_LEN]
 
     @property
     def mean_reward(self) -> float:
@@ -166,14 +224,25 @@ class GRPOTrainer:
         # Optimizer (only trainable params — assumes LoRA or similar)
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         if trainable:
-            self.optimizer = torch.optim.AdamW(
-                trainable, lr=self.config.learning_rate, weight_decay=0.01)
+            if getattr(config, 'optimizer', 'adamw') == 'cpu_offload':
+                from research.training.optim.hybrid_offload import CPUAdamW
+                self.optimizer = CPUAdamW(
+                    trainable, lr=self.config.learning_rate, weight_decay=0.01)
+                print("  [GRPOTrainer] Using CPUAdamW (optimizer states on CPU)")
+            else:
+                self.optimizer = torch.optim.AdamW(
+                    trainable, lr=self.config.learning_rate, weight_decay=0.01)
         else:
             self.optimizer = None
 
         # Advanced RL algorithm (2026 research)
         self._rl_algo = None
-        if self.config.rl_algorithm == "sppo":
+        self._gtpo_init_entropy = None  # measured on first step if auto
+        if self.config.rl_algorithm == "gtpo":
+            # GTPO: no reference model needed (saves VRAM)
+            print("  [GRPOTrainer] Using GTPO (Group-relative Trajectory-based PO)")
+            print("  [GRPOTrainer] GTPO: KL penalty disabled, ref_model not required")
+        elif self.config.rl_algorithm == "sppo":
             from research.training.losses.advanced_rl import SPPO, SPPOConfig
             self._rl_algo = SPPO(SPPOConfig(lr=self.config.learning_rate))
             print("  [GRPOTrainer] Using SPPO (Sequence-Level PPO)")
@@ -224,6 +293,35 @@ class GRPOTrainer:
             self.stats.advantage_collapse_count += 1
 
         return advantages
+
+    def _apply_repetition_penalty(self, rewards: list[float],
+                                   completions: list[str]) -> list[float]:
+        """Apply n-gram repetition penalty to doom-looping completions.
+
+        LFM2.5-1.2B-Thinking RLVR recipe: during early RL training, apply a
+        negative reward to completions with excessive n-gram repetition.
+        This discourages the model from doom-looping before it learns to
+        produce coherent reasoning.
+
+        Only active after `repetition_warmup_steps` to let the model
+        stabilize first. Reduces doom-loop rate from ~4% (DPO) to ~0.36%.
+
+        Returns adjusted rewards.
+        """
+        if not self.config.use_repetition_penalty:
+            return rewards
+        if self.stats.total_steps < self.config.repetition_warmup_steps:
+            return rewards
+
+        from research.training.runners.curriculum_sft import is_doom_loop
+        adjusted = []
+        for reward, completion in zip(rewards, completions):
+            if is_doom_loop(completion, n=self.config.repetition_n,
+                            threshold=self.config.repetition_threshold):
+                adjusted.append(reward + self.config.repetition_penalty)
+            else:
+                adjusted.append(reward)
+        return adjusted
 
     def _group_correctness_ratio(self, rewards: list[float]) -> float:
         """Compute the correctness ratio for a group of completions.
@@ -343,6 +441,19 @@ class GRPOTrainer:
 
         return advantages
 
+    def _pretokenize_prompt_lens(self, prompts: list[str]) -> dict[str, int]:
+        """Tokenize each unique prompt once and cache its token length.
+
+        Avoids re-tokenizing the same prompt G times (once per completion)
+        just to get its length. Returns {prompt_str: prompt_token_len}.
+        """
+        cache: dict[str, int] = {}
+        for p in prompts:
+            if p not in cache:
+                cache[p] = self.tokenizer(
+                    p, return_tensors="pt").input_ids.shape[1]
+        return cache
+
     def compute_kl_penalty(self, input_ids: torch.Tensor,
                            current_logits: torch.Tensor) -> torch.Tensor:
         """Compute KL(π_current || π_ref) per token.
@@ -350,7 +461,7 @@ class GRPOTrainer:
         KL = Σ p_current * log(p_current / p_ref)
         Approximated per-token, averaged over sequence.
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             ref_logits, _ = self.ref_model(input_ids)
             ref_log_probs = F.log_softmax(ref_logits, dim=-1)
             ref_probs = ref_log_probs.exp()
@@ -361,6 +472,119 @@ class GRPOTrainer:
         # KL divergence per token: sum over vocab
         kl_per_token = (curr_probs * (curr_log_probs - ref_log_probs)).sum(dim=-1)
         return kl_per_token.mean()
+
+    # -----------------------------------------------------------------------
+    # GTPO: Group-relative Trajectory-based Policy Optimization
+    # (arXiv 2508.03772 — entropy control + conflict-aware gradient correction)
+    # -----------------------------------------------------------------------
+
+    def _gtpo_compute_conflict_masks(
+        self,
+        completions: list[list[int]],  # token IDs per completion
+        advantages: list[float],
+    ) -> list[torch.Tensor]:
+        """Build conflict-aware masks for each completion.
+
+        Identifies tokens at the same position (from left or right) that appear
+        in both positive and negative advantage completions. These "conflict
+        tokens" receive contradictory gradient updates in vanilla GRPO.
+
+        Returns: list of (T_i,) tensors with λ weights: 0 (skip neg), 1 (normal), 2 (amplify pos)
+        """
+        G = len(completions)
+        if G < 2:
+            return [torch.ones(len(c), device=self.device) for c in completions]
+
+        pos_idx = [i for i, a in enumerate(advantages) if a > 0]
+        neg_idx = [i for i, a in enumerate(advantages) if a < 0]
+        if not pos_idx or not neg_idx:
+            return [torch.ones(len(c), device=self.device) for c in completions]
+
+        # Forward conflict: same token at same position from left
+        min_len = min(len(completions[i]) for i in range(G))
+        fw_conflict = torch.zeros(min_len, dtype=torch.bool, device=self.device)
+        for t in range(min_len):
+            pos_tokens = set(completions[i][t] for i in pos_idx if t < len(completions[i]))
+            neg_tokens = set(completions[i][t] for i in neg_idx if t < len(completions[i]))
+            if pos_tokens & neg_tokens:
+                fw_conflict[t] = True
+
+        # Backward conflict: same token at same offset from end
+        bw_conflict = torch.zeros(G, dtype=torch.bool, device=self.device)
+        # Check from the end, up to min completion length
+        for r in range(min_len):
+            pos_tokens = set(
+                completions[i][len(completions[i]) - 1 - r]
+                for i in pos_idx if r < len(completions[i])
+            )
+            neg_tokens = set(
+                completions[i][len(completions[i]) - 1 - r]
+                for i in neg_idx if r < len(completions[i])
+            )
+            if pos_tokens & neg_tokens:
+                bw_conflict[r] = True
+
+        # Build per-completion λ masks
+        masks = []
+        for i, c in enumerate(completions):
+            T = len(c)
+            lam = torch.ones(T, device=self.device)
+            is_pos = advantages[i] > 0
+
+            # Forward mask: first contiguous span of conflict tokens
+            fw_mask = torch.zeros(T, dtype=torch.bool, device=self.device)
+            for t in range(min(T, min_len)):
+                if fw_conflict[t]:
+                    fw_mask[t] = True
+                else:
+                    break  # only first contiguous span
+
+            # Backward mask: first contiguous span from the end
+            bw_mask = torch.zeros(T, dtype=torch.bool, device=self.device)
+            for r in range(min(T, min_len)):
+                if bw_conflict[r]:
+                    bw_mask[T - 1 - r] = True
+                else:
+                    break
+
+            combined = fw_mask | bw_mask
+            # λ = 0 for conflict tokens with negative advantage
+            # λ = 2 for conflict tokens with positive advantage
+            # λ = 1 elsewhere (normal)
+            lam[combined & ~is_pos] = 0.0  # skip negative on conflict
+            lam[combined & is_pos] = 2.0   # amplify positive on conflict
+            masks.append(lam)
+
+        return masks
+
+    def _gtpo_compute_entropy(
+        self,
+        logits: torch.Tensor,  # (T, V) or (1, T, V)
+    ) -> float:
+        """Compute average Shannon entropy of the output distribution."""
+        if logits.dim() == 3:
+            logits = logits.squeeze(0)
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        # H = -Σ p * log(p), per token
+        entropy_per_token = -(probs * log_probs).sum(dim=-1)
+        return entropy_per_token.mean().item()
+
+    def _gtpo_entropy_filter(
+        self,
+        completion_entropies: list[float],
+    ) -> list[float]:
+        """Build entropy filter masks δ_i.
+
+        If model's initial entropy < ln(2), filter out completions with
+        entropy > ln(2) (unstable/high-entropy completions cause collapse).
+        """
+        threshold = self.config.gtpo_entropy_threshold
+        if self._gtpo_init_entropy is None or self._gtpo_init_entropy >= threshold:
+            # Model naturally produces high-entropy outputs — no filtering
+            return [1.0] * len(completion_entropies)
+        # Model is low-entropy — filter high-entropy completions
+        return [1.0 if h <= threshold else 0.0 for h in completion_entropies]
 
     # -----------------------------------------------------------------------
     # Golden trajectory injection (anti-regression via replay buffer)
@@ -465,11 +689,16 @@ class GRPOTrainer:
                 self._inject_golden_replays(prompts, completions, rewards)
 
         self.model.train()
-        total_loss = 0.0
-        total_kl = 0.0
+        # Accumulate loss/kl as GPU scalar tensors to avoid per-step .item()
+        # syncs (N syncs → 1 sync at the end of the step).
+        total_loss = torch.zeros(1, device=self.device)
+        total_kl = torch.zeros(1, device=self.device)
         total_reward = 0.0
         n_updates = 0
         accum_count = 0
+
+        # Pre-tokenize prompt lengths once (avoids G× redundant tokenization)
+        prompt_len_cache = self._pretokenize_prompt_lens(prompts) if not prompt_token_lens else None
 
         for prompt_idx, (prompt, comps, rews) in enumerate(zip(prompts, completions, rewards)):
             if not comps or len(comps) < 2:
@@ -481,10 +710,39 @@ class GRPOTrainer:
                 self.stats.correctness_ratios.append(cr)
                 rews = self._apply_grpo_lambda_penalty(rews, comps, cr)
 
+            # N-gram repetition penalty (LFM2.5-Thinking RLVR recipe)
+            if self.config.use_repetition_penalty:
+                rews = self._apply_repetition_penalty(rews, comps)
+
             # Compute group-relative advantages
             advantages = self.compute_advantages(rews)
             self.stats.advantages.extend(advantages)
             self.stats.total_rewards.extend(rews)
+
+            # GTPO: measure initial entropy on first step + build conflict masks
+            gtpo_lam_masks = None
+            if self.config.rl_algorithm == "gtpo":
+                # Auto-calibrate initial entropy on first step
+                if self._gtpo_init_entropy is None and self.config.gtpo_auto_init_entropy:
+                    # Measure on first completion of first group
+                    if prompt_idx == 0 and comps:
+                        _enc = self.tokenizer(
+                            prompt + comps[0], return_tensors="pt",
+                            truncation=True, max_length=self.config.max_seq_len
+                        ).input_ids.to(self.device)
+                        with torch.no_grad():
+                            _logits, _ = self.model(_enc)
+                        self._gtpo_init_entropy = self._gtpo_compute_entropy(_logits)
+                        print(f"  [GTPO] Initial entropy: {self._gtpo_init_entropy:.4f} "
+                              f"(threshold: {self.config.gtpo_entropy_threshold:.4f})")
+
+                # Build conflict masks for this group
+                comp_token_ids = [
+                    self.tokenizer(c, add_special_tokens=False).input_ids
+                    for c in comps
+                ]
+                gtpo_lam_masks = self._gtpo_compute_conflict_masks(
+                    comp_token_ids, advantages)
 
             for comp_idx, (completion, reward, advantage) in enumerate(
                     zip(comps, rews, advantages)):
@@ -498,9 +756,11 @@ class GRPOTrainer:
                                      truncation=True, max_length=self.config.max_seq_len)
                 input_ids = enc.input_ids.to(self.device)
 
-                # Find prompt boundary
+                # Find prompt boundary (use cache to avoid re-tokenizing prompt)
                 if prompt_token_lens:
                     prompt_len = prompt_token_lens[prompt_idx]
+                elif prompt_len_cache is not None:
+                    prompt_len = prompt_len_cache[prompt]
                 else:
                     prompt_len = self.tokenizer(
                         prompt, return_tensors="pt").input_ids.shape[1]
@@ -508,54 +768,95 @@ class GRPOTrainer:
                 if input_ids.shape[1] <= prompt_len + 1:
                     continue  # completion too short
 
-                # Forward pass (current policy)
-                logits, _ = self.model(input_ids)
-                solution_logits = logits[0, prompt_len - 1:-1, :]
-                solution_targets = input_ids[0, prompt_len:].long()
+                with oom_guard(self.device, label="grpo_fwd") as safe:
+                    # Forward pass (current policy) — autocast for bf16 efficiency
+                    with torch.autocast(
+                        device_type="cuda", dtype=torch.bfloat16,
+                        enabled=("cuda" in str(self.device)),
+                    ):
+                        logits, _ = self.model(input_ids)
+                    solution_logits = logits[0, prompt_len - 1:-1, :]
+                    solution_targets = input_ids[0, prompt_len:].long()
 
-                if solution_logits.shape[0] == 0:
+                    if solution_logits.shape[0] == 0:
+                        continue  # completion too short
+
+                    # Compute log probabilities for the generated tokens
+                    log_probs = F.log_softmax(solution_logits, dim=-1)
+                    token_log_probs = log_probs.gather(1, solution_targets.unsqueeze(0)).squeeze(0)
+
+                    # Compute old log probs (for PPO ratio)
+                    if (old_log_probs is not None
+                            and prompt_idx < len(old_log_probs)
+                            and comp_idx < len(old_log_probs[prompt_idx])):
+                        old_lp = old_log_probs[prompt_idx][comp_idx]
+                        old_lp = old_lp[:token_log_probs.shape[0]]
+                        ratio = (token_log_probs - old_lp).exp()
+                    else:
+                        if old_log_probs is None and prompt_idx == 0 and comp_idx == 0:
+                            import warnings
+                            warnings.warn(
+                                "old_log_probs not provided to train_step; "
+                                "PPO ratio will be 1.0 (no off-policy correction). "
+                                "Pass log-probs collected during rollout for proper PPO.",
+                                stacklevel=2,
+                            )
+                        with torch.no_grad():
+                            old_lp = token_log_probs.detach()
+                        ratio = (token_log_probs - old_lp).exp()
+
+                    # Clipped policy gradient loss
+                    clipped_ratio = ratio.clamp(1 - self.config.clip_range,
+                                                1 + self.config.clip_range)
+
+                    if self.config.rl_algorithm == "gtpo":
+                        # GTPO: conflict-aware gradient correction + entropy control
+                        # No KL penalty needed (saves ref model forward pass + VRAM)
+                        # λ weights from conflict masks: 0 (skip neg), 1 (normal), 2 (amplify pos)
+                        if gtpo_lam_masks is not None and comp_idx < len(gtpo_lam_masks):
+                            lam = gtpo_lam_masks[comp_idx][:ratio.shape[0]]
+                            if lam.shape[0] < ratio.shape[0]:
+                                lam = torch.cat([
+                                    lam, torch.ones(ratio.shape[0] - lam.shape[0],
+                                                    device=self.device)])
+                        else:
+                            lam = torch.ones_like(ratio)
+
+                        # Entropy regularization: γ * ⟨H⟩_i
+                        with torch.no_grad():
+                            probs = log_probs.exp()
+                            entropy_per_token = -(probs * log_probs).sum(dim=-1)
+                            avg_entropy = entropy_per_token.mean()
+                        # GTPO loss: -(A - γ*H) * mean(ratio * λ)
+                        adjusted_adv = advantage - self.config.gtpo_entropy_gamma * avg_entropy.item()
+                        pg_loss = -(adjusted_adv * lam * ratio).mean()
+                        kl_loss = torch.zeros(1, device=self.device)  # no KL
+                    else:
+                        pg_loss = -torch.min(ratio * advantage, clipped_ratio * advantage).mean()
+
+                        # KL penalty
+                        kl = self.compute_kl_penalty(input_ids, logits)
+                        kl_loss = self.config.kl_coefficient * kl
+
+                    # MoE load-balancing aux loss (prevents router collapse during RL).
+                    # The model forward stores this on self._last_moe_aux_loss even
+                    # when targets are not passed (GRPO uses logits-only forward).
+                    # Without this, the MoE router gets no balancing signal during
+                    # RLVR and can collapse to a single expert.
+                    moe_aux = getattr(self.model, '_last_moe_aux_loss', None)
+                    moe_aux_term = 0.0
+                    if moe_aux is not None and moe_aux.requires_grad:
+                        moe_aux_term = moe_aux * getattr(self.config, 'moe_aux_weight', 0.01)
+
+                    # Total loss
+                    loss = (pg_loss + kl_loss + moe_aux_term) / self.config.grad_accum_steps
+                    loss.backward()
+                if safe.skipped:
                     continue
-
-                # Compute log probabilities for the generated tokens
-                log_probs = F.log_softmax(solution_logits, dim=-1)
-                token_log_probs = log_probs.gather(1, solution_targets.unsqueeze(0)).squeeze(0)
-
-                # Compute old log probs (for PPO ratio)
-                if (old_log_probs is not None
-                        and prompt_idx < len(old_log_probs)
-                        and comp_idx < len(old_log_probs[prompt_idx])):
-                    old_lp = old_log_probs[prompt_idx][comp_idx]
-                    old_lp = old_lp[:token_log_probs.shape[0]]
-                    ratio = (token_log_probs - old_lp).exp()
-                else:
-                    if old_log_probs is None and prompt_idx == 0 and comp_idx == 0:
-                        import warnings
-                        warnings.warn(
-                            "old_log_probs not provided to train_step; "
-                            "PPO ratio will be 1.0 (no off-policy correction). "
-                            "Pass log-probs collected during rollout for proper PPO.",
-                            stacklevel=2,
-                        )
-                    with torch.no_grad():
-                        old_lp = token_log_probs.detach()
-                    ratio = (token_log_probs - old_lp).exp()
-
-                # Clipped policy gradient loss
-                clipped_ratio = ratio.clamp(1 - self.config.clip_range,
-                                            1 + self.config.clip_range)
-                pg_loss = -torch.min(ratio * advantage, clipped_ratio * advantage).mean()
-
-                # KL penalty
-                kl = self.compute_kl_penalty(input_ids, logits)
-                kl_loss = self.config.kl_coefficient * kl
-
-                # Total loss
-                loss = (pg_loss + kl_loss) / self.config.grad_accum_steps
-                loss.backward()
                 accum_count += 1
 
-                total_loss += loss.item() * self.config.grad_accum_steps
-                total_kl += kl.item()
+                total_loss += loss.detach() * self.config.grad_accum_steps
+                total_kl += kl.detach()
                 total_reward += reward
                 n_updates += 1
 
@@ -566,6 +867,9 @@ class GRPOTrainer:
                         self.config.max_grad_norm)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+                    # DeepSeek-V3 aux-loss-free: update expert bias after step.
+                    from research.moe.moe import update_moe_biases
+                    update_moe_biases(self.model)
                     accum_count = 0
 
         # Final step
@@ -575,13 +879,16 @@ class GRPOTrainer:
                 self.config.max_grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad()
+            from research.moe.moe import update_moe_biases
+            update_moe_biases(self.model)
 
         self.model.eval()
 
-        # Update stats
+        # Update stats — single .item() sync for accumulated GPU tensors
         self.stats.total_steps += 1
-        self.stats.policy_losses.append(total_loss / max(n_updates, 1))
-        self.stats.kl_divergences.append(total_kl / max(n_updates, 1))
+        self.stats.policy_losses.append(total_loss.item() / max(n_updates, 1))
+        self.stats.kl_divergences.append(total_kl.item() / max(n_updates, 1))
+        self.stats.trim()  # prevent unbounded memory growth
 
         acr = self.stats.advantage_collapse_rate
         acr_alert = " [WARNING: ACR>0.3]" if acr > 0.3 else ""
@@ -592,11 +899,14 @@ class GRPOTrainer:
             self._record_golden_trajectories(
                 prompts, completions, rewards, grad_norm=grad_norm_val)
 
+        _mean_loss = total_loss.item() / max(n_updates, 1)
+        _mean_kl = total_kl.item() / max(n_updates, 1)
+
         return {
             "n_updates": n_updates,
-            "mean_loss": total_loss / max(n_updates, 1),
+            "mean_loss": _mean_loss,
             "mean_reward": total_reward / max(n_updates, 1),
-            "mean_kl": total_kl / max(n_updates, 1),
+            "mean_kl": _mean_kl,
             "advantage_collapse_rate": acr,
             "acr_alert": acr_alert,
             "n_golden_injected": n_injected,
@@ -629,26 +939,56 @@ class GRPOTrainer:
         """
         self.model.eval()
         all_log_probs: list[list[torch.Tensor]] = []
-        with torch.no_grad():
+        # Pre-tokenize prompt lengths once (avoids G× redundant tokenization)
+        prompt_len_cache = self._pretokenize_prompt_lens(prompts) if not prompt_token_lens else None
+        with torch.inference_mode():
             for prompt_idx, (prompt, comps) in enumerate(zip(prompts, completions)):
                 group_lps: list[torch.Tensor] = []
+                # Determine prompt length from cache
+                if prompt_token_lens:
+                    prompt_len = prompt_token_lens[prompt_idx]
+                elif prompt_len_cache is not None:
+                    prompt_len = prompt_len_cache[prompt]
+                else:
+                    prompt_len = self.tokenizer(
+                        prompt, return_tensors="pt").input_ids.shape[1]
+
+                # Tokenize all completions for this prompt, filter valid ones
+                valid_seqs = []  # (comp_idx, input_ids, sol_len)
                 for comp_idx, completion in enumerate(comps):
                     full_text = prompt + completion
                     enc = self.tokenizer(
                         full_text, return_tensors="pt",
                         truncation=True, max_length=self.config.max_seq_len)
                     input_ids = enc.input_ids.to(self.device)
-                    if prompt_token_lens:
-                        prompt_len = prompt_token_lens[prompt_idx]
-                    else:
-                        prompt_len = self.tokenizer(
-                            prompt, return_tensors="pt").input_ids.shape[1]
-                    if input_ids.shape[1] <= prompt_len + 1:
+                    sol_len = input_ids.shape[1] - prompt_len
+                    if input_ids.shape[1] <= prompt_len + 1 or sol_len <= 0:
                         group_lps.append(torch.tensor([], device=self.device))
                         continue
-                    logits, _ = self.model(input_ids)
-                    solution_logits = logits[0, prompt_len - 1:-1, :]
-                    solution_targets = input_ids[0, prompt_len:].long()
+                    valid_seqs.append((comp_idx, input_ids, sol_len))
+
+                if not valid_seqs:
+                    all_log_probs.append(group_lps if group_lps else
+                                         [torch.tensor([], device=self.device)] * len(comps))
+                    continue
+
+                # Batch forward pass for all valid completions of this prompt
+                max_seq = max(s[1].shape[1] for s in valid_seqs)
+                batch_ids = torch.full((len(valid_seqs), max_seq),
+                                       self.tokenizer.pad_token_id or 0,
+                                       dtype=torch.long, device=self.device)
+                attn_mask = torch.zeros_like(batch_ids)
+                for i, (_, ids, _) in enumerate(valid_seqs):
+                    seq_len = ids.shape[1]
+                    batch_ids[i, :seq_len] = ids[0]
+                    attn_mask[i, :seq_len] = 1
+
+                logits, _ = self.model(batch_ids, attention_mask=attn_mask)
+
+                for i, (comp_idx, ids, sol_len) in enumerate(valid_seqs):
+                    seq_len = ids.shape[1]
+                    solution_logits = logits[i, prompt_len - 1:seq_len - 1, :]
+                    solution_targets = ids[0, prompt_len:].long()
                     if solution_logits.shape[0] == 0:
                         group_lps.append(torch.tensor([], device=self.device))
                         continue
@@ -656,6 +996,10 @@ class GRPOTrainer:
                     token_log_probs = log_probs.gather(
                         1, solution_targets.unsqueeze(0)).squeeze(0)
                     group_lps.append(token_log_probs.detach())
+
+                # Pad group_lps to match completions count
+                while len(group_lps) < len(comps):
+                    group_lps.append(torch.tensor([], device=self.device))
                 all_log_probs.append(group_lps)
         return all_log_probs
 
@@ -714,7 +1058,7 @@ class GRPOTrainer:
 
         # Forward pass on all completions to get solution logits.
         all_log_probs = []
-        with torch.no_grad():
+        with torch.inference_mode():
             for i, ids in enumerate(input_ids_list):
                 logits, _ = self.model(ids)
                 plen = prompt_lens[i]
@@ -880,12 +1224,16 @@ class GRPOTrainer:
                 self._inject_golden_replays(prompts, completions, rewards)
 
         self.model.train()
-        total_loss = 0.0
-        total_kl = 0.0
+        # GPU tensor accumulators — avoid per-step .item() syncs
+        total_loss = torch.zeros(1, device=self.device)
+        total_kl = torch.zeros(1, device=self.device)
         total_reward = 0.0
         total_sc_weight = 0.0
         n_updates = 0
         accum_count = 0
+
+        # Pre-tokenize prompt lengths once (avoids G× redundant tokenization)
+        prompt_len_cache = self._pretokenize_prompt_lens(prompts) if not prompt_token_lens else None
 
         for prompt_idx, (prompt, comps, rews) in enumerate(
                 zip(prompts, completions, rewards)):
@@ -913,12 +1261,16 @@ class GRPOTrainer:
             group_input_ids = []
             group_prompt_lens = []
             group_solution_lens = []
+            # Use cached prompt length (avoids re-tokenizing prompt per completion)
+            cached_plen = (prompt_token_lens[prompt_idx] if prompt_token_lens
+                           else prompt_len_cache.get(prompt) if prompt_len_cache
+                           else None)
             for comp in comps:
                 full_text = prompt + comp
                 enc = self.tokenizer(full_text, return_tensors="pt",
                                      truncation=True, max_length=self.config.max_seq_len)
                 ids = enc.input_ids.to(self.device)
-                plen = prompt_token_lens[prompt_idx] if prompt_token_lens else \
+                plen = cached_plen if cached_plen is not None else \
                     self.tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
                 group_input_ids.append(ids)
                 group_prompt_lens.append(plen)
@@ -963,7 +1315,7 @@ class GRPOTrainer:
                 if sc_weights[comp_idx] is not None:
                     w = sc_weights[comp_idx][:pg_loss.shape[0]]
                     pg_loss = pg_loss * w
-                    total_sc_weight += float(w.mean().item())
+                    total_sc_weight += float(w.mean().detach().item())
 
                 # OM-GRPO: mask gradients on the answer span.
                 if self.config.use_om_grpo:
@@ -977,12 +1329,18 @@ class GRPOTrainer:
                 kl = self.compute_kl_penalty(input_ids, logits)
                 kl_loss = self.config.kl_coefficient * kl
 
-                loss = (pg_loss + kl_loss) / self.config.grad_accum_steps
+                # MoE load-balancing aux loss (prevents router collapse during RL).
+                moe_aux = getattr(self.model, '_last_moe_aux_loss', None)
+                moe_aux_term = 0.0
+                if moe_aux is not None and moe_aux.requires_grad:
+                    moe_aux_term = moe_aux * getattr(self.config, 'moe_aux_weight', 0.01)
+
+                loss = (pg_loss + kl_loss + moe_aux_term) / self.config.grad_accum_steps
                 loss.backward()
                 accum_count += 1
 
-                total_loss += loss.item() * self.config.grad_accum_steps
-                total_kl += kl.item()
+                total_loss += loss.detach() * self.config.grad_accum_steps
+                total_kl += kl.detach()
                 total_reward += reward
                 n_updates += 1
 
@@ -992,6 +1350,8 @@ class GRPOTrainer:
                         self.config.max_grad_norm)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+                    from research.moe.moe import update_moe_biases
+                    update_moe_biases(self.model)
                     accum_count = 0
 
         if accum_count > 0:
@@ -1000,11 +1360,14 @@ class GRPOTrainer:
                 self.config.max_grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad()
+            from research.moe.moe import update_moe_biases
+            update_moe_biases(self.model)
 
         self.model.eval()
         self.stats.total_steps += 1
-        self.stats.policy_losses.append(total_loss / max(n_updates, 1))
-        self.stats.kl_divergences.append(total_kl / max(n_updates, 1))
+        self.stats.policy_losses.append(total_loss.item() / max(n_updates, 1))
+        self.stats.kl_divergences.append(total_kl.item() / max(n_updates, 1))
+        self.stats.trim()  # prevent unbounded memory growth
 
         acr = self.stats.advantage_collapse_rate
         modes = []
@@ -1016,11 +1379,14 @@ class GRPOTrainer:
             modes.append("GVPO")
         mode_str = "+".join(modes) if modes else "vanilla"
 
+        _mean_loss = total_loss.item() / max(n_updates, 1)
+        _mean_kl = total_kl.item() / max(n_updates, 1)
+
         return {
             "n_updates": n_updates,
-            "mean_loss": total_loss / max(n_updates, 1),
+            "mean_loss": _mean_loss,
             "mean_reward": total_reward / max(n_updates, 1),
-            "mean_kl": total_kl / max(n_updates, 1),
+            "mean_kl": _mean_kl,
             "advantage_collapse_rate": acr,
             "acr_alert": " [WARNING: ACR>0.3]" if acr > 0.3 else "",
             "mode": mode_str,

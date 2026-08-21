@@ -425,3 +425,150 @@ class TestFusedQKNormRoPE:
         q_out, k_out = fused_qk_norm_rope(
             q, k, q_weight, k_weight, cos, sin, use_triton=False)
         assert q_out.shape == q.shape
+
+
+class _EngineConfig:
+    d_model = 4
+    n_heads = 1
+    n_kv_heads = 1
+    head_dim = 4
+    max_seq_len = 64
+    vocab_size = 16
+    n_layers = 1
+
+
+class _EngineTokenizer:
+    eos_token_id = 7
+
+    def __call__(self, text, **kwargs):
+        words = text.split() or [text]
+        ids = [(len(word) % 5) + 1 for word in words]
+        return type("Encoding", (), {"input_ids": torch.tensor([ids])})()
+
+    def __len__(self):
+        return 16
+
+    def encode(self, text, **kwargs):
+        return [(sum(map(ord, text)) % 8) + 8]
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+        return "".join(
+            str(token_id)
+            for token_id in token_ids
+            if not skip_special_tokens or token_id != self.eos_token_id
+        )
+
+
+class _EngineModel(torch.nn.Module):
+    def __init__(self, next_token=3):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = _EngineConfig()
+        self.eos_token_id = 7
+        self.next_token = next_token
+
+    def forward(self, input_ids, past_key_values=None, use_cache=False):
+        batch, seq_len = input_ids.shape
+        logits = torch.full((batch, seq_len, self.config.vocab_size), -10.0)
+        logits[..., self.next_token] = 10.0
+        key = torch.zeros(batch, 1, seq_len, self.config.head_dim)
+        value = torch.zeros_like(key)
+        return logits, None, ((key, value),)
+
+
+def _make_engine():
+    from research.inference.forge_engine import ForgeEngine
+
+    return ForgeEngine(_EngineModel(), _EngineTokenizer(), device="cpu")
+
+
+class TestForgeEngineRefactor:
+    def test_top_p_sampling_returns_a_valid_nucleus_token(self):
+        engine = _make_engine()
+        logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+        token = engine._sample_next_token(logits, 1.0, 0, 0.8, 1.05, [])
+        assert token.item() in {0, 1}
+
+    def test_raw_and_streaming_generation_share_greedy_semantics(self):
+        raw_engine = _make_engine()
+        stream_engine = _make_engine()
+        raw = raw_engine.generate_raw("prompt", max_new_tokens=3, temperature=0.0)
+        streamed = "".join(stream_engine.generate_stream(
+            "prompt", max_new_tokens=3, temperature=0.0))
+        assert raw == streamed == "333"
+        assert raw_engine.total_tokens_generated == 3
+        assert stream_engine.total_tokens_generated == 3
+
+    def test_learned_prefix_cache_uses_its_native_interface(self):
+        from research.inference.kv.learned_prefix_cache import LearnedPrefixCache
+
+        engine = _make_engine()
+        engine._prefix_cache = LearnedPrefixCache(max_entries=2)
+        prefix = " ".join(f"prefix{i}" for i in range(32))
+        first_prompt = f"{prefix} first suffix tokens"
+        second_prompt = f"{prefix} second different suffix"
+        assert engine.generate(
+            first_prompt, max_new_tokens=1, finish_sentence=False) == "3"
+        assert engine.generate(
+            second_prompt, max_new_tokens=1, finish_sentence=False) == "3"
+        assert engine._prefix_cache.stats()["entries"] == 1
+
+    def test_sleep_level_one_transitions_a_fresh_engine(self):
+        engine = _make_engine()
+        engine.sleep(level=1)
+        assert not engine.is_awake
+        with pytest.raises(RuntimeError, match="call wake"):
+            engine.generate_raw("prompt", max_new_tokens=1)
+        engine.wake()
+        assert engine.is_awake
+
+    def test_sleep_level_two_requires_a_reloadable_checkpoint(self):
+        engine = _make_engine()
+        with pytest.raises(RuntimeError, match="checkpoint path"):
+            engine.sleep(level=2)
+        assert engine.is_awake
+        assert engine.model is not None
+
+    def test_level_two_wake_re_activates_strategies(self, monkeypatch):
+        """Level 2 wake should re-activate strategies after model reload."""
+        import research.inference.forge_engine as fe_mod
+        from research.inference.prefix_cache import LRUPrefixCache
+        from research.model_loader import ModelLoader
+
+        engine = _make_engine()
+        engine.checkpoint_path = "fake.safetensors"
+        engine.activate(kv_cache="standard", decoding="standard",
+                        use_prefix_cache=True, warmup=False)
+        assert engine.kv_cache is not None
+        assert engine.decoding is not None
+        assert isinstance(engine._prefix_cache, LRUPrefixCache)
+
+        # Sleep level 2 discards the model
+        engine.sleep(level=2)
+        assert not engine.is_awake
+        assert engine.model is None
+
+        # Mock the model reload to return a fresh _EngineModel
+        def fake_build(config, checkpoint_path, dtype):
+            return _EngineModel()
+        monkeypatch.setattr(
+            ModelLoader, "build_model_fast", staticmethod(fake_build))
+
+        engine.wake()
+        assert engine.is_awake
+        # Strategies should be re-activated on the new model
+        assert engine.kv_cache is not None
+        assert engine.decoding is not None
+        assert isinstance(engine._prefix_cache, LRUPrefixCache)
+
+    def test_activate_initializes_core_strategies_on_cpu(self):
+        from research.inference.prefix_cache import LRUPrefixCache
+
+        engine = _make_engine()
+        engine.activate(kv_cache="standard", decoding="standard",
+                        use_prefix_cache=True, warmup=False)
+        assert engine.kv_cache.info()["type"] == "standard_prealloc"
+        assert engine.decoding.name == "StandardDecoding"
+        assert isinstance(engine._prefix_cache, LRUPrefixCache)

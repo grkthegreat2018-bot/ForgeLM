@@ -1,40 +1,95 @@
-"""Shared pytest fixtures for ForgeAI test suite."""
+"""Shared pytest fixtures for ForgeAI test suite.
+
+All tests use GPU (CUDA) with the full ForgeEngine pipeline.
+CPU fallback only when CUDA is critically unavailable.
+"""
+import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import pytest
 import torch
 
 from research.config import ModelConfig, get_config
 
-# Small vocab for CPU tests — avoids 151665×d_model embedding spike.
-_CPU_VOCAB = 256
+CUDA_AVAILABLE = torch.cuda.is_available()
+
+# ── GPU-first config fixtures ──────────────────────────────────────────────
+
+def _gpu_config(preset="lfm25_tiny", vocab=256, dtype="bfloat16"):
+    """Build config on GPU with bf16. Falls back to CPU only if no CUDA."""
+    cfg = get_config(preset)
+    cfg.vocab_size = vocab
+    cfg.dtype = dtype
+    cfg.device = "cuda" if CUDA_AVAILABLE else "cpu"
+    return cfg
 
 
 @pytest.fixture
 def tiny_config():
-    """Minimal config for fast CPU-only testing. Uses small vocab to avoid CPU spike."""
-    cfg = get_config("lfm25_tiny")
-    return ModelConfig(**{**cfg.__dict__, "device": "cpu", "vocab_size": _CPU_VOCAB})
+    """Tiny config on GPU (bf16). CPU fallback only if no CUDA."""
+    return _gpu_config("lfm25_tiny")
 
 
 @pytest.fixture
 def tiny_config_cpu(tiny_config):
-    """Tiny config forced to CPU (alias for clarity)."""
+    """Alias — same as tiny_config (GPU-first now)."""
     return tiny_config
 
 
 @pytest.fixture
 def tiny_config_gpu():
-    """Tiny config for GPU tests. Uses small vocab. Mark with @pytest.mark.gpu."""
-    cfg = get_config("lfm25_tiny")
-    return ModelConfig(**{**cfg.__dict__, "device": "cuda", "vocab_size": _CPU_VOCAB})
+    """GPU config (explicit). Skips if no CUDA."""
+    if not CUDA_AVAILABLE:
+        pytest.skip("CUDA not available")
+    return _gpu_config("lfm25_tiny")
+
+
+@pytest.fixture
+def v7_config():
+    """Full V7 config on GPU (bf16). For integration tests."""
+    if not CUDA_AVAILABLE:
+        pytest.skip("CUDA not available — V7 requires GPU")
+    return _gpu_config("forgelm_v7", vocab=65536)
 
 
 @pytest.fixture
 def gpu_available():
     """Skip test if CUDA is not available."""
-    if not torch.cuda.is_available():
+    if not CUDA_AVAILABLE:
         pytest.skip("CUDA not available")
     return True
+
+
+@pytest.fixture
+def forge_engine(tiny_config_gpu):
+    """Build a ForgeEngine with full feature activation on GPU.
+
+    Uses the tiny config for fast tests. activate_optimal() enables:
+      - RotorQuant KV cache, torch.compile, Triton conv, prefix cache,
+        fused QK-Norm+RoPE+Cache-Write, chunked prefill, seq split, warmup.
+    """
+    from research.model_loader import ConfigurableResearchLLM
+    from research.inference.forge_engine import ForgeEngine
+    from research.tokenizer_cache import get_tokenizer
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        with torch.device("cuda"):
+            model = ConfigurableResearchLLM(tiny_config_gpu)
+    finally:
+        torch.set_default_dtype(old_dtype)
+    model.eval()
+
+    tok = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    engine = ForgeEngine(model, tok, device="cuda")
+    engine.activate_optimal()
+    yield engine
+    # Cleanup
+    del engine
+    del model
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture

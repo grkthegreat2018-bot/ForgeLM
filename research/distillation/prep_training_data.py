@@ -291,8 +291,8 @@ def main():
     print("\n" + "-" * 70)
     print("  Saving")
     print("-" * 70)
-    train_path = OUTPUT_DIR / "forgelm_v3_train.jsonl"
-    val_path = OUTPUT_DIR / "forgelm_v3_val.jsonl"
+    train_path = OUTPUT_DIR / "forgelm_v7_train.jsonl"
+    val_path = OUTPUT_DIR / "forgelm_v7_val.jsonl"
     save_jsonl(train, train_path)
     save_jsonl(val, val_path)
 

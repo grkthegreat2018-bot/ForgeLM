@@ -86,16 +86,18 @@ class BatchedDecoding(DecodingStrategy):
             else:
                 generators.append(None)
 
-        # Pad prompts to same length (right-pad)
+        # Pad prompts to same length (LEFT-pad: zeros on left, prompt on right)
+        # Left-padding is correct for causal LM generation — the last position
+        # is the generation start, consistent across all sequences in the batch.
         max_prompt_len = max(p.shape[1] for p in prompts)
         padded_ids = torch.zeros(B, max_prompt_len, dtype=torch.long, device=device)
         prompt_lens = []
         for i, p in enumerate(prompts):
             L = p.shape[1]
-            padded_ids[i, -L:] = p[0]
+            padded_ids[i, -L:] = p[0]  # right-align prompt (pad on left)
             prompt_lens.append(L)
 
-        # Attention mask
+        # Attention mask — attend to the rightmost L positions (the prompt)
         attn_mask = torch.zeros(B, max_prompt_len, dtype=torch.bool, device=device)
         for i, L in enumerate(prompt_lens):
             attn_mask[i, -L:] = True

@@ -241,6 +241,11 @@ class StreamingInference:
         # Identify layer modules
         self.layer_modules = self._find_layer_modules()
 
+    def __del__(self):
+        """Clean up the prefetch executor to avoid thread leaks."""
+        if getattr(self, '_executor', None) is not None:
+            self._executor.shutdown(wait=False)
+
     def _find_layer_modules(self) -> list[str]:
         """Find module names that correspond to transformer layers."""
         layer_names = []

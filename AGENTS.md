@@ -1,5 +1,130 @@
 # ForgeAI — Agent Notes
 
+## Agent Operating Directives (READ FIRST)
+
+These directives govern how work is done in ForgeAI. They are non-negotiable
+unless the user explicitly overrides them for a specific task.
+
+### A. Model Versioning — Build On The Prior, Never Beside It
+- **Every new custom model version MUST be derived from the immediately
+  preceding version**, carrying forward all prior keys/architecture as the
+  baseline, then adding or replacing only what's new. Example chain:
+  `lfm25_1.2b` → `forgelm_v3` → `forgelm_v4` → `forgelm_v5`.
+- **Port-first, train-second**: when introducing a new architecture key or
+  attention variant, write the lossless checkpoint-conversion path
+  (`XxxKey` class, identity/zero-init warm start, bit-exact load test)
+  **before** any training experiment. This eliminates the "train first, port
+  later" tax that has bitten past rounds.
+- **No silent regressions**: a new preset that drops a prior key must
+  document WHY in the preset line and in the R&D round notes. Dropping keys
+  silently is a bug.
+- **Preset lineage check**: before merging a new preset, run a bit-exact
+  forward-pass comparison against the prior preset's checkpoint on the BSP
+  base. Max logit diff must be 0.0 (lossless) unless the preset is
+  intentionally non-lossless (document the delta).
+
+### B. Confirm-Then-Fix — Never Leave A Known Bug Sitting
+- **When you find an issue, confirm it** (reproduce with a minimal script or
+  test) **then fix it in the same session**. Do not log it and move on.
+- If a fix would be large/risky, scope a minimal failing test first, then
+  implement the smallest correct fix. Prefer targeted edits over rewrites.
+- **Always add or update a test** for the fix so it cannot silently return.
+  Tests live in `tests/unit/` and run on CPU where possible.
+- If a fix is genuinely blocked (needs user input, env change, or a
+  destructive op), say so explicitly and create a `todo` — do not pretend
+  it's done.
+
+### C. R&D Is The Default Mode — Push For Novel Improvements
+- **No area is "solved"**. Every existing technique (attention, KV cache,
+  quantization, decoding, optimizer, loss, scheduler) is fair game for a
+  novel variation. The codebase already has 13 R&D rounds; round 14+ is
+  expected, not exceptional.
+- **Prefer novel over copy**: when implementing a known technique, always
+  ask "what's the novel twist that could beat the paper's number on our
+  specific hardware (RTX 5070, 12GB, SM120, Blackwell)?" Implement the
+  baseline AND at least one novel variation in the same round.
+- **Cross-domain combinations are the highest-value R&D** — see the
+  expanded Novel Discovery Protocol below.
+- **When stuck on a hard optimization, pivot don't quit**: if 2 iterations
+  fail to beat the known best, shelf it in `.devin/scratchpad.md` with the
+  failed approaches documented, then touch up a *different* area. Fresh
+  context often surfaces the missing idea. Return to the hard problem later.
+- **Record failures as carefully as successes** — a documented dead end
+  saves the next session hours. Use `.devin/scratchpad.md`.
+
+### D. GPU/VRAM — Mixed Approaches Are Mandatory To Consider
+- **Never propose a GPU-only or CPU-only solution when a mixed approach is
+  viable.** The hardware is RTX 5070 12GB VRAM + 32GB system RAM + pinned
+  CPU offload (`hybrid_offload.py`, `cpu_kv_offload.py`). The optimal
+  operating point is almost always a split.
+- **Always state the VRAM budget** for any new inference or training
+  feature. If a feature pushes past 12GB on the 1.2B model, it MUST offer
+  a mixed CPU/GPU fallback path (e.g. CPUAdamW for training, CPU KV
+  offload for inference, BitNet int8 for weights).
+- **Quantization is a first-class citizen**, not a fallback. BitNet b1.58,
+  W8A8, NVFP4, OffQ, AAAC, SharQ, MosaicQuant are all production paths on
+  this hardware — prefer them over "just use a smaller model".
+- **Profile before assuming**: use `torch.cuda.memory_allocated()` /
+  `torch.cuda.max_memory_allocated()` in test scripts. Guessing VRAM is
+  how we get OOM at 3am.
+
+### E. No Redundant Files — Search Before You Create
+- **Before creating ANY new script or module, grep the codebase for an
+  existing one that does the same thing.** The codebase has 340+ .py files
+  across 13 R&D rounds; the odds are high that a related implementation
+  exists.
+- **Prefer upgrading an existing file over spawning a new one.** If
+  `research/inference/kv/snapkv.py` exists and you want "smarter SnapKV",
+  edit that file — do not create `snapkv_v2.py` or `smart_snapkv.py`.
+  Versioned filenames fragment the codebase and hide the canonical path.
+- **If two files end up doing the same thing, merge them** and delete the
+  inferior one. Document the merge in the "Removed (consolidation)" section.
+- **The canonical path wins**: when in doubt, the file already wired into
+  `forge_engine.py` / `forge_server.py` / `sft_train.py` is canonical. New
+  code hooks into those, not around them.
+
+### F. Math Thinking + Script Testing — Find The True Optimum
+- **Every optimization claim must be backed by a number from a script**,
+  not a paper citation. Papers report numbers on different hardware/models;
+  our numbers come from RTX 5070 + LFM2.5-1.2B.
+- **Write the smallest possible test script first** (see Novel Discovery
+  Protocol step 1). A 20-line script that runs in 5 seconds > a 200-line
+  design doc.
+- **Do the math by hand for small cases** before trusting a benchmark.
+  If a KV compression scheme claims "15×", verify: `bytes_full /
+  bytes_compressed` with the actual dims (d_model=2048, head_dim=64,
+  8 KV heads, 16 layers). Catches off-by-one and per-layer-vs-total
+  confusion.
+- **Sweep parameters, don't guess them**: when a technique has
+  hyperparameters (rank, block size, threshold, alpha), write a sweep
+  script that tries 5-10 values and plots/logs the result. The optimum is
+  rarely the paper's default.
+- **Compare against the RIGHT baseline**: a new KV cache must beat the
+  current production cache (`s4r` for V4), not a strawman. A new optimizer
+  must beat `muon_sf_plain` (V3) or `cpu_offload` (V4), not raw AdamW.
+- **No area is truly solved**: even "obviously optimal" choices (RoPE
+  theta, head_dim, SwiGLU intermediate ratio) deserve a periodic
+  re-challenge. If the improvement is hard to find, shelf it and touch up
+  another area — fresh ideas surface indirectly.
+
+### G. General Best Practices For This Codebase
+- **Run the test suite before declaring done**: `pytest tests/ --tb=short -q`
+  with the venv python and `PYTHONPATH=D:\windsurf\ForgeAI`.
+- **Keep AGENTS.md current**: when you add a new file, feature, or R&D
+  round, update the relevant section here in the SAME session. Stale
+  AGENTS.md causes the next agent to duplicate your work.
+- **Use `.devin/scratchpad.md` for long working notes**, not the main
+  conversation. Keeps context clean and persists across sessions.
+- **Debate the user's premise when warranted** — if a requested approach
+  has a known-better alternative on this hardware, say so and propose the
+  alternative. Don't silently implement a worse path.
+- **Subagent delegation**: use `subagent_explore` for read-only research
+  (file indexing, paper lookups) and `subagent_general` for parallel
+  implementation tasks. Spawn 2-3 in parallel for independent work.
+- **Skills**: invoke `.devin/skills/` skills (`log-bug`, `sync-memory`,
+  `systemspecs`, `glm-supercharge`) when they match the task — they encode
+  project-specific workflows.
+
 ## Current Architecture: LFM2.5-1.2B
 
 **Base model**: Liquid AI LFM2.5-1.2B-Instruct, ported 100% lossless into ForgeAI framework.
@@ -37,12 +162,17 @@ Four configs:
 - `research/decoding/mtp.py` — MTP speculative decoding + training (independent heads design)
 
 ### Inference
-- `research/inference/forge_engine.py` — Unified inference engine
-- `research/inference/forge_server.py` — **v3.0: OpenAI-compatible FastAPI server** with multi-model (ModelRegistry), tool calling, SSE streaming, sleep/wake, **concurrent task-based generation** (SessionManager + BatchQueue), and request batching for 3-5x throughput
+- `research/inference/forge_engine.py` — Unified inference engine. **Hot-swap support**: `engine.hotswap.set_kv_cache()`, `set_decoding()`, `set_context_limit()`, `set_infinite_context()`, `set_generation_defaults()`, `set_feature()`, `update()`. `generate_batch()` for parallel multi-prompt generation. `generate_adaptive()` for RPO-trained adaptive thinking. Per-request `context_limit` override.
+- `research/inference/forge_server.py` — **v3.2: OpenAI-compatible FastAPI server** with multi-model (ModelRegistry), tool calling, SSE streaming, sleep/wake, **concurrent task-based generation** (SessionManager + BatchQueue), request batching, **hot-swap API** (`/v1/engine/*`), **Library API** (`/v1/library/*`), **agentic tool API** (`/v1/chat/agent`, `/v1/tools`, `/v1/tools/execute`), and per-task config updates. Built-in tools give the LLM direct access to Library, hot-swap, batch gen, and engine introspection.
 - `research/inference/session_manager.py` — **SessionManager + BatchQueue**: per-task conversation context (LRU eviction), concurrent request batching (50ms window, up to 8 requests per batch → single BatchedDecoding forward pass). 1005 tok/s on 8 concurrent tasks (3.5x vs serial)
 - `research/inference/decoding.py` — Decoding strategies (standard, speculative, MTP, **batched**)
 - `research/inference/batched_decoding.py` — BatchedDecoding: multiple prompts in single forward pass (GEMV→GEMM, 3-5x throughput)
-- `research/inference/kv_backend.py` — KV cache strategies (standard, paged, rotorquant, hadamard, compressed, streaming, snapkv)
+- `research/inference/kv_backend.py` — KV cache strategies (standard, paged, rotorquant, hadamard, compressed, streaming, snapkv, **kvzip**)
+- `research/inference/hotswap.py` — **HotSwapManager**: runtime config changes without restart. Hot-swap KV cache, decoding, quantization, context limits, generation defaults, feature flags, VRAM margin, batch config. Thread-safe, per-request overrides. Applied lazily on next generate() or forced via apply_pending().
+- `research/inference/library.py` — **Library**: persistent knowledge base with lorebook-style injection. Pre-tokenizes content on save (token cache saved as .npy alongside .json). Auto-trims by relevance (LRU + priority + category retention). Model self-write (failures/wins/research). Tag + keyword indices for O(1) lookup. `inject()` scans prompt for triggers, injects matching entries up to token budget. `get_injection_tokens()` returns pre-tokenized IDs (no re-tokenization). Disk-backed at `research/data/library/`. API: `/v1/library/*`.
+- `research/inference/engine_tools.py` — **EngineToolRegistry**: 38 built-in tools the LLM can call during generation. **Library** (9): `library_save/search/lookup/get/delete/update/stats/optimize/set_config`. **Hot-swap** (7): `engine_set_kv_cache/decoding/context_limit/infinite_context/generation_params/feature/apply_changes`. **Engine info** (3): `engine_get_settings/stats/pending`. **Generation** (2): `engine_batch_generate`, `engine_generate_adaptive`. **Math** (2): `math_eval` (safe AST-based expression eval with sqrt/sin/cos/log/etc.), `calc` (quick calculator). **Random** (2): `random_number` (int/float ranges), `chance` (coin_flip/dice/choice/shuffle/weighted). **Web** (3): `web_search` (Tavily API), `web_search_semantic` (Exa neural search), `web_scrape` (Firecrawl page scrape). **Files** (7): `file_read/write/edit/move/rename/list/delete` (workspace-scoped, path-validated, security-checked). **Security** (3): `scan_script` (pre-scan Python for dangerous imports/patterns), `security_get_config`, `security_get_pending`. Server-side execution via `execute(name, args)` / `execute_calls(calls)`. All file writes and web scrapes go through `ToolSecurityManager`. Used by `generate_with_tools()` agentic loop and `/v1/chat/agent` API endpoint. API keys in `.env`: `TAVILY_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`.
+- `research/inference/tool_security.py` — **ToolSecurityManager**: sandbox-file-based security for LLM tool execution. **Sandbox model**: `research/data/sandbox.json` defines all access rules. Everything OUTSIDE the sandbox is blacklisted for writes (defaults to read-only). **3 access levels**: `read_write` (full access), `read_only` (can read but not write/delete), `denied` (no access at all). **Reading is always allowed** within workspace unless path is `denied` — reading blacklisted files is OK. **File blacklist**: 17 patterns for files that can't be written/deleted (.env, secrets, keys, .pem, .ssh, credentials). **Protected engine files**: 14 core files that can never be written (but CAN be read). **Command blacklist**: 40+ risky patterns (os.system, subprocess, eval, exec, shutil.rmtree, socket, pickle, ctypes, winreg, directory traversal) → triggers `needs_permission` flag. **Hard refusal patterns**: attempts to disable security or hijack tool registry. **Website whitelist/blacklist**: domain filtering for web tools (empty whitelist = all allowed). **Script pre-scan**: AST-based scan of Python scripts for 17 dangerous imports + dynamic import detection. **Auto modes**: `allow`, `deny`, `ask` (default). **Permission flow**: risky ops create pending requests → user approves/denies via API. **Sandbox persistence**: all config changes auto-save to `sandbox.json`. API: `/v1/security/config` (GET/PATCH), `/v1/security/reload` (POST), `/v1/security/access/{path}` (GET), `/v1/security/pending` (GET), `/v1/security/pending/{id}/approve|deny` (POST), `/v1/security/scan` (POST).
+- `research/data/sandbox.json` — **Sandbox config file**: defines access rules for LLM tool execution. Writable dirs: `research/data`, `research/output`, `research/sandbox`, `research/results`, `.devin`. Read-only dirs: `research/inference`, `research/training`, `research/self_play`, `research/distillation`, `research/evaluation`, `research/checkpoints`, `research/architecture`, `research/decoding`, `research/quantization`, `research/keys`, `research/moe`, `research/runtime`, `AGENTS.md`, `docs`. Denied: `.env`, `.git`, `venv`, `.venv`, `node_modules`, `__pycache__`. Website whitelist/blacklist empty by default (all sites allowed).
 - `research/inference/quant/int4_quant.py` — INT4 weight-only quantization
 - `research/inference/innovations.py` — Runtime innovations (MRL, QuaRot, V0, ProgressiveKV)
 
@@ -69,9 +199,22 @@ Planned for further integration:
 - MTP, Safety, LeRoPE, CSA, QK-Norm, SandwichNorm, LearnedSink, ValueResidual, SwiGLU Clamp, MRL
 
 ### Self-play & Training
+- `research/training/optim/hybrid_offload.py` — **CPUAdamW**: ZeRO-Offload-style hybrid CPU-GPU optimizer. Keeps fp32 optimizer states + master weights on CPU pinned RAM, model bf16 on GPU. Eliminates 14.4GB fp32 AdamW VRAM cost for 1.2B models → full-precision training on 12GB GPU. Async grad offload + optional overlap mode (CPU math on background thread, GPU param sync on main thread). Use via `--optimizer cpu_offload` in any trainer. VRAM budget: ~6-7GB GPU (weights+grads+activations), ~19GB CPU (optimizer states).
+- `research/training/runners/cpt_train.py` — **CPT with reasoning trace injection** (midtraining stage of LFM2.5-1.2B-Thinking recipe). Mixes reasoning traces (openthoughts, openr1_math, dolphin_r1) with general data (orca_math, metamath) at configurable ratio (default 60% reasoning). Full-sequence next-token prediction (no completion masking, unlike SFT). Sequence packing for efficiency. MixedDataSampler ensures every batch has the right reasoning/general ratio. CLI: `python -m research.training.runners.cpt_train --reasoning-data <files> --general-data <files> --checkpoint <ckpt> --save <out> --optimizer cpu_offload --reasoning-ratio 0.6 --lr 1e-4 --max-steps 5000`
+- `research/training/runners/curriculum_sft.py` — **Curriculum SFT: Mix Distillation + two-stage curriculum** (SFT stage of LFM2.5-1.2B-Thinking recipe, informed by Small Model Learnability Gap research arXiv 2502.12143). Three subcommands: `prepare` (classifies data into short/long CoT, filters doom-loops via n-gram repetition, applies mix distillation blending), `train-stage1` (short CoT — builds internal solver, higher LR), `train-stage2` (long CoT + mix distillation — externalizes reasoning, lower LR), `full` (runs all three). Doom-loop filter: n-gram repetition ratio detector (n=8, threshold=0.3) removes training examples with excessive repetition (#1 failure mode of reasoning models). Mix distillation: blends long CoT (teacher) + short CoT (student) at target ratio to match small model intrinsic learning capacity. CLI: `python -m research.training.runners.curriculum_sft prepare --input <files> --output-dir <dir> --filter-doom-loops --mix-ratio 0.5`
+- `research/training/runners/dpo_data_gen.py` — **DPO preference data generation with doom-loop mitigation** (DPO stage of LFM2.5-1.2B-Thinking recipe). Generates 5 temperature-sampled + 1 greedy candidate per prompt from SFT checkpoint, scores each with an LLM judge (teacher API model via distill_client), flags doom-loop candidates via n-gram repetition, constructs preference pairs where chosen=best non-looping, rejected=worst OR any looping (loops always rejected regardless of judge score). Reduces doom-loop rate from ~15% (SFT) to ~4% (DPO). CLI: `python -m research.training.runners.dpo_data_gen --prompts <jsonl> --checkpoint <sft_ckpt> --output <pairs.jsonl> --n-temp-samples 5 --judge-model qwen3-32b`. Then: `python -m research.training.runners.dpo_align --data <pairs.jsonl> --checkpoint <sft_ckpt> --save <dpo_ckpt> --optimizer cpu_offload`
+- `research/training/runners/rlvr_train.py` — **RLVR (Reinforcement Learning with Verifiable Rewards)** (RL stage of LFM2.5-1.2B-Thinking recipe). GRPO-style RL on verifiable tasks with binary rewards (1.0 if verified correct, 0.0 otherwise). N-gram repetition penalty applied early in training (doom-loop mitigation, reduces rate from ~4% to ~0.36%). KL penalty against DPO checkpoint (reference model). Supports SPPO/PS-PPO/EVPO/GRPO-OR via --rl-algorithm. Math verification: extracts final answer (#### N, \boxed{}, "answer is X") and compares to gold. CLI: `python -m research.training.runners.rlvr_train --tasks <jsonl> --checkpoint <dpo_ckpt> --save <rlvr_ckpt> --use-repetition-penalty --rl-algorithm grpo --optimizer cpu_offload --max-steps 500`
+- `research/self_play/grpo_trainer.py` — **Updated**: Added n-gram repetition penalty (LFM2.5-Thinking RLVR recipe) via `use_repetition_penalty`, `repetition_n`, `repetition_threshold`, `repetition_penalty`, `repetition_warmup_steps` config fields. Penalty applied in `train_step` after GRPO-λ length penalty, before advantage computation. Added CPUAdamW optimizer support via `config.optimizer='cpu_offload'`.
+- `research/prequantize.py` — **Pre-quantization script**: Converts any ForgeLM checkpoint to BitNet b1.58 ternary int8 format. Ternary-quantizes all `.weight` tensors to {-1, 0, +1} and stores as int8 (1 byte/param vs 2 bytes bf16). Writes `_bitnet_prequant=1` metadata to safetensors for auto-detection by ForgeEngine. CLI: `python -m research.prequantize --checkpoint <input.safetensors> --output <output.safetensors>`. ForgeLM_V5_Base (14.1GB bf16) -> ForgeLM_V5_BitNet (7.08GB int8, 2x disk compression). ForgeEngine loads int8 directly to VRAM (no fp32 intermediate), then converts BitNetLinear layers to int8 buffer storage (4x weight VRAM cut vs fp32). V5 7.5B model loads in 5.8GB VRAM (vs 14.1GB bf16).
+- `research/keys/quantization/bitnet_b158_key.py` — **Updated**: Added int8 weight storage mode for pre-quantized inference. `BitNetLinear.load_prequantized(int8_tensor, scale)` loads ternary weights directly as int8 buffer (bypasses fp32 parameter). `convert_model_to_int8(model)` converts all BitNetLinear layers. `BitNetLinear.forward()` uses int8 tensor-core GEMM directly when `_prequantized=True` (no runtime quantization cost). `_load_from_state_dict` handles int8 source tensors and meta-device loading.
+- `research/inference/forge_engine.py` — **Updated**: Auto-detects pre-quantized BitNet checkpoints via safetensors metadata (`_bitnet_prequant=1`). Loads int8 weights directly to VRAM (no fp32 intermediate, no CPU RAM spike). Builds model on meta device, loads tensors one at a time to GPU, converts BitNetLinear to int8 buffer storage. `activate_optimal()` method: S4R KV cache (15x), torch.compile, fused QK-Norm+RoPE+Cache, Triton conv, prefix cache, chunked prefill, seq-aware split. V5 7.5B: 5.8GB VRAM inference.
+- `research/moe/moe.py` — **Updated**: Dense bypass path handles BitNet int8 experts. When experts are BitNetLinear with `_prequantized=True`, calls each expert's forward individually (ternary GEMM kernel) instead of stacking weights for batched matmul.
+- `research/training/runners/sft_train.py` — **Updated**: Optimal defaults for VRAM-efficient training: `--optimizer muon_sf` (2.39x vs AdamW), `--lora` default True (rank 32, alpha 64), `--bitnet-everywhere` default True, `--grad-checkpoint` default True. Use `--no-lora`, `--no-bitnet-everywhere`, `--no-grad-checkpoint` to disable.
+- `research/self_play/infinite_loop.py` — **Updated**: Added `ThinkingPipeline` class + `ThinkingPipelineConfig` that orchestrates the full LFM2.5-1.2B-Thinking 4-stage pipeline (CPT -> Curriculum SFT -> DPO -> RLVR). Each stage runs as a subprocess calling the corresponding runner. Resumable: completed stages are skipped if output checkpoint exists. Accessible via `--self-play-mode thinking`. Also fixed pre-existing argparse `%%` escaping bug in `--saerl` help text. CLI: `python -m research.self_play.infinite_loop --checkpoint <base_ckpt> --self-play-mode thinking --config forgelm_v4 --ft-optimizer cpu_offload`
 - `research/self_play/infinite_loop.py` — **Unified AZR self-play loop** (entry point). Propose → solve → verify → SFT → eval → promote. CLI: `python -m research.self_play.infinite_loop --checkpoint <ckpt> --epochs 50`
 - `research/self_play/infinite_curriculum.py` — AZR curriculum engine (task proposal, validation, solving, ELO difficulty tracking)
 - `research/self_play/` — Recursive self-play, sandbox, curriculum, GRPO
+- `research/self_play/discovery/discovery_tools.py` — **Self-play discovery tool registry** (NOT for inference). Tools: `think`, `sudo_think`, `run_script`, `web_search` (DuckDuckGo, no API key), `wikipedia_search`, `arxiv_search`, `fetch_url`, `calculate`, `save_research`, `propose_theory`, `update_theory`, `record_discovery`, `query_db`, `migrate_schema`, `summarize_context`, `finish_session`, `set_goal`. Used by the discovery self-play loop and agentic distillation. For inference tool registry, see `research/inference/engine_tools.py`.
 - `research/training/` — DPO alignment, training utils, chunked CE
 - `research/evaluation/` — Prompt tests, reasoning benchmarks, LiveCodeBench
 
@@ -1131,10 +1274,12 @@ Follow this iterative empirical loop:
    100 steps). Run it BEFORE researching. Get a baseline number.
 2. **Research + think long** — web_search the topic, read 3-5 papers, think
    hard about what's known vs unknown. Write findings to `.devin/scratchpad.md`.
+   **Do the math by hand** for the small case before trusting any number.
 3. **Apply novel ideas, compare to documented results** — implement 2-3 novel
    variations in the isolated script. Run them. Compare numbers to documented
-   baselines from research. Most novel ideas will LOSE to known answers —
-   that's expected and informative.
+   baselines from research AND to the current production baseline on this
+   hardware. Most novel ideas will LOSE to known answers — that's expected
+   and informative.
 4. **Iterate once more before defaulting** — if novel ideas lost, adjust the
    angle (not just parameters). Try a different combination. Only after a
    second failed iteration should you default to the best known answer.
@@ -1144,7 +1289,20 @@ Follow this iterative empirical loop:
    compression theory applied to gradient sparsity.
 6. **Record what worked AND what failed** — failed novel ideas are still
    valuable; document them in scratchpad so the next session doesn't repeat.
+   Include the numbers, the hypothesis, and why it likely failed.
 7. **Sometimes, leave it to luch** - sometimes, leaving things to chance can be a good modivator. if you need more ideas, take all known and loosly related systems, throw them into a randomizer script, and see what it adds together. ie; ##### + #####. This could help you find new ideas that you wouldn't have thought of otherwise.
+8. **Pivot don't quit** — if a hard optimization resists 2 iterations,
+   shelf it (documented in scratchpad) and touch up a DIFFERENT area.
+   Fresh context often surfaces the missing idea. Return to the hard
+   problem in a later round. No area is truly solved, but not every area
+   yields on the first session.
+9. **Sweep before you ship** — any technique with hyperparameters gets a
+   sweep script (5-10 values) before being declared optimal. The paper's
+   default is rarely our optimum on RTX 5070 + 1.2B.
+10. **Confirm-then-fix in R&D too** — if a test script reveals a bug in
+    existing code (not your new code), confirm it and fix it in the same
+    session per Directive B. R&D rounds that leave behind unfixed bugs
+    are not complete.
 
 Key principles:
 - **Isolated scripts over integration** — test the core mechanism on a toy
@@ -1156,6 +1314,12 @@ Key principles:
   a toy script, not 30 hours of integration.
 - **Cross-domain is where novelty lives** — the best novel discoveries
   combine techniques from fields that don't usually interact.
+- **Mixed GPU/CPU is the default assumption** — never design a technique
+  that only works if it fits in VRAM. Always have the CPU-offload fallback
+  path designed from the start (Directive D).
+- **Search before you build** — before writing a new test script, grep for
+  an existing one that tests the same mechanism. Adapt it instead of
+  starting fresh (Directive E).
 
 ## Fast Boot / Cold-Start Optimization (2026-08-19)
 

@@ -9,6 +9,7 @@ Built-in diagnostics (read_log, read_output, bottleneck) eliminate the need
 for one-off log-reading/profiling scripts. These are available on every
 TaskLogger / task_scope instance.
 """
+import atexit
 import json
 import os
 import threading
@@ -58,6 +59,27 @@ class TaskLogger:
         # Per-phase timing for bottleneck profiling.
         self._phase_timings: dict[str, list[float]] = {}
 
+        # Persistent file handles for append-mode files (avoid open/close per call).
+        # status_file is opened per-write (mode "w" overwrites) but throttled by time.
+        self._log_handle = None
+        self._outputs_handle = None
+        self._write_count = 0
+        self._flush_every = 64  # flush every N writes to append handles
+        self._last_status_write = 0.0  # for time-based status throttle
+        self._status_throttle_s = 1.0  # only write status if >1s since last write
+
+        # Open persistent append handles
+        try:
+            self._log_handle = open(self.log_file, "a", encoding="utf-8")
+            self._outputs_handle = open(self.outputs_file, "a", encoding="utf-8")
+        except Exception as e:
+            import warnings
+            warnings.warn(f"task_logger: failed to open persistent handles: {e}",
+                          RuntimeWarning, stacklevel=2)
+
+        # Register atexit cleanup for persistent file handles
+        atexit.register(self._atexit_close)
+
         self.status = {
             "id": self.task_id,
             "name": self.name,
@@ -71,7 +93,16 @@ class TaskLogger:
         }
         self._write_status()
 
-    def _write_status(self):
+    def _write_status(self, force: bool = False):
+        """Write status.json (overwritten each time, time-throttled).
+
+        Args:
+            force: if True, bypass the time-based throttle (used by finish/update).
+        """
+        now = time.monotonic()
+        if not force and (now - self._last_status_write) < self._status_throttle_s:
+            return  # throttled — skip this write
+        self._last_status_write = now
         with self._lock:
             try:
                 with open(self.status_file, "w", encoding="utf-8") as f:
@@ -84,8 +115,15 @@ class TaskLogger:
     def _write_log(self, text):
         with self._lock:
             try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(text + "\n")
+                if self._log_handle is not None:
+                    self._log_handle.write(text + "\n")
+                    self._write_count += 1
+                    if self._write_count % self._flush_every == 0:
+                        self._log_handle.flush()
+                else:
+                    # Fallback: open per-call if persistent handle failed
+                    with open(self.log_file, "a", encoding="utf-8") as f:
+                        f.write(text + "\n")
             except Exception as e:
                 import warnings
                 warnings.warn(f"task_logger: failed to write log: {e}",
@@ -125,7 +163,7 @@ class TaskLogger:
         if progress:
             self.status["progress"].update(progress)
         self.status["updated_at"] = _now()
-        self._write_status()
+        self._write_status(force=True)
 
     def record_output(self, prompt: str, output: str, **metadata):
         """Record a generation output (from eval/sample) to disk + buffer."""
@@ -134,8 +172,15 @@ class TaskLogger:
         self._outputs.append(entry)
         with self._lock:
             try:
-                with open(self.outputs_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                if self._outputs_handle is not None:
+                    self._outputs_handle.write(
+                        json.dumps(entry, ensure_ascii=False) + "\n")
+                    self._write_count += 1
+                    if self._write_count % self._flush_every == 0:
+                        self._outputs_handle.flush()
+                else:
+                    with open(self.outputs_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except Exception:
                 pass
 
@@ -149,13 +194,48 @@ class TaskLogger:
         """
         return _PhaseTimer(self, phase)
 
+    def flush(self):
+        """Flush all buffered writes to disk."""
+        with self._lock:
+            if self._log_handle is not None:
+                try:
+                    self._log_handle.flush()
+                except Exception:
+                    pass
+            if self._outputs_handle is not None:
+                try:
+                    self._outputs_handle.flush()
+                except Exception:
+                    pass
+
+    def _atexit_close(self):
+        """Close persistent file handles (called at interpreter exit)."""
+        self.flush()
+        with self._lock:
+            for attr in ("_log_handle", "_outputs_handle"):
+                handle = getattr(self, attr, None)
+                if handle is not None and not handle.closed:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                setattr(self, attr, None)
+
+    def __del__(self):
+        """Close persistent file handles on garbage collection."""
+        try:
+            self._atexit_close()
+        except Exception:
+            pass
+
     def finish(self, status="completed", message=None):
         self.status["status"] = status
         self.status["updated_at"] = _now()
         if message:
             self.status["message"] = message
             self._write_log(f"[{_ts_short()}] {message}")
-        self._write_status()
+        self._write_status(force=True)
+        self.flush()
 
     # ── Built-in diagnostics (replaces one-off scripts) ──────────────────
 

@@ -68,6 +68,14 @@ dedup_run.log
 _inspect_template.py
 *.log
 
+# Runtime caches & recovery state
+.forge_recovery/
+.hf_cache/
+
+# Temp refactor / debug helpers
+_refactor_helper.py
+help.txt
+
 # IDE / OS
 .vscode/
 .idea/

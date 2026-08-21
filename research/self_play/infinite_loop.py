@@ -16,7 +16,7 @@ Cycle per epoch:
 
 Usage:
     python -m research.self_play.infinite_loop \\
-        --checkpoint research/checkpoints/ForgeLM_V3_SFT.safetensors \\
+        --checkpoint research/checkpoints/forgelm_v7_SFT.safetensors \\
         --epochs 50 --tasks-per-epoch 30
 
 The loop is resumable: if interrupted, it picks up from the last
@@ -74,10 +74,10 @@ class LoopConfig:
     # Paths
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data/finetune"
-    config_name: str = "forgelm_v3"
+    config_name: str = "forgelm_v7"
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
-    replay_file: str = ""            # path to prior SFT JSONL (e.g. forgelm_v3_train.jsonl)
+    replay_file: str = ""            # path to prior SFT JSONL (e.g. forgelm_v7_train.jsonl)
     replay_ratio: float = 0.2        # fraction of replay examples in each epoch
 
     # Task source: "model" (AZR self-propose) or "api" (distillation APIs)
@@ -100,7 +100,7 @@ class InfiniteSelfPlayLoop:
     def _epoch_checkpoint_path(self, epoch: int) -> str:
         return os.path.normpath(os.path.join(
             self.config.checkpoint_dir,
-            f"ForgeLM_V3_SP{epoch}.safetensors"))
+            f"forgelm_v7_SP{epoch}.safetensors"))
 
     # ── Phase 1: Self-Play (AZR curriculum) ──────────────────────────
 
@@ -198,16 +198,51 @@ class InfiniteSelfPlayLoop:
             del curriculum
             gc.collect()
             if torch.cuda.is_available():
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             return {"error": "no_valid_tasks", "n_proposed": 0}
 
         # ── Solve tasks ──
+        # Use ThreadPoolExecutor to overlap CPU-bound sandbox verification
+        # of one task with GPU generation of the next. GPU generation
+        # serializes naturally (single CUDA context); the win comes from
+        # parallelizing the subprocess-based test execution.
         successes = 0
         failures = 0
         self._trajectories = []
 
-        for i, task in enumerate(validated):
-            result = curriculum.solve_task(task)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from threading import Lock
+        max_workers = min(4, len(validated)) if len(validated) > 1 else 1
+
+        # Curriculum state (e.g. self.temperature, _seen_descriptions, stats)
+        # is not thread-safe. _solve_direct mutates self.temperature per retry.
+        # Serialize solve_task to prevent concurrent corruption. The GPU
+        # generation inside solve_task serializes via CUDA anyway, so the lock
+        # mainly costs us overlapping subprocess sandbox execution — acceptable
+        # for correctness.
+        _solve_lock = Lock()
+
+        def _solve_and_record(task):
+            """Solve a single task and return (task, result)."""
+            with _solve_lock:
+                result = curriculum.solve_task(task)
+            return task, result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks — GPU generation serializes via GIL+CUDA,
+            # but sandbox verification (subprocess) overlaps across threads
+            futures = {
+                executor.submit(_solve_and_record, task): i
+                for i, task in enumerate(validated)
+            }
+            results_ordered = [None] * len(validated)
+            for future in as_completed(futures):
+                idx = futures[future]
+                results_ordered[idx] = future.result()
+
+        for i, (task, result) in enumerate(r for r in results_ordered if r is not None):
             success = result.get("final_success", False)
             attempts = result.get("attempts", [])
 
@@ -273,7 +308,9 @@ class InfiniteSelfPlayLoop:
         del curriculum
         gc.collect()
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         return stats
 
     def _free_model(self, model):
@@ -281,7 +318,9 @@ class InfiniteSelfPlayLoop:
         del model
         gc.collect()
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             from research.model_loader import ModelLoader
             ModelLoader.clear_cache()
             # Verify VRAM was actually released
@@ -371,10 +410,6 @@ class InfiniteSelfPlayLoop:
 
         save_path = self._epoch_checkpoint_path(epoch)
 
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))))
-
         cmd = [
             os.sys.executable, "-m", "research.training.runners.sft_train",
             "--data", data_path,
@@ -396,11 +431,11 @@ class InfiniteSelfPlayLoop:
         if self.config.ft_grad_checkpoint:
             cmd.append("--grad-checkpoint")
 
-        print(f"  Running: {' '.join(cmd)}")
-        import subprocess
-        result = subprocess.run(cmd, env=env)
-        if result.returncode != 0 or not os.path.exists(save_path):
-            raise RuntimeError(f"Finetune failed (exit code {result.returncode})")
+        # Run in-process (no subprocess spawn overhead)
+        if not self._run_subprocess(cmd, "Finetune"):
+            raise RuntimeError(f"Finetune failed (in-process)")
+        if not os.path.exists(save_path):
+            raise RuntimeError(f"Finetune completed but checkpoint not found: {save_path}")
 
         return save_path
 
@@ -489,7 +524,8 @@ class InfiniteSelfPlayLoop:
         # Phase 2: Export + Finetune
         try:
             data_path = self._export_trajectories(self.epoch)
-            n_examples = sum(1 for _ in open(data_path, encoding='utf-8'))
+            with open(data_path, encoding='utf-8') as _f:
+                n_examples = sum(1 for _ in _f)
 
             if n_examples < self.config.ft_min_examples:
                 print(f"  Too few examples ({n_examples}), skipping finetune")
@@ -588,16 +624,17 @@ def main():
     parser.add_argument("--ft-batch-size", type=int, default=1)
     parser.add_argument("--ft-grad-accum", type=int, default=4)
     parser.add_argument("--ft-optimizer", type=str, default="bnb",
-                        choices=["fused", "bnb", "lion", "flash_adamw", "flash_lion", "forge"])
+                        choices=["fused", "bnb", "lion", "flash_adamw", "flash_lion", "forge", "cpu_offload"])
     parser.add_argument("--self-play-mode", type=str, default="azr",
-                        choices=["azr", "soar", "sgs"],
+                        choices=["azr", "soar", "sgs", "thinking"],
                         help="Self-play mode: 'azr' (standard), 'soar' (meta-RL curriculum, "
                              "escapes learning plateaus), 'sgs' (self-guided self-play, "
-                             "prevents Conjecturer collapse with Guide role)")
+                             "prevents Conjecturer collapse with Guide role), "
+                             "'thinking' (LFM2.5-Thinking pipeline: CPT to SFT to DPO to RLVR)")
     parser.add_argument("--saerl", action="store_true",
                         help="Enable SAERL: SAE-guided data engineering for RL. "
                              "Diversity control + difficulty curriculum + quality filtering. "
-                             "+3% accuracy, 20% fewer steps to target.")
+                             "+3%% accuracy, 20%% fewer steps to target.")
     parser.add_argument("--opmix", action="store_true",
                         help="Enable OP-MIX: on-policy data mixing via low-rank adapters. "
                              "Dynamically adjusts mixing ratio across data sources.")
@@ -615,7 +652,7 @@ def main():
                         choices=["model", "api"],
                         help="Task source: 'model' (AZR self-propose) or "
                              "'api' (distillation teacher APIs)")
-    parser.add_argument("--config", type=str, default="forgelm_v3",
+    parser.add_argument("--config", type=str, default="forgelm_v7",
                         help="Model config name")
     parser.add_argument("--eval-threshold", type=float, default=0.5,
                         help="Min candidate quality vs base to promote")
@@ -669,6 +706,17 @@ def main():
         print(f"[SGS] Completed {len(stats)} rounds. Final: {sgs.stats()}")
         return
 
+    if args.self_play_mode == "thinking":
+        print("[InfiniteLoop] THINKING mode: LFM2.5-1.2B-Thinking pipeline (CPT->SFT->DPO->RLVR)")
+        pipeline_config = ThinkingPipelineConfig(
+            config_name=args.config,
+            optimizer=args.ft_optimizer if args.ft_optimizer != "bnb" else "cpu_offload",
+        )
+        pipeline = ThinkingPipeline(args.checkpoint, pipeline_config)
+        final_ckpt = pipeline.run()
+        print(f"\n[ThinkingPipeline] Final checkpoint: {final_ckpt}")
+        return
+
     # Standard AZR self-play (with optional SAERL + OP-MIX)
     if args.saerl:
         print("[InfiniteLoop] SAERL enabled: SAE-guided data engineering")
@@ -681,6 +729,454 @@ def main():
 
     loop = InfiniteSelfPlayLoop(args.checkpoint, config)
     loop.run()
+
+
+# ── LFM2.5-Thinking Pipeline ─────────────────────────────────────────────
+
+@dataclass
+class ThinkingPipelineConfig:
+    """Configuration for the LFM2.5-1.2B-Thinking multi-stage pipeline.
+
+    Implements the full training recipe from Liquid AI's LFM2.5-1.2B-Thinking:
+      CPT (midtraining with reasoning traces) →
+      SFT (curriculum: short CoT → long CoT + mix distillation) →
+      DPO (doom-loop mitigation with LLM judge) →
+      RLVR (GRPO with n-gram repetition penalty on verifiable tasks)
+
+    Each stage is a subprocess call to the corresponding runner. The pipeline
+    is resumable: if interrupted, it skips completed stages by checking for
+    output checkpoint existence.
+    """
+    # Model
+    config_name: str = "forgelm_v7"
+    device: str = "cuda"
+    optimizer: str = "cpu_offload"  # full-precision on 12GB GPU
+
+    # Stage 1: CPT (midtraining with reasoning traces)
+    cpt_enabled: bool = True
+    cpt_reasoning_data: list[str] = field(default_factory=lambda: [
+        "research/distillation/hf_datasets/openr1_math.jsonl",
+        "research/distillation/hf_datasets/openthoughts_114k.jsonl",
+        "research/distillation/hf_datasets/dolphin_r1.jsonl",
+    ])
+    cpt_general_data: list[str] = field(default_factory=lambda: [
+        "research/distillation/hf_datasets/orca_math.jsonl",
+        "research/distillation/hf_datasets/metamath.jsonl",
+    ])
+    cpt_reasoning_ratio: float = 0.6
+    cpt_lr: float = 1e-4
+    cpt_max_steps: int = 5000
+    cpt_batch_size: int = 2
+    cpt_seq_len: int = 2048
+    cpt_grad_accum: int = 4
+
+    # Stage 2: Curriculum SFT (mix distillation + 2-stage curriculum)
+    sft_enabled: bool = True
+    sft_data_inputs: list[str] = field(default_factory=lambda: [
+        "research/distillation/hf_datasets/gsm8k.jsonl",
+        "research/distillation/hf_datasets/openr1_math.jsonl",
+        "research/distillation/hf_datasets/openthoughts_114k.jsonl",
+    ])
+    sft_short_cot_max_tokens: int = 150
+    sft_long_cot_min_tokens: int = 300
+    sft_mix_ratio: float = 0.5
+    sft_filter_doom_loops: bool = True
+    sft_stage1_lr: float = 5e-5
+    sft_stage1_steps: int = 1000
+    sft_stage2_lr: float = 2e-5
+    sft_stage2_steps: int = 1500
+    sft_batch_size: int = 2
+    sft_seq_len: int = 1024
+    sft_grad_accum: int = 4
+
+    # Stage 3: DPO (doom-loop mitigation)
+    dpo_enabled: bool = True
+    dpo_n_temp_samples: int = 5
+    dpo_max_new_tokens: int = 512
+    dpo_judge_model: str = "qwen3-32b"
+    dpo_max_prompts: int = 500
+    dpo_lr: float = 5e-7
+    dpo_max_steps: int = 200
+    dpo_method: str = "orpo"
+
+    # Stage 4: RLVR (GRPO with repetition penalty)
+    rlvr_enabled: bool = True
+    rlvr_tasks: list[str] = field(default_factory=lambda: [
+        "research/distillation/hf_datasets/gsm8k.jsonl",
+    ])
+    rlvr_task_type: str = "math"
+    rlvr_max_steps: int = 500
+    rlvr_group_size: int = 4
+    rlvr_lr: float = 5e-6
+    rlvr_algorithm: str = "grpo"
+    rlvr_use_repetition_penalty: bool = True
+
+    # Paths
+    checkpoint_dir: str = "research/checkpoints"
+    data_dir: str = "research/data/thinking_pipeline"
+
+
+class ThinkingPipeline:
+    """Orchestrates the full LFM2.5-1.2B-Thinking training pipeline.
+
+    Stages:
+      1. CPT: Midtrain with reasoning traces (openthoughts, openr1_math, dolphin_r1)
+      2. SFT: Curriculum (short CoT internal solver → long CoT externalize + mix distillation)
+      3. DPO: Doom-loop mitigation (5 temp + 1 greedy, LLM judge, n-gram loop detector)
+      4. RLVR: GRPO with n-gram repetition penalty on verifiable tasks
+
+    Each stage runs as a subprocess calling the corresponding runner module.
+    The pipeline is resumable: completed stages are skipped if the output
+    checkpoint already exists.
+    """
+
+    def __init__(self, base_checkpoint: str, config: ThinkingPipelineConfig | None = None):
+        self.base_checkpoint = base_checkpoint
+        self.config = config or ThinkingPipelineConfig()
+        self.history: list[dict] = []
+
+    def _stage_path(self, stage: str) -> str:
+        """Get the checkpoint path for a stage output."""
+        return os.path.normpath(os.path.join(
+            self.config.checkpoint_dir,
+            f"forgelm_v7_{stage}.safetensors"))
+
+    def _run_subprocess(self, cmd: list[str], stage_name: str) -> bool:
+        """Run a training stage in-process (no subprocess spawn).
+
+        Replaces the old subprocess.run() approach which spawned a fresh
+        Python interpreter per stage (~3-5s startup + import overhead each).
+        Now calls the runner's main() directly via sys.argv manipulation,
+        with explicit VRAM cleanup between stages.
+        """
+        # cmd[0] is the python executable, cmd[1] is "-m", cmd[2] is the module
+        if len(cmd) >= 3 and cmd[1] == "-m":
+            module_name = cmd[2]
+            cli_args = cmd[3:]
+        else:
+            # Fallback: can't parse, use old subprocess approach
+            env = os.environ.copy()
+            env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+            print(f"  Running (subprocess fallback): {' '.join(cmd[:4])}... ({len(cmd)} args)")
+            import subprocess
+            result = subprocess.run(cmd, env=env)
+            if result.returncode != 0:
+                print(f"  {stage_name} FAILED (exit code {result.returncode})")
+                return False
+            return True
+
+        print(f"  Running (in-process): {module_name} {' '.join(cli_args[:3])}... ({len(cli_args)} args)")
+
+        # Cleanup VRAM from previous stage before starting new one
+        self._cleanup_vram()
+
+        import sys
+        import importlib
+        old_argv = sys.argv
+        sys.argv = [module_name] + cli_args
+        try:
+            mod = importlib.import_module(module_name)
+            if hasattr(mod, "main"):
+                mod.main()
+                return True
+            else:
+                print(f"  {stage_name}: module has no main() — falling back to subprocess")
+                sys.argv = old_argv
+                return self._run_subprocess_fallback(cmd, stage_name)
+        except SystemExit as e:
+            code = e.code
+            if code is None or code == 0:
+                return True
+            print(f"  {stage_name} FAILED (exit code {code})")
+            return False
+        except Exception as e:
+            print(f"  {stage_name} FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            sys.argv = old_argv
+            self._cleanup_vram()
+
+    def _run_subprocess_fallback(self, cmd: list[str], stage_name: str) -> bool:
+        """Legacy subprocess fallback (used when in-process isn't possible)."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        import subprocess
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            print(f"  {stage_name} FAILED (exit code {result.returncode})")
+            return False
+        return True
+
+    def _cleanup_vram(self):
+        """Release VRAM between in-process pipeline stages."""
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    def _stage_completed(self, checkpoint: str) -> bool:
+        """Check if a stage's output checkpoint already exists (for resumability)."""
+        return os.path.exists(checkpoint)
+
+    # ── Stage 1: CPT ──────────────────────────────────────────────────
+
+    def run_cpt(self) -> str:
+        """Stage 1: Midtraining with reasoning traces."""
+        output = self._stage_path("CPT")
+        print(f"\n{'='*70}")
+        print(f"  STAGE 1/4: CPT (Midtraining with Reasoning Traces)")
+        print(f"{'='*70}")
+
+        if self._stage_completed(output):
+            print(f"  ✓ Already completed: {output}")
+            return output
+
+        if not self.config.cpt_enabled:
+            print(f"  Skipped (disabled)")
+            return self.base_checkpoint
+
+        cmd = [
+            os.sys.executable, "-m", "research.training.runners.cpt_train",
+            "--reasoning-data", *self.config.cpt_reasoning_data,
+            "--general-data", *self.config.cpt_general_data,
+            "--config", self.config.config_name,
+            "--checkpoint", self.base_checkpoint,
+            "--save", output,
+            "--optimizer", self.config.optimizer,
+            "--reasoning-ratio", str(self.config.cpt_reasoning_ratio),
+            "--lr", str(self.config.cpt_lr),
+            "--max-steps", str(self.config.cpt_max_steps),
+            "--batch-size", str(self.config.cpt_batch_size),
+            "--seq-len", str(self.config.cpt_seq_len),
+            "--grad-accum", str(self.config.cpt_grad_accum),
+        ]
+        if not self._run_subprocess(cmd, "CPT"):
+            raise RuntimeError("CPT stage failed")
+        self.history.append({"stage": "cpt", "checkpoint": output})
+        return output
+
+    # ── Stage 2: Curriculum SFT ───────────────────────────────────────
+
+    def run_sft(self, cpt_checkpoint: str) -> str:
+        """Stage 2: Curriculum SFT (mix distillation + 2-stage curriculum)."""
+        output = self._stage_path("SFT2")
+        print(f"\n{'='*70}")
+        print(f"  STAGE 2/4: CURRICULUM SFT (Mix Distillation + 2-Stage)")
+        print(f"{'='*70}")
+
+        if self._stage_completed(output):
+            print(f"  ✓ Already completed: {output}")
+            return output
+
+        if not self.config.sft_enabled:
+            print(f"  Skipped (disabled)")
+            return cpt_checkpoint
+
+        # Step 2a: Prepare curriculum data
+        curriculum_dir = os.path.join(self.config.data_dir, "curriculum")
+        cmd_prep = [
+            os.sys.executable, "-m", "research.training.runners.curriculum_sft",
+            "prepare",
+            "--input", *self.config.sft_data_inputs,
+            "--output-dir", curriculum_dir,
+            "--short-cot-max-tokens", str(self.config.sft_short_cot_max_tokens),
+            "--long-cot-min-tokens", str(self.config.sft_long_cot_min_tokens),
+            "--mix-ratio", str(self.config.sft_mix_ratio),
+        ]
+        if self.config.sft_filter_doom_loops:
+            cmd_prep.append("--filter-doom-loops")
+        if not self._run_subprocess(cmd_prep, "SFT prepare"):
+            raise RuntimeError("SFT data preparation failed")
+
+        stage1_data = os.path.join(curriculum_dir, "stage1_short.jsonl")
+        stage2_data = os.path.join(curriculum_dir, "stage2_long.jsonl")
+        sft1_output = self._stage_path("SFT1")
+
+        # Step 2b: Stage 1 (short CoT — internal solver)
+        cmd_s1 = [
+            os.sys.executable, "-m", "research.training.runners.curriculum_sft",
+            "train-stage1",
+            "--data", stage1_data,
+            "--checkpoint", cpt_checkpoint,
+            "--save", sft1_output,
+            "--config", self.config.config_name,
+            "--lr", str(self.config.sft_stage1_lr),
+            "--max-steps", str(self.config.sft_stage1_steps),
+            "--optimizer", self.config.optimizer,
+            "--seq-len", str(self.config.sft_seq_len),
+            "--batch-size", str(self.config.sft_batch_size),
+            "--grad-accum", str(self.config.sft_grad_accum),
+        ]
+        if not self._run_subprocess(cmd_s1, "SFT Stage 1"):
+            raise RuntimeError("SFT Stage 1 failed")
+
+        # Step 2c: Stage 2 (long CoT — externalize reasoning)
+        cmd_s2 = [
+            os.sys.executable, "-m", "research.training.runners.curriculum_sft",
+            "train-stage2",
+            "--data", stage2_data,
+            "--checkpoint", sft1_output,
+            "--save", output,
+            "--config", self.config.config_name,
+            "--lr", str(self.config.sft_stage2_lr),
+            "--max-steps", str(self.config.sft_stage2_steps),
+            "--optimizer", self.config.optimizer,
+            "--seq-len", str(self.config.sft_seq_len * 2),
+            "--batch-size", str(self.config.sft_batch_size),
+            "--grad-accum", str(self.config.sft_grad_accum),
+        ]
+        if not self._run_subprocess(cmd_s2, "SFT Stage 2"):
+            raise RuntimeError("SFT Stage 2 failed")
+        self.history.append({"stage": "sft", "checkpoint": output})
+        return output
+
+    # ── Stage 3: DPO ──────────────────────────────────────────────────
+
+    def run_dpo(self, sft_checkpoint: str) -> str:
+        """Stage 3: DPO doom-loop mitigation."""
+        output = self._stage_path("DPO")
+        print(f"\n{'='*70}")
+        print(f"  STAGE 3/4: DPO (Doom-Loop Mitigation)")
+        print(f"{'='*70}")
+
+        if self._stage_completed(output):
+            print(f"  ✓ Already completed: {output}")
+            return output
+
+        if not self.config.dpo_enabled:
+            print(f"  Skipped (disabled)")
+            return sft_checkpoint
+
+        # Step 3a: Generate preference data
+        dpo_data_dir = os.path.join(self.config.data_dir, "dpo")
+        os.makedirs(dpo_data_dir, exist_ok=True)
+        prompts_file = os.path.join(self.config.data_dir, "curriculum", "stage2_long.jsonl")
+        pref_data = os.path.join(dpo_data_dir, "preference_pairs.jsonl")
+
+        cmd_gen = [
+            os.sys.executable, "-m", "research.training.runners.dpo_data_gen",
+            "--prompts", prompts_file,
+            "--checkpoint", sft_checkpoint,
+            "--output", pref_data,
+            "--config", self.config.config_name,
+            "--n-temp-samples", str(self.config.dpo_n_temp_samples),
+            "--max-new-tokens", str(self.config.dpo_max_new_tokens),
+            "--judge-model", self.config.dpo_judge_model,
+            "--max-prompts", str(self.config.dpo_max_prompts),
+        ]
+        if not self._run_subprocess(cmd_gen, "DPO data generation"):
+            print("  DPO data generation failed, skipping DPO stage")
+            return sft_checkpoint
+
+        # Step 3b: DPO training
+        cmd_dpo = [
+            os.sys.executable, "-m", "research.training.runners.dpo_align",
+            "--data", pref_data,
+            "--checkpoint", sft_checkpoint,
+            "--save", output,
+            "--config", self.config.config_name,
+            "--method", self.config.dpo_method,
+            "--lr", str(self.config.dpo_lr),
+            "--max-steps", str(self.config.dpo_max_steps),
+            "--optimizer", self.config.optimizer,
+        ]
+        if not self._run_subprocess(cmd_dpo, "DPO training"):
+            raise RuntimeError("DPO stage failed")
+        self.history.append({"stage": "dpo", "checkpoint": output})
+        return output
+
+    # ── Stage 4: RLVR ─────────────────────────────────────────────────
+
+    def run_rlvr(self, dpo_checkpoint: str) -> str:
+        """Stage 4: RLVR with GRPO + n-gram repetition penalty."""
+        output = self._stage_path("RLVR")
+        print(f"\n{'='*70}")
+        print(f"  STAGE 4/4: RLVR (GRPO + Repetition Penalty)")
+        print(f"{'='*70}")
+
+        if self._stage_completed(output):
+            print(f"  ✓ Already completed: {output}")
+            return output
+
+        if not self.config.rlvr_enabled:
+            print(f"  Skipped (disabled)")
+            return dpo_checkpoint
+
+        cmd = [
+            os.sys.executable, "-m", "research.training.runners.rlvr_train",
+            "--tasks", *self.config.rlvr_tasks,
+            "--task-type", self.config.rlvr_task_type,
+            "--checkpoint", dpo_checkpoint,
+            "--save", output,
+            "--config", self.config.config_name,
+            "--max-steps", str(self.config.rlvr_max_steps),
+            "--group-size", str(self.config.rlvr_group_size),
+            "--lr", str(self.config.rlvr_lr),
+            "--rl-algorithm", self.config.rlvr_algorithm,
+            "--optimizer", self.config.optimizer,
+        ]
+        if self.config.rlvr_use_repetition_penalty:
+            cmd.append("--use-repetition-penalty")
+        if not self._run_subprocess(cmd, "RLVR"):
+            raise RuntimeError("RLVR stage failed")
+        self.history.append({"stage": "rlvr", "checkpoint": output})
+        return output
+
+    # ── Full pipeline ─────────────────────────────────────────────────
+
+    def run(self) -> str:
+        """Run the full 4-stage LFM2.5-Thinking pipeline.
+
+        Returns the path to the final RLVR checkpoint.
+        """
+        t0 = time.time()
+        print(f"\n{'#'*70}")
+        print(f"#  LFM2.5-1.2B-THINKING PIPELINE")
+        print(f"#  Base checkpoint: {self.base_checkpoint}")
+        print(f"#  Config: {self.config.config_name}")
+        print(f"#  Optimizer: {self.config.optimizer}")
+        print(f"{'#'*70}")
+
+        stages = []
+        try:
+            # Stage 1: CPT
+            cpt_ckpt = self.run_cpt()
+            stages.append(("CPT", cpt_ckpt))
+
+            # Stage 2: Curriculum SFT
+            sft_ckpt = self.run_sft(cpt_ckpt)
+            stages.append(("SFT", sft_ckpt))
+
+            # Stage 3: DPO
+            dpo_ckpt = self.run_dpo(sft_ckpt)
+            stages.append(("DPO", dpo_ckpt))
+
+            # Stage 4: RLVR
+            rlvr_ckpt = self.run_rlvr(dpo_ckpt)
+            stages.append(("RLVR", rlvr_ckpt))
+
+        except RuntimeError as e:
+            print(f"\n  PIPELINE INTERRUPTED: {e}")
+            print(f"  Completed stages: {[s[0] for s in stages]}")
+            if stages:
+                print(f"  Last checkpoint: {stages[-1][1]}")
+            raise
+
+        elapsed = time.time() - t0
+        print(f"\n{'#'*70}")
+        print(f"#  PIPELINE COMPLETE ({elapsed:.0f}s)")
+        print(f"{'#'*70}")
+        for stage_name, ckpt in stages:
+            print(f"  {stage_name}: {ckpt}")
+        print(f"\n  Final model: {rlvr_ckpt}")
+        print(f"  Total time: {elapsed:.0f}s ({elapsed/3600:.1f}h)")
+        return rlvr_ckpt
 
 
 if __name__ == "__main__":

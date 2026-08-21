@@ -567,7 +567,7 @@ def main():
 
     # Load model
     print("\n[1] Loading LFM2.5 base...")
-    cfg = get_config("forgelm_v3", device="cuda")
+    cfg = get_config("forgelm_v7", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors")
     model.to("cuda").eval()

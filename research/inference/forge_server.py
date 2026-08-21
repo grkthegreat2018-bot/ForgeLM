@@ -15,7 +15,7 @@ Usage:
     # Or programmatically:
     from research.inference.forge_server import ForgeServer
     server = ForgeServer()
-    server.register("forgelm-v3", checkpoint="...", config="forgelm_v3")
+    server.register("forgelm-v3", checkpoint="...", config="forgelm_v7")
     server.serve(port=8000)
 
 Task-based concurrent generation:
@@ -28,6 +28,8 @@ Task-based concurrent generation:
 import argparse
 import asyncio
 import json
+import os
+import tempfile
 import time
 import uuid
 from typing import Any, Literal, Optional
@@ -185,6 +187,142 @@ class TaskMessageResponse(BaseModel):
     created_at: float
 
 
+# ── Hot-swap API models ──────────────────────────────────────────────────────
+
+class UpdateEngineSettingsRequest(BaseModel):
+    """Hot-edit any engine setting. Only set fields are updated."""
+    model: str = "lfm2.5-1.2b"
+    kv_cache: Optional[str] = None
+    decoding: Optional[str] = None
+    quantize: Optional[str] = None
+    acceleration: Optional[str] = None
+    kv_cache_tokens: Optional[int] = None
+    kv_bits: Optional[int] = None
+    max_context_tokens: Optional[int] = None
+    infinite_context: Optional[bool] = None
+    default_temperature: Optional[float] = None
+    default_max_tokens: Optional[int] = None
+    default_top_p: Optional[float] = None
+    default_top_k: Optional[int] = None
+    default_repetition_penalty: Optional[float] = None
+    use_compile: Optional[bool] = None
+    use_triton_conv: Optional[bool] = None
+    use_prefix_cache: Optional[bool] = None
+    use_chunked_prefill: Optional[bool] = None
+    use_fused_qk_norm_rope_cache: Optional[bool] = None
+    use_seq_split: Optional[bool] = None
+    vram_safety_margin_gb: Optional[float] = None
+    auto_offload: Optional[bool] = None
+    max_batch_size: Optional[int] = None
+    batch_timeout_ms: Optional[int] = None
+
+class InfiniteContextRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    enabled: bool = True
+    budget: int = 100_000  # KV cache token budget before eviction
+
+class SwitchStrategyRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    strategy: str
+
+class ContextLimitRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    max_tokens: int
+
+
+class BatchGenerateRequest(BaseModel):
+    """Batch generation request for parallel multi-prompt generation."""
+    model: str = "lfm2.5-1.2b"
+    prompts: list[str]
+    max_tokens: int = 256
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 80
+    repetition_penalty: float = 1.05
+
+
+class BatchGenerateResponse(BaseModel):
+    model: str
+    results: list[str]
+    total_tokens: int = 0
+    elapsed_ms: float = 0.0
+
+
+# ── Library API models ───────────────────────────────────────────────────────
+
+class LibrarySaveRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    content: str
+    category: str = "custom"  # failure, win, research, common_data, custom
+    tags: Optional[list[str]] = None
+    description: str = ""
+    triggers: Optional[list[str]] = None
+    priority: int = 0
+    max_tokens: int = 2048
+
+class LibraryLookupRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    tags: Optional[list[str]] = None
+    category: Optional[str] = None
+    limit: int = 50
+
+class LibrarySearchRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    query: str
+    limit: int = 20
+
+class LibraryEntryResponse(BaseModel):
+    id: str
+    description: str
+    category: str
+    tags: list[str]
+    token_count: int
+    priority: int
+    access_count: int
+    created_at: float
+    last_accessed: float
+    enabled: bool
+
+class LibraryConfigRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    enabled: Optional[bool] = None
+    injection_budget: Optional[int] = None
+
+
+class AgentChatRequest(BaseModel):
+    """Agentic chat request — model can call built-in tools autonomously."""
+    model: str = "lfm2.5-1.2b"
+    prompt: str
+    max_tokens: int = 512
+    max_tool_rounds: int = 5
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 80
+    repetition_penalty: float = 1.05
+    tools: Optional[list[ToolDefinition]] = None  # extra user-defined tools
+
+
+class AgentChatResponse(BaseModel):
+    model: str
+    content: str
+    tool_calls: list[dict] = []
+    tool_results: list[dict] = []
+    rounds: int = 0
+    elapsed_ms: float = 0.0
+
+
+class ExecuteToolRequest(BaseModel):
+    """Execute a single built-in tool call directly (no generation)."""
+    model: str = "lfm2.5-1.2b"
+    name: str
+    arguments: dict = {}
+
+
+class BuiltinToolsResponse(BaseModel):
+    """List of available built-in tools."""
+    tools: list[dict]
+
+
 # ── Tool-call helpers ────────────────────────────────────────────────────────
 
 _SPECIAL_MARKERS = (TOOL_CALL_START, TOOL_CALL_END, IM_START, IM_END)
@@ -232,6 +370,10 @@ class ForgeServer:
     def __init__(self, registry: ModelRegistry | None = None,
                  batch_window_ms: int = 50, max_batch_size: int = 8,
                  max_sessions: int = 64):
+        # ── GPU device selection + contention guard ───────────────────────
+        self._gpu_lock_file = None
+        self._setup_gpu()
+
         self.registry = registry or ModelRegistry()
         self.session_manager = SessionManager(max_sessions=max_sessions)
         self.batch_queue = BatchQueue(
@@ -248,6 +390,92 @@ class ForgeServer:
             allow_headers=["*"],
         )
         self._setup_routes()
+
+    def _setup_gpu(self):
+        """Set CUDA_VISIBLE_DEVICES and detect GPU contention from other servers.
+
+        - If CUDA_VISIBLE_DEVICES is not already set, defaults to "0".
+        - Logs which GPU is being used.
+        - Creates a temp file-lock per GPU to warn if another forge_server
+          is already running on the same device.
+        """
+        gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if gpu_id is None:
+            gpu_id = "0"
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+
+        # Log GPU info (best-effort — torch may not be imported yet)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"  [ForgeServer] Using GPU {gpu_id}: {gpu_name}")
+            else:
+                print(f"  [ForgeServer] CUDA_VISIBLE_DEVICES={gpu_id} "
+                      f"(CUDA not available)")
+        except Exception:
+            print(f"  [ForgeServer] CUDA_VISIBLE_DEVICES={gpu_id}")
+
+        # GPU contention guard: file-lock per GPU
+        try:
+            lock_dir = os.path.join(tempfile.gettempdir(), "forge_gpu_locks")
+            os.makedirs(lock_dir, exist_ok=True)
+            lock_path = os.path.join(lock_dir, f"gpu_{gpu_id}.lock")
+            # Try to create the file exclusively — if it exists, another
+            # forge_server may be running on the same GPU.
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                self._gpu_lock_file = lock_path
+            except FileExistsError:
+                # Check if the PID in the lock file is still alive
+                try:
+                    with open(lock_path, "r") as f:
+                        old_pid = int(f.read().strip())
+                    # Cross-platform alive check: os.kill(pid, 0) on Unix,
+                    # or ctypes OpenProcess on Windows
+                    is_alive = False
+                    if os.name == "nt":
+                        try:
+                            import ctypes
+                            kernel32 = ctypes.windll.kernel32
+                            SYNCHRONIZE = 0x00100000
+                            handle = kernel32.OpenProcess(SYNCHRONIZE, False, old_pid)
+                            if handle:
+                                kernel32.CloseHandle(handle)
+                                is_alive = True
+                        except Exception:
+                            is_alive = False
+                    else:
+                        try:
+                            os.kill(old_pid, 0)
+                            is_alive = True
+                        except OSError:
+                            is_alive = False
+                    if is_alive:
+                        print(f"  [ForgeServer] WARNING: Another forge_server "
+                              f"(PID {old_pid}) may already be running on "
+                              f"GPU {gpu_id}. This may cause VRAM contention.")
+                    else:
+                        # Stale lock — take it over
+                        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
+                        os.write(fd, str(os.getpid()).encode())
+                        os.close(fd)
+                        self._gpu_lock_file = lock_path
+                except (ValueError, OSError):
+                    pass  # Can't read lock file — just warn
+        except Exception:
+            pass  # Non-fatal: lock setup is best-effort
+
+    def _cleanup_gpu_lock(self):
+        """Remove the GPU lock file on shutdown."""
+        if self._gpu_lock_file is not None:
+            try:
+                os.unlink(self._gpu_lock_file)
+            except OSError:
+                pass
+            self._gpu_lock_file = None
 
     def register(self, model_id: str, checkpoint: str, config_name: str,
                  tokenizer_path: str | None = None,
@@ -276,6 +504,7 @@ class ForgeServer:
             uvicorn.run(self.app, host=host, port=port, log_level="warning")
         finally:
             self.batch_queue.stop()
+            self._cleanup_gpu_lock()
 
     def _build_prompt(self, req: ChatCompletionRequest) -> str:
         """Build prompt from chat messages, using qwen_adapter when tools are present."""
@@ -384,6 +613,263 @@ class ForgeServer:
                              "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             }
+
+        @app.post("/v1/batch/completions")
+        async def batch_completions(req: BatchGenerateRequest):
+            """Batch generation — multiple prompts in one forward pass.
+
+            3-5x faster than serial generation for 2-8 prompts.
+            Falls back to serial if batch OOMs.
+            """
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+
+            import time as _time
+            _t0 = _time.perf_counter()
+            results = engine.generate_batch(
+                req.prompts,
+                max_new_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
+            )
+            _elapsed_ms = (_time.perf_counter() - _t0) * 1000
+            _total = sum(len(r.split()) for r in results)
+
+            return BatchGenerateResponse(
+                model=req.model,
+                results=results,
+                total_tokens=_total,
+                elapsed_ms=_elapsed_ms,
+            )
+
+        # ── Agentic tool endpoints ──────────────────────────────────────
+
+        @app.get("/v1/tools")
+        async def list_builtin_tools(model_id: str = "lfm2.5-1.2b"):
+            """List all available built-in tools the model can call.
+
+            These tools give the LLM direct access to Library, hot-swap,
+            batch generation, and engine introspection features.
+            """
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return BuiltinToolsResponse(tools=engine.tools.get_tool_defs())
+
+        @app.post("/v1/tools/execute")
+        async def execute_tool(req: ExecuteToolRequest):
+            """Execute a single built-in tool call directly (no generation).
+
+            Useful for testing tools or when the client manages the
+            conversation loop but wants server-side tool execution.
+            """
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            result = engine.tools.execute(req.name, req.arguments)
+            return {"status": result["status"], "result": result.get("result"),
+                    "error": result.get("error")}
+
+        @app.post("/v1/chat/agent")
+        async def agent_chat(req: AgentChatRequest):
+            """Agentic chat — model autonomously calls built-in tools.
+
+            The model generates a response. If it makes tool calls, they
+            are executed server-side and results are fed back. This
+            continues for up to `max_tool_rounds` rounds.
+
+            Built-in tools: library_save/search/lookup/get/delete/stats/
+            optimize/set_config, engine_set_kv_cache/decoding/context_limit/
+            infinite_context/generation_params/feature/apply_changes,
+            engine_get_settings/stats/pending, engine_batch_generate,
+            engine_generate_adaptive.
+
+            Extra user-defined tools can be passed in `tools` — their
+            definitions are included but execution must be handled by
+            the client (the model will call them but the server can't
+            execute unknown tools).
+            """
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+
+            extra_tools = None
+            if req.tools:
+                extra_tools = [
+                    {"name": t.function.name,
+                     "description": t.function.description or "",
+                     "parameters": t.function.parameters or {}}
+                    for t in req.tools
+                ]
+
+            import time as _time
+            _t0 = _time.perf_counter()
+            result = engine.generate_with_tools(
+                req.prompt,
+                max_new_tokens=req.max_tokens,
+                max_tool_rounds=req.max_tool_rounds,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
+                extra_tools=extra_tools,
+            )
+            _elapsed = (_time.perf_counter() - _t0) * 1000
+
+            return AgentChatResponse(
+                model=req.model,
+                content=result["content"],
+                tool_calls=result["tool_calls"],
+                tool_results=result["tool_results"],
+                rounds=result["rounds"],
+                elapsed_ms=_elapsed,
+            )
+
+        # ── Security management endpoints ───────────────────────────────
+
+        @app.get("/v1/security/config")
+        async def get_security_config(model_id: str = "lfm2.5-1.2b"):
+            """Get the current security configuration.
+
+            Returns sandbox access rules, file blacklist, website
+            whitelist/blacklist, auto mode, and pending request count.
+            """
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return engine.tools.security.get_config()
+
+        @app.patch("/v1/security/config")
+        async def update_security_config(
+            model_id: str = "lfm2.5-1.2b",
+            auto_mode: Optional[str] = None,
+            set_access_rules: Optional[dict[str, str]] = None,
+            remove_access_rules: Optional[list[str]] = None,
+            add_file_blacklist: Optional[list[str]] = None,
+            remove_file_blacklist: Optional[list[str]] = None,
+            add_website_whitelist: Optional[list[str]] = None,
+            remove_website_whitelist: Optional[list[str]] = None,
+            add_website_blacklist: Optional[list[str]] = None,
+            remove_website_blacklist: Optional[list[str]] = None,
+        ):
+            """Update security configuration.
+
+            All parameters are optional — only provided fields are updated.
+            Changes are persisted to sandbox.json.
+
+            auto_mode: "allow" (auto-approve risky), "deny" (auto-deny), "ask" (flag for user)
+            set_access_rules: {path: "read_write"|"read_only"|"denied"} — set/update rules
+            remove_access_rules: [paths] — remove rules (path defaults to read-only)
+            """
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            sec = engine.tools.security
+
+            if auto_mode is not None:
+                sec.set_auto_mode(auto_mode)
+            for path, level in (set_access_rules or {}).items():
+                sec.set_access_rule(path, level)
+            for path in (remove_access_rules or []):
+                sec.remove_access_rule(path)
+            for p in (add_file_blacklist or []):
+                sec.add_to_file_blacklist(p)
+            for p in (remove_file_blacklist or []):
+                sec.remove_from_file_blacklist(p)
+            for d in (add_website_whitelist or []):
+                sec.add_to_website_whitelist(d)
+            for d in (remove_website_whitelist or []):
+                sec.remove_from_website_whitelist(d)
+            for d in (add_website_blacklist or []):
+                sec.add_to_website_blacklist(d)
+            for d in (remove_website_blacklist or []):
+                sec.remove_from_website_blacklist(d)
+
+            return {"status": "ok", "config": sec.get_config()}
+
+        @app.post("/v1/security/reload")
+        async def reload_sandbox(model_id: str = "lfm2.5-1.2b"):
+            """Reload sandbox config from disk (picks up external edits to sandbox.json)."""
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            engine.tools.security.reload_sandbox()
+            return {"status": "reloaded", "config": engine.tools.security.get_config()}
+
+        @app.get("/v1/security/access/{path:path}")
+        async def check_access(path: str, model_id: str = "lfm2.5-1.2b"):
+            """Check the access level for a specific path.
+
+            Returns the access level (read_write, read_only, denied) and
+            whether read/write/delete would be allowed.
+            """
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            sec = engine.tools.security
+            level = sec.get_access_level(path)
+            read_d = sec.check_file_read(path)
+            write_d = sec.check_file_write(path)
+            delete_d = sec.check_file_delete(path)
+            return {
+                "path": path,
+                "access_level": level,
+                "can_read": read_d.allowed,
+                "can_write": write_d.allowed or write_d.needs_permission,
+                "can_delete": delete_d.allowed or delete_d.needs_permission,
+                "write_reason": write_d.reason if not write_d.allowed else "",
+                "delete_reason": delete_d.reason if not delete_d.allowed else "",
+            }
+
+        @app.get("/v1/security/pending")
+        async def get_pending_permissions(model_id: str = "lfm2.5-1.2b"):
+            """Get pending permission requests that need user approval."""
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return {"pending": engine.tools.security.get_pending_requests(),
+                    "count": len(engine.tools.security.pending_requests)}
+
+        @app.post("/v1/security/pending/{request_id}/approve")
+        async def approve_permission(request_id: str, model_id: str = "lfm2.5-1.2b"):
+            """Approve a pending permission request."""
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            approved = engine.tools.security.approve_request(request_id)
+            if not approved:
+                raise HTTPException(404, f"Request '{request_id}' not found")
+            return {"status": "approved", "request_id": request_id}
+
+        @app.post("/v1/security/pending/{request_id}/deny")
+        async def deny_permission(request_id: str, model_id: str = "lfm2.5-1.2b"):
+            """Deny a pending permission request."""
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            denied = engine.tools.security.deny_request(request_id)
+            if not denied:
+                raise HTTPException(404, f"Request '{request_id}' not found")
+            return {"status": "denied", "request_id": request_id}
+
+        @app.post("/v1/security/scan")
+        async def scan_script(
+            model_id: str = "lfm2.5-1.2b",
+            content: str = "",
+        ):
+            """Scan a Python script for dangerous content.
+
+            Returns verdict (allow/needs_permission/refuse) and detailed
+            findings including dangerous imports, risky patterns, and
+            forbidden patterns.
+            """
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return engine.tools.security.scan_script(content)
 
         @app.post("/v1/models/{model_id}/sleep")
         async def sleep_model(model_id: str, req: SleepRequest = SleepRequest()):
@@ -605,6 +1091,262 @@ class ForgeServer:
                 raise HTTPException(404, f"Task '{task_id}' not found")
             return {"status": "deleted", "task_id": task_id}
 
+        # ── Hot-swap engine config endpoints ──────────────────────────────
+
+        @app.get("/v1/engine/settings")
+        async def get_engine_settings(model_id: str = "lfm2.5-1.2b"):
+            """Get current engine settings (hot-swappable config)."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return engine.hotswap.get_settings()
+
+        @app.patch("/v1/engine/settings")
+        async def update_engine_settings(req: UpdateEngineSettingsRequest):
+            """Hot-edit engine settings without restart.
+
+            Changes take effect on the next generation request.
+            Only fields that are set (non-None) will be updated.
+
+            Example:
+                PATCH /v1/engine/settings
+                {"model": "lfm2.5-1.2b", "kv_cache": "kvzip",
+                 "decoding": "eagle3", "temperature": 0.7}
+            """
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+
+            updates = {k: v for k, v in req.model_dump().items()
+                       if v is not None and k != "model"}
+            engine.hotswap.update_from_dict(updates)
+            return {
+                "status": "pending",
+                "model": req.model,
+                "pending_changes": engine.hotswap.get_pending_changes(),
+            }
+
+        @app.post("/v1/engine/apply")
+        async def apply_engine_settings(model_id: str = "lfm2.5-1.2b"):
+            """Force-apply pending hot-swap changes immediately.
+
+            Normally changes are applied lazily on the next generate() call.
+            This endpoint forces immediate application (useful for testing).
+            """
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            applied = engine.hotswap.apply_pending()
+            return {
+                "status": "applied" if applied else "no_changes",
+                "model": model_id,
+                "settings": engine.hotswap.get_settings(),
+            }
+
+        @app.post("/v1/engine/infinite-context")
+        async def enable_infinite_context(req: InfiniteContextRequest):
+            """Enable infinite context mode with KV cache eviction.
+
+            When enabled, the engine uses eviction-based KV caching to
+            maintain unbounded context within the VRAM budget.
+            """
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            engine.hotswap.set_infinite_context(
+                enabled=req.enabled, budget=req.budget)
+            return {
+                "status": "pending",
+                "model": req.model,
+                "infinite_context": req.enabled,
+                "budget": req.budget,
+                "pending_changes": engine.hotswap.get_pending_changes(),
+            }
+
+        @app.post("/v1/engine/kv-cache")
+        async def switch_kv_cache(req: SwitchStrategyRequest):
+            """Hot-swap KV cache strategy."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            engine.hotswap.set_kv_cache(req.strategy)
+            return {
+                "status": "pending",
+                "model": req.model,
+                "kv_cache": req.strategy,
+            }
+
+        @app.post("/v1/engine/decoding")
+        async def switch_decoding(req: SwitchStrategyRequest):
+            """Hot-swap decoding strategy."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            engine.hotswap.set_decoding(req.strategy)
+            return {
+                "status": "pending",
+                "model": req.model,
+                "decoding": req.strategy,
+            }
+
+        @app.post("/v1/engine/context-limit")
+        async def set_context_limit(req: ContextLimitRequest):
+            """Set the maximum context window (in tokens)."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            engine.hotswap.set_context_limit(req.max_tokens)
+            return {
+                "status": "pending",
+                "model": req.model,
+                "max_context_tokens": req.max_tokens,
+            }
+
+        @app.get("/v1/engine/pending")
+        async def get_pending_changes(model_id: str = "lfm2.5-1.2b"):
+            """Check if there are pending hot-swap changes not yet applied."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return {
+                "model": model_id,
+                "has_pending": engine.hotswap.has_pending(),
+                "pending_changes": engine.hotswap.get_pending_changes(),
+            }
+
+        # ── Library endpoints ────────────────────────────────────────────
+
+        @app.get("/v1/library/stats")
+        async def library_stats(model_id: str = "lfm2.5-1.2b"):
+            """Get library statistics."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            return engine.library_stats()
+
+        @app.post("/v1/library/save")
+        async def library_save(req: LibrarySaveRequest):
+            """Save an entry to the library (model self-write or user).
+
+            Categories: "failure", "win", "research", "common_data", "custom".
+            Content is pre-tokenized on save for instant injection later.
+            """
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            entry_id = engine.library_save(
+                content=req.content,
+                category=req.category,
+                tags=req.tags,
+                description=req.description,
+                triggers=req.triggers,
+                priority=req.priority,
+            )
+            return {"status": "saved", "entry_id": entry_id}
+
+        @app.post("/v1/library/lookup")
+        async def library_lookup(req: LibraryLookupRequest):
+            """Lookup entries by tags and/or category."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            entries = engine.library_lookup(
+                tags=req.tags, category=req.category, limit=req.limit)
+            return {"entries": [
+                {"id": e.id, "description": e.description,
+                 "category": e.category, "tags": e.tags,
+                 "token_count": e.token_count, "priority": e.priority,
+                 "access_count": e.access_count, "enabled": e.enabled}
+                for e in entries
+            ]}
+
+        @app.post("/v1/library/search")
+        async def library_search(req: LibrarySearchRequest):
+            """Full-text search the library."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            entries = engine.library_search(req.query, limit=req.limit)
+            return {"results": [
+                {"id": e.id, "description": e.description,
+                 "category": e.category, "tags": e.tags,
+                 "content_preview": e.content[:200],
+                 "token_count": e.token_count, "priority": e.priority}
+                for e in entries
+            ]}
+
+        @app.get("/v1/library/entry/{entry_id}")
+        async def library_get_entry(entry_id: str, model_id: str = "lfm2.5-1.2b"):
+            """Get a single library entry by ID."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            entry = engine.library.get(entry_id)
+            if entry is None:
+                raise HTTPException(404, f"Entry '{entry_id}' not found")
+            return {
+                "id": entry.id, "content": entry.content,
+                "description": entry.description, "category": entry.category,
+                "tags": entry.tags, "triggers": entry.triggers,
+                "priority": entry.priority, "token_count": entry.token_count,
+                "access_count": entry.access_count, "enabled": entry.enabled,
+                "created_at": entry.created_at,
+                "last_accessed": entry.last_accessed,
+            }
+
+        @app.delete("/v1/library/entry/{entry_id}")
+        async def library_delete_entry(entry_id: str, model_id: str = "lfm2.5-1.2b"):
+            """Delete a library entry."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            deleted = engine.library.delete(entry_id)
+            if not deleted:
+                raise HTTPException(404, f"Entry '{entry_id}' not found")
+            return {"status": "deleted", "entry_id": entry_id}
+
+        @app.patch("/v1/library/config")
+        async def library_config(req: LibraryConfigRequest):
+            """Configure library injection (enable/disable, set budget)."""
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            if req.enabled is not None:
+                engine.library_set_enabled(req.enabled)
+            if req.injection_budget is not None:
+                engine.library_set_budget(req.injection_budget)
+            return {
+                "status": "updated",
+                "model": req.model,
+                "enabled": engine._library_enabled,
+                "injection_budget": engine._library_injection_budget,
+            }
+
+        @app.post("/v1/library/optimize")
+        async def library_optimize(model_id: str = "lfm2.5-1.2b"):
+            """Run library optimization (merge similar, trim, re-index)."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            result = engine.library_optimize()
+            return {"status": "optimized", "result": result}
+
+        @app.get("/v1/library/list")
+        async def library_list(
+            model_id: str = "lfm2.5-1.2b",
+            category: Optional[str] = None,
+            tag: Optional[str] = None,
+            limit: int = 100,
+            offset: int = 0,
+        ):
+            """List library entries with optional filtering."""
+            engine = self.registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            entries = engine.library.list_entries(
+                category=category, tag=tag, limit=limit, offset=offset)
+            return {"entries": entries, "total": len(entries)}
+
     async def _stream_chat(self, req: ChatCompletionRequest, prompt: str):
         """SSE streaming generator for chat completions with tool-call detection."""
         resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -770,7 +1512,7 @@ class ForgeServer:
 DEFAULT_MODELS = {
     "lfm2.5-1.2b": {
         "checkpoint": str(LFM25_CHECKPOINT),
-        "config": "forgelm_v3",
+        "config": "forgelm_v7",
         "tokenizer": str(LFM25_HF_DIR),
         "vram_gb": 2.5,
     },
@@ -785,7 +1527,7 @@ def main():
                         help="Comma-separated model IDs to load")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Override checkpoint path")
-    parser.add_argument("--config", type=str, default="forgelm_v3",
+    parser.add_argument("--config", type=str, default="forgelm_v7",
                         help="Model config preset")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Override tokenizer path")

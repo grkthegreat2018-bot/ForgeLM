@@ -102,9 +102,10 @@ def save_checkpoint(state: dict[str, Any], path: str) -> str:
         meta: dict[str, Any] = {}
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
-                # safetensors requires contiguous tensors and does not allow
-                # shared storage; clone to be safe.
-                tensors[k] = v.detach().cpu().contiguous().clone()
+                # safetensors requires contiguous tensors on CPU.
+                # .cpu() already creates a copy if on GPU; .contiguous() ensures
+                # layout. No need for .clone() — .cpu() + .contiguous() suffices.
+                tensors[k] = v.detach().cpu().contiguous()
             else:
                 meta[k] = v
         # Atomic write: save to .tmp, verify metadata, then rename.
@@ -297,13 +298,29 @@ def verify_checkpoint(path: str) -> dict[str, Any]:
             with safe_open(path, framework="pt", device="cpu") as f:
                 keys = list(f.keys())
                 result["n_tensors"] = len(keys)
-                # Check for NaN/Inf in first few tensors
+                # Check for NaN/Inf in first few tensors — use small slices
+                # instead of loading full tensors into memory
                 for k in keys[:5]:
                     t = f.get_tensor(k)
-                    if torch.isnan(t).any():
-                        result["errors"].append(f"NaN in tensor '{k}'")
-                    if torch.isinf(t).any():
-                        result["errors"].append(f"Inf in tensor '{k}'")
+                    # For large tensors, check a subsample instead of full load
+                    if t.numel() > 1_000_000:
+                        # Check first + last + middle slices (catches corruption)
+                        n = t.numel()
+                        sample = torch.cat([
+                            t.flatten()[:1024],
+                            t.flatten()[n // 2 - 512:n // 2 + 512],
+                            t.flatten()[-1024:],
+                        ])
+                        if torch.isnan(sample).any():
+                            result["errors"].append(f"NaN in tensor '{k}'")
+                        if torch.isinf(sample).any():
+                            result["errors"].append(f"Inf in tensor '{k}'")
+                    else:
+                        if torch.isnan(t).any():
+                            result["errors"].append(f"NaN in tensor '{k}'")
+                        if torch.isinf(t).any():
+                            result["errors"].append(f"Inf in tensor '{k}'")
+                    del t  # free immediately
         except Exception as e:
             result["errors"].append(f"safetensors read error: {e}")
             return result

@@ -13,3 +13,13 @@ Subpackages:
     keys            — 75+ weight transform and runtime keys
     inference       — forge engine, KV backend, decoding strategies
 """
+
+# Clean up orphaned .tmp checkpoint files from crashed writes.
+# These accumulate when a checkpoint save is interrupted (kill -9, OOM, etc).
+# Safe to call at import — only removes .tmp files in checkpoint directories.
+try:
+    from research.checkpoint_io import cleanup_orphaned_tmp
+    cleanup_orphaned_tmp()
+except Exception:
+    pass  # don't fail import if cleanup has issues
+

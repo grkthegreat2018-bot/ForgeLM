@@ -136,6 +136,19 @@ class SandboxExecutor:
         self._pool = []
         self._persistent = None
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def execute(self, code: str, expected_output: str | None = None) -> dict:
         """Execute Python code and return full telemetry.
 
@@ -157,8 +170,12 @@ class SandboxExecutor:
             return result
 
         # Fallback: subprocess per execution (slow path, ~200ms startup).
-        # Write code to temp file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
+        # Write code to temp file — include thread ID + UUID to avoid collisions
+        # when multiple threads run sandbox executions concurrently.
+        import threading
+        import uuid
+        unique_suffix = f'_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.py'
+        with tempfile.NamedTemporaryFile(mode='w', suffix=unique_suffix,
                                           delete=False, encoding='utf-8',
                                           dir=self.temp_dir) as f:
             f.write(code)
@@ -559,7 +576,9 @@ class SelfPlaySandbox:
             except NameError:
                 pass
             if torch.cuda.is_available():
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
         gen_time_ms = (time.time() - t0) * 1000
         tokens_generated = len(generated_ids)
@@ -883,7 +902,9 @@ class SelfPlaySandbox:
             except NameError:
                 pass
             if torch.cuda.is_available():
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
         gen_time_ms = (time.time() - t0) * 1000
 
@@ -1450,7 +1471,7 @@ def main():
 
     # Load model
     print("\n[1] Loading ForgeLM V3 (diff-attn + BitNet QAT + TITAN + MoD)...")
-    cfg = get_config("forgelm_v3", device="cuda")
+    cfg = get_config("forgelm_v7", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
         checkpoint_path="research/checkpoints/ForgeLM_V2_BSP.safetensors")
     model.to("cuda").eval()

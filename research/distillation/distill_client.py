@@ -286,6 +286,28 @@ _MODEL_POOL_RAW: list[DistillModel] = [
                  2, 0, True,
                  "https://api.mistral.ai/v1", "MISTRAL_API_KEY",
                  0.0, 0.0, True, "glm-5.2", "GLM-5.2 via Mistral"),
+
+    # ══ DeepSeek direct (MIT) — DeepSeek API ══
+    DistillModel("deepseek", "deepseek-chat", "MIT", 65536,
+                 60, 0, False,
+                 "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY",
+                 0.0, 0.0, True, "deepseek-v3", "DeepSeek V3 direct API"),
+
+    # ══ Cerebras (Apache-2.0) — free tier, fast inference ══
+    DistillModel("cerebras", "openai/gpt-oss-120b", "Apache-2.0", 131072,
+                 30, 0, True,
+                 "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY",
+                 0.0, 0.0, True, "gpt-oss-120b", "Cerebras free tier, fast"),
+    DistillModel("cerebras", "openai/gpt-oss-20b", "Apache-2.0", 131072,
+                 30, 0, True,
+                 "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY",
+                 0.0, 0.0, True, "gpt-oss-20b", "Cerebras free tier, fast"),
+
+    # ══ SambaNova (Apache-2.0) — free tier ══
+    DistillModel("sambanova", "openai/gpt-oss-120b", "Apache-2.0", 131072,
+                 50, 0, True,
+                 "https://api.sambanova.ai/v1", "SAMBANOVA_API_KEY",
+                 0.0, 0.0, True, "gpt-oss-120b", "SambaNova free tier"),
 ]
 
 # NVIDIA NIM: only third-party models allowed (MIT/Apache).

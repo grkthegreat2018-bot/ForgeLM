@@ -1,145 +1,194 @@
-# R&D Round: Boot Time / Load Optimization (2026-08-18/19)
+# Self-Play Quality Scaling Analysis
 
-## Baseline (forgelm_v3, ForgeLM_V3_Base.safetensors, RTX 5070, bf16)
+## V7 Compute Cost Minimization R&D (2025-01)
 
-| Stage | Cold (ms) | Warm (ms) | % (warm) | Notes |
-|-------|-----------|-----------|----------|-------|
-| D_arch_build | 6689-11398 | 6689 | 59% | ConfigurableResearchLLM.__init__ + .to(device) |
-| F_weights_load | 1283-29165 | 1283 | 11% | fastsafetensors direct-to-GPU |
-| J_tokenizer_load | 2720-46244 | 2720 | 24% | Serial AFTER model build |
-| L_first_forward | 176-2414 | 376 | 3.3% | cache_devices() + JIT |
-| H_load_state_dict | 37-378 | 37 | 0.3% | GPU→GPU copy |
-| I_post_load_scan | 20-342 | 20 | 0.2% | QK-norm identity scan |
-| **TOTAL** | **11279-90382** | **11279** | 100% | |
+### Problem
+Full V7 (forgelm_v7): 2.8B params, 7.36 GB storage (NLRQ INT8), 8.47 GB on GPU.
+Training needs: model (8.47GB) + gradients (5.6GB) + activations = 14+ GB > 12GB VRAM.
+Inference: NLRQ dequantization materializes 268MB/projection × 3 × 32 layers = 25.9GB OOM.
 
-## Variation Results (all correct: "Paris. The capital" tokens [5242,523,509,1098,5706])
+### Fix Already Applied: NLRQ Factorized Forward
+Changed `nlrq_ffn_key.py` forward from `W = U @ diag(S) @ V; y = x @ W^T` to
+`y = ((x @ V^T) * S) @ U^T`. Avoids materializing (out, in) weight matrix.
+Peak memory: O(batch * (rank + out)) vs O(out * in). Forward now works on 12GB.
 
-| Variation | TOTAL (ms) | Speedup | VRAM | Correct | Key Change |
-|-----------|-----------|---------|------|---------|------------|
-| baseline | 11279 | 1.0x | 2.68 | ✓ | reference |
-| V1 skip_init | 10190 | 1.1x | 2.74 | ✓ | torch.nn.utils.skip_init |
-| V2 parallel tok | 7185 | 1.6x | 2.68 | ✓ | tokenizer in ThreadPoolExecutor |
-| V3 OS prefetch | 6363 | 1.8x | 2.68 | ✓ | background 16MB block reads |
-| V4 PrefetchVM | 6355 | 1.8x | 2.68 | ✓ | Windows PrefetchVirtualMemory (failed, fell back) |
-| V5 meta+assign | 4414 | 2.6x | 2.74 | ✓ | meta init + load_state_dict(assign=True) |
-| V6 V1+V2+V3 | 8209 | 1.4x | 2.74 | ✓ | skip_init + parallel tok + prefetch |
-| **V7 V5+V2+V3** | **3316** | **3.4x** | **2.74** | **✓** | **meta+assign + parallel tok + prefetch** |
+### Research Findings: Training Memory Reduction
 
-## V7 Breakdown (the winner)
+#### Tier 1: Gradient Offloading (implement now)
+- **offload_adam** (tascj): Hook-driven grad D2H in backward, pinned CPU memory.
+  Modes: stochastic_rounding (bf16 states, smallest), fp32_master (bit-exact AdamW).
+  Trades ~10% throughput for 2-3x larger model training. NUMA-aware pinning.
+  → **Action**: Replace CPUAdamW with OffloadAdam pattern. Hook fires during
+  backward(), streams grads to CPU pinned buffer. Frees GPU grad memory immediately.
+  Expected: V7 2.8B trainable on 12GB (8.47GB model + ~0GB grads + O(1) activations).
 
-| Stage | ms | Notes |
-|-------|------|-------|
-| D_arch_build | 1098 | meta init (no param alloc, no init kernels) |
-| F_weights_load | 1489 | fastsafetensors + OS prefetch warmed cache |
-| J_tokenizer_load | 392 | wait time only; 2713ms hidden behind arch+weights |
-| L_first_forward | 181 | first kernel JIT (unavoidable) |
-| E_dtype_convert | 56 | RoPE buffer re-init |
-| H_load_state_dict | 46 | assign=True (direct param replacement) |
-| I_post_load_scan | 22 | QK-norm identity scan |
-| M_first_decode | 28 | second token |
-| **TOTAL** | **3316** | |
+- **ZenFlow** (arXiv 2505.12242): Stall-free offloading. Keeps important gradients
+  on GPU for immediate update, offloads rest to CPU async. 5x speedup, 85% less
+  GPU stall. Gradient selection via spatial+temporal locality.
+  → **Action**: Novel twist — use TITAN memory importance scores to select which
+  gradients stay on GPU. TITAN already computes per-layer importance.
 
-## Key Findings
+#### Tier 2: Block-wise / Layer-wise Training (implement next)
+- **BAdam** (NeurIPS 2024): Block coordinate descent with Adam. Updates one
+  transformer layer at a time. Memory: 2M + 16M/D GB (D=blocks). For V7 (M=2.8B,
+  D=32 layers): 2*2.8 + 16*2.8/32 = 5.6 + 1.4 = 7.0 GB. Fits 12GB easily.
+  Outperforms LoRA on MT-bench. Microsoft BlockOptimizers repo has impl.
+  → **Action**: Implement BAdam wrapper. Only one layer's optimizer states live
+  on GPU at a time. Cycle through layers. Full-parameter training at LoRA cost.
 
-### What Worked
-1. **Meta device init + assign=True (V5/V7)** — 6.1x speedup on D_arch_build (6.7s → 1.1s)
-   - Build model on `torch.device("meta")` (zero storage, just shape metadata)
-   - `load_state_dict(state, assign=True)` directly replaces meta params with state_dict tensors
-   - Skips both init kernels AND the .to(device) copy
-   - Requires: re-tie weights (assign breaks sharing), re-init RoPE buffers (non-persistent)
-2. **Parallel tokenizer (V2/V7)** — hides 2.7s behind arch build
-   - `ThreadPoolExecutor` starts tokenizer load before arch build
-   - Only 392ms wait time (2713ms hidden)
-3. **OS page cache prefetch (V3/V7)** — modest weight load improvement
-   - Background thread reads 16MB blocks during arch build
-   - Warms OS page cache before fastsafetensors reads
+- **LISA** (NeurIPS 2024): Layerwise Importance Sampled AdamW. Freezes most
+  middle layers, only updates top/bottom + randomly sampled layers. Memory = LoRA
+  cost but outperforms LoRA by 10-35% on MT-bench. Key insight: weight norms are
+  skewed across layers (embedding/output layers have 100x larger norms).
+  → **Action**: Implement LISA scheduler. Use existing MoD router scores to
+  determine which layers to update. Novel: MoD-aware LISA.
 
-### What Failed
-1. **V4 PrefetchVirtualMemory** — API call failed on Windows (mmap buffer access issue)
-   - `mm.__buffer__()` not available in Python's mmap module
-   - Would need ctypes-level virtual memory mapping to work
-   - Fell back to no-prefetch, same as V3
-2. **V1 skip_init** — works but slower than V5 (10.2s vs 4.4s)
-   - `skip_init` uses meta + `to_empty` internally
-   - `to_empty` materializes ALL params (extra copy), then `load_state_dict` fills them
-   - V5's `assign=True` skips the intermediate materialization
-3. **V6 (skip_init combo)** — 8.2s, dominated by skip_init overhead
-   - Replaced by V7 (meta+assign combo) which is 2.5x faster
+#### Tier 3: Low-Rank Gradient Projection (R&D, higher risk)
+- **GaLore** (ICML 2024): Projects gradients to low-rank subspace via SVD.
+  65.5% optimizer memory reduction. 7B model on 24GB GPU. Already in codebase
+  (galore_torch import in training_utils.py line 235) but optional dep.
+  → **Action**: Already available. Wire it for V7 with rank=768 (matches NLRQ).
 
-### Future Optimizations (not implemented)
-1. **Lazy key instantiation** — 698ms (92% of meta init!) is key module creation overhead
-   - TITAN/MoD/MHC/AttnRes/DiffAttn/BitNet created per-block in __init__
-   - Could defer to first forward (they're zero-init=lossless)
-   - Would drop D_arch_build from 1098ms to ~400ms
-   - Requires invasive ModularBlock changes
-2. **fastsafetensors pipeline mode** — `use_pipeline=true, queue_size=0`
-   - Overlaps copy with broadcast (for multi-GPU)
-   - Single-GPU benefit unclear
-3. **CUDA stream weight copy** — overlap H2D with kernel JIT
-   - Would hide F_weights_load behind L_first_forward JIT
-4. **Persistent compile cache warming** — pre-compile kernels offline
-   - Would eliminate L_first_forward JIT overhead (181ms)
+- **Q-GaLore** (PMLR 2025): INT4 projection matrices + INT8 weights with
+  stochastic rounding. Adaptive subspace updates based on convergence. 7B on
+  24GB. Reduces SVD overhead vs GaLore.
+  → **Action**: Implement if GaLore SVD overhead is bottleneck.
 
-## Randomizer Output (step 7)
-- Combo 3: os_page_prefetch + cuda_stream_weight_copy + meta_device_init (≈ V7 + stream copy)
-- Combo 4: buffer_reuse + spectral_decomposition_load + torch_compile_warm_cache (cross-domain)
-- Combo 5: cuda_stream_weight_copy + skip_init + moe_expert_bake + kv_cache_lazy_alloc
-- Most promising next: lazy_key_instantiation (698ms savings, noted above)
+- **Fira** (NeurIPS 2025): Full-rank training under low-rank constraint.
+  Uses norm-based scaling from low-rank optimizer as proxy for full-rank.
+  8x smaller optimizer memory than GaLore, outperforms it. Plug-and-play.
+  → **Action**: Highest-value R&D target. Fira + NLRQ = both weight AND
+  optimizer in low-rank. Novel: "NLRQ-Fira" — use NLRQ's SVD as Fira's
+  low-rank subspace (free, no extra SVD needed).
 
-## Production Change
+- **Weight Refactorization + Momentum Reset** (arXiv 2505.22922): Two techniques
+  that beat GaLore/Fira with 25% less memory. Weight refactorization = rescale
+  weights to unit norm. Momentum reset = clear optimizer momentum periodically.
+  → **Action**: Easy wins, implement as flags on existing optimizers.
 
-Implemented in `research/model_loader.py` + `research/tokenizer_cache.py`:
-- Added `fast_load` parameter to `load_default_model()` and `build_model_fast()`
-- When `fast_load=True`: uses meta init + assign=True + parallel tokenizer + OS prefetch
-- Added `self.base`, `self.max_seq_len`, `self.rope_scaling` to RotaryEmbedding (needed for buffer re-init)
-- Added `_reset_non_persistent_buffers()` helper
-- Default: `fast_load=True` (opt-in to disable with `fast_load=False`)
+### Research Findings: Inference Optimization
 
-## Round 2: Lazy Key Instantiation Investigation (2026-08-19)
+#### NLRQ Factorized Matmul (already implemented)
+- `y = ((x @ V^T) * S) @ U^T` — avoids materializing W. Works.
+- Further: fuse into single Triton kernel with INT8 tensor cores.
 
-### Profiling Result
-- Meta init (full V3, cold): 780ms — dominated by Python import overhead
-- Meta init (full V3, warm): 52ms — only 40ms is key module creation
-- BitNet is 97% of key overhead (762ms cold, 33ms warm)
-- **Conclusion: lazy key instantiation NOT worth it** — the 700ms cold cost is
-  Python import overhead that must be paid somewhere. Moving to first forward
-  is a bad trade (first forward is already 180ms JIT, adding 700ms = 880ms).
+#### INT8 Tensor Cores on Blackwell (RTX 5070, SM120)
+- 5th-gen Tensor Cores: dedicated INT8 + FP8 paths. 2.18x speedup vs fp16 on 4090.
+- `torch._int_mm` / `torch._scaled_mm`: native INT8 matmul via cuBLAS.
+- Triton `tl.dot` with int8 operands + int32 accumulation (sm_80+).
+- → **Action**: Write Triton kernel for NLRQ that does INT8 x INT8 matmul
+  directly on tensor cores, fusing dequant+matmul+scale. Expected 2x inference.
 
-### Pivot: Fast Tokenizer (the real bottleneck)
+#### FP4 on Blackwell
+- Native FP4 tensor core support on RTX 5070. 2x memory + 2x compute vs INT8.
+- Block-level scaling factors (8-bit). Two-level scaling.
+- → **Action**: FP4 NLRQ factors (instead of INT8). 2x smaller storage.
+  7.36GB → 3.68GB. Enables full 2048 seq_len training.
 
-Profiled tokenizer load:
-- `from transformers import AutoTokenizer`: 3957ms (!!) — dominant cost
-- `AutoTokenizer.from_pretrained()`: 89ms
-- `gigatoken.Tokenizer().as_hf()`: 204ms
-- Total via transformers: 4254ms
+#### torch.compile Fusion
+- `config.force_fuse_int_mm_with_mul = True` fuses dequant+matmul.
+- torch.compile generates efficient Triton kernels for weight-only quant.
+- → **Action**: `torch.compile(model, mode="max-autotune")` on NLRQ forward.
 
-**Fast path: `tokenizers` Rust library directly**
-- `from tokenizers import Tokenizer`: 18.5ms
-- `Tokenizer.from_file()`: 77ms
-- `gigatoken.Tokenizer(rust_tok).as_hf()`: 113ms
-- Read tokenizer_config.json for special tokens: <1ms
-- Total: 223ms — **19x faster**
+### Priority Implementation Order
+1. **Gradient offloading** (offload_adam pattern) — enables V7 training on 12GB
+2. **BAdam** — block-wise training, 7GB for V7, full-parameter
+3. **Fira + NLRQ** — novel low-rank training using NLRQ's existing SVD
+4. **Triton INT8 NLRQ kernel** — 2x inference speedup
+5. **FP4 NLRQ factors** — 2x memory reduction for training+inference
+6. **LISA with MoD-aware selection** — novel layer-wise training
 
-### Implementation
-- `tokenizer_cache.py`: `_load_fast_tokenizer()` uses `tokenizers.Tokenizer.from_file()`
-  + gigatoken wrap + sets `eos_token`/`bos_token`/`pad_token` strings (gigatoken's
-  `eos_token_id` property reads from these)
-- Falls back to `_load_hf_tokenizer()` (transformers) if fast path fails
-- Token IDs verified identical: [1, 1098, 5706, 803, 4481, 856] for both paths
+---
 
-### Final Results (with fast tokenizer)
+## Current State
+- **Model**: LFM2.5-1.2B (1.17B params, 2.34GB bf16)
+- **Self-play**: AZR curriculum (propose→solve→verify), LoRA finetuning (r=16, ~1M trainable params)
+- **Eval**: fast_eval with 7 categories (tool_use, knowledge, reasoning, code, instruction, concise, self_correction)
+- **Promotion threshold**: candidate quality >= base quality * (1 - eval_threshold=0.5)
+- **Training VRAM**: ~6-7GB GPU (CPUAdamW offload), 19GB CPU RAM — fits RTX 5070 12GB
 
-| Metric | Original Baseline | V7 (meta+assign) | V7 + fast tokenizer |
-|--------|------------------|------------------|---------------------|
-| TOTAL  | 11279 ms         | 3316 ms          | **2696 ms**         |
-| Speedup| 1.0x             | 3.4x             | **4.2x**            |
-| D_arch | 6689 ms          | 1098 ms          | 1142 ms             |
-| F_weights | 1283 ms       | 1489 ms          | 1254 ms             |
-| J_tok_wait | 2720 ms      | 392 ms           | **0 ms**            |
-| L_first | 376 ms          | 181 ms           | 170 ms              |
+## Research Findings
 
-### Production test (test_boot.py)
-- Boot: 2.5s (was 11.3s original, 2.8s with V7 only)
-- Output: "Paris. The capital of France." — correct
-- 292.5 tok/s, 2.69 GB VRAM
-- 84 unit tests pass
+### 1. Parameter Threshold for Reasoning
+- **Critical threshold: 1.6B params** (arXiv 2502.15120) — below this, CoT reasoning fails
+- **Current model (1.2B) is BELOW the reasoning threshold**
+- AZR scaling: 3B→+5.7pts, 7B→+10.2pts, 14B→+13.2pts — "bigger bases yield bigger gains"
+- AZR used Qwen2.5-7B as primary base; 3B was minimum tested
+
+### 2. Self-Play Quality Bottleneck
+- 1.2B model can propose tasks but struggles to SOLVE complex ones
+- Small Model Learnability Gap (arXiv 2502.12143): models ≤3B don't benefit from long CoT
+- Mix Distillation needed: blend short+long CoT for small models
+- SGS (Self-Guided Self-Play): 7B model after 200 rounds > 671B model pass@4
+
+### 3. Distillation Infrastructure (already built)
+- Multi-provider teacher pool: gpt-oss-120b, DeepSeek-R1, Qwen3-32B, GLM-4.7
+- 7+ free providers with rate-limit rotation
+- Agentic distillation: teachers call tools, generate trajectories
+- Curriculum distillation: 2-stage (internal solver → externalized reasoning)
+
+### 4. Parameter Scaling Options
+
+#### Option A: MoE (V5 config — already built)
+- 7.5B total params, 1.2B active (same inference cost)
+- 8 experts top-2 + shared expert
+- AirMoE: experts hotloaded from disk, LRU cached (~2MB each with SVD+int4)
+- VRAM: ~300MB weights (BitNet) + 1GB KV = 1.3GB
+- **Problem**: Training MoE is harder (router instability, load balancing)
+
+#### Option B: Depth Scaling (16→24 or 32 layers)
+- More layers = more reasoning depth
+- 24 layers: ~1.7B params (above 1.6B threshold!)
+- 32 layers: ~2.3B params
+- VRAM: 3.4GB / 4.6GB bf16 (fits 12GB with CPUAdamW)
+- **Advantage**: Simple, proven, no architecture changes
+
+#### Option C: Width Scaling (d_model 2048→3072)
+- 3072 dim: ~2.6B params
+- Better per-layer capacity
+- VRAM: 5.2GB bf16 (fits 12GB with CPUAdamW)
+- **Advantage**: More capacity per layer
+
+#### Option D: V6 Compressed + Scale Up
+- Use Monarch/Kronecker FFN compression to fit a LARGER model in same VRAM
+- 2.3B model with Monarch FFN ≈ 1.0B VRAM (same as current 1.2B dense)
+- "Free" parameter expansion via compression
+- **Advantage**: 2x params at same VRAM cost
+
+## Recommended Path
+
+### Phase 1: Cross the 1.6B threshold (immediate)
+- Scale to 24 layers (1.7B params) — minimal change, crosses reasoning threshold
+- Use V6 compression (Monarch FFN) to keep VRAM at ~1.7GB
+- Distill from teacher pool (gpt-oss-120b, DeepSeek-R1) to bootstrap reasoning
+- Mix Distillation: blend short+long CoT (arXiv 2502.12143)
+
+### Phase 2: MoE expansion (medium term)
+- V5 MoE config: 7.5B total, 1.2B active
+- AirMoE disk offload for inference (already built)
+- Train with dense_bypass=True (lossless start), gradually activate router
+- Expert tying (g=2) to halve expert params
+
+### Phase 3: Self-play at scale (long term)
+- AZR self-play on 7B+ base (proven to work)
+- SGS mode (already in codebase) to prevent Conjecturer collapse
+- SAERL for diversity control + difficulty curriculum
+- RLVR with verifiable rewards (math, code)
+
+## VRAM Budget (RTX 5070, 12GB)
+
+| Config | Params | VRAM (bf16) | VRAM (BitNet) | Train VRAM |
+|--------|--------|-------------|---------------|------------|
+| V4 (current) | 1.22B | 2.45 GB | 0.61 GB | 6-7 GB |
+| V6 compressed | 491M | 0.98 GB | 0.25 GB | 4-5 GB |
+| 24-layer | 1.7B | 3.4 GB | 0.85 GB | 8-9 GB |
+| 24-layer + V6 | ~1.0B | 2.0 GB | 0.50 GB | 6-7 GB |
+| 32-layer | 2.3B | 4.6 GB | 1.15 GB | 10-11 GB |
+| 32-layer + V6 | ~1.4B | 2.8 GB | 0.70 GB | 7-8 GB |
+| V5 MoE (active) | 1.2B | 2.4 GB | 0.60 GB | 6-7 GB |
+| V5 MoE (total) | 7.5B | 15 GB | 3.75 GB | N/A (disk) |
+
+## Key Insight
+The #1 bottleneck is NOT VRAM — it's the 1.6B reasoning threshold.
+Current 1.2B model is below it. V6 compression lets us scale to 2.3B+
+at the SAME VRAM cost as the current 1.2B dense model.

@@ -64,6 +64,21 @@ _RE_CODEBLOCK_CLOSE = re.compile(r'```\s*$', re.MULTILINE)
 
 from research.evaluation.goal_tasks import GoalTask
 
+# ─── Persistent sandbox worker pool ──────────────────────────────────
+# Module-level ThreadPool reused across sandbox executions to avoid the
+# overhead of creating/destroying threads for every validation run.
+_SANDBOX_POOL = None
+
+
+def _get_sandbox_pool():
+    """Return (or lazily create) the persistent sandbox ThreadPool."""
+    global _SANDBOX_POOL
+    if _SANDBOX_POOL is None:
+        from multiprocessing.pool import ThreadPool
+        _SANDBOX_POOL = ThreadPool(processes=4)
+    return _SANDBOX_POOL
+
+
 # ─── Data structures ──────────────────────────────────────────────────
 
 @dataclass
@@ -498,12 +513,11 @@ class InfiniteCurriculum:
         eos_id = self.tokenizer.eos_token_id
         pad_id = self.tokenizer.pad_token_id or eos_id or 0
 
-        # Tokenize all prompts
-        all_ids = []
-        for prompt in prompts:
-            enc = self.tokenizer(prompt, return_tensors="pt",
-                                 truncation=True, max_length=512)
-            all_ids.append(enc.input_ids[0])  # (T_i,)
+        # Tokenize all prompts — batch mode (single call vs N per-prompt calls)
+        # Use return_tensors=None since prompts have variable lengths; we
+        # left-pad manually below.
+        enc = self.tokenizer(prompts, truncation=True, max_length=512)
+        all_ids = [torch.tensor(ids, dtype=torch.long) for ids in enc.input_ids]
 
         # Left-pad to max prompt length (left pad so generation positions align)
         max_prompt_len = max(ids.shape[0] for ids in all_ids)
@@ -1278,12 +1292,13 @@ class InfiniteCurriculum:
 
     def _execute_sandbox(self, code: str, timeout_s: float = 3.0) -> dict:
         """Execute Python code in a subprocess sandbox."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
-                                          delete=False, encoding='utf-8') as f:
-            f.write(code)
-            temp_path = f.name
-
+        temp_path = None
         try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
+                                              delete=False, encoding='utf-8') as f:
+                f.write(code)
+                temp_path = f.name
+
             proc = subprocess.Popen(
                 [sys.executable, temp_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1301,11 +1316,23 @@ class InfiniteCurriculum:
                 proc.kill()
                 return {"stdout": "", "stderr": "TIMEOUT", "returncode": -1}
         finally:
-            try:
-                os.unlink(temp_path)
-            except OSError as e:
-                import warnings
-                warnings.warn(f"log rotation cleanup: {e}", RuntimeWarning, stacklevel=2)
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    def _execute_sandbox_batch(self, codes: list[str],
+                               timeout_s: float = 3.0) -> list[dict]:
+        """Execute multiple Python code snippets in parallel via the persistent
+        sandbox worker pool.
+
+        Returns a list of result dicts in the same order as *codes*.
+        """
+        pool = _get_sandbox_pool()
+        results = pool.map(
+            lambda c: self._execute_sandbox(c, timeout_s=timeout_s), codes)
+        return list(results)
 
     # ─── Solving ───────────────────────────────────────────────────
 
@@ -1365,17 +1392,39 @@ class InfiniteCurriculum:
             # Build full solution: prompt (has def solve) + completion (has body)
             full_solution = prompt + solution_body
 
-            # Execute and check
-            test_code = full_solution + "\n"
+            # Execute and check — run individual test cases in parallel
+            # via the persistent sandbox worker pool.
+            test_codes = []
             for tc in task.test_cases:
                 args_str = ", ".join(repr(a) for a in tc["args"])
                 expected_repr = repr(tc["expected"])
-                test_code += f"\nassert solve({args_str}) == {expected_repr}, "
-                test_code += f"'solve({args_str}) failed'"
-            test_code += "\nprint('PASS')"
+                tc_code = (
+                    full_solution + "\n"
+                    f"assert solve({args_str}) == {expected_repr}, "
+                    f"'solve({args_str}) failed'\n"
+                    "print('PASS')"
+                )
+                test_codes.append(tc_code)
 
-            result = self._execute_sandbox(test_code, timeout_s=5.0)
-            success = result.get("returncode") == 0 and "PASS" in result.get("stdout", "")
+            if not test_codes:
+                result = {"stdout": "", "stderr": "NO_TESTS", "returncode": -1}
+                success = False
+            elif len(test_codes) == 1:
+                result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
+                success = (result.get("returncode") == 0
+                           and "PASS" in result.get("stdout", ""))
+            else:
+                tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
+                success = all(
+                    r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
+                    for r in tc_results
+                )
+                # Aggregate error from first failing test case
+                result = next(
+                    (r for r in tc_results if not (
+                        r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
+                    tc_results[0],
+                )
 
             attempts.append({
                 "code": full_solution, "success": success,
@@ -1447,15 +1496,27 @@ class InfiniteCurriculum:
             result["decomposition_chain"] = []
             return result
 
-        # Solve each variant recursively (stepping stones)
+        # Solve each variant recursively (stepping stones) — in parallel
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         variant_solutions = []
-        for variant in variants:
-            v_result = self.solve_with_ladder(variant, engine=engine, depth=depth + 1)
-            variant_solutions.append({
-                "variant": variant,
-                "result": v_result,
-                "depth": depth + 1,
-            })
+        with ThreadPoolExecutor(max_workers=min(4, len(variants))) as executor:
+            futures = {
+                executor.submit(self.solve_with_ladder, v, engine=engine, depth=depth + 1): v
+                for v in variants
+            }
+            variant_results = {}
+            for future in as_completed(futures):
+                v = futures[future]
+                variant_results[id(v)] = future.result()
+
+            # Reassemble in original variant order
+            for variant in variants:
+                v_result = variant_results[id(variant)]
+                variant_solutions.append({
+                    "variant": variant,
+                    "result": v_result,
+                    "depth": depth + 1,
+                })
 
         # Check if any variant succeeded — use as context for retrying original
         successful_variants = [v for v in variant_solutions if v["result"].get("final_success")]
@@ -1604,15 +1665,36 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             solution_body = code_match.group(1) if code_match else completion
             full_solution = hinted_prompt + solution_body
 
-            test_code = full_solution + "\n"
+            # Execute test cases in parallel via the persistent sandbox pool.
+            test_codes = []
             for tc in task.test_cases:
                 args_str = ", ".join(repr(a) for a in tc["args"])
                 expected_repr = repr(tc["expected"])
-                test_code += f"\nassert solve({args_str}) == {expected_repr}"
-            test_code += "\nprint('PASS')"
+                tc_code = (
+                    full_solution + "\n"
+                    f"assert solve({args_str}) == {expected_repr}\n"
+                    "print('PASS')"
+                )
+                test_codes.append(tc_code)
 
-            result = self._execute_sandbox(test_code, timeout_s=5.0)
-            success = result.get("returncode") == 0 and "PASS" in result.get("stdout", "")
+            if not test_codes:
+                result = {"stdout": "", "stderr": "NO_TESTS", "returncode": -1}
+                success = False
+            elif len(test_codes) == 1:
+                result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
+                success = (result.get("returncode") == 0
+                           and "PASS" in result.get("stdout", ""))
+            else:
+                tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
+                success = all(
+                    r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
+                    for r in tc_results
+                )
+                result = next(
+                    (r for r in tc_results if not (
+                        r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
+                    tc_results[0],
+                )
 
             return {
                 "final_success": success,

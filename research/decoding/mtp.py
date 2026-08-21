@@ -293,3 +293,133 @@ class MTPTrainer:
     def stats(self):
         return {"step": self.current_step, "current_n": self.current_n,
                 "target_n": self.n_predict}
+
+
+# ─── MTPModule: integrated multi-head MTP for model_loader wiring ───────────
+#
+# Nemotron Lightning style: N independent heads that share a trunk, each
+# predicting token t+k+1 from the hidden state at position t. The heads can
+# be tied to the model's LM head (shared weight design) for zero extra param
+# cost at inference, or use independent weights for better quality.
+#
+# Identity init: when identity_init=True, the trunk is identity (zero-init the
+# Linear bias, ones-init the LayerNorm, and the output heads copy the model's
+# head weights). This makes MTP lossless at start — the first head predicts
+# exactly what the main head predicts, and subsequent heads are zero-init so
+# they contribute zero loss initially. Training then diverges the heads.
+
+
+class MTPModule(nn.Module):
+    """Integrated multi-token prediction module for model wiring.
+
+    Wraps N MTPHeads into a single module with a shared trunk, designed to be
+    attached to ConfigurableResearchLLM as ``model.mtp_module``. The forward
+    method computes the auxiliary MTP loss from hidden states + ground truth
+    token embeddings.
+
+    Args:
+        d_model: model hidden dimension.
+        vocab_size: vocabulary size.
+        n_heads: number of MTP prediction heads (each predicts t+k+1).
+        loss_weight: weight of the MTP auxiliary loss (added to main CE).
+        identity_init: if True, init heads to copy the model head (lossless).
+    """
+
+    def __init__(self, d_model: int, vocab_size: int, n_heads: int = 2,
+                 loss_weight: float = 0.3, identity_init: bool = True):
+        super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.n_heads = n_heads
+        self.loss_weight = loss_weight
+        self.identity_init = identity_init
+
+        # Shared trunk: project hidden state → prediction representation.
+        # Identity-ish init: Linear is near-zero (so trunk_out ≈ hidden),
+        # LayerNorm is identity (weight=1, bias=0).
+        self.trunk = nn.Sequential(
+            nn.Linear(d_model, d_model, bias=False),
+            nn.GELU(),
+            nn.LayerNorm(d_model),
+        )
+        with torch.no_grad():
+            self.trunk[0].weight.zero_()  # zero-init → trunk_out = 0 initially
+            self.trunk[2].weight.fill_(1.0)
+            self.trunk[2].bias.zero_()
+
+        # N independent output heads. Zero-init so they predict uniform
+        # distribution initially (zero MTP loss contribution).
+        self.heads = nn.ModuleList([
+            nn.Linear(d_model, vocab_size, bias=False)
+            for _ in range(n_heads)
+        ])
+        for head in self.heads:
+            head.weight.data.zero_()
+
+        self._tied_head_weight: nn.Parameter | None = None
+
+    def tie_head_to_model(self, model_head_weight: nn.Parameter):
+        """Tie the first MTP head to the model's LM head (shared weights).
+
+        This makes the first MTP head predict exactly what the main head
+        predicts (lossless at init). Subsequent heads remain independent.
+        """
+        self._tied_head_weight = model_head_weight
+        # Don't directly assign .weight (would break parameter registration);
+        # instead, forward() uses the tied weight when set.
+        self.heads[0] = None  # type: ignore[assignment]
+
+    def forward(self, hidden: torch.Tensor, token_embeds: torch.Tensor,
+                targets: torch.Tensor) -> tuple[torch.Tensor | None, list]:
+        """Compute MTP auxiliary loss.
+
+        Args:
+            hidden: (B, T, d_model) final hidden states from the model.
+            token_embeds: (B, T, d_model) ground-truth token embeddings
+                (used as input for the recursive MTP prediction).
+            targets: (B, T) ground-truth token ids.
+
+        Returns:
+            (mtp_loss, logits_list) — mtp_loss is a scalar (or None if
+            sequence too short), logits_list is the list of per-head logits.
+        """
+        T = hidden.size(1)
+        if T <= self.n_heads + 1:
+            return None, []
+
+        trunk_out = self.trunk(hidden)  # (B, T, d_model)
+        # At init, trunk is zero → trunk_out = 0 → all heads output 0 →
+        # softmax = uniform → CE = ln(vocab) = constant, but grad flows.
+
+        mtp_loss = torch.tensor(0.0, device=hidden.device, dtype=hidden.dtype)
+        logits_list = []
+
+        for k in range(self.n_heads):
+            # Head k predicts token at position t + k + 1
+            offset = k + 1
+            if offset + 1 >= T:
+                break
+
+            # Use trunk_out at position t to predict target at t + offset
+            pred_input = trunk_out[:, :-offset, :]  # (B, T-offset, d_model)
+            target_k = targets[:, offset:]  # (B, T-offset)
+
+            if self._tied_head_weight is not None and k == 0:
+                logits_k = F.linear(pred_input, self._tied_head_weight)
+            else:
+                logits_k = self.heads[k](pred_input)
+
+            logits_list.append(logits_k)
+
+            # CE loss for this head
+            loss_k = F.cross_entropy(
+                logits_k.reshape(-1, logits_k.size(-1)),
+                target_k.reshape(-1),
+                ignore_index=-100,
+            )
+            mtp_loss = mtp_loss + loss_k
+
+        if self.n_heads > 0:
+            mtp_loss = mtp_loss * self.loss_weight / self.n_heads
+
+        return mtp_loss, logits_list

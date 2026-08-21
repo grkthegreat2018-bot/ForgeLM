@@ -192,7 +192,7 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
     cfg = config or FinetuneConfig()
 
     # Load base model + tokenizer (reuse existing loaders).
-    model_cfg = get_config("forgelm_v3", device=device)
+    model_cfg = get_config("forgelm_v7", device=device)
     # Enable gradient checkpointing + chunked CE in the model config.
     model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
     model_cfg.use_chunked_ce = cfg.use_chunked_ce

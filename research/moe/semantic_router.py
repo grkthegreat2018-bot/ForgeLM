@@ -126,7 +126,10 @@ class SemanticRouter:
 
     @classmethod
     def load(cls, path: str, model, tokenizer, device: str = "cuda") -> "SemanticRouter":
-        data = torch.load(path, map_location=device)
+        try:
+            data = torch.load(path, map_location=device, weights_only=True)
+        except Exception:
+            data = torch.load(path, map_location=device, weights_only=False)
         inst = cls(model, tokenizer, {}, device=device)
         for t, e in data["topic_embeddings"].items():
             inst.topic_embeddings[t] = e.to(device)

@@ -6,6 +6,7 @@ import os
 import random
 import sys
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,76 @@ import torch
 import torch.nn.functional as F
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# OOM guard — wraps forward+backward so a single bad batch doesn't kill a run
+# ---------------------------------------------------------------------------
+
+class OOMBatchSkipped(Exception):
+    """Raised inside the oom_guard block body to signal "skip this batch"."""
+    pass
+
+
+@contextmanager
+def oom_guard(device: str = "cuda", *, skip: bool = True, label: str = ""):
+    """Context manager that catches ``torch.cuda.OutOfMemoryError``.
+
+    On OOM it synchronizes the device, clears the CUDA cache, and either:
+      * swallows the error and sets ``guard.skipped = True`` (``skip=True``), or
+      * re-raises after cleanup (``skip=False``).
+
+    Usage::
+
+        with oom_guard(str(device)) as safe:
+            out = model(input_ids)
+            loss = compute_loss(...)
+            (loss / grad_accum).backward()
+        if safe.skipped:
+            optimizer.zero_grad()
+            continue   # skip this batch, don't step
+    """
+    guard = _OOMGuardState()
+    try:
+        yield guard
+    except torch.cuda.OutOfMemoryError as exc:
+        guard.skipped = True
+        guard.error = exc
+        if not skip:
+            _cuda_cleanup(device)
+            raise
+        _cuda_cleanup(device)
+        tag = f" [{label}]" if label else ""
+        print(f"  [OOM guard{tag}] CUDA OOM — cache cleared, batch skipped.")
+    except RuntimeError as exc:
+        # PyTorch < 2.0 may raise plain RuntimeError for OOM.
+        if "out of memory" in str(exc).lower():
+            guard.skipped = True
+            guard.error = exc
+            if not skip:
+                _cuda_cleanup(device)
+                raise
+            _cuda_cleanup(device)
+            tag = f" [{label}]" if label else ""
+            print(f"  [OOM guard{tag}] CUDA OOM — cache cleared, batch skipped.")
+        else:
+            raise
+
+
+class _OOMGuardState:
+    __slots__ = ("skipped", "error")
+
+    def __init__(self):
+        self.skipped = False
+        self.error: Exception | None = None
+
+
+def _cuda_cleanup(device: str = "cuda"):
+    """Synchronize + empty_cache, safe on CPU."""
+    if torch.cuda.is_available() and "cuda" in str(device):
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize(device)
 
 
 class ReplayBuffer:
@@ -152,6 +223,14 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
             )
         except Exception as e:
             print(f"bitsandbytes Lion unavailable ({e}); falling back to AdamW.")
+
+    if optimizer_name == "cpu_offload":
+        # CPUAdamW: optimizer states + fp32 master on CPU pinned RAM.
+        # Eliminates the 14.4GB fp32 AdamW VRAM cost for 1.2B models.
+        # Enables full-precision training on 12GB GPUs (vs 8-bit bnb fallback).
+        from research.training.optim.hybrid_offload import CPUAdamW
+        print("Using CPUAdamW (ZeRO-Offload-style: optimizer states on CPU).")
+        return CPUAdamW(param_groups, lr=max_lr, weight_decay=weight_decay)
 
     if optimizer_name == "galore":
         try:

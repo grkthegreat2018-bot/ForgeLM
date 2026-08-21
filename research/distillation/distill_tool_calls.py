@@ -1,5 +1,8 @@
 """API distillation: teacher models generate tool-call + code-format training data.
 
+⚠️  TRAINING DATA GENERATION ONLY — not used during inference.
+    For inference tool registry, see research/inference/engine_tools.py.
+
 This is the cold-start solution for ForgeLM V3. The base LFM2.5 model can't
 code or use tools -- we use strong API teachers (gpt-oss-120b, DeepSeek, etc.)
 to generate high-quality training data that teaches the local model:

@@ -100,6 +100,18 @@ class ForwardCache:
         """Clear the entire cache."""
         self._cache.clear()
 
+    def clear(self):
+        """Explicitly clear cache and release CUDA tensors."""
+        self._cache.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def __del__(self):
+        try:
+            self.clear()
+        except Exception:
+            pass
+
     @property
     def hit_rate(self) -> float:
         total = self._hits + self._misses

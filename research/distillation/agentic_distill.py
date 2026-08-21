@@ -1,5 +1,9 @@
 """Agentic distillation client — teacher models call tools to generate rich training data.
 
+⚠️  TRAINING DATA GENERATION ONLY — uses discovery_tools.py for the self-play
+    tool set. Not used during inference. For inference tool registry, see
+    research/inference/engine_tools.py.
+
 Takes the self-play loop process from `tool_use_loop.py` and applies it to the
 distillation model router. Teacher API models (gpt-oss, DeepSeek, Qwen, GLM, etc.)
 act as the "engine" in an agentic tool-use loop:

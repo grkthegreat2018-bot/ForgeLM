@@ -857,11 +857,12 @@ def verify_solution(solution: str, test_cases: list[dict]) -> bool:
             return False
 
     tmp_dir = tempfile.gettempdir()
-    sol_fd, sol_path = tempfile.mkstemp(suffix=".py", dir=tmp_dir)
-    tests_fd, tests_path = tempfile.mkstemp(suffix=".json", dir=tmp_dir)
-    runner_fd, runner_path = tempfile.mkstemp(suffix=".py", dir=tmp_dir)
+    sol_fd = sol_path = tests_fd = tests_path = runner_fd = runner_path = None
     try:
         import os as _os
+        sol_fd, sol_path = tempfile.mkstemp(suffix=".py", dir=tmp_dir)
+        tests_fd, tests_path = tempfile.mkstemp(suffix=".json", dir=tmp_dir)
+        runner_fd, runner_path = tempfile.mkstemp(suffix=".py", dir=tmp_dir)
         with _os.fdopen(sol_fd, "w", encoding="utf-8") as f:
             f.write(solution)
         with _os.fdopen(tests_fd, "w", encoding="utf-8") as f:
@@ -885,11 +886,20 @@ def verify_solution(solution: str, test_cases: list[dict]) -> bool:
         return proc.stdout.strip() == "PASS"
     finally:
         import os as _os
+        # Close any fds that weren't consumed by fdopen (e.g., if mkstemp
+        # for a later file failed after an earlier one succeeded).
+        for _fd in (sol_fd, tests_fd, runner_fd):
+            if _fd is not None:
+                try:
+                    _os.close(_fd)
+                except OSError:
+                    pass
         for _p in (sol_path, tests_path, runner_path):
-            try:
-                _os.unlink(_p)
-            except OSError:
-                pass
+            if _p is not None:
+                try:
+                    _os.unlink(_p)
+                except OSError:
+                    pass
 
 
 def run_agentic_mode(args):

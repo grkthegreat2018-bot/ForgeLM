@@ -1,4 +1,5 @@
 """Modular model factory and inference engine for ForgeAI research."""
+import copy
 import math
 import os
 from collections import OrderedDict
@@ -27,6 +28,10 @@ os.environ.setdefault("TORCHINDUCTOR_PERSISTENT_AUTOTUNE_DIR", str(TORCH_CACHE_D
 # Enable TensorFloat32 tensor cores for float32 matmuls (RTX 5070 supports this).
 # Free ~8x speedup on fp32 matmuls with negligible precision loss (~1e-5).
 torch.set_float32_matmul_precision("high")
+# Also enable TF32 for cuDNN convolutions (affects conv layers, attention padding ops)
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 from research.config import ModelConfig
 
@@ -405,6 +410,16 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
+        # ValueResidual: V_0 from layer 0 is injected by the parent model.
+        # When set, v = v + gate * v0 (applied before attention).
+        self._v0_residual: torch.Tensor | None = None
+        self._v0_gate: torch.Tensor | None = None
+        self._v0_capture: torch.Tensor | None = None  # set by parent for layer 0
+
+        # LearnedSink (GPT-OSS): per-head attention sink bias.
+        # init=0 → lossless (no bias added). Training learns sink values.
+        self.sinks: nn.Parameter | None = None
+
     def _repeat_kv(self, x):
         """Repeat KV heads to match query heads."""
         if self.n_rep == 1:
@@ -420,6 +435,17 @@ class GroupedQueryAttention(nn.Module):
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        # ValueResidual (ResFormer): add V_0 from layer 0 to this layer's V.
+        # gate=0 at init → v unchanged (lossless). Training opens the gate.
+        if self._v0_residual is not None and self._v0_gate is not None:
+            gate_val = self._v0_gate
+            if gate_val.item() != 0.0:
+                # V_0 is (B, n_kv_heads, T, head_dim) — same shape as v.
+                v = v + gate_val * self._v0_residual
+        # Capture V_0 from layer 0 (set by parent model for the first layer).
+        if self._v0_capture is not None:
+            self._v0_capture = v.detach()
 
         # Fused QK-Norm + RoPE path (opt-in via FORGE_FUSED_ROPE_QKNORM=1).
         # Fuses RMSNorm and RoPE into a single Triton kernel, halving HBM
@@ -476,8 +502,37 @@ class GroupedQueryAttention(nn.Module):
 
         # Single-token decode with cached KV: no causal mask needed (all keys are valid)
         total_len = k.shape[-2]
+        # CSA (Compressed Sparse Attention): for long sequences, use top-k
+        # position selection to reduce O(S^2) → O(S*k). Short sequences
+        # use full attention (lossless when S <= top_k).
+        csa_top_k = getattr(self, '_csa_top_k', 0)
+        if getattr(self, '_csa_enabled', False) and csa_top_k > 0 and total_len > csa_top_k and T > 1:
+            from research.keys.attention.csa_key import CSAAttention
+            csa = CSAAttention(
+                self.d_model if hasattr(self, 'd_model') else C,
+                self.n_heads, top_k=csa_top_k,
+                head_dim=self.head_dim)
+            out = csa(q, k, v, is_causal=True)
+            out = out.transpose(1, 2).reshape(B, T, C)
+            return self.out_proj(out), new_kv
+        # LearnedSink: add per-head sink bias to attention scores.
+        # sink is (n_heads,) → broadcast to (1, n_heads, 1, total_len).
+        # init=0 → no-op (lossless). Training learns positive sink values.
+        sink_bias = None
+        if self.sinks is not None and self.sinks.abs().max().item() != 0.0:
+            sink_bias = self.sinks.view(1, self.n_heads, 1, 1).expand(1, self.n_heads, 1, total_len)
         if attention_bias is not None:
+            if sink_bias is not None:
+                attention_bias = attention_bias + sink_bias.to(attention_bias.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
+        elif sink_bias is not None:
+            # Build a combined bias: causal + sink
+            if T == 1 and total_len > 1:
+                bias = sink_bias.to(q.dtype).expand(B, self.n_heads, 1, total_len)
+            else:
+                causal = _causal_mask(T, total_len, 0, q.device, q.dtype)
+                bias = causal + sink_bias.to(q.dtype).expand(B, self.n_heads, T, total_len)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
         elif T == 1 and total_len > 1:
             out = flash_attention(q, k, v, is_causal=False)
         else:
@@ -620,18 +675,36 @@ class DoubleGatedConvLayer(nn.Module):
 
 
 class SwiGLUFFN(nn.Module):
-    """SwiGLU feed-forward network."""
+    """SwiGLU feed-forward network.
 
-    def __init__(self, d_model: int = 768, hidden_dim: int | None = None):
+    With use_clamp=True, uses GPT-OSS clamped SwiGLU: gate clamped to
+    [None, limit], up clamped to [-limit, limit], scaled sigmoid (α=1.702),
+    and +1 residual on the linear path. Prevents outlier activations.
+    """
+
+    def __init__(self, d_model: int = 768, hidden_dim: int | None = None,
+                 use_clamp: bool = False, clamp_alpha: float = 1.702,
+                 clamp_limit: float = 7.0):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = int(8 * d_model / 3)
         self.w_gate = nn.Linear(d_model, hidden_dim, bias=False)
         self.w_up = nn.Linear(d_model, hidden_dim, bias=False)
         self.w_down = nn.Linear(hidden_dim, d_model, bias=False)
+        self.use_clamp = use_clamp
+        self.clamp_alpha = clamp_alpha
+        self.clamp_limit = clamp_limit
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
+        gate = self.w_gate(x)
+        up = self.w_up(x)
+        if self.use_clamp:
+            # GPT-OSS clamped SwiGLU: scaled sigmoid + clamp + (up+1) residual
+            gate = gate.clamp(min=None, max=self.clamp_limit)
+            up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
+            glu = gate * torch.sigmoid(self.clamp_alpha * gate)
+            return self.w_down((up + 1) * glu)
+        return self.w_down(F.silu(gate) * up)
 
 
 class ModularBlock(nn.Module):
@@ -677,6 +750,14 @@ class ModularBlock(nn.Module):
         self._ffn_skip_threshold = getattr(config, 'ffn_skip_threshold', 0.0)
         self._ffn_skip_count = 0
         self._static_skip_layers: set[int] = set()  # populated when threshold > 0
+
+        # SandwichNorm: post-sublayer RMSNorm (identity init = lossless).
+        # Applied after attention output and after FFN output, before the
+        # residual add. Stabilizes MoE training by bounding activations.
+        self._use_sandwich = getattr(config, 'use_sandwich_norm', False)
+        if self._use_sandwich:
+            self.post_attn_norm = norm(config.d_model)
+            self.post_ffn_norm = norm(config.d_model)
 
         # TITAN neural memory + MoD token router (zero-init => lossless at
         # start; the ported checkpoint loads and behaves identically).
@@ -831,6 +912,9 @@ class ModularBlock(nn.Module):
                     attention_bias=attention_bias, position_ids=position_ids,
                 )
             x = x + attn_out
+            # SandwichNorm: post-attention norm (identity init = no-op).
+            if self._use_sandwich:
+                x = self.post_attn_norm(x)
             # FFN-SkipLLM: skip FFN on saturated layers during eval.
             # Uses a static skip set (calibrated via cosine similarity).
             # Safe with KV cache: FFN doesn't touch KV state, only attention.
@@ -850,6 +934,9 @@ class ModularBlock(nn.Module):
                     self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
             x = x + ffn_out
+            # SandwichNorm: post-FFN norm (identity init = no-op).
+            if self._use_sandwich:
+                x = self.post_ffn_norm(x)
 
         # TITAN memory read + MoD token gating (zero-init => lossless).
         # Applied on the combined block update for every branch above.
@@ -930,10 +1017,16 @@ class ModularBlock(nn.Module):
 def build_attention(config: ModelConfig) -> nn.Module:
     kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
                   use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None))
+    # LeRoPE/AdaRoPE: learnable RoPE frequencies (identity init = lossless).
+    # Applied post-construction by replacing the RotaryEmbedding module.
+    rope_variant = getattr(config, 'rope_variant', 'standard')
     if config.attn_type == "gqa":
         attn = GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False))
         attn = _maybe_bitnet_attention(config, attn)
+        attn = _maybe_apply_lerope(config, attn)
+        attn = _maybe_apply_learned_sink(config, attn)
+        attn = _maybe_apply_csa(config, attn)
         return _maybe_fuse_qkv(config, attn)
     if config.attn_type == "diff":
         # Differential Attention (Diff-Transformer): dual-softmax subtraction.
@@ -961,6 +1054,9 @@ def build_attention(config: ModelConfig) -> nn.Module:
             attn_bias=getattr(config, 'attn_bias', False),
             n_layers=config.n_layers, layer_idx=0)
         attn = _maybe_bitnet_attention(config, attn)
+        attn = _maybe_apply_lerope(config, attn)
+        attn = _maybe_apply_learned_sink(config, attn)
+        attn = _maybe_apply_csa(config, attn)
         return _maybe_fuse_qkv(config, attn)
     if config.attn_type == "gla":
         # Grouped Latent Attention (arXiv 2505.21487): latent-compressed KV,
@@ -980,6 +1076,73 @@ def build_attention(config: ModelConfig) -> nn.Module:
     raise ValueError(
         f"Unknown attention type: '{config.attn_type}'. "
         f"Valid options: 'gqa', 'diff', 'gta', 'gla'")
+
+
+def _maybe_apply_lerope(config: ModelConfig, attn: nn.Module) -> nn.Module:
+    """Replace RotaryEmbedding with LeRoPE/AdaRoPE (identity init = lossless).
+
+    LeRoPE: learnable per-frequency-band scaling (dim//2 params, init=1.0).
+    AdaRoPE: per-head learnable frequencies + attention scaling.
+    Both init to standard RoPE → byte-identical at start.
+    """
+    rope_variant = getattr(config, 'rope_variant', 'standard')
+    if rope_variant in ("lerope", "adarope"):
+        from research.keys.position.lerope_key import LeRoPEEmbedding, AdaRoPEEmbedding
+        if hasattr(attn, 'rope') and isinstance(attn.rope, RotaryEmbedding):
+            head_dim = attn.rope.dim
+            max_seq = attn.rope.max_seq_len if hasattr(attn.rope, 'max_seq_len') else config.max_seq_len
+            if rope_variant == "lerope":
+                attn.rope = LeRoPEEmbedding(
+                    dim=head_dim, max_seq_len=max_seq, base=config.rope_base,
+                    rope_scaling=config.rope_scaling)
+            else:  # adarope
+                attn.rope = AdaRoPEEmbedding(
+                    dim=head_dim, n_heads=config.n_heads,
+                    max_seq_len=max_seq, base=config.rope_base,
+                    rope_scaling=config.rope_scaling)
+    return attn
+
+
+def _maybe_apply_learned_sink(config: ModelConfig, attn: nn.Module) -> nn.Module:
+    """Add learned attention sink bias to attention layers (GPT-OSS style).
+
+    init=0 → lossless (no bias added). Training learns sink values.
+    """
+    if not getattr(config, 'use_learned_sink', False):
+        return attn
+    if hasattr(attn, 'n_heads'):
+        n_heads = attn.n_heads
+        init_val = getattr(config, 'learned_sink_init', 0.0)
+        init_method = getattr(config, 'learned_sink_init_method', 'zero')
+        if init_method == "zero":
+            sinks = torch.zeros(n_heads)
+        elif init_method == "constant":
+            sinks = torch.full((n_heads,), init_val, dtype=torch.float32)
+        elif init_method == "random":
+            sinks = torch.randn(n_heads) * 0.1 + init_val
+        else:
+            sinks = torch.zeros(n_heads)
+        attn.sinks = nn.Parameter(sinks)
+    return attn
+
+
+def _maybe_apply_csa(config: ModelConfig, attn: nn.Module) -> nn.Module:
+    """Enable Compressed Sparse Attention (CSA) for long-context efficiency.
+
+    CSA selects the top-k most relevant key positions per query, reducing
+    attention complexity from O(S^2) to O(S*k). When the sequence is shorter
+    than top_k, full attention is used (lossless for short sequences).
+
+    Applied as a flag on the attention module — the forward checks the flag
+    and uses CSA's top-k selection for long sequences.
+    """
+    pattern = getattr(config, 'attention_pattern', 'standard')
+    if pattern not in ('csa', 'csa_hca_hybrid'):
+        return attn
+    top_k = getattr(config, 'csa_top_k', 256)
+    attn._csa_top_k = top_k
+    attn._csa_enabled = True
+    return attn
 
 
 def _maybe_bitnet_attention(config: ModelConfig, attn: nn.Module) -> nn.Module:
@@ -1043,8 +1206,111 @@ def _maybe_fuse_qkv(config: ModelConfig, attn: nn.Module) -> nn.Module:
     return attn
 
 
+def _build_moe_ffn(config: ModelConfig) -> nn.Module:
+    """Build a MoE FFN layer with BitNet experts and shared expert.
+
+    Uses the existing MoELayer from research.moe, then swaps expert linears
+    for BitNetLinear when use_bitnet=True. The shared expert is also BitNet.
+
+    With dense_bypass=True (default for V5), the router is skipped at init
+    and all experts run with equal weight → exact dense FFN output.
+    Training gradually enables routing (disable dense_bypass after warmup).
+    """
+    from research.moe.moe import MoELayer
+
+    d_model = config.d_model
+    d_ff = getattr(config, 'moe_d_ff', None) or getattr(config, 'intermediate_size', None) or d_model * 2
+    n_experts = getattr(config, 'moe_n_experts', 8)
+    top_k = getattr(config, 'moe_top_k', 2)
+    shared = getattr(config, 'moe_shared_expert', True)
+    dense_bypass = getattr(config, 'moe_dense_bypass', True)
+    noisy = getattr(config, 'moe_noisy_gating', True)
+    lb_weight = getattr(config, 'moe_load_balance_weight', 0.01)
+    router_mode = getattr(config, 'moe_router_mode', 'switch')
+
+    moe = MoELayer(
+        d_model, n_experts=n_experts, top_k=top_k, d_ff=d_ff,
+        shared_expert=shared, capacity_factor=None,
+        noisy_gating=noisy, dense_bypass=dense_bypass,
+        use_clamp=getattr(config, 'use_swiglu_clamp', False),
+        clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
+        clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0),
+        router_mode=router_mode)
+
+    # Override load balance weight
+    moe.router.load_balance_loss_weight = lb_weight
+
+    # Apply BitNet to all expert linears + shared expert
+    if getattr(config, 'use_bitnet', False):
+        from research.keys.quantization.bitnet_b158_key import build_bitnet_linear
+        for expert in moe.experts:
+            expert.w1 = build_bitnet_linear(config, d_model, d_ff)
+            expert.w3 = build_bitnet_linear(config, d_model, d_ff)
+            expert.w2 = build_bitnet_linear(config, d_ff, d_model)
+        if hasattr(moe, 'shared'):
+            moe.shared.w1 = build_bitnet_linear(config, d_model, d_ff)
+            moe.shared.w3 = build_bitnet_linear(config, d_model, d_ff)
+            moe.shared.w2 = build_bitnet_linear(config, d_ff, d_model)
+
+    return moe
+
+
 def build_ffn(config: ModelConfig) -> nn.Module:
+    # V5: MoE FFN — replace dense FFN with shared expert + routed experts.
+    if getattr(config, 'use_moe', False):
+        return _build_moe_ffn(config)
     if config.ffn_type == "swiglu":
+        # V5.2: FFN compression (Monarch/Kronecker/TT) — replaces dense linear
+        # layers with factored versions. Conversion from dense checkpoint
+        # happens in build_model_fast() via _convert_ffn_compression().
+        ffn_compression = getattr(config, 'ffn_compression', 'none')
+        if ffn_compression == 'monarch':
+            from research.keys.compression.monarch_ffn_key import MonarchSwiGLUFFN
+            ffn = MonarchSwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None),
+                block_size=getattr(config, 'monarch_block_size', 32),
+                use_clamp=getattr(config, 'use_swiglu_clamp', False),
+                clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
+                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
+            return ffn
+        elif ffn_compression == 'kron':
+            from research.keys.compression.kron_ffn_key import KroneckerSwiGLUFFN
+            # kron_a*kron_b should = intermediate, kron_c*kron_d should = d_model
+            # Use config values as the (a, b) split for gate/up output factorization
+            gate_kron = (getattr(config, 'kron_a', 64),
+                         getattr(config, 'kron_b', 32))
+            down_kron = (getattr(config, 'kron_c', 32),
+                         getattr(config, 'kron_d', 256))
+            ffn = KroneckerSwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None),
+                gate_kron=gate_kron,
+                down_kron=down_kron,
+                use_clamp=getattr(config, 'use_swiglu_clamp', False),
+                clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
+                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
+            return ffn
+        elif ffn_compression == 'tt':
+            from research.keys.compression.tt_ffn_key import TTSwiGLUFFN
+            ffn = TTSwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None),
+                tt_rank=getattr(config, 'tt_rank', 4))
+            return ffn
+        elif ffn_compression == 'nlrq':
+            from research.keys.compression.nlrq_ffn_key import NLRQSwiGLUFFN
+            ffn = NLRQSwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None),
+                rank=getattr(config, 'nlrq_rank', 256),
+                factor_bits=getattr(config, 'nlrq_factor_bits', 8),
+                use_residual=getattr(config, 'nlrq_use_residual', False),
+                residual_group_size=getattr(config, 'nlrq_residual_group_size', 128),
+                use_clamp=getattr(config, 'use_swiglu_clamp', False),
+                clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
+                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
+            return ffn
         # Smooth-SwiGLU: per-channel RMSNorm on gate output for FP8 stability.
         # When use_smooth_swiglu=True, uses SmoothSwiGLUFFN (bounds SiLU outliers).
         # Otherwise standard SwiGLUFFN.
@@ -1054,7 +1320,12 @@ def build_ffn(config: ModelConfig) -> nn.Module:
                 config.d_model,
                 hidden_dim=getattr(config, 'intermediate_size', None))
         else:
-            ffn = SwiGLUFFN(config.d_model, hidden_dim=getattr(config, 'intermediate_size', None))
+            ffn = SwiGLUFFN(
+                config.d_model,
+                hidden_dim=getattr(config, 'intermediate_size', None),
+                use_clamp=getattr(config, 'use_swiglu_clamp', False),
+                clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
+                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
         if getattr(config, 'use_bitnet', False):
             # BitNet b1.58 QAT: swap linear layers for ternary-STE versions
             # (learned per-layer scales; ternary only in training by default).
@@ -1086,21 +1357,46 @@ class ConfigurableResearchLLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
+        # V5: Factorized embedding (ALBERT pattern, 7.8x param reduction).
+        # Init via SVD of original embedding when loading from checkpoint.
+        # Combined with BitNet embedding for ~60x total reduction.
+        if getattr(config, 'use_factorized_embeddings', False):
+            from research.keys.architecture.factorized_embed_key import (
+                FactorizedEmbedding, FactorizedLMHead)
+            rank = getattr(config, 'embed_factorized_rank', 256)
+            self.embed = FactorizedEmbedding(config.vocab_size, config.d_model, rank=rank)
+            self.head = FactorizedLMHead(self.embed)
         # PIT: Pseudo-Inverse Tying (L=I → standard weight tying, lossless).
-        if getattr(config, 'use_pit', False):
+        elif getattr(config, 'use_pit', False):
             from research.keys.misc.pit_key import PITEmbedding, PITLMHead
             self.embed = PITEmbedding(config.vocab_size, config.d_model)
             self.head = PITLMHead.from_embedding(self.embed)
+        # V5: BitNet embedding (ternary QAT on embedding weight).
+        elif getattr(config, 'use_bitnet_embedding', False):
+            from research.keys.quantization.bitnet_b158_key import build_bitnet_embedding
+            self.embed = build_bitnet_embedding(config, config.vocab_size, config.d_model)
+            self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         else:
             self.embed = nn.Embedding(config.vocab_size, config.d_model)
             self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         self.ln_f = norm(config.d_model)
-        # Weight tying: skip if PIT is enabled (PIT replaces tying),
+        # Weight tying: skip if PIT or factorized is enabled (they handle tying),
         # or if config explicitly disables it (e.g., Qwen2.5).
-        if not getattr(config, 'use_pit', False) and getattr(config, 'tie_word_embeddings', True):
+        if (not getattr(config, 'use_pit', False)
+                and not getattr(config, 'use_factorized_embeddings', False)
+                and getattr(config, 'tie_word_embeddings', True)):
             self.embed.weight = self.head.weight  # Weight tying
+
+        # V5: Expert tying — share expert weights across consecutive layer groups.
+        # Applied after blocks are built but before weight loading.
+        # Pointer aliasing: odd layers in each group point to even layers.
+        if getattr(config, 'use_moe', False) and getattr(config, 'moe_expert_tying', False):
+            from research.keys.moe.expert_tying_key import ExpertTyingKey
+            tie_key = ExpertTyingKey()
+            tie_key.apply(self)
+            self._expert_tying_applied = True
 
         # AttnRes: cross-layer retrieval (shared module, gates=0 → lossless).
         # Applied after each block; maintains a buffer of past layer outputs.
@@ -1112,6 +1408,21 @@ class ConfigurableResearchLLM(nn.Module):
                 k=getattr(config, 'attn_res_k', 4),
                 n_heads=min(4, config.n_heads))
             self._attn_res_gate_zero: bool | None = None
+
+        # ValueResidual (ResFormer): add V_0 residual to all layers' V.
+        # gate=0 at init → lossless. Training opens the gate.
+        # V_0 is captured from layer 0's first attention forward and stored
+        # as a buffer (detached, no grad) for use by subsequent layers.
+        self._use_value_residual = getattr(config, 'use_value_residual', False)
+        self._v0_mode = getattr(config, 'value_residual_mode', 'resformer')
+        self._v0: torch.Tensor | None = None  # captured during first forward
+        self._v0_gates = None
+        if self._use_value_residual:
+            # Per-layer gate (scalar), init=0 → lossless at start.
+            import torch.nn.init as init
+            self._v0_gates = nn.ParameterList([
+                nn.Parameter(torch.zeros(1)) for _ in range(config.n_layers)
+            ])
 
         # Zero-init residual: output projections start at zero so the residual
         # stream is unchanged at init — cleaner gradient flow early in training
@@ -1141,6 +1452,35 @@ class ConfigurableResearchLLM(nn.Module):
             )
             # Tie MTP head to model head (shared weight design)
             self.mtp_module.tie_head_to_model(self.head.weight)
+
+        # V5.2: LiSA — cross-layer Q/K sharing with alignment FFN.
+        # Lossless at init: shared Q/K + alignment are zero-init (gate=0).
+        # Per-layer Q/K loaded from checkpoint unchanged. Training opens gate.
+        self.lisa: nn.Module | None = None
+        if getattr(config, 'use_lisa', False):
+            from research.keys.attention.lisa_key import LisaKey
+            LisaKey.apply(self, config)
+
+        # V5.2: Hyperloop — looped middle blocks for layer param reduction.
+        # Lossless at init: all layers unique, loop gate=0. Training opens gate.
+        # We only register the loop block + gates as submodules (not the wrapper,
+        # which would create a circular ref: model → wrapper → model).
+        if getattr(config, 'use_hyperloop', False):
+            from research.keys.architecture.hyperloop_key import HyperloopKey
+            _hl = HyperloopKey.apply(
+                self,
+                begin=getattr(config, 'hyperloop_begin', 2),
+                end=getattr(config, 'hyperloop_end', 2),
+                loop_iters=getattr(config, 'hyperloop_loop_iters', 3))
+            # Register loop block and gates as direct submodules (no wrapper)
+            self.loop_block = _hl.loop_block
+            self.loop_gates = _hl.loop_gates
+            self.middle_gates = _hl.middle_gates
+            # Store config for forward-time hyperloop logic
+            self._hyperloop_begin = _hl.begin
+            self._hyperloop_end = _hl.end
+            self._hyperloop_loop_iters = _hl.loop_iters
+            self._hyperloop_n_middle = _hl.n_middle
 
         # Cache config flags to avoid getattr/hasattr per forward.
         self._use_liger_ce = getattr(config, 'use_liger_ce', False)
@@ -1346,11 +1686,28 @@ class ConfigurableResearchLLM(nn.Module):
             if block_device != cur_device:
                 x = x.to(block_device)
                 cur_device = block_device
+            # ValueResidual: inject V_0 into layers 1+ (gate=0 → lossless).
+            # V_0 is captured from layer 0's V projection on the first forward.
+            if self._use_value_residual and i > 0 and self._v0 is not None:
+                attn = block.attn
+                if hasattr(attn, '_v0_residual'):
+                    attn._v0_residual = self._v0
+                    attn._v0_gate = self._v0_gates[i] if self._v0_gates is not None else None
+            # Enable V_0 capture on layer 0 (first forward only).
+            if self._use_value_residual and i == 0 and self._v0 is None and not use_cache:
+                attn = block.attn
+                if hasattr(attn, '_v0_capture'):
+                    attn._v0_capture = True  # signal to capture
             past = past_key_values[i] if past_key_values is not None else None
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
                                attention_bias=attention_bias, position_ids=position_ids,
                                modulation=modulation)
+            # Capture V_0 from layer 0 after its first forward (for training).
+            if self._use_value_residual and i == 0 and self._v0 is None and not use_cache:
+                attn = block.attn
+                if hasattr(attn, '_v0_capture') and attn._v0_capture is not None:
+                    self._v0 = attn._v0_capture.detach()
             # AttnRes: cross-layer retrieval (gates=0 → lossless at start).
             if attn_res_active:
                 x = x + self._attn_res(x, i, past_outputs)
@@ -1366,11 +1723,16 @@ class ConfigurableResearchLLM(nn.Module):
             x = x.to(ln_f_device)
         hidden = self.ln_f(x)
 
-        # Collect MoE aux_loss from all blocks that have it
+        # Collect MoE aux_loss from all blocks that have it.
+        # Stored as self._last_moe_aux_loss so callers that don't pass targets
+        # (e.g. GRPO/RLVR policy-gradient forward) can still add it to their
+        # loss — otherwise the MoE router gets no load-balancing signal during
+        # RL and can collapse to a single expert.
         moe_aux_loss = torch.tensor(0.0, device=idx.device, dtype=hidden.dtype)
         for block in self.blocks:
             if hasattr(block, '_last_aux_loss') and block._last_aux_loss is not None:
                 moe_aux_loss = moe_aux_loss + block._last_aux_loss
+        self._last_moe_aux_loss = moe_aux_loss
 
         # Chunked CE path: skip materializing full [B*T, V] logits for loss.
         # The head Linear + CE are fused into chunked passes over the token dim,
@@ -1452,7 +1814,11 @@ class ModelLoader:
 
     @staticmethod
     def _config_signature(config: ModelConfig) -> str:
-        """A stable hashable signature for caching blank models."""
+        """A stable hashable signature for caching blank models.
+
+        Must capture ALL architecture-affecting fields so that configs
+        differing in any key produce different signatures (no cache collisions).
+        """
         layer_types_sig = tuple(getattr(config, 'layer_types', None) or [])
         mtp_sig = f"mtp{getattr(config, 'use_mtp', False)}_{getattr(config, 'mtp_n_heads', 0)}"
         arch_sig = (f"{getattr(config, 'use_bitnet', False)}_"
@@ -1465,7 +1831,32 @@ class ModelLoader:
                     f"{getattr(config, 'mhc_rank', 0)}_"
                     f"{getattr(config, 'use_attn_residual', False)}_"
                     f"{getattr(config, 'attn_res_k', 4)}")
-        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}_{arch_sig}"
+        # V5.1 keys — all affect architecture structure (new params/modules)
+        v51_sig = (f"vr{getattr(config, 'use_value_residual', False)}_"
+                   f"sn{getattr(config, 'use_sandwich_norm', False)}_"
+                   f"ls{getattr(config, 'use_learned_sink', False)}_"
+                   f"sc{getattr(config, 'use_swiglu_clamp', False)}_"
+                   f"rv{getattr(config, 'rope_variant', 'standard')}_"
+                   f"ap{getattr(config, 'attention_pattern', 'standard')}_"
+                   f"ck{getattr(config, 'csa_top_k', 0)}_"
+                   f"be{getattr(config, 'use_bitnet_embedding', False)}_"
+                   f"fg{getattr(config, 'use_fused_gemm', False)}_"
+                   f"moe{getattr(config, 'use_moe', False)}_"
+                   f"ne{getattr(config, 'moe_n_experts', 0)}_"
+                   f"tk{getattr(config, 'moe_top_k', 0)}_"
+                   f"se{getattr(config, 'moe_shared_expert', False)}_"
+                   f"et{getattr(config, 'moe_expert_tying', 0)}_"
+                   f"rm{getattr(config, 'moe_router_mode', 'switch')}_"
+                   f"fe{getattr(config, 'use_factorized_embedding', False)}_"
+                   f"fc{getattr(config, 'ffn_compression', 'none')}_"
+                   f"mb{getattr(config, 'monarch_block_size', 32)}_"
+                   f"hl{getattr(config, 'use_hyperloop', False)}_"
+                   f"hb{getattr(config, 'hyperloop_begin', 2)}_"
+                   f"he{getattr(config, 'hyperloop_end', 2)}_"
+                   f"hi{getattr(config, 'hyperloop_loop_iters', 3)}_"
+                   f"li{getattr(config, 'use_lisa', False)}_"
+                   f"lc{getattr(config, 'lisa_compress', 6)}")
+        return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}_{arch_sig}_{v51_sig}"
 
     @staticmethod
     def blank_state_dict(config: ModelConfig) -> dict:
@@ -1588,6 +1979,79 @@ class ModelLoader:
                 for key in f.keys():
                     state[key] = f.get_tensor(key)
         return state
+
+    @staticmethod
+    def _convert_ffn_compression(state: dict, config, compression: str) -> dict:
+        """Convert dense FFN weights to factored format (Monarch/Kron/TT).
+
+        Transforms blocks.{i}.ffn.w_{gate,up,down}.weight (dense) into the
+        factored parameter names expected by the compressed FFN modules.
+        This is a one-time conversion; subsequent saves store factored weights.
+        """
+        import re
+        new_state = {}
+        # Pattern: blocks.{i}.ffn.w_{gate,up,down}.weight
+        ffn_pattern = re.compile(r'blocks\.(\d+)\.ffn\.w_(gate|up|down)\.weight')
+
+        for key, tensor in state.items():
+            m = ffn_pattern.match(key)
+            if m:
+                layer_idx = int(m.group(1))
+                proj = m.group(2)  # gate, up, or down
+                weight = tensor.float()  # (out, in) — nn.Linear format
+
+                if compression == 'monarch':
+                    from research.keys.compression.monarch_ffn_key import MonarchLinear
+                    block_size = getattr(config, 'monarch_block_size', 32)
+                    ml = MonarchLinear.from_dense(weight, block_size=block_size)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.L'] = ml.L.data.to(tensor.dtype)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.R'] = ml.R.data.to(tensor.dtype)
+                    # perm_idx is a buffer, not a parameter — skip (re-init'd in module)
+
+                elif compression == 'kron':
+                    from research.keys.compression.kron_ffn_key import KroneckerLinear
+                    a = getattr(config, 'kron_a', 64)
+                    b = getattr(config, 'kron_b', 32)
+                    c = getattr(config, 'kron_c', 32)
+                    d = getattr(config, 'kron_d', 256)
+                    out_features, in_features = weight.shape
+                    # Adjust factorization to match actual dimensions
+                    # For w_gate/w_up: out=intermediate, in=d_model
+                    # For w_down: out=d_model, in=intermediate
+                    # Find factors that work for the actual dimensions
+                    kl = KroneckerLinear.from_dense(weight, a, b, c, d)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.A'] = kl.A.data.to(tensor.dtype)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.B'] = kl.B.data.to(tensor.dtype)
+
+                elif compression == 'tt':
+                    from research.keys.compression.tt_ffn_key import TTLinear
+                    tt_rank = getattr(config, 'tt_rank', 4)
+                    tl = TTLinear.from_dense(weight, tt_rank=tt_rank)
+                    for ci, core in enumerate(tl.cores):
+                        new_state[f'blocks.{layer_idx}.ffn.w_{proj}.cores.{ci}'] = core.data.to(tensor.dtype)
+
+                elif compression == 'nlrq':
+                    from research.keys.compression.nlrq_ffn_key import NLRQLinear
+                    rank = getattr(config, 'nlrq_rank', 256)
+                    factor_bits = getattr(config, 'nlrq_factor_bits', 8)
+                    use_residual = getattr(config, 'nlrq_use_residual', False)
+                    residual_gs = getattr(config, 'nlrq_residual_group_size', 128)
+                    nl = NLRQLinear.from_dense(weight, rank=rank,
+                                               factor_bits=factor_bits,
+                                               use_residual=use_residual,
+                                               residual_group_size=residual_gs)
+                    # INT8 buffers (real quantized storage)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.U_q'] = nl.U_q.to(torch.int8)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.V_q'] = nl.V_q.to(torch.int8)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.S'] = nl.S.data.to(tensor.dtype)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.U_scale'] = nl.U_scale.to(torch.float16)
+                    new_state[f'blocks.{layer_idx}.ffn.w_{proj}.V_scale'] = nl.V_scale.to(torch.float16)
+                    if use_residual and nl.residual_q is not None:
+                        new_state[f'blocks.{layer_idx}.ffn.w_{proj}.residual_q'] = nl.residual_q.to(torch.int8)
+                        new_state[f'blocks.{layer_idx}.ffn.w_{proj}.residual_scales'] = nl.residual_scales.to(torch.float16)
+            else:
+                new_state[key] = tensor
+        return new_state
 
     @staticmethod
     def _remap_hf_keys(state: dict, config) -> dict:
@@ -1753,13 +2217,27 @@ class ModelLoader:
             state_thread = threading.Thread(target=_bg_load_state, daemon=True)
             state_thread.start()
 
-            # Meta init in main thread (overlaps with background weight load)
+            # Meta init in main thread (overlaps with background weight load).
+            # Caches the meta-init architecture so subsequent boots with the
+            # same config skip the ~3-7s build and just deepcopy (~0.1s).
             t_arch = time.time()
-            cfg_meta = ModelConfig(**{**config.__dict__, "device": "meta"})
-            with torch.device("meta"):
-                model = ConfigurableResearchLLM(cfg_meta)
-            t_arch = time.time() - t_arch
-            print(f"  [FastBuild] Meta-init architecture in {t_arch:.1f}s")
+            meta_sig = f"meta_{sig}"
+            if meta_sig in ModelLoader._model_cache:
+                model = copy.deepcopy(ModelLoader._model_cache[meta_sig])
+                ModelLoader._model_cache.move_to_end(meta_sig)
+                t_arch = time.time() - t_arch
+                print(f"  [FastBuild] Meta architecture cloned in {t_arch:.1f}s (cached)")
+            else:
+                cfg_meta = ModelConfig(**{**config.__dict__, "device": "meta"})
+                with torch.device("meta"):
+                    model = ConfigurableResearchLLM(cfg_meta)
+                # Cache the meta model (cheap — no real tensors, just shapes)
+                ModelLoader._model_cache[meta_sig] = copy.deepcopy(model)
+                ModelLoader._model_cache.move_to_end(meta_sig)
+                while len(ModelLoader._model_cache) > ModelLoader._MODEL_CACHE_MAXSIZE:
+                    ModelLoader._model_cache.popitem(last=False)
+                t_arch = time.time() - t_arch
+                print(f"  [FastBuild] Meta-init architecture in {t_arch:.1f}s")
 
             # Wait for background weight load to complete
             t_weights = time.time()
@@ -1767,6 +2245,16 @@ class ModelLoader:
             if "error" in state_result:
                 raise state_result["error"]
             state = state_result.get("state", {})
+
+            # Pre-quantized BitNet: int8 weights need cast to bf16 for
+            # load_state_dict(assign=True). The weights are ternary {-1,0,+1}
+            # so this cast is lossless. convert_model_to_int8() re-quantizes
+            # post-load for VRAM savings.
+            _has_int8 = any(t.dtype == torch.int8 for t in state.values())
+            if _has_int8:
+                for k in list(state.keys()):
+                    if state[k].dtype == torch.int8:
+                        state[k] = state[k].to(torch.bfloat16)
 
             # GQA -> diff warm start (CPU-side transform on loaded state_dict)
             if config.attn_type == "diff":
@@ -1830,6 +2318,19 @@ class ModelLoader:
                         state = res.weights
                         print("  [FastBuild] GQA -> GLA warm start "
                               "(lossless, identity up-projs, gate=0)")
+
+            # V5.2: FFN compression (Monarch/Kronecker/TT) — convert dense
+            # FFN weights to factored format on first load. Subsequent saves
+            # store the factored weights directly (no re-conversion needed).
+            ffn_compression = getattr(config, 'ffn_compression', 'none')
+            if ffn_compression != 'none':
+                ffn_gate_key = next((k for k in state
+                                     if 'ffn.w_gate.weight' in k), None)
+                if ffn_gate_key is not None:
+                    state = ModelLoader._convert_ffn_compression(
+                        state, config, ffn_compression)
+                    print(f"  [FastBuild] Dense FFN -> {ffn_compression} "
+                          f"compression (one-time conversion)")
 
             t_weights = time.time() - t_weights
 
@@ -1903,7 +2404,6 @@ class ModelLoader:
             cached = ModelLoader._model_cache[sig]
             ModelLoader._model_cache.move_to_end(sig)  # mark as recently used
             # Deep copy the cached model (CPU — no VRAM overhead)
-            import copy
             model = copy.deepcopy(cached).to(device)
             t_arch = time.time() - t_arch
             print(f"  [FastBuild] Architecture cloned in {t_arch:.1f}s (from cache)")
@@ -2091,6 +2591,14 @@ class ModelLoader:
         if hasattr(model, 'ln_f'):
             model.ln_f = model.ln_f.to(gpu_dev)
 
+        # Auxiliary modules that participate in forward pass — keep on GPU
+        # so they don't cause device mismatch with GPU-resident blocks.
+        for attr in ('loop_block', 'lisa', 'mtp_module', '_attn_res',
+                     '_hyperloop', 'loop_gates', 'middle_gates', '_v0_gates'):
+            mod = getattr(model, attr, None)
+            if mod is not None and hasattr(mod, 'to'):
+                mod.to(gpu_dev)
+
         gpu_count = 0
         cpu_count = 0
         for i, block in enumerate(model.blocks):
@@ -2109,6 +2617,38 @@ class ModelLoader:
                 gpu_count += 1
             else:
                 cpu_count += 1
+
+        # Expert tying fix: tied expert pairs share the same Parameter objects.
+        # When hybrid offload puts paired layers on different devices (e.g.,
+        # layer 2=attention→GPU, layer 3=conv→CPU), the last .to() wins and
+        # experts end up on the wrong device. Fix: for each tied pair, move
+        # experts to the GPU layer's device (attention layers need GPU).
+        if getattr(model.config, 'moe_expert_tying', False):
+            tie_g = getattr(model.config, 'moe_tie_group_size', 2)
+            for even_idx in range(0, len(model.blocks), tie_g):
+                odd_idx = even_idx + 1
+                if odd_idx >= len(model.blocks):
+                    break
+                even_moe = getattr(model.blocks[even_idx].ffn, 'experts', None)
+                odd_moe = getattr(model.blocks[odd_idx].ffn, 'experts', None)
+                if even_moe is None or odd_moe is None:
+                    continue
+                # Check if they're actually tied (same object)
+                if len(even_moe) > 0 and len(odd_moe) > 0 \
+                        and even_moe[0] is odd_moe[0]:
+                    # Tied: move experts to whichever block is on GPU
+                    even_dev = next(model.blocks[even_idx].parameters()).device
+                    odd_dev = next(model.blocks[odd_idx].parameters()).device
+                    if even_dev.type == 'cuda':
+                        for exp in even_moe:
+                            exp.to(gpu_dev)
+                        if hasattr(model.blocks[odd_idx].ffn, 'shared'):
+                            model.blocks[odd_idx].ffn.shared.to(gpu_dev)
+                    elif odd_dev.type == 'cuda':
+                        for exp in odd_moe:
+                            exp.to(gpu_dev)
+                        if hasattr(model.blocks[odd_idx].ffn, 'shared'):
+                            model.blocks[odd_idx].ffn.shared.to(gpu_dev)
 
         # Placement changed — drop any cached device scan from a prior forward.
         if hasattr(model, 'invalidate_device_cache'):
@@ -2220,7 +2760,7 @@ class ModelLoader:
 
 
 def load_default_model(
-    config_name: str = "forgelm_v4",
+    config_name: str = "forgelm_v7",
     checkpoint_path: str | None = None,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -2236,7 +2776,7 @@ def load_default_model(
         tokenizer = get_tokenizer(...)
 
     Args:
-        config_name: model config name (default "forgelm_v4")
+        config_name: model config name (default "forgelm_v7")
         checkpoint_path: path to .safetensors checkpoint (default: config default)
         device: "cuda" or "cpu"
         dtype: torch.bfloat16 or torch.float32 (default: bf16 for cuda, fp32 for cpu)
@@ -2258,28 +2798,32 @@ def load_default_model(
 
     # Fast load: start tokenizer in parallel with model build (hides ~2.7s)
     tok_fut = None
+    _tok_ex = None
     if fast_load:
         from concurrent.futures import ThreadPoolExecutor
         _tok_ex = ThreadPoolExecutor(max_workers=1)
         tok_fut = _tok_ex.submit(
             get_tokenizer, "research/checkpoints/lfm25_tokenizer")
 
-    model = ModelLoader.build_model_fast(
-        cfg, checkpoint_path=checkpoint_path,
-        moe_top_k=moe_top_k, dtype=dtype, fast_load=fast_load)
-    model.to(device).eval()
+    try:
+        model = ModelLoader.build_model_fast(
+            cfg, checkpoint_path=checkpoint_path,
+            moe_top_k=moe_top_k, dtype=dtype, fast_load=fast_load)
+        model.to(device).eval()
 
-    if compile_mode is not None:
-        try:
-            model = model.compile_for_inference(mode=compile_mode)
-        except Exception:
-            pass
+        if compile_mode is not None:
+            try:
+                model = model.compile_for_inference(mode=compile_mode)
+            except Exception:
+                pass
 
-    if tok_fut is not None:
-        tokenizer = tok_fut.result()
-        _tok_ex.shutdown(wait=False)
-    else:
-        tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+        if tok_fut is not None:
+            tokenizer = tok_fut.result()
+        else:
+            tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    finally:
+        if _tok_ex is not None:
+            _tok_ex.shutdown(wait=False)
     return model, tokenizer
 
 
@@ -2358,7 +2902,7 @@ except ImportError:
 # immediately without ~500ms context creation overhead.
 try:
     from research.config import get_config as _get_config_warmup
-    _warmup_cfg = _get_config_warmup("forgelm_v3", device="meta")
+    _warmup_cfg = _get_config_warmup("forgelm_v7", device="meta")
     with torch.device("meta"):
         _warmup_model = ConfigurableResearchLLM(_warmup_cfg)
     del _warmup_model, _warmup_cfg
@@ -2372,7 +2916,7 @@ except Exception:
 if __name__ == "__main__":
     from research.config import get_config
 
-    for name in ["lfm25_tiny", "forgelm_v3"]:
+    for name in ["lfm25_tiny", "forgelm_v7"]:
         print("\n" + "=" * 50)
         cfg = get_config(name)
         cfg.device = "cpu"

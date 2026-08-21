@@ -28,27 +28,50 @@ import torch.nn.functional as F
 class Router(nn.Module):
     """Top-k router for MoE. Outputs expert assignments + gating weights.
 
+    Two load-balancing modes:
+      - mode="switch" (default for backward compat): Switch-Transformer aux
+        loss = n_experts * sum(fraction * mean_gate), computed from top-k
+        dispatched weights (non-differentiable fraction term).
+      - mode="aux_free" (DeepSeek-V3): adds a learnable per-expert bias to
+        routing logits AND uses a sequence-wise balance loss computed from
+        the FULL softmax probabilities (differentiable through all experts,
+        no top-k truncation in the loss). The bias is updated by the balance
+        loss only (decoupled from the main gate via stop-gradient on the
+        gate's contribution to the bias update path). This is the
+        "auxiliary-loss-free load balancing" from DeepSeek-V3 §3.3.
+
     Args:
         d_model: input dimension
         n_experts: number of experts
         top_k: number of experts to route each token to
         noisy_gating: if True, add noise during training (exploration)
         load_balance_loss_weight: weight of auxiliary load balancing loss
+        mode: "switch" or "aux_free"
     """
 
     def __init__(self, d_model, n_experts, top_k=2, noisy_gating=True,
-                 load_balance_loss_weight=0.01):
+                 load_balance_loss_weight=0.01, mode="switch"):
         super().__init__()
         self.d_model = d_model
         self.n_experts = n_experts
         self.top_k = min(top_k, n_experts)
         self.noisy_gating = noisy_gating
         self.load_balance_loss_weight = load_balance_loss_weight
+        self.mode = mode
 
         self.gate = nn.Linear(d_model, n_experts, bias=False)
         if noisy_gating:
             self.noise = nn.Linear(d_model, n_experts, bias=False)
             self.noise_scale = nn.Parameter(torch.ones(1) * 0.1)
+        # DeepSeek-V3 aux-loss-free: per-expert bias added to routing logits.
+        # This is a BUFFER (not a Parameter) — updated by a direct load-
+        # statistic rule (update_bias()), NOT by backprop. The bias steers
+        # top-k selection toward underused experts; the gate is trained by
+        # the sequence-wise balance loss (aux_loss) for quality + balance.
+        # Init to zero (lossless — bias has no effect at start).
+        if mode == "aux_free":
+            self.register_buffer("expert_bias", torch.zeros(n_experts))
+            self.bias_update_rate = 1e-3  # gamma in DeepSeek-V3 §3.3
 
     def forward(self, x):
         """Route tokens to experts.
@@ -69,15 +92,30 @@ class Router(nn.Module):
         # Compute routing logits.
         clean_logits = self.gate(x)  # (N, n_experts)
 
+        # DeepSeek-V3: add learnable per-expert bias to logits for routing
+        # decisions (bias steers traffic toward underused experts), but the
+        # bias is NOT used in the gating weight softmax (so expert output
+        # scaling is unaffected by the balance mechanism).
+        if self.mode == "aux_free":
+            routing_logits = clean_logits + self.expert_bias  # used for top-k
+            gating_logits = clean_logits                      # used for weights
+        else:
+            routing_logits = clean_logits
+            gating_logits = clean_logits
+
         if self.noisy_gating and self.training:
             noise = torch.randn_like(clean_logits) * self.noise_scale
-            logits = clean_logits + noise * F.softplus(self.noise(x))
-        else:
-            logits = clean_logits
+            routing_logits = routing_logits + noise * F.softplus(self.noise(x))
 
-        # Top-k selection.
-        top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
-        top_k_weights = F.softmax(top_k_logits, dim=-1)  # (N, top_k)
+        # Top-k selection on routing logits (with bias).
+        top_k_logits, top_k_indices = routing_logits.topk(self.top_k, dim=-1)
+        # Gating weights from gating logits (without bias) — recompute softmax
+        # over the selected top-k experts using the unbiased logits.
+        if self.mode == "aux_free":
+            top_k_gating_logits = gating_logits.gather(1, top_k_indices)
+            top_k_weights = F.softmax(top_k_gating_logits, dim=-1)
+        else:
+            top_k_weights = F.softmax(top_k_logits, dim=-1)  # (N, top_k)
 
         # Build dispatch mask and gating weights.
         dispatch_mask = torch.zeros(N, self.n_experts, device=x.device, dtype=x.dtype)
@@ -89,24 +127,64 @@ class Router(nn.Module):
             dispatch_mask.scatter_(1, expert_idx.unsqueeze(1), 1.0)
             gating_weights.scatter_(1, expert_idx.unsqueeze(1), weight.unsqueeze(1).to(gating_weights.dtype))
 
-        # Load balancing loss (encourages uniform expert utilization).
-        # Following Switch Transformer: loss = n_experts * sum(mean_gate * mean_dispatch)
-        with torch.no_grad():
-            # Fraction of tokens routed to each expert.
-            tokens_per_expert = dispatch_mask.sum(dim=0)  # (n_experts,)
-            fraction_per_expert = tokens_per_expert / (N * self.top_k)
-            # Mean gating weight per expert.
-            mean_gate = gating_weights.mean(dim=0)  # (n_experts,)
-        # Aux loss = n_experts * sum(fraction * mean_gate)
-        aux_loss = self.n_experts * (fraction_per_expert * mean_gate).sum()
+        if self.mode == "aux_free":
+            # DeepSeek-V3 auxiliary-loss-free balance loss.
+            # Uses FULL softmax probabilities (differentiable through all
+            # experts, not truncated to top-k). Computed per-sequence then
+            # averaged, matching DeepSeek-V3's sequence-wise formulation.
+            #   f_i = fraction of tokens dispatched to expert i (detached)
+            #   P_i = softmax(gating_logits)_i   (full, not top-k)
+            #   loss = n_experts * sum(f_i * P_i)
+            # This loss trains the GATE (via P_i) for quality-aware balance.
+            # The expert_bias is updated separately by update_bias() using a
+            # direct load-statistic rule (not backprop) — DeepSeek-V3 §3.3.
+            probs_full = F.softmax(gating_logits, dim=-1)  # (N, n_experts)
+            f_per_expert = dispatch_mask.detach().float().mean(dim=0)  # (n_experts,)
+            mean_prob = probs_full.mean(dim=0)  # (n_experts,)
+            aux_loss = self.n_experts * (f_per_expert * mean_prob).sum()
+            # Store load stats for update_bias() (called by trainer after step)
+            self._last_load = f_per_expert.detach()
+        else:
+            # Switch Transformer aux loss (original path, backward compat).
+            with torch.no_grad():
+                tokens_per_expert = dispatch_mask.sum(dim=0)  # (n_experts,)
+                fraction_per_expert = tokens_per_expert / (N * self.top_k)
+                mean_gate = gating_weights.mean(dim=0)  # (n_experts,)
+            aux_loss = self.n_experts * (fraction_per_expert * mean_gate).sum()
 
         return dispatch_mask, gating_weights, aux_loss * self.load_balance_loss_weight
 
+    @torch.no_grad()
+    def update_bias(self):
+        """DeepSeek-V3 aux-loss-free bias update rule.
+
+        After each forward, adjust expert_bias so underused experts get a
+        positive bias (more likely to be selected) and overloaded experts get
+        a negative bias. The update is:
+
+            b_i += gamma * (target_fraction - actual_fraction_i)
+
+        where target_fraction = top_k / n_experts (uniform ideal). This is
+        called by the trainer after each optimizer step (not by backprop).
+
+        No-op for mode="switch" (no bias buffer).
+        """
+        if self.mode != "aux_free" or not hasattr(self, "_last_load"):
+            return
+        target = self.top_k / self.n_experts
+        # _last_load is on the forward device; bias is on the same device.
+        delta = self.bias_update_rate * (target - self._last_load)
+        self.expert_bias.add_(delta.to(self.expert_bias.dtype))
+
 
 class Expert(nn.Module):
-    """A single FFN expert (SwiGLU-style)."""
+    """A single FFN expert (SwiGLU-style).
 
-    def __init__(self, d_model, d_ff=None, activation="swiglu"):
+    With use_clamp=True, uses GPT-OSS clamped SwiGLU (outlier prevention).
+    """
+
+    def __init__(self, d_model, d_ff=None, activation="swiglu",
+                 use_clamp=False, clamp_alpha=1.702, clamp_limit=7.0):
         super().__init__()
         d_ff = d_ff or d_model * 2  # smaller than dense (4x) since we have multiple experts
         if activation == "swiglu":
@@ -117,10 +195,20 @@ class Expert(nn.Module):
             self.fc1 = nn.Linear(d_model, d_ff)
             self.fc2 = nn.Linear(d_ff, d_model)
         self.activation = activation
+        self.use_clamp = use_clamp
+        self.clamp_alpha = clamp_alpha
+        self.clamp_limit = clamp_limit
 
     def forward(self, x):
         if self.activation == "swiglu":
-            return self.w2(F.silu(self.w1(x)) * self.w3(x))
+            gate = self.w1(x)
+            up = self.w3(x)
+            if self.use_clamp:
+                gate = gate.clamp(min=None, max=self.clamp_limit)
+                up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
+                glu = gate * torch.sigmoid(self.clamp_alpha * gate)
+                return self.w2((up + 1) * glu)
+            return self.w2(F.silu(gate) * up)
         else:
             return self.fc2(F.gelu(self.fc1(x)))
 
@@ -140,7 +228,8 @@ class MoELayer(nn.Module):
 
     def __init__(self, d_model, n_experts=4, top_k=2, d_ff=None,
                  shared_expert=True, capacity_factor=None, noisy_gating=True,
-                 dense_bypass=False):
+                 dense_bypass=False, use_clamp=False, clamp_alpha=1.702,
+                 clamp_limit=7.0, router_mode="switch"):
         super().__init__()
         self.d_model = d_model
         self.n_experts = n_experts
@@ -151,13 +240,20 @@ class MoELayer(nn.Module):
         # Used when router is untrained (uniform init) to reproduce dense FFN.
         # With w2 scaled by n_experts, equal weight 1/n gives exact dense output.
         self.dense_bypass = dense_bypass
+        self.use_clamp = use_clamp
+        self.clamp_alpha = clamp_alpha
+        self.clamp_limit = clamp_limit
 
-        self.router = Router(d_model, n_experts, top_k, noisy_gating)
+        self.router = Router(d_model, n_experts, top_k, noisy_gating,
+                             mode=router_mode)
         self.experts = nn.ModuleList([
-            Expert(d_model, d_ff) for _ in range(n_experts)
+            Expert(d_model, d_ff, use_clamp=use_clamp,
+                   clamp_alpha=clamp_alpha, clamp_limit=clamp_limit)
+            for _ in range(n_experts)
         ])
         if shared_expert:
-            self.shared = Expert(d_model, d_ff)
+            self.shared = Expert(d_model, d_ff, use_clamp=use_clamp,
+                                 clamp_alpha=clamp_alpha, clamp_limit=clamp_limit)
 
     def forward(self, x):
         """Forward pass.
@@ -176,20 +272,42 @@ class MoELayer(nn.Module):
         # Dense bypass: skip router, run all experts with equal weight.
         # This reproduces the original dense FFN when the router is untrained.
         if self.dense_bypass:
-            # Batched: stack all expert weights into batched matmuls instead of
-            # looping over experts (n_experts Python iterations → 1 batched call).
-            # Handle both plain nn.Linear (.weight) and DoRA-wrapped (.base_weight).
-            def _get_weight(mod):
-                return getattr(mod, 'base_weight', getattr(mod, 'weight', None))
-            w1 = torch.stack([_get_weight(e.w1) for e in self.experts])
-            w3 = torch.stack([_get_weight(e.w3) for e in self.experts])
-            w2 = torch.stack([_get_weight(e.w2) for e in self.experts])
-            # x_flat: (N, D) → (n_experts, N, d_ff) via batched matmul
-            x_exp = x_flat.unsqueeze(0).expand(self.n_experts, -1, -1)
-            h1 = torch.bmm(x_exp, w1.transpose(1, 2))
-            h3 = torch.bmm(x_exp, w3.transpose(1, 2))
-            expert_out = torch.bmm(F.silu(h1) * h3, w2.transpose(1, 2))  # (n_experts, N, D)
-            output = expert_out.mean(dim=0)  # equal weight = 1/n_experts → (N, D)
+            # Check if experts use BitNet int8 storage (can't stack int8 buffers)
+            first_w1 = self.experts[0].w1
+            is_bitnet_int8 = (type(first_w1).__name__ == "BitNetLinear"
+                              and getattr(first_w1, '_prequantized', False))
+            if is_bitnet_int8:
+                # BitNet int8 path: call each expert's forward individually
+                # (ternary GEMM kernel handles int8 weights natively)
+                expert_outs = []
+                for expert in self.experts:
+                    h1 = expert.w1(x_flat)
+                    h3 = expert.w3(x_flat)
+                    h = F.silu(h1) * h3
+                    out = expert.w2(h)
+                    expert_outs.append(out)
+                expert_out = torch.stack(expert_outs)  # (n_experts, N, D)
+                output = expert_out.mean(dim=0)
+            else:
+                # Standard path: batched matmul with stacked weights
+                def _get_weight(mod):
+                    return getattr(mod, 'base_weight', getattr(mod, 'weight', None))
+                w1 = torch.stack([_get_weight(e.w1) for e in self.experts])
+                w3 = torch.stack([_get_weight(e.w3) for e in self.experts])
+                w2 = torch.stack([_get_weight(e.w2) for e in self.experts])
+                # x_flat: (N, D) -> (n_experts, N, d_ff) via batched matmul
+                x_exp = x_flat.unsqueeze(0).expand(self.n_experts, -1, -1)
+                h1 = torch.bmm(x_exp, w1.transpose(1, 2))
+                h3 = torch.bmm(x_exp, w3.transpose(1, 2))
+                if self.use_clamp:
+                    # GPT-OSS clamped SwiGLU in batched path
+                    h1 = h1.clamp(min=None, max=self.clamp_limit)
+                    h3 = h3.clamp(min=-self.clamp_limit, max=self.clamp_limit)
+                    glu = h1 * torch.sigmoid(self.clamp_alpha * h1)
+                    expert_out = torch.bmm((h3 + 1) * glu, w2.transpose(1, 2))
+                else:
+                    expert_out = torch.bmm(F.silu(h1) * h3, w2.transpose(1, 2))
+                output = expert_out.mean(dim=0)
             if self.has_shared:
                 output = output + self.shared(x_flat)
             aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
@@ -287,3 +405,35 @@ def collect_aux_loss(model):
             if hasattr(block.ffn, '_last_aux_loss'):
                 total_aux = total_aux + block.ffn._last_aux_loss
     return total_aux
+
+
+def update_moe_biases(model):
+    """Update DeepSeek-V3 aux-loss-free expert biases on all MoE layers.
+
+    Call after each optimizer step. No-op for layers using "switch" mode
+    (no expert_bias buffer). This is the bias-update half of DeepSeek-V3's
+    auxiliary-loss-free load balancing (§3.3).
+    """
+    for block in model.blocks:
+        if hasattr(block, 'ffn') and isinstance(block.ffn, MoELayer):
+            block.ffn.router.update_bias()
+
+
+def disable_dense_bypass(model):
+    """Disable dense_bypass on all MoE layers so the router activates.
+
+    After warmup, call this to switch from "all experts run equally" (dense
+    FFN behavior, lossless init) to actual top-k routing (experts specialize).
+    The router weights were trained during warmup via the aux loss path even
+    in dense_bypass mode (the router forward still runs, just its output is
+    ignored for the FFN computation). After disabling, routing takes effect.
+    """
+    n_disabled = 0
+    for block in model.blocks:
+        if hasattr(block, 'ffn') and isinstance(block.ffn, MoELayer):
+            if block.ffn.dense_bypass:
+                block.ffn.dense_bypass = False
+                n_disabled += 1
+    if n_disabled:
+        print(f"  [MoE] Disabled dense_bypass on {n_disabled} layers — router active")
+    return n_disabled

@@ -207,6 +207,10 @@ class BitNetLinear(nn.Module):
       - learned_scale: a per-layer learnable quantize scale (absmean init),
         which QAT tunes to minimize ternary rounding error — the step that
         recovers most of the b1.58 quality gap vs. a fixed absmean scale.
+      - prequantized: weights stored as int8 buffer (1 byte vs 4 bytes fp32).
+        Set via ``convert_to_int8_storage()`` after loading a pre-quantized
+        checkpoint. Forward pass uses int8 directly with tensor-core GEMM.
+        4x VRAM reduction for weights; no runtime quantization cost.
 
     Args:
         in_features, out_features: as nn.Linear.
@@ -228,6 +232,7 @@ class BitNetLinear(nn.Module):
         self.force_quant = force_quant
         self.learned_scale = learned_scale
         self.quantize_scale = quantize_scale
+        self._prequantized = False  # set True by convert_to_int8_storage()
         # Kaiming init matching nn.Linear so pre-trained weights load fine.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -244,34 +249,114 @@ class BitNetLinear(nn.Module):
             self.qscale = nn.Parameter(scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Pre-quantized int8 path: weights already ternary, stored as int8 buffer.
+        # 4x less VRAM than fp32 parameter; no runtime quantization needed.
+        if self._prequantized:
+            w_int8 = self.weight_int8  # int8 buffer, values {-1, 0, +1}
+            scale = self.qscale_buf.to(x.dtype) if hasattr(self, 'qscale_buf') else 1.0
+            if x.is_cuda and self.bias is None:
+                # Use int8 tensor-core GEMM directly (weights already int8).
+                return _int8_ternary_linear(x, w_int8, scale)
+            # CPU fallback: dequantize int8 → fp, standard GEMM.
+            w = w_int8.to(x.dtype) * scale
+            return F.linear(x, w, self.bias)
+        # Normal QAT / eval path.
         w = self.weight
-        # QAT: quantize only in training (or when explicitly deploying).
         if self.quantize and (self.training or self.force_quant):
             scale = self.qscale if self.qscale is not None else self.quantize_scale
             if x.is_cuda and self.bias is None:
-                # TRUE BitNet on CUDA: default = int8 tensor-core GEMM;
-                # FORGE_BITNET_KERNEL=triton selects the b1.58 add-only
-                # kernel (fp activations). STE backward in both.
                 import os
                 kernel = os.environ.get("FORGE_BITNET_KERNEL", "int8")
                 return _TernaryLinearFn.apply(x, w, scale, kernel)
-            # Fallback (CPU): fp GEMM on ternary weights, STE.
             q, _ = ternary_quantize(w, scale)
             w = w + (q - w).detach()
         return F.linear(x, w, self.bias)
 
+    def convert_to_int8_storage(self):
+        """Convert fp32 weight parameter to int8 buffer (pre-quantized inference).
+
+        Ternary-quantizes the current weight, stores as int8 buffer, and removes
+        the fp32 parameter. Reduces weight VRAM by 4x (4 bytes → 1 byte per param).
+        Also stores qscale as a buffer (no gradient needed in inference).
+
+        After conversion, the layer uses the int8 tensor-core GEMM path directly
+        — no runtime quantization cost.
+        """
+        if self._prequantized:
+            return  # already converted
+        with torch.no_grad():
+            scale = self.qscale if self.qscale is not None else self.quantize_scale
+            q, s = ternary_quantize(self.weight.data.float(), scale)
+            # Store ternary weights as int8 {-1, 0, +1}
+            w_int8 = q.to(torch.int8)
+            # Register as buffer (not parameter — no gradients in inference)
+            device = self.weight.device
+            dtype = self.weight.dtype
+            del self.weight
+            self.register_buffer("weight_int8", w_int8.to(device))
+            # Store scale as buffer too
+            if isinstance(s, torch.Tensor):
+                self.register_buffer("qscale_buf", s.to(device).to(dtype))
+            else:
+                self.register_buffer("qscale_buf", torch.tensor(s, device=device, dtype=dtype))
+            # Remove qscale parameter if it exists
+            if self.qscale is not None:
+                del self.qscale
+                self.qscale = None
+            self._prequantized = True
+
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
         had_weight = prefix + "weight" in state_dict
+        # Check if loading a pre-quantized int8 weight
+        weight_key = prefix + "weight"
+        src_tensor = state_dict.get(weight_key, None)
+        is_int8_weight = src_tensor is not None and src_tensor.dtype == torch.int8
+
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)
+
         if had_weight and self.qscale is not None:
             # qscale was initialized from the RANDOM init weight; re-anchor
             # it to the loaded checkpoint's absmean (b1.58 convention).
-            with torch.no_grad():
-                self.qscale.copy_(
-                    self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
+            # Skip if weight is still on meta (assign=True defers replacement)
+            # or if loading pre-quantized int8 (qscale set by convert_to_int8_storage)
+            if is_int8_weight:
+                # Pre-quantized: compute scale from the int8 source tensor directly
+                with torch.no_grad():
+                    absmean = src_tensor.float().abs().mean().clamp(min=_TERNARY_EPS)
+                    self.qscale.copy_(absmean / 0.7)
+            elif not self.weight.is_meta:
+                with torch.no_grad():
+                    self.qscale.copy_(
+                        self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
+            # else: weight is on meta, skip qscale update (will be set after assign)
+
+    def load_prequantized(self, weight_int8: torch.Tensor, qscale: float | torch.Tensor):
+        """Load a pre-quantized ternary weight (int8) directly into int8 storage.
+
+        Bypasses the fp32 parameter entirely — stores as int8 buffer.
+        Call this after __init__ but before any forward pass.
+        The tensor's own device is used (typically GPU for direct-VRAM loading).
+        """
+        # Use the tensor's device (already on GPU if loaded direct from safetensors)
+        device = weight_int8.device
+        # Remove fp32 weight parameter
+        if hasattr(self, 'weight'):
+            del self.weight
+        # Register int8 buffer (keep on tensor's device)
+        self.register_buffer("weight_int8", weight_int8.to(torch.int8))
+        # Register scale buffer
+        if isinstance(qscale, torch.Tensor):
+            self.register_buffer("qscale_buf", qscale.to(device))
+        else:
+            self.register_buffer("qscale_buf", torch.tensor(qscale, device=device))
+        # Remove qscale parameter
+        if self.qscale is not None:
+            del self.qscale
+            self.qscale = None
+        self._prequantized = True
 
 
 def apply_bitnet_b158(state: dict[str, torch.Tensor], scale: float | None = None
@@ -342,3 +427,74 @@ def build_bitnet_linear(config, in_features: int, out_features: int,
                         quantize=bool(getattr(config, "use_bitnet", False)),
                         force_quant=bool(getattr(config, "bitnet_force_quant", False)),
                         learned_scale=bool(getattr(config, "bitnet_learned_scale", True)))
+
+
+def convert_model_to_int8(model: nn.Module) -> int:
+    """Convert all BitNetLinear layers in a model to int8 weight storage.
+
+    Call after loading a checkpoint with ternary-quantized weights.
+    Reduces weight VRAM by 4x (fp32 → int8). Returns number of layers converted.
+    """
+    n = 0
+    for module in model.modules():
+        if isinstance(module, BitNetLinear) and not module._prequantized:
+            module.convert_to_int8_storage()
+            n += 1
+    return n
+
+
+class BitNetEmbedding(nn.Module):
+    """Embedding with BitNet b1.58 ternary QAT on the embedding weight.
+
+    During training (or force_quant), the looked-up vectors are ternary-quantized
+    with STE. Eval uses full-precision master weights (lossless for warm start).
+
+    Args:
+        num_embeddings: vocab size
+        embedding_dim: embedding dimension
+        quantize: enable ternary QAT during training
+        force_quant: also quantize in eval (deployment)
+        learned_scale: learn a per-tensor quantize scale
+    """
+
+    def __init__(self, num_embeddings: int, embedding_dim: int,
+                 quantize: bool = False, force_quant: bool = False,
+                 learned_scale: bool = True):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.quantize = quantize
+        self.force_quant = force_quant
+        self.weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
+        if learned_scale:
+            with torch.no_grad():
+                scale = self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7
+            self.qscale = nn.Parameter(scale)
+        else:
+            self.qscale = None
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        x = F.embedding(token_ids, self.weight)
+        if self.quantize and (self.training or self.force_quant):
+            scale = self.qscale if self.qscale is not None else None
+            q, s = ternary_quantize(self.weight, scale)
+            q_out = F.embedding(token_ids, q) * s.to(x.dtype)
+            # STE: gradient flows through master weights
+            x = x + (q_out - x).detach()
+        return x
+
+    @property
+    def weight_data(self) -> torch.Tensor:
+        """Access the raw weight parameter (for checkpoint I/O)."""
+        return self.weight
+
+
+def build_bitnet_embedding(config, num_embeddings: int, embedding_dim: int
+                           ) -> nn.Module:
+    """Build a BitNetEmbedding honoring the model config."""
+    return BitNetEmbedding(
+        num_embeddings, embedding_dim,
+        quantize=bool(getattr(config, "use_bitnet", False)),
+        force_quant=bool(getattr(config, "bitnet_force_quant", False)),
+        learned_scale=bool(getattr(config, "bitnet_learned_scale", True)))

@@ -538,7 +538,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         # Load engine fresh with base checkpoint
         engine = ForgeEngine.from_checkpoint(
             checkpoint=base_checkpoint,
-            config_name="forgelm_v3",
+            config_name="forgelm_v7",
             tokenizer_path="research/checkpoints/lfm25_tokenizer",
             device=device,
         )
@@ -559,7 +559,10 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             if name in candidate_state:
                 param.data.copy_(candidate_state[name])
     del candidate_state
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     print(f"  [FastEval] Weight swap done in {time.perf_counter() - t_swap:.1f}s")
 
     # Run candidate tests
@@ -574,12 +577,18 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     if engine_created_here:
         del engine
         import gc; gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         from research.model_loader import ModelLoader
         ModelLoader.clear_cache()
         print("  [FastEval] Internal engine freed (VRAM reclaimed)")
     import gc; gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     # Print comparison
     _print_comparison(base_result, candidate_result)

@@ -132,7 +132,7 @@ class DiscoveryLoop:
             ckpt = None
             print("[discovery] WARNING: no checkpoint found — using random weights")
 
-        model, tok = load_default_model("forgelm_v3", checkpoint_path=ckpt)
+        model, tok = load_default_model("forgelm_v7", checkpoint_path=ckpt)
         return cls(model, tok, db, **kw)
 
     def _default_generate(self, prompt: str) -> str:

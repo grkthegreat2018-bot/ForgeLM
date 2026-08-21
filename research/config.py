@@ -111,6 +111,114 @@ class ModelConfig:
     # Requires SM90+ (Hopper/Blackwell). Falls back to BF16 on older GPUs.
     use_fp8_training: bool = False
 
+    # === V5: MoE + Factorized Embedding + Full BitNet (2026-09) ===
+    # Mixture-of-Experts FFN: replace dense FFN with shared expert + routed
+    # experts. Active params stay ~same; total params scale with n_experts.
+    # AirMoE hotloads routed experts from disk at inference (only top-k in VRAM).
+    use_moe: bool = False
+    moe_n_experts: int = 8           # routed experts per layer
+    moe_top_k: int = 2               # experts activated per token
+    moe_shared_expert: bool = True   # always-active shared expert (DeepSeek-V3 style)
+    moe_dense_bypass: bool = True    # skip router at init (lossless = dense FFN)
+    # Disable dense_bypass after this many training steps so the router
+    # activates (experts start specializing). 0 = never disable (stays dense).
+    # DeepSeek-V3 uses a warmup where the router gradually takes over.
+    moe_dense_bypass_warmup_steps: int = 0
+    moe_noisy_gating: bool = True    # add noise during training for exploration
+    moe_load_balance_weight: float = 0.01  # aux loss weight for load balancing
+    # Router mode: "switch" (Switch-Transformer aux loss, backward compat) or
+    # "aux_free" (DeepSeek-V3 auxiliary-loss-free load balancing with per-expert
+    # bias + sequence-wise balance loss from full softmax). "aux_free" is
+    # lossless at init (bias=0).
+    moe_router_mode: str = "switch"
+    moe_d_ff: int | None = None      # expert hidden dim (None = intermediate_size)
+    # Expert Tying (arXiv 2606.16825): share expert weights across consecutive
+    # layer groups. g=2: layers (0,1) share, (2,3) share, etc. 2x expert param
+    # reduction, near-lossless. Applied as pointer aliasing after model build.
+    moe_expert_tying: bool = False
+    moe_tie_group_size: int = 2      # consecutive layers that share experts
+    # Factorized Embedding (ALBERT pattern): decompose vocab×d_model into
+    # vocab×rank × rank×d_model. 7.8x param reduction for 65536×2048.
+    # Init via SVD of original embedding (lossless at start).
+    use_factorized_embeddings: bool = False
+    embed_factorized_rank: int = 256  # factorization rank (<< d_model)
+    # BitNet on embeddings: ternary quantize embedding weights (QAT).
+    # Saves ~8x on embedding VRAM. Combined with factorized = ~60x reduction.
+    use_bitnet_embedding: bool = False
+
+    # === V5.1: Additional architecture keys (2026-08) ===
+    # All lossless at init (zero/identity), activated during training.
+
+    # ValueResidual (ResFormer, arXiv 2410.17897): add V_0 residual to all
+    # layers. Gate=0 at init → lossless. Training opens the gate.
+    # mode: "resformer" (additive V_i + gate*V_0) or "svformer" (shared V_0).
+    use_value_residual: bool = False
+    value_residual_mode: str = "resformer"  # "resformer" or "svformer"
+    value_residual_gate_init: float = 0.0  # 0 = lossless at start
+
+    # SandwichNorm: post-sublayer RMSNorm (identity init = lossless).
+    # Stabilizes MoE training by bounding post-FFN/post-attn activations.
+    use_sandwich_norm: bool = False
+
+    # LearnedSink (GPT-OSS): per-head attention sink bias logits.
+    # init_method="zero" = lossless (no bias added). "constant" adds a
+    # small positive bias to stabilize attention.
+    use_learned_sink: bool = False
+    learned_sink_init: float = 0.0  # 0 = lossless; 1.0 = GPT-OSS default
+    learned_sink_init_method: str = "zero"  # "zero", "constant", "random"
+
+    # SwiGLU Clamp (GPT-OSS): clamped SwiGLU activation with scaled sigmoid.
+    # Prevents outlier activations from destabilizing quantized inference.
+    # This is a runtime-only change (no weights), but changes the activation
+    # function — NOT lossless in the strict sense, but close at init since
+    # clamping only affects outliers (|x| > limit=7.0).
+    use_swiglu_clamp: bool = False
+    swiglu_clamp_alpha: float = 1.702  # sigmoid scale (approximates GELU)
+    swiglu_clamp_limit: float = 7.0  # clamp value (prevents outliers)
+
+    # === V5.2: Parameter-reduction keys (2026-08) ===
+    # All decomposition-based keys convert dense weights on first checkpoint
+    # load, then save the compressed checkpoint (no re-conversion on subsequent
+    # loads). See .devin/scratchpad.md for full analysis.
+
+    # Monarch FFN (Dao et al. 2022): W ≈ L @ R @ P with L,R block-diagonal.
+    # 70% FFN param reduction, near-lossless (matches dense expressivity).
+    # ffn_compression="monarch" activates this.
+    # block_size: size of block-diagonal blocks (must divide d_model and intermediate).
+    ffn_compression: str = "none"  # "none", "monarch", "kron", "tt", "nlrq"
+    monarch_block_size: int = 32
+    # NLRQ FFN (R&D winner): SVD + quantized factors + optional INT4 residual.
+    # 12.8x param reduction (rank=256, 8-bit), 3x with INT4 residual at 0.15% error.
+    nlrq_rank: int = 256             # SVD truncation rank
+    nlrq_factor_bits: int = 8        # bits per U/V factor element
+    nlrq_use_residual: bool = False  # add INT4 group-quantized residual
+    nlrq_residual_group_size: int = 128
+    # Kronecker FFN: W = A ⊗ B. 71% FFN param reduction, lossy-recoverable.
+    # Factorization shapes for (d_model, intermediate): (a*b, c*d) = (d_model, intermediate).
+    kron_a: int = 64   # A is (a, c)
+    kron_b: int = 32   # B is (b, d)
+    kron_c: int = 32
+    kron_d: int = 256
+    # Tensor-Train FFN: TT decomposition of weight matrix. 71% reduction, lossy-recoverable.
+    tt_rank: int = 4   # TT rank (higher = less compression, less loss)
+
+    # Hyperloop Transformers (arXiv 2604.21254): looped middle blocks.
+    # begin_layers unique + middle shared (looped n_loop_iters times) + end_layers unique.
+    # 44% layer param reduction, near-lossless (paper: BETTER quality).
+    # Lossless at init: all layers unique, loop gate=0. Training opens gate.
+    use_hyperloop: bool = False
+    hyperloop_begin: int = 2    # unique begin layers
+    hyperloop_end: int = 2      # unique end layers
+    hyperloop_loop_iters: int = 3  # how many times to loop the shared middle block
+
+    # LiSA (TACL 2026): cross-layer Q/K sharing with alignment FFN.
+    # 6x Q/K compression, 19-40% throughput improvement.
+    # Lossless at init: per-layer Q/K loaded from checkpoint, shared Q/K gate=0.
+    # Training opens gate, then per-layer Q/K can be pruned.
+    use_lisa: bool = False
+    lisa_compress: int = 6     # Q/K compression factor across attention layers
+    lisa_align_dim: int = 0    # alignment FFN hidden dim (0 = d_model // 4)
+
     # === Training ===
     dropout: float = 0.0
     device: str = "cpu"
@@ -232,92 +340,6 @@ MODEL_CONFIGS = {
         batch_size=2,
         seq_len=1024,
     ),
-    # ForgeLM V3 — labeled evolution of the LFM2.5 port with the full
-    # 2025/2026 architecture stack:
-    #   - Differential Attention (identity warm start; GQA checkpoints
-    #     auto-convert losslessly at load)
-    #   - BitNet b1.58 QAT on the FFN (ternary in training, fp eval)
-    #   - TITAN neural memory (low-rank, zero-init gate)
-    #   - Mixture-of-Depths router (keep_fraction=1.0 = lossless start)
-    # ALL mechanisms are lossless at load: ForgeLM_V2_BSP.safetensors loads
-    # bit-exact (verified max logit diff 0.0, incl. KV-cached decode).
-    "forgelm_v3": ModelConfig(
-        vocab_size=65536,
-        d_model=2048,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        intermediate_size=8192,
-        attn_type="diff",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
-                     "conv", "conv", "attention", "conv", "attention", "conv",
-                     "attention", "conv", "attention", "conv"],
-        use_titan_memory=True,
-        titan_memory_rank=64,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        # FFN-SkipLLM: NOT applicable to V3 (16 layers, no saturation region).
-        # See docs/FFN_RESEARCH.md. Kept for future 32+ layer models.
-        ffn_skip_threshold=0.0,
-        # Additional lossless keys (gate=0 / identity init):
-        use_mhc=True,             # DeepSeek-V4 hyper-connections
-        mhc_rank=0,               # 0 = auto (d_model // 4)
-        use_attn_residual=True,   # Kimi K3 cross-layer retrieval
-        attn_res_k=4,             # retrieve from last 4 layers
-        batch_size=2,
-        seq_len=1024,
-    ),
-    # ForgeLM V4 — hardware-efficient evolution of V3:
-    #   - GTA (Grouped-Tied Attention): V=K at init (lossless), halves KV cache
-    #     bandwidth. Training unties V from K. Replaces Differential Attention.
-    #   - Fused QKV + Gate-Up GEMM: single GEMM for Q/K/V and gate/up, halving
-    #     kernel launches per layer.
-    #   - All V3 keys preserved: BitNet b1.58, TITAN memory, MoD, mHC, AttnRes.
-    #   - W8A8 INT8 quantization available at inference (not training).
-    # Loads ForgeLM_V2_BSP.safetensors losslessly via GTA identity warm start
-    # (V=K, v_mix_gate=0). All mechanisms lossless at load; training activates them.
-    "forgelm_v4": ModelConfig(
-        vocab_size=65536,
-        d_model=2048,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        intermediate_size=8192,
-        attn_type="gta",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_fused_gemm=True,          # Fused QKV + Gate-Up GEMM
-        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
-                     "conv", "conv", "attention", "conv", "attention", "conv",
-                     "attention", "conv", "attention", "conv"],
-        use_titan_memory=True,
-        titan_memory_rank=64,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.0,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        batch_size=2,
-        seq_len=1024,
-    ),
     # Tiny LFM2.5 for fast testing
     "lfm25_tiny": ModelConfig(
         vocab_size=256,
@@ -339,6 +361,207 @@ MODEL_CONFIGS = {
         seq_len=64,
         max_steps=20,
         warmup_steps=5,
+    ),
+
+    # ══════════════════════════════════════════════════════════════════════
+    # V7: NLRQ-compressed 6-8B model (2026-08 R&D)
+    # ══════════════════════════════════════════════════════════════════════
+    # Scales V6 architecture to d_model=3072, 32 layers → ~7B dense params.
+    # NLRQ FFN compression (R&D winner: 12.8x CR, 1.3% error) cuts FFN params
+    # by 92%, bringing effective VRAM to ~2-3 GB for weights.
+    # All V6 keys preserved (GTA, BitNet, TITAN, MoD, mHC, AttnRes, MTP,
+    # Hyperloop, LiSA, factorized embedding, PIT, etc).
+    #
+    # Param budget (before NLRQ):
+    #   - Embedding: 65536 × 3072 = 201M (factorized: 65536×256 + 256×3072 = 17.5M)
+    #   - Attention: 32 layers × (4 × 3072² / 4 GQA) = 32 × 9.4M = 301M
+    #   - FFN: 32 layers × (2 × 3072 × 12288 + 12288 × 3072) = 32 × 226M = 7.2B
+    #   - Total dense: ~7.7B
+    #
+    # With NLRQ (rank=512, 8-bit factors):
+    #   - FFN: 32 × 3 × 512 × (12288 + 3072) × 8b = 32 × 3 × 24.6M bits = 296M bytes
+    #   - FFN compressed: ~0.3 GB (vs 14.4 GB dense)
+    #   - Total VRAM: ~2-3 GB (weights) + KV cache
+    #
+    # V7-Dense (forgelm_v7): 32-layer dense, NLRQ FFN, ~7B params → ~2.5 GB VRAM
+    # V7-MoE (forgelm_v7_moe): 32-layer MoE, NLRQ on shared expert, ~8B total
+    # ══════════════════════════════════════════════════════════════════════
+
+    # V7-Dense: 32-layer NLRQ-compressed model for high-capacity self-play.
+    # d_model=4096, 32 layers → ~7B dense params with NLRQ rank=1024.
+    # NLRQ FFN (rank=1024, 8-bit) → ~4-5 GB VRAM for weights.
+    "forgelm_v7": ModelConfig(
+        vocab_size=65536,
+        d_model=4096,                    # SCALED: 2048→4096 (2x wider)
+        n_layers=32,                    # SCALED: 24→32 (33% deeper)
+        n_heads=64,                     # 4096/64 = 64 heads
+        n_kv_heads=16,                  # GQA 4x (64/16)
+        intermediate_size=16384,        # 4x d_model (SwiGLU ratio)
+        attn_type="gta",                # Grouped-Tied Attention
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=32768,
+        conv_kernel_size=3,
+        use_qk_norm=True,
+        # ── BitNet: ternary weights ──
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        use_bitnet_embedding=True,
+        # ── Hardware efficiency ──
+        use_fused_gemm=True,
+        # ── 32-layer hybrid: conv/attention interleaved ──
+        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
+        # ── Memory & routing keys (all lossless at init) ──
+        use_titan_memory=True,
+        titan_memory_rank=128,           # scaled with d_model
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        ffn_skip_threshold=0.15,
+        use_mhc=True,
+        mhc_rank=0,                     # auto = d_model // 4 = 1024
+        use_attn_residual=True,
+        attn_res_k=4,
+        # ── V5.1 architecture keys ──
+        use_mtp=True,
+        mtp_n_heads=2,
+        mtp_loss_weight=0.3,
+        use_value_residual=True,
+        value_residual_mode="resformer",
+        value_residual_gate_init=0.0,
+        use_sandwich_norm=True,
+        use_learned_sink=True,
+        learned_sink_init=0.0,
+        learned_sink_init_method="zero",
+        use_swiglu_clamp=True,
+        swiglu_clamp_alpha=1.702,
+        swiglu_clamp_limit=7.0,
+        rope_variant="lerope",
+        # ── V6 keys ──
+        use_pit=True,
+        zero_init_residual=True,
+        # ── V7 NEW: NLRQ FFN compression (R&D winner) ──
+        ffn_compression="nlrq",
+        nlrq_rank=768,                 # balanced: 8B dense equiv, fits 12GB
+        nlrq_factor_bits=8,
+        nlrq_use_residual=False,        # pure NLRQ (12.8x CR, 1.3% error)
+        nlrq_residual_group_size=128,
+        # ── Hyperloop: 4 begin + 4 end + looped middle ──
+        use_hyperloop=True,
+        hyperloop_begin=4,
+        hyperloop_end=4,
+        hyperloop_loop_iters=3,
+        # ── LiSA ──
+        use_lisa=True,
+        lisa_compress=6,
+        lisa_align_dim=0,               # auto = d_model // 4 = 1024
+        # ── Factorized embedding ──
+        use_factorized_embeddings=True,
+        embed_factorized_rank=512,      # scaled with d_model
+        # ── Training optimizations ──
+        use_gradient_checkpointing=True,
+        selective_gradient_checkpointing="ffn",
+        use_chunked_ce=True,
+        ce_chunk_size=256,
+        entropy_alpha=0.5,
+        use_smooth_swiglu=True,
+        use_mu_scaling=True,
+        # ── Training hyperparams ──
+        batch_size=1,
+        seq_len=1024,
+        max_steps=5000,
+        warmup_steps=500,
+        max_lr=2e-4,
+        min_lr=2e-5,
+    ),
+
+    # V7-MoE: 32-layer MoE with NLRQ on shared expert.
+    # ~8B total params (8 experts top-2 + shared), ~2B active.
+    # NLRQ compresses the shared expert; routed experts use AirMoE disk offload.
+    "forgelm_v7_moe": ModelConfig(
+        vocab_size=65536,
+        d_model=4096,
+        n_layers=32,
+        n_heads=64,
+        n_kv_heads=16,
+        intermediate_size=16384,
+        attn_type="gta",
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=32768,
+        conv_kernel_size=3,
+        use_qk_norm=True,
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        use_bitnet_embedding=True,
+        use_fused_gemm=True,
+        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
+        use_titan_memory=True,
+        titan_memory_rank=96,
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        ffn_skip_threshold=0.15,
+        use_mhc=True,
+        mhc_rank=0,
+        use_attn_residual=True,
+        attn_res_k=4,
+        use_mtp=True,
+        mtp_n_heads=2,
+        mtp_loss_weight=0.3,
+        use_value_residual=True,
+        value_residual_mode="resformer",
+        value_residual_gate_init=0.0,
+        use_sandwich_norm=True,
+        use_learned_sink=True,
+        learned_sink_init=0.0,
+        learned_sink_init_method="zero",
+        use_swiglu_clamp=True,
+        swiglu_clamp_alpha=1.702,
+        swiglu_clamp_limit=7.0,
+        rope_variant="lerope",
+        use_pit=True,
+        zero_init_residual=True,
+        # NLRQ on shared expert only (routed experts offloaded to disk)
+        ffn_compression="none",         # MoE replaces FFN
+        use_hyperloop=True,
+        hyperloop_begin=4,
+        hyperloop_end=4,
+        hyperloop_loop_iters=3,
+        use_lisa=True,
+        lisa_compress=6,
+        lisa_align_dim=0,
+        use_factorized_embeddings=True,
+        embed_factorized_rank=384,
+        # ── MoE: 8 experts top-2 + shared expert ──
+        use_moe=True,
+        moe_n_experts=8,
+        moe_top_k=2,
+        moe_shared_expert=True,
+        moe_dense_bypass=True,
+        moe_dense_bypass_warmup_steps=500,
+        moe_noisy_gating=True,
+        moe_load_balance_weight=0.01,
+        moe_router_mode="aux_free",
+        moe_d_ff=12288,
+        moe_expert_tying=True,
+        moe_tie_group_size=2,
+        # ── Training optimizations ──
+        use_gradient_checkpointing=True,
+        selective_gradient_checkpointing="ffn",
+        use_chunked_ce=True,
+        ce_chunk_size=256,
+        entropy_alpha=0.5,
+        use_smooth_swiglu=True,
+        use_mu_scaling=True,
+        batch_size=1,
+        seq_len=1024,
+        max_steps=5000,
+        warmup_steps=500,
+        max_lr=2e-4,
+        min_lr=2e-5,
     ),
 }
 

@@ -15,6 +15,7 @@ TMP_DIR = PROJECT_ROOT / ".devin" / "tmp"
 HF_CACHE_DIR = PROJECT_ROOT / ".devin" / "hf_cache"
 BENCH_CACHE_DIR = PROJECT_ROOT / ".devin" / "bench_cache"
 TORCH_CACHE_DIR = PROJECT_ROOT / ".devin" / "torch_cache"
+LIBRARY_DIR = DATA_DIR / "library"
 
 # Specific subdirectories.
 CURRICULUM_DIR = DATA_DIR / "curriculum"

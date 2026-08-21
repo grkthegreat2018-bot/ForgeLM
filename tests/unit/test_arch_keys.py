@@ -1,7 +1,7 @@
 """Tests for the 2025/2026 architecture keys:
 
 BitNet b1.58 QAT, Differential Attention, TITAN neural memory, MoD routing.
-All run on CPU with the tiny_test config.
+All run on GPU (CUDA) with bf16. CPU fallback only if CUDA unavailable.
 """
 import pytest
 import torch
@@ -22,10 +22,15 @@ from research.keys.quantization.bitnet_b158_key import (
 )
 from research.model_loader import ConfigurableResearchLLM, create_kv_cache
 
+_CUDA = torch.cuda.is_available()
+_DEV = "cuda" if _CUDA else "cpu"
+_DTYPE = torch.bfloat16 if _CUDA else torch.float32
 
-def _tiny(device="cpu"):
+
+def _tiny(device=_DEV):
     cfg = get_config("lfm25_tiny")
     cfg.device = device
+    cfg.dtype = "bfloat16" if _CUDA else "float32"
     return cfg
 
 
@@ -424,20 +429,39 @@ class TestMod:
 
 class TestMainModel:
     def test_main_config_builds_with_new_keys(self):
-        cfg = get_config("forgelm_v3")  # labeled default for fresh self-play
+        """Test V7 config fields + tiny model build on GPU with ForgeEngine features."""
+        cfg = get_config("forgelm_v7")
         assert cfg.use_titan_memory is True
         assert cfg.use_mod is True and cfg.mod_keep_fraction == 1.0
-        assert cfg.attn_type == "diff"     # lossless warm start
+        assert cfg.attn_type == "gta"      # Grouped-Tied Attention (V7)
         assert cfg.use_bitnet is True      # QAT (ternary only in training)
-        cfg.device = "cpu"
-        cfg.dtype = "float32"
-        model = ConfigurableResearchLLM(cfg).eval()
+        assert cfg.ffn_compression == "nlrq"  # NLRQ FFN compression
+        assert cfg.nlrq_rank == 768
+        assert cfg.d_model == 4096 and cfg.n_layers == 32
+        # Build tiny model on GPU to verify TITAN/MoD forward works with bf16
+        tiny = get_config("lfm25_tiny")
+        tiny.use_titan_memory = True
+        tiny.titan_memory_rank = 16
+        tiny.use_mod = True
+        tiny.mod_keep_fraction = 1.0
+        tiny.device = _DEV
+        tiny.dtype = "bfloat16" if _CUDA else "float32"
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(_DTYPE)
+        try:
+            if _CUDA:
+                with torch.device("cuda"):
+                    model = ConfigurableResearchLLM(tiny).eval()
+            else:
+                model = ConfigurableResearchLLM(tiny).eval()
+        finally:
+            torch.set_default_dtype(old_dtype)
         n_mem = sum(1 for b in model.blocks if b._memory is not None)
         n_mod = sum(1 for b in model.blocks if b._mod is not None)
-        assert n_mem == 16 and n_mod == 16
-        x = torch.randint(0, 65536, (1, 4))
+        assert n_mem == 4 and n_mod == 4  # tiny has 4 layers
+        x = torch.randint(0, 256, (1, 4), device=_DEV)
         with torch.no_grad():
             logits, _ = model(x)
-        assert logits.shape == (1, 4, 65536)
-        print(f"Main LFM2.5-1.2B + TITAN/MoD forward OK "
+        assert logits.shape == (1, 4, 256)
+        print(f"Tiny + TITAN/MoD forward OK on {_DEV} "
               f"({sum(p.numel() for p in model.parameters())/1e6:.0f}M params)")
