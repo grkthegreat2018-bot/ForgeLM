@@ -42,7 +42,6 @@ import json
 import os
 import random
 import sys
-import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -84,26 +83,8 @@ from research.training.training_utils import (
     vram_exceeded,
     write_heartbeat,
     write_status_json,
+    load_anchor_cached,
 )
-
-_ANCHOR_CACHE: OrderedDict[tuple[str, float], dict] = OrderedDict()
-_ANCHOR_CACHE_MAX = 8  # anchor checkpoints are large; keep only recent few
-
-
-def _load_anchor_cached(path: str) -> dict:
-    """Load anchor checkpoint with module-level LRU caching by (path, mtime)."""
-    import os
-    from safetensors.torch import load_file as safetensors_load
-    mtime = os.path.getmtime(path)
-    key = (path, mtime)
-    if key not in _ANCHOR_CACHE:
-        _ANCHOR_CACHE[key] = safetensors_load(path)
-        while len(_ANCHOR_CACHE) > _ANCHOR_CACHE_MAX:
-            _ANCHOR_CACHE.popitem(last=False)
-    else:
-        _ANCHOR_CACHE.move_to_end(key)
-    return _ANCHOR_CACHE[key]
-
 
 # Special token ids from the LFM2.5 tokenizer (Qwen-style).
 IM_START = 6
@@ -1110,11 +1091,6 @@ def main():
         except Exception as e:
             print(f"  [OOMB] unavailable ({e})")
 
-    # ── FORGE optimizer: register gradient hooks ──
-    if args.optimizer == "forge":
-        if hasattr(optimizer, 'register_hooks'):
-            optimizer.register_hooks(model)
-
     # ── Hybrid 8-bit fast gradient clipping ──
     hybrid_clipper = None
     if args.hybrid_clip:
@@ -1149,14 +1125,19 @@ def main():
                                      bandwidth_adaptive=args.bandwidth_adaptive,
                                      chunk_size_mb=args.chunk_size_mb)
 
+    # ── FORGE optimizer: register gradient hooks (must run AFTER optimizer
+    # creation — the optimizer object didn't exist at the previous site) ──
+    if args.optimizer == "forge":
+        if hasattr(optimizer, 'register_hooks'):
+            optimizer.register_hooks(model)
+
     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
     # Load anchor checkpoint and build a name→tensor map for L2-SP loss.
-    # Only activates when --anchor is provided.
+    # Only activates when --anchor is provided AND l2_lambda > 0.
     anchor_named_params = None
-    if args.anchor:
+    if args.anchor and getattr(args, 'l2_lambda', 0) > 0:
         print(f"Loading anchor checkpoint for L2-SP: {args.anchor}")
-        from safetensors.torch import load_file as safetensors_load
-        anchor_sd = _load_anchor_cached(args.anchor)
+        anchor_sd = load_anchor_cached(args.anchor)
         # Map anchor tensors to model device; match by parameter name.
         anchor_named_params = {}
         model_named = dict(model.named_parameters())

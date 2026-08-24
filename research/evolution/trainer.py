@@ -21,13 +21,15 @@ class GeneratorTrainer:
 
     def __init__(self, batched_gen, lr: float = 1e-3,
                  baseline_decay: float = 0.9, device: torch.device = None,
-                 max_grad_norm: float = 1.0):
+                 max_grad_norm: float = 1.0,
+                 pushaway_strength: float = 0.3):
         self.batched_gen = batched_gen
         self.lr = lr
         self.device = device or torch.device("cpu")
         self.baseline = 0.0
         self.baseline_decay = baseline_decay
         self.max_grad_norm = max_grad_norm
+        self.pushaway_strength = pushaway_strength
         # Single optimizer over all batched weights
         self.optimizer = torch.optim.Adam(batched_gen.parameters(), lr=lr)
         # Track which generator slots were mutated → reset their optimizer state
@@ -108,7 +110,7 @@ class GeneratorTrainer:
                 if reward > 0:
                     loss = nn.functional.mse_loss(output, target_params)
                 else:
-                    loss = -nn.functional.mse_loss(output, target_params) * 0.3
+                    loss = -nn.functional.mse_loss(output, target_params) * self.pushaway_strength
 
                 losses.append(loss)
 

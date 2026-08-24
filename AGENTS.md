@@ -9,7 +9,8 @@ unless the user explicitly overrides them for a specific task.
 - **Every new custom model version MUST be derived from the immediately
   preceding version**, carrying forward all prior keys/architecture as the
   baseline, then adding or replacing only what's new. Example chain:
-  `lfm25_1.2b` → `forgelm_v3` → `forgelm_v4` → `forgelm_v5`.
+  `lfm25_1.2b` → `forgelm_v7` (V3/V4/V5 presets were superseded by V7;
+  their architecture keys are preserved in V7's config).
 - **Port-first, train-second**: when introducing a new architecture key or
   attention variant, write the lossless checkpoint-conversion path
   (`XxxKey` class, identity/zero-init warm start, bit-exact load test)
@@ -141,9 +142,11 @@ unless the user explicitly overrides them for a specific task.
 
 ## Config Presets
 
-Four configs:
-- `forgelm_v4` — **ForgeLM V4: the new default.** Hardware-efficient evolution of V3. GTA (Grouped-Tied Attention, `attn_type="gta"`, V=K identity warm start, halves KV cache BW), Fused QKV + Gate-Up GEMM (`use_fused_gemm=True`, halves kernel launches), all V3 keys preserved (BitNet b1.58, TITAN memory rank 64, MoD keep 1.0, MHC rank=512 gate=0, AttnRes k=4 gates=0). Loads `ForgeLM_V2_BSP.safetensors` **bit-exact** via automatic GQA→GTA conversion (V=K, v_mix_gate=0). `load_default_model()` defaults to this. New inference features: W8A8 INT8 quantization (`quantize="w8a8"`), PagedEviction KV cache (`kv_cache="paged_eviction"`), XQuant rematerialization (`kv_cache="xquant"`), Megakernel decode (`acceleration="megakernel"`), Chunked prefill (`use_chunked_prefill=True`).
-- `forgelm_v3` — ForgeLM V3: Differential Attention (`attn_type="diff"`, identity warm start), BitNet b1.58 QAT FFN, TITAN memory (rank 64), MoD router (keep 1.0), MHC hyper-connections (rank=512, gate=0), AttnRes cross-layer retrieval (k=4, gates=0). 1256M params. Loads `ForgeLM_V2_BSP.safetensors` **bit-exact** via automatic GQA→diff conversion. Benchmark: 165-328 tok/s, 2.69 GB VRAM (RTX 5070).
+Six configs (V3/V4/V5 presets were superseded by V7; their keys are preserved):
+- `forgelm_v7` — **ForgeLM V7: the default.** 32-layer NLRQ-compressed dense model (d_model=4096, ~7B params, ~2.5 GB VRAM with NLRQ). GTA (Grouped-Tied Attention), BitNet b1.58, TITAN memory, MoD, MHC, AttnRes, MTP, Hyperloop, LiSA, factorized embeddings, PIT, NLRQ FFN compression (rank=768, 12.8x CR). `load_default_model()` defaults to this. All prior version keys (V3 diff-attn, V4 GTA/fused-GEMM, V5 value-residual/sandwich-norm/learned-sink, V6 PIT/zero-init-residual) are carried forward.
+- `forgelm_v7_8b_b` — V7-8B variant: NLRQ rank=1024 (less compression, more capacity). 6.68 GB storage. BAdam training: 8.50 GB.
+- `forgelm_v7_8b_d` — V7-8B variant: 48 layers (50% deeper), NLRQ rank=768. 9.23 GB storage. BAdam training: 10.83 GB.
+- `forgelm_v7_moe` — V7-MoE: 32-layer MoE with NLRQ on shared expert. ~8B total params, ~2B active. AirMoE disk offload for routed experts.
 - `lfm25_1.2b` — Reference LFM2.5-1.2B port (plain GQA, no keys).
 - `lfm25_tiny` — 4-layer tiny model for fast testing
 

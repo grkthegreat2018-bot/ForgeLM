@@ -261,7 +261,7 @@ class ConvConfig(BaseDomain):
         try:
             out = conv(x)
             out_quality = float(out.std().item() / (x.std().item() + 1e-8))
-        except:
+        except (RuntimeError, ValueError, TypeError):
             out_quality = 0.0
         rf_norm = min(1.0, rf / 100)
         score = rf_norm * 10 + out_quality * 5 - param_ratio * 3

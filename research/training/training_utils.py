@@ -1116,6 +1116,34 @@ def write_heartbeat(path):
     write_status_json(path, {"ts": _time.time()})
 
 
+# ---------------------------------------------------------------------------
+# Anchor checkpoint caching — shared by SFT and CPT for L2-SP regularization.
+# Bounded LRU so multiple anchor files don't cause unbounded RAM growth.
+# ---------------------------------------------------------------------------
+
+from collections import OrderedDict as _OrderedDict
+_ANCHOR_CACHE: _OrderedDict[tuple[str, float], dict] = _OrderedDict()
+_ANCHOR_CACHE_MAX = 8  # anchor checkpoints are large; keep only recent few
+
+
+def load_anchor_cached(path: str) -> dict:
+    """Load an anchor checkpoint with module-level LRU caching by (path, mtime).
+
+    Used by SFT and CPT runners for L2-SP anchor regularization. The cache is
+    keyed by (path, mtime) so editing the anchor file invalidates the entry.
+    """
+    mtime = os.path.getmtime(path)
+    key = (path, mtime)
+    if key not in _ANCHOR_CACHE:
+        from safetensors.torch import load_file as safetensors_load
+        _ANCHOR_CACHE[key] = safetensors_load(path)
+        while len(_ANCHOR_CACHE) > _ANCHOR_CACHE_MAX:
+            _ANCHOR_CACHE.popitem(last=False)
+    else:
+        _ANCHOR_CACHE.move_to_end(key)
+    return _ANCHOR_CACHE[key]
+
+
 def add_safeguard_args(parser):
     """Add the shared progress-safety CLI flags to an argparse parser.
 

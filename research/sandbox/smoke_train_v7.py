@@ -128,7 +128,7 @@ def main():
 
     # Enable all training features in config
     cfg.use_gradient_checkpointing = True
-    cfg.selective_gradient_checkpointing = "optimal"  # Hirschberg knapsack
+    cfg.selective_gradient_checkpointing = "all"  # "optimal" not implemented → falls back to "none" (no checkpointing, OOM risk)
     cfg.grad_clip = 1.0
 
     # Build on meta device (no real tensors, instant), then materialize on GPU

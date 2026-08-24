@@ -70,25 +70,14 @@ from research.training.training_utils import (
     has_nan_params,
     init_ema,
     oom_guard,
+    restore_ema,
     update_ema,
     patch_triton_cache_for_windows,
     vram_exceeded,
     write_heartbeat,
     write_status_json,
+    load_anchor_cached,
 )
-
-_ANCHOR_CACHE: dict[tuple[str, float], dict] = {}
-
-
-def _load_anchor_cached(path: str) -> dict:
-    """Load anchor checkpoint with module-level caching by (path, mtime)."""
-    import os
-    from safetensors.torch import load_file as safetensors_load
-    mtime = os.path.getmtime(path)
-    key = (path, mtime)
-    if key not in _ANCHOR_CACHE:
-        _ANCHOR_CACHE[key] = safetensors_load(path)
-    return _ANCHOR_CACHE[key]
 
 
 # ── Data loading ────────────────────────────────────────────────────────────
@@ -390,7 +379,7 @@ def main():
     if args.anchor and args.l2_lambda > 0:
         print(f"Loading anchor checkpoint for L2-SP: {args.anchor}")
         from safetensors.torch import load_file as safetensors_load
-        anchor_sd = _load_anchor_cached(args.anchor)
+        anchor_sd = load_anchor_cached(args.anchor)
         anchor_named_params = {}
         for name, p in model.named_parameters():
             if name in anchor_sd:
@@ -510,10 +499,8 @@ def main():
     # ── Final save ──
     print(f"\nSaving final checkpoint: {args.save}")
     if ema_state:
-        # Apply EMA weights before saving
-        for name, p in model.named_parameters():
-            if name in ema_state:
-                p.data.copy_(ema_state[name])
+        # Apply EMA weights before saving (use shared utility, not inline copy)
+        restore_ema(ema_state, model)
         print("  Applied EMA weights before save")
     save_training_checkpoint(model, args.save, optimizer=optimizer,
                              ema_state=ema_state, step=step)

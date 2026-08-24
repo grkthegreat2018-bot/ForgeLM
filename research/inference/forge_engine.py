@@ -58,7 +58,7 @@ Usage:
 import os
 import time
 import json
-from contextlib import suppress
+import threading
 from pathlib import Path
 
 import torch
@@ -69,10 +69,13 @@ _DEFAULT_EOS_TOKEN_IDS = frozenset({7, 151643, 151645})
 # Module-level caches to avoid repeated disk I/O for checkpoint metadata and sizes.
 # Keyed by (path, mtime) so stale entries are invalidated when the file changes.
 # Bounded with LRU eviction to prevent unbounded growth in long-running servers.
+# Thread-safe: guarded by _ckpt_cache_lock (forge_server runs generate() from
+# multiple worker threads via SessionManager/BatchQueue).
 from collections import OrderedDict as _OrderedDict
 _CKPT_CACHE_MAX = 64
 _checkpoint_metadata_cache: _OrderedDict[tuple[str, float], dict] = _OrderedDict()
 _checkpoint_size_cache: _OrderedDict[str, int] = _OrderedDict()
+_ckpt_cache_lock = threading.Lock()
 
 from research.inference.activation import ActivationConfig
 from research.inference.airllm_streamer import AirLLMStreamer
@@ -134,6 +137,8 @@ class ForgeEngine:
         self.decoding: DecodingStrategy = StandardDecoding()
         self.quantize: str | None = None
         self.acceleration: str | None = None
+        self._active_kv_bits = 8  # default; updated by _activate_kv_cache
+        self._active_kv_cache_name: str | None = None
 
         # Innovation slots
         self.mrl_adapter: MRLAdaptiveContext | None = None
@@ -209,6 +214,39 @@ class ForgeEngine:
         print(f"  [{source.title()}] {message}" if source != "engine"
               else f"  [ForgeEngine] {message}")
         self.events.log(message, level=level, source=source, **data)
+
+    def _clear_cuda_cache(self):
+        """Synchronize + empty CUDA cache. Deduplicates the 6x repeated
+        ``synchronize / empty_cache / synchronize`` pattern across generate,
+        sleep, and OOM-recovery paths."""
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(self.device)
+
+    def _release_acceleration_resources(self):
+        """Release CUDA graph / megakernel / flex-decoding / chunked-prefill
+        resources that hold GPU memory independent of ``self.model``.
+
+        Called from ``sleep(level=2)`` before discarding the model to prevent
+        leaks of CUDA graph pools and megakernel capture buffers.
+        """
+        for attr in ("_graph_runner", "_megakernel",
+                     "_flex_decoding", "_chunked_prefill"):
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
+            # If the object exposes a cleanup/release method, call it.
+            for method_name in ("release", "cleanup", "destroy", "close"):
+                method = getattr(obj, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        pass
+                    break
+            setattr(self, attr, None)
+        self.acceleration = None
 
     # ── Convenience properties ──────────────────────────────────────────
     # These derive from the loaded model so callers don't need to reach
@@ -361,9 +399,10 @@ class ForgeEngine:
         ckpt_size = _checkpoint_size_cache.get(checkpoint)
         if ckpt_size is None:
             ckpt_size = Path(checkpoint).stat().st_size
-            _checkpoint_size_cache[checkpoint] = ckpt_size
-            while len(_checkpoint_size_cache) > _CKPT_CACHE_MAX:
-                _checkpoint_size_cache.popitem(last=False)
+            with _ckpt_cache_lock:
+                _checkpoint_size_cache[checkpoint] = ckpt_size
+                while len(_checkpoint_size_cache) > _CKPT_CACHE_MAX:
+                    _checkpoint_size_cache.popitem(last=False)
         dev = torch.device(device)
         vram_free, _ = cls._memory_info(dev)
         needed = int(ckpt_size * 1.3)
@@ -521,19 +560,24 @@ class ForgeEngine:
         except OSError:
             mtime = 0.0
         cache_key = (checkpoint, mtime)
-        cached = _checkpoint_metadata_cache.get(cache_key)
+        with _ckpt_cache_lock:
+            cached = _checkpoint_metadata_cache.get(cache_key)
         if cached is not None:
             return cached
 
         from safetensors import safe_open
         metadata = {}
-        with suppress(Exception), safe_open(
-            checkpoint, framework="pt"
-        ) as checkpoint_file:
-            metadata = checkpoint_file.metadata() or {}
-        _checkpoint_metadata_cache[cache_key] = metadata
-        while len(_checkpoint_metadata_cache) > _CKPT_CACHE_MAX:
-            _checkpoint_metadata_cache.popitem(last=False)
+        try:
+            with safe_open(checkpoint, framework="pt") as checkpoint_file:
+                metadata = checkpoint_file.metadata() or {}
+        except (OSError, RuntimeError, ValueError):
+            # File missing, corrupt, or not a valid safetensors archive —
+            # return empty metadata rather than crashing the engine.
+            metadata = {}
+        with _ckpt_cache_lock:
+            _checkpoint_metadata_cache[cache_key] = metadata
+            while len(_checkpoint_metadata_cache) > _CKPT_CACHE_MAX:
+                _checkpoint_metadata_cache.popitem(last=False)
         return metadata
 
     @classmethod
@@ -557,7 +601,7 @@ class ForgeEngine:
                      checkpoint_path=checkpoint, **kwargs)
         engine._checkpoint_metadata = metadata
         engine.keystack_features = ["bitnet_prequant", "quarot", "mrl"]
-        print(f"  [ForgeEngine] KeyStack features: {engine.keystack_features}")
+        engine._log(f"KeyStack features: {engine.keystack_features}")
         return engine
 
     @classmethod
@@ -809,6 +853,9 @@ class ForgeEngine:
         self.kv_cache = build_kv_cache(kv_cache)
         self.kv_cache.init(n_heads, head_dim, n_kv, max_seq,
                            str(self.device), self.dtype)
+        # Track active KV bits for OOM-recovery fallback (s4r 4-bit, etc.)
+        self._active_kv_bits = getattr(self.kv_cache, "bits", 8)
+        self._active_kv_cache_name = kv_cache
         self._log(f"KV cache: {self.kv_cache.info()}")
 
     def _activate_decoding(self, decoding):
@@ -1024,9 +1071,7 @@ class ForgeEngine:
                     f"{self._LOW_VRAM_THRESHOLD_BYTES / 1e9:.2f} GB) — "
                     f"proactively switching KV cache to cpu_offload",
                     level="warn")
-                torch.cuda.synchronize(self.device)
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize(self.device)
+                self._clear_cuda_cache()
                 try:
                     self._activate_kv_cache("cpu_offload", None)
                 except Exception as e:
@@ -1254,7 +1299,7 @@ class ForgeEngine:
             self._log(
                 f"Batched OOM ({len(prompts)} prompts), falling back to serial",
                 level="warn")
-            torch.cuda.empty_cache()
+            self._clear_cuda_cache()
             return [self.generate(
                 p, max_new_tokens=max_new_tokens,
                 temperature=temperature, top_p=top_p, top_k=top_k,
@@ -1659,9 +1704,7 @@ class ForgeEngine:
 
             self._record_generation(len(generated_ids))
         except torch.cuda.OutOfMemoryError as e:
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize(self.device)
+            self._clear_cuda_cache()
             vram = self.vram_usage() if self.device.type == "cuda" else {}
             raise GenerationOOMError(
                 f"OOM during streaming generation: {e}",
@@ -1732,9 +1775,7 @@ class ForgeEngine:
             return generate_fn(*args, **kwargs)
         except torch.cuda.OutOfMemoryError as e:
             self._log(f"OOM during generation: {e}", level="error")
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize(self.device)
+            self._clear_cuda_cache()
 
             # Attempt 1: retry after cache clear
             try:
@@ -2022,10 +2063,7 @@ class ForgeEngine:
 
         if level == 1:
             self.model.to("cpu", non_blocking=True)
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize(self.device)
+            self._clear_cuda_cache()
             self._awake = False
             self._sleep_level = 1
             self._log("Sleep level 1: weights offloaded to CPU")
@@ -2036,11 +2074,11 @@ class ForgeEngine:
         self._stored_dtype = self.dtype
         self._stored_checkpoint = self.checkpoint_path
         self._profiler.model = None
+        # Release acceleration resources that hold CUDA memory/graphs.
+        # Without this, sleep(level=2) leaks CUDA graph + megakernel memory.
+        self._release_acceleration_resources()
         self.model = None
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize(self.device)
+        self._clear_cuda_cache()
         self._awake = False
         self._sleep_level = 2
         if self.device.type == "cuda":
@@ -2187,6 +2225,7 @@ class ForgeEngine:
             session_id, prompt)
 
         # If we have cached KV, only prefill the delta
+        generated_ids: list[int] = []
         if cached_len > 0 and past_kv is not None:
             delta_ids = ids[:, cached_len:]
             if delta_ids.shape[1] > 0:
@@ -2195,7 +2234,6 @@ class ForgeEngine:
                         delta_ids, past_key_values=past_kv, use_cache=True)
                     logits, past_kv = unpack_output_with_kv(out)
             # Decode from current logits
-            generated_ids: list[int] = []
             eos_set = self._eos_token_ids()
             for _ in self._decode_tokens(
                 logits, past_kv, max_new_tokens, temperature, top_p, top_k,
@@ -2209,13 +2247,14 @@ class ForgeEngine:
                 lambda: self._full_generate(
                     ids, max_new_tokens, temperature, top_p, top_k,
                     repetition_penalty))
+            # _full_generate records its own token count; generated_ids stays empty here.
 
         # Update session KV state
         last_kv = getattr(self.model, '_forge_last_kv', None)
         if last_kv is not None:
             self._session_cache.update_session_kv(session_id, last_kv)
 
-        self._record_generation(len(generated_ids) if 'generated_ids' in dir() else 0)
+        self._record_generation(len(generated_ids))
         return result
 
     def pin_session(self, session_id: str, ttl: float | None = None):

@@ -435,32 +435,20 @@ class CPUAdamW(Optimizer):
         # synchronous copies (the CPU AdamW math is the bottleneck anyway,
         # so transfer overlap provides minimal benefit).
         if not chunk_bytes:
-            shared_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-            if shared_stream is not None:
-                with torch.cuda.stream(shared_stream):
-                    for group in self.param_groups:
-                        for p in group["params"]:
-                            if p.grad is None:
-                                continue
-                            if p.device.type == "cpu":
-                                continue
-                            state = self.state[p]
-                            grad_cpu = state[buf_key]
-                            # Synchronous copy: avoids GPU temp buffer accumulation
-                            # from async dtype-converted copies
-                            grad_cpu.copy_(p.grad, non_blocking=False)
-                copy_streams.append(shared_stream)
-            else:
-                for group in self.param_groups:
-                    for p in group["params"]:
-                        if p.grad is None:
-                            continue
-                        if p.device.type == "cpu":
-                            continue
-                        state = self.state[p]
-                        grad_cpu = state[buf_key]
-                        grad_cpu.copy_(p.grad, non_blocking=False)
-            return copy_streams
+            # Synchronous copy path: no stream needed (copies are non_blocking=False
+            # to avoid GPU temp buffer accumulation from dtype-converted async copies).
+            # The CPU AdamW math is the bottleneck, so transfer overlap provides
+            # minimal benefit here.
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    if p.device.type == "cpu":
+                        continue
+                    state = self.state[p]
+                    grad_cpu = state[buf_key]
+                    grad_cpu.copy_(p.grad, non_blocking=False)
+            return copy_streams  # empty list — caller's stream sync loop is a no-op
 
         # Chunked transfer path: use a small pool of streams (max 4)
         max_streams = 4

@@ -115,12 +115,20 @@ def test_synthetic():
     print(f"\n  ForgeEvolve is {fe_eff/rand_eff:.1f}x more efficient than random search")
 
     # Check if ForgeEvolve beat random with fewer or equal evaluations
+    # Use a relaxed threshold (95% of random) since ForgeEvolve uses fewer evals
+    # and stochasticity can cause variance. The assertion ensures the test
+    # actually fails if ForgeEvolve regresses badly.
     if results['best_score'] > random_best:
         print("  PASS: ForgeEvolve found better score than random search")
     elif results['best_score'] > random_best * 0.95:
         print("  PASS: ForgeEvolve matched random search (within 5%)")
     else:
-        print("  WARN: ForgeEvolve did not match random search — may need tuning")
+        print(f"  FAIL: ForgeEvolve did not match random search "
+              f"({results['best_score']:.4f} vs {random_best:.4f})")
+    assert results['best_score'] >= random_best * 0.90, (
+        f"ForgeEvolve ({results['best_score']:.4f}) severely underperformed "
+        f"random search ({random_best:.4f}) — possible regression in "
+        f"generator/surrogate/trainer")
 
     # Check archive diversity
     elites = results['archive'].get_all_elites()
@@ -128,6 +136,7 @@ def test_synthetic():
         print(f"  PASS: Archive has {len(elites)} diverse elites (MAP-Elites working)")
     else:
         print(f"  WARN: Archive only has {len(elites)} elites (low diversity)")
+    assert len(elites) >= 1, "Archive has zero elites — MAP-Elites is broken"
 
     return results
 
@@ -257,6 +266,11 @@ def test_surrogate_learning():
         print(f"  Improvement: {late_best - early_best:.4f}")
     else:
         print(f"  WARN: No improvement over generations — check learning rate / exploration")
+    # Assert that late generations are at least as good as early (not a strict
+    # improvement requirement since stochasticity on dim=4 can plateau).
+    assert late_best >= early_best * 0.98, (
+        f"Late generations ({late_best:.4f}) regressed vs early ({early_best:.4f}) "
+        f"— surrogate or REINFORCE may be broken")
 
     # Discovery timeline
     if results['discoveries_list']:

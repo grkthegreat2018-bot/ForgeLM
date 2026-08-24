@@ -26,14 +26,17 @@ from safetensors.torch import load_file as load_safetensors
 
 
 def port_to_v3(input_path: str, output_path: str, config_name: str = "forgelm_v7"):
-    """Port base LFM2.5 weights into V3 architecture checkpoint.
+    """Port base LFM2.5 weights into a ForgeLM architecture checkpoint.
 
-    1. Build blank V3 model (diff-attn, BitNet, TITAN, MoD initialized)
+    Historically named "port_to_v3" but now defaults to forgelm_v7 config.
+    The conversion steps depend on the target config's architecture keys:
+
+    1. Build blank model with the target config (all keys identity/zero-init)
     2. Load base LFM2.5 safetensors
-    3. Apply GQA→diff-attn weight conversion (duplicate rows, lambda=0)
-    4. Initialize BitNet qscale from loaded weights
-    5. TITAN memory zero-init (lossless)
-    6. MoD router keep-all (lossless)
+    3. Apply GQA→GTA weight conversion (V=K identity, lossless)
+    4. Initialize BitNet qscale from loaded weights (if use_bitnet)
+    5. TITAN memory zero-init (lossless, if use_titan_memory)
+    6. MoD router keep-all (lossless, if use_mod)
     7. Save full state_dict as new checkpoint
     """
     t0 = time.time()

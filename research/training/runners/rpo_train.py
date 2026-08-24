@@ -207,7 +207,7 @@ class RPOTrainer:
                 if prompt_len == 0:
                     continue
 
-                with oom_guard(self.device, label="rpo_fwd") as safe:
+                with oom_guard(str(self.device), label="rpo_fwd") as safe:
                     with torch.autocast(
                         device_type="cuda", dtype=torch.bfloat16,
                         enabled=("cuda" in str(self.device)),
@@ -258,6 +258,9 @@ class RPOTrainer:
                     loss.backward()
 
                 if safe.skipped:
+                    # Zero any partial gradients from the failed forward/backward
+                    # to prevent corruption of the next accumulation window.
+                    self.optimizer.zero_grad()
                     continue
                 accum_count += 1
 

@@ -28,7 +28,7 @@ import torch
 import numpy as np
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional, Callable
+from typing import Any, Optional
 
 from .generators import GeneratorConfig, GeneratorPopulation, TemplateGenerator
 from .surrogate import SurrogateModel
@@ -388,281 +388,284 @@ class ForgeEvolve:
                   f"domain={self.domain.name()}, device={self.device}"
                   + (f", CPU_pool={self.n_cpu_workers} workers" if self.cpu_pool else ""))
 
-        for gen in range(self.cfg.generations):
-            self.generation = gen
+        try:
+            for gen in range(self.cfg.generations):
+                self.generation = gen
 
-            # Clear CUDA cache periodically to prevent fragmentation OOM
-            if gen > 0 and gen % 5 == 0 and self.device.type == "cuda":
-                torch.cuda.empty_cache()
+                # Clear CUDA cache periodically to prevent fragmentation OOM
+                if gen > 0 and gen % 5 == 0 and self.device.type == "cuda":
+                    torch.cuda.empty_cache()
 
-            if self.cfg.time_budget_s > 0:
-                elapsed = time.time() - self.start_time
-                if elapsed > self.cfg.time_budget_s:
-                    self._log(f"Time budget exceeded ({elapsed:.0f}s)")
-                    break
+                if self.cfg.time_budget_s > 0:
+                    elapsed = time.time() - self.start_time
+                    if elapsed > self.cfg.time_budget_s:
+                        self._log(f"Time budget exceeded ({elapsed:.0f}s)")
+                        break
 
-            # ── PHASE 1: GENERATE (batched GPU forward) ──
-            t0 = time.time()
-            candidates = self.population.generate(n_per_gen=1)
-            n_generated = len(candidates)
-            t_gen = time.time() - t0
+                # ── PHASE 1: GENERATE (batched GPU forward) ──
+                t0 = time.time()
+                candidates = self.population.generate(n_per_gen=1)
+                n_generated = len(candidates)
+                t_gen = time.time() - t0
 
-            # ── PHASE 2: FILTER (surrogate on GPU + epsilon-greedy exploration) ──
-            t0 = time.time()
-            neural_cands = [c for c in candidates if c.get("params") is not None]
-            template_cands = [c for c in candidates if c.get("template_config") is not None]
+                # ── PHASE 2: FILTER (surrogate on GPU + epsilon-greedy exploration) ──
+                t0 = time.time()
+                neural_cands = [c for c in candidates if c.get("params") is not None]
+                template_cands = [c for c in candidates if c.get("template_config") is not None]
 
-            n_eval = max(self.cfg.min_evaluate,
-                         min(self.cfg.max_evaluate, n_generated // self.cfg.filter_ratio))
+                n_eval = max(self.cfg.min_evaluate,
+                             min(self.cfg.max_evaluate, n_generated // self.cfg.filter_ratio))
 
-            n_template_eval = len(template_cands)
-            n_neural_eval = max(0, n_eval - n_template_eval)
+                n_template_eval = len(template_cands)
+                n_neural_eval = max(0, n_eval - n_template_eval)
 
-            if neural_cands and n_neural_eval > 0:
-                # Epsilon-greedy: 30% of eval budget goes to random candidates
-                # Adaptive: more exploration early, less later
-                epsilon = max(0.1, 0.3 - gen * 0.005)
-                n_random = max(1, int(n_neural_eval * epsilon))
-                n_surrogate = n_neural_eval - n_random
+                if neural_cands and n_neural_eval > 0:
+                    # Epsilon-greedy: 30% of eval budget goes to random candidates
+                    # Adaptive: more exploration early, less later
+                    epsilon = max(0.1, 0.3 - gen * 0.005)
+                    n_random = max(1, int(n_neural_eval * epsilon))
+                    n_surrogate = n_neural_eval - n_random
 
-                # Surrogate-filtered selection
-                param_tensor = torch.stack([c["params"] for c in neural_cands]).to(self.device)
-                top_indices = self.surrogate.filter_top_k(param_tensor, n_surrogate)
-                selected_neural = [neural_cands[i] for i in top_indices.tolist()]
+                    # Surrogate-filtered selection
+                    param_tensor = torch.stack([c["params"] for c in neural_cands]).to(self.device)
+                    top_indices = self.surrogate.filter_top_k(param_tensor, n_surrogate)
+                    selected_neural = [neural_cands[i] for i in top_indices.tolist()]
 
-                # Random selection (exploration)
-                remaining = [i for i in range(len(neural_cands)) if i not in top_indices.tolist()]
-                if remaining and n_random > 0:
-                    random_indices = np.random.choice(remaining,
-                                                      size=min(n_random, len(remaining)),
-                                                      replace=False)
-                    selected_neural += [neural_cands[i] for i in random_indices]
-            else:
-                selected_neural = []
-
-            selected = selected_neural + template_cands
-            t_filter = time.time() - t0
-
-            # ── PHASE 3: SCORE (domain evaluation, GPU+CPU parallel) ──
-            t0 = time.time()
-            scores = []
-            behavioral_list = []
-            configs = []
-
-            # Decode all configs first — batch GPU→CPU transfer to avoid 50 sync points
-            # Collect all param tensors, move to CPU in one call, then decode
-            param_tensors = []
-            param_indices = []
-            for ci, cand in enumerate(selected):
-                if "params" in cand and cand["params"] is not None:
-                    param_tensors.append(cand["params"])
-                    param_indices.append(ci)
-
-            if param_tensors:
-                # Single GPU→CPU transfer for all params at once
-                batched_params = torch.stack(param_tensors).detach().cpu()
-
-            decoded = [None] * len(selected)
-            for ci, cand in enumerate(selected):
-                if "params" in cand and cand["params"] is not None:
-                    # Use pre-transferred CPU tensor
-                    pi = param_indices.index(ci)
-                    decoded[ci] = self.domain.decode(batched_params[pi])
+                    # Random selection (exploration)
+                    remaining = [i for i in range(len(neural_cands)) if i not in top_indices.tolist()]
+                    if remaining and n_random > 0:
+                        random_indices = np.random.choice(remaining,
+                                                          size=min(n_random, len(remaining)),
+                                                          replace=False)
+                        selected_neural += [neural_cands[i] for i in random_indices]
                 else:
-                    tc = cand["template_config"]
-                    try:
-                        config = self.domain.decode(self.domain.encode(tc))
-                        config.update(tc)
-                    except Exception:
-                        config = tc
-                    decoded[ci] = config
+                    selected_neural = []
 
-            if self.cpu_pool is not None and len(decoded) >= 8:
-                # Split: GPU gets 40%, CPU workers get 60% (CPU has more cores)
-                n_cpu = int(len(decoded) * 0.6)
-                n_gpu = len(decoded) - n_cpu
-                gpu_configs = decoded[:n_gpu]
-                cpu_configs = decoded[n_gpu:]
+                selected = selected_neural + template_cands
+                t_filter = time.time() - t0
 
-                # Submit CPU batch asynchronously (non-blocking, chunked)
-                chunksize = max(1, len(cpu_configs) // (self.n_cpu_workers * 2))
-                cpu_result_async = self.cpu_pool.map_async(
-                    _cpu_eval, cpu_configs, chunksize=chunksize,
-                )
+                # ── PHASE 3: SCORE (domain evaluation, GPU+CPU parallel) ──
+                t0 = time.time()
+                scores = []
+                behavioral_list = []
+                configs = []
 
-                # Run GPU batch with thread pool + CUDA streams for overlap
-                gpu_results = self._gpu_batch_eval(gpu_configs)
+                # Decode all configs first — batch GPU→CPU transfer to avoid 50 sync points
+                # Collect all param tensors, move to CPU in one call, then decode
+                param_tensors = []
+                param_indices = []
+                for ci, cand in enumerate(selected):
+                    if "params" in cand and cand["params"] is not None:
+                        param_tensors.append(cand["params"])
+                        param_indices.append(ci)
 
-                # Wait for CPU workers to finish
-                cpu_results = cpu_result_async.get()
+                if param_tensors:
+                    # Single GPU→CPU transfer for all params at once
+                    batched_params = torch.stack(param_tensors).detach().cpu()
 
-                # Re-merge in order
-                results = gpu_results + cpu_results
-                configs = gpu_configs + cpu_configs
-            else:
-                # GPU-only: use threaded batch eval for kernel overlap
-                results = self._gpu_batch_eval(decoded)
-                configs = decoded
+                decoded = [None] * len(selected)
+                for ci, cand in enumerate(selected):
+                    if "params" in cand and cand["params"] is not None:
+                        # Use pre-transferred CPU tensor
+                        pi = param_indices.index(ci)
+                        decoded[ci] = self.domain.decode(batched_params[pi])
+                    else:
+                        tc = cand["template_config"]
+                        try:
+                            config = self.domain.decode(self.domain.encode(tc))
+                            config.update(tc)
+                        except Exception:
+                            config = tc
+                        decoded[ci] = config
 
-            for config, result in zip(configs, results):
-                scores.append(result["score"])
-                behavioral_list.append(result.get("behavioral", (0,)))
+                if self.cpu_pool is not None and len(decoded) >= 8:
+                    # Split: GPU gets 40%, CPU workers get 60% (CPU has more cores)
+                    n_cpu = int(len(decoded) * 0.6)
+                    n_gpu = len(decoded) - n_cpu
+                    gpu_configs = decoded[:n_gpu]
+                    cpu_configs = decoded[n_gpu:]
 
-                self.all_results.append({
-                    "generation": gen,
-                    "config": config,
-                    "score": result["score"],
-                    "behavioral": result.get("behavioral", (0,)),
-                    "metadata": result.get("metadata", {}),
-                })
+                    # Submit CPU batch asynchronously (non-blocking, chunked)
+                    chunksize = max(1, len(cpu_configs) // (self.n_cpu_workers * 2))
+                    cpu_result_async = self.cpu_pool.map_async(
+                        _cpu_eval, cpu_configs, chunksize=chunksize,
+                    )
 
-            # Cap results to prevent OOM on long runs
-            if len(self.all_results) > self.max_results:
-                self.all_results = self.all_results[-self.max_results:]
+                    # Run GPU batch with thread pool + CUDA streams for overlap
+                    gpu_results = self._gpu_batch_eval(gpu_configs)
 
-            t_score = time.time() - t0
+                    # Wait for CPU workers to finish
+                    cpu_results = cpu_result_async.get()
 
-            # ── PHASE 4: TRAIN (GPU updates) ──
-            t0 = time.time()
+                    # Re-merge in order
+                    results = gpu_results + cpu_results
+                    configs = gpu_configs + cpu_configs
+                else:
+                    # GPU-only: use threaded batch eval for kernel overlap
+                    results = self._gpu_batch_eval(decoded)
+                    configs = decoded
 
-            # Update archive + save new discoveries to DB
-            new_discoveries = 0
-            new_discovery_list = []
-            for config, score, behavioral in zip(configs, scores, behavioral_list):
-                added = self.archive.add(config, score, behavioral, gen)
-                if added:
-                    new_discoveries += 1
-                    self.discoveries.append({
+                for config, result in zip(configs, results):
+                    scores.append(result["score"])
+                    behavioral_list.append(result.get("behavioral", (0,)))
+
+                    self.all_results.append({
                         "generation": gen,
                         "config": config,
-                        "score": score,
-                        "behavioral": behavioral,
-                    })
-                    new_discovery_list.append({
-                        "generation": gen,
-                        "config": config,
-                        "score": score,
-                        "behavioral": behavioral,
-                        "metadata": self.all_results[-1].get("metadata", {}),
+                        "score": result["score"],
+                        "behavioral": result.get("behavioral", (0,)),
+                        "metadata": result.get("metadata", {}),
                     })
 
-            # Save new discoveries to database (batched — flush every 10 gens)
-            if new_discovery_list:
-                self._pending_discoveries.extend(new_discovery_list)
-                if (gen + 1) % 10 == 0 or gen == self.cfg.generations - 1:
-                    self.db.save_discoveries(self.run_id, self.domain.name(),
-                                             self._pending_discoveries)
-                    self._pending_discoveries = []
+                # Cap results to prevent OOM on long runs
+                if len(self.all_results) > self.max_results:
+                    self.all_results = self.all_results[-self.max_results:]
 
-            # Update surrogate
-            if neural_cands and selected_neural:
-                eval_params = torch.stack([c["params"] for c in selected_neural]).detach()
-                eval_scores = torch.tensor(
-                    scores[:len(selected_neural)], dtype=torch.float32
-                )
-                self.surrogate.train(eval_params, eval_scores)
-                self.surrogate.generation = gen
+                t_score = time.time() - t0
 
-            # Update generators (REINFORCE) — pass context
-            self.trainer.update(selected, scores, self.population.context)
+                # ── PHASE 4: TRAIN (GPU updates) ──
+                t0 = time.time()
 
-            # Evolve population
-            gen_indices = [c.get("generator_idx", -1) for c in selected]
-            mutated = self.population.evolve(scores, gen_indices)
+                # Update archive + save new discoveries to DB
+                new_discoveries = 0
+                new_discovery_list = []
+                for config, score, behavioral in zip(configs, scores, behavioral_list):
+                    added = self.archive.add(config, score, behavioral, gen)
+                    if added:
+                        new_discoveries += 1
+                        self.discoveries.append({
+                            "generation": gen,
+                            "config": config,
+                            "score": score,
+                            "behavioral": behavioral,
+                        })
+                        new_discovery_list.append({
+                            "generation": gen,
+                            "config": config,
+                            "score": score,
+                            "behavioral": behavioral,
+                            "metadata": self.all_results[-1].get("metadata", {}),
+                        })
 
-            # Notify trainer of mutations so it can reset optimizer state
-            for idx in mutated:
-                self.trainer.notify_mutation(idx)
+                # Save new discoveries to database (batched — flush every 10 gens)
+                if new_discovery_list:
+                    self._pending_discoveries.extend(new_discovery_list)
+                    if (gen + 1) % 10 == 0 or gen == self.cfg.generations - 1:
+                        self.db.save_discoveries(self.run_id, self.domain.name(),
+                                                 self._pending_discoveries)
+                        self._pending_discoveries = []
 
-            # Update context: UCB-selected parent (not just best)
-            # 70% UCB selection, 30% best (exploit known good)
-            if np.random.random() < 0.7:
-                parent = self.archive.sample_elite_ucb(current_gen=gen, c=1.0)
-            else:
-                parent = self.archive.best_entry
-            if parent is None:
-                parent = self.archive.best_entry
-            if parent:
-                parent_params = self.domain.encode(parent.config)
-                if parent_params is not None:
-                    self.population.update_context(parent_params)
+                # Update surrogate
+                if neural_cands and selected_neural:
+                    eval_params = torch.stack([c["params"] for c in selected_neural]).detach()
+                    eval_scores = torch.tensor(
+                        scores[:len(selected_neural)], dtype=torch.float32
+                    )
+                    self.surrogate.train(eval_params, eval_scores)
+                    self.surrogate.generation = gen
 
-            t_train = time.time() - t0
+                # Update generators (REINFORCE) — pass context
+                self.trainer.update(selected, scores, self.population.context)
 
-            # Incremental generator/surrogate checkpoint every 10 gens
-            if (gen + 1) % 10 == 0:
-                self.db.save_generators(self.run_id, self.domain.name(),
-                                        self.population.batched_gen)
-                self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
+                # Evolve population
+                gen_indices = [c.get("generator_idx", -1) for c in selected]
+                mutated = self.population.evolve(scores, gen_indices)
 
-            # ── LOG ──
-            if gen % self.cfg.log_every == 0:
-                self._log(
-                    f"gen={t_gen:.3f}s filter={t_filter:.3f}s "
-                    f"score={t_score:.2f}s train={t_train:.3f}s | "
-                    f"evaluated={len(selected)}/{n_generated} | "
-                    f"new={new_discoveries} | "
-                    f"{self.archive.summary()}"
-                )
+                # Notify trainer of mutations so it can reset optimizer state
+                for idx in mutated:
+                    self.trainer.notify_mutation(idx)
 
-        # Final summary
-        elapsed = time.time() - self.start_time
-        self._log(f"Done: {self.generation+1} generations, "
-                  f"{len(self.all_results)} evaluations, "
-                  f"{len(self.discoveries)} discoveries, "
-                  f"{elapsed:.1f}s total")
+                # Update context: UCB-selected parent (not just best)
+                # 70% UCB selection, 30% best (exploit known good)
+                if np.random.random() < 0.7:
+                    parent = self.archive.sample_elite_ucb(current_gen=gen, c=1.0)
+                else:
+                    parent = self.archive.best_entry
+                if parent is None:
+                    parent = self.archive.best_entry
+                if parent:
+                    parent_params = self.domain.encode(parent.config)
+                    if parent_params is not None:
+                        self.population.update_context(parent_params)
 
-        # Save final state to database
-        # Flush any remaining pending discoveries
-        if self._pending_discoveries:
-            self.db.save_discoveries(self.run_id, self.domain.name(),
-                                     self._pending_discoveries)
-            self._pending_discoveries = []
+                t_train = time.time() - t0
 
-        results = {
-            "generations": self.generation + 1,
-            "total_evaluations": len(self.all_results),
-            "discoveries": len(self.discoveries),
-            "best_score": self.archive.best_score,
-            "best_config": self.archive.best_entry.config if self.archive.best_entry else None,
-            "device": str(self.device),
-        }
-        self.db.save_run(self.run_id, self.domain.name(),
-                         {"n_generators": self.cfg.n_generators,
-                          "filter_ratio": self.cfg.filter_ratio,
-                          "generations": self.cfg.generations},
-                         results, self.start_time)
-        self.db.save_generators(self.run_id, self.domain.name(),
-                                self.population.batched_gen)
-        self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
-        self._log(f"Saved to database: {self.cfg.db_path} (run_id={self.run_id})")
+                # Incremental generator/surrogate checkpoint every 10 gens
+                if (gen + 1) % 10 == 0:
+                    self.db.save_generators(self.run_id, self.domain.name(),
+                                            self.population.batched_gen)
+                    self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
 
-        # Clean up CPU worker pool
-        if self.cpu_pool is not None:
-            self.cpu_pool.close()
-            self.cpu_pool.join()
-            self.cpu_pool = None
+                # ── LOG ──
+                if gen % self.cfg.log_every == 0:
+                    self._log(
+                        f"gen={t_gen:.3f}s filter={t_filter:.3f}s "
+                        f"score={t_score:.2f}s train={t_train:.3f}s | "
+                        f"evaluated={len(selected)}/{n_generated} | "
+                        f"new={new_discoveries} | "
+                        f"{self.archive.summary()}"
+                    )
 
-        return {
-            "generations": self.generation + 1,
-            "total_evaluations": len(self.all_results),
-            "discoveries": len(self.discoveries),
-            "archive_coverage": self.archive.coverage(),
-            "best_score": self.archive.best_score,
-            "best_config": self.archive.best_entry.config if self.archive.best_entry else None,
-            "pareto_front": [
-                {"config": e.config, "score": e.score, "behavioral": e.behavioral,
-                 "generation": e.generation, "metadata": e.metadata}
-                for e in self.archive.get_pareto_front()
-            ],
-            "time_s": elapsed,
-            "all_results": self.all_results,
-            "discoveries_list": self.discoveries,
-            "archive": self.archive,
-            "device": str(self.device),
-            "run_id": self.run_id,
-            "warm_started": self._warm_started,
-        }
+            # Final summary
+            elapsed = time.time() - self.start_time
+            self._log(f"Done: {self.generation+1} generations, "
+                      f"{len(self.all_results)} evaluations, "
+                      f"{len(self.discoveries)} discoveries, "
+                      f"{elapsed:.1f}s total")
+
+            # Save final state to database
+            # Flush any remaining pending discoveries
+            if self._pending_discoveries:
+                self.db.save_discoveries(self.run_id, self.domain.name(),
+                                         self._pending_discoveries)
+                self._pending_discoveries = []
+
+            results = {
+                "generations": self.generation + 1,
+                "total_evaluations": len(self.all_results),
+                "discoveries": len(self.discoveries),
+                "best_score": self.archive.best_score,
+                "best_config": self.archive.best_entry.config if self.archive.best_entry else None,
+                "device": str(self.device),
+            }
+            self.db.save_run(self.run_id, self.domain.name(),
+                             {"n_generators": self.cfg.n_generators,
+                              "filter_ratio": self.cfg.filter_ratio,
+                              "generations": self.cfg.generations},
+                             results, self.start_time)
+            self.db.save_generators(self.run_id, self.domain.name(),
+                                    self.population.batched_gen)
+            self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
+            self._log(f"Saved to database: {self.cfg.db_path} (run_id={self.run_id})")
+
+            results = {
+                "generations": self.generation + 1,
+                "total_evaluations": len(self.all_results),
+                "discoveries": len(self.discoveries),
+                "archive_coverage": self.archive.coverage(),
+                "best_score": self.archive.best_score,
+                "best_config": self.archive.best_entry.config if self.archive.best_entry else None,
+                "pareto_front": [
+                    {"config": e.config, "score": e.score, "behavioral": e.behavioral,
+                     "generation": e.generation, "metadata": e.metadata}
+                    for e in self.archive.get_pareto_front()
+                ],
+                "time_s": elapsed,
+                "all_results": self.all_results,
+                "discoveries_list": self.discoveries,
+                "archive": self.archive,
+                "device": str(self.device),
+                "run_id": self.run_id,
+                "warm_started": self._warm_started,
+            }
+        finally:
+            # Clean up CPU worker pool
+            if self.cpu_pool is not None:
+                self.cpu_pool.close()
+                self.cpu_pool.join()
+                self.cpu_pool = None
+
+        return results
 
     def guide(self, direction: str = "explore",
               seed_configs: list[dict] | None = None,

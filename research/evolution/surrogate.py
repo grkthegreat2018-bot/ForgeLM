@@ -105,7 +105,7 @@ class SurrogateModel:
                 # Distance-based uncertainty (epistemic)
                 dist_uncertainty = torch.zeros_like(pred_mean)
                 if self.x_history is not None and len(self.x_history) > 0:
-                    x_hist = self.x_history
+                    x_hist = torch.cat(self.x_history)
                     if len(x_hist) > 500:
                         idx = torch.randperm(len(x_hist))[:500]
                         x_hist = x_hist[idx]
@@ -167,13 +167,16 @@ class SurrogateModel:
 
             self.n_trained += len(scs)
 
-            # Track training data for distance uncertainty
+            # Track training data for distance uncertainty (list of tensors,
+            # concatenated only when needed in predict() to avoid O(n²) reallocation)
             if self.x_history is None:
-                self.x_history = cands.clone()
-            else:
-                self.x_history = torch.cat([self.x_history, cands])
-            if len(self.x_history) > 2000:
-                self.x_history = self.x_history[-2000:]
+                self.x_history = []
+            self.x_history.append(cands.clone())
+            # Cap: remove oldest batches if total data points exceed 2000
+            _total = sum(t.shape[0] for t in self.x_history)
+            while _total > 2000 and len(self.x_history) > 1:
+                _removed = self.x_history.pop(0)
+                _total -= _removed.shape[0]
 
         elif self.mode == "gp":
             cands = candidates.to(self.device)

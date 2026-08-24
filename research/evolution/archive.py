@@ -11,6 +11,7 @@ Example for quant domain:
 """
 from __future__ import annotations
 
+import collections
 import torch
 import numpy as np
 from dataclasses import dataclass, field
@@ -45,8 +46,8 @@ class MapElitesArchive:
         self.n_filled = 0
         self.best_score = -float("inf")
         self.best_entry: Optional[ArchiveEntry] = None
-        self.history: list[ArchiveEntry] = []
         self.max_history = max_history  # cap to prevent OOM on long runs
+        self.history = collections.deque(maxlen=self.max_history)
         self._pareto_cache: list[ArchiveEntry] | None = None  # cached Pareto front
 
     def _init_grid(self):
@@ -77,9 +78,6 @@ class MapElitesArchive:
             generation=generation, metadata=metadata or {},
         )
         self.history.append(entry)
-        # Cap history to prevent unbounded memory growth on long runs
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
 
         idx = self._to_bin(behavioral)
         existing = self.grid[idx]

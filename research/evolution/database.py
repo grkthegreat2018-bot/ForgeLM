@@ -386,7 +386,8 @@ class FindingsDB:
                 transferred += 1
                 # Only transfer from the best source (first match)
                 break
-            except Exception:
+            except Exception as e:
+                print(f"  [ForgeEvolve] Cross-domain transfer failed: {e}")
                 continue
 
         return transferred
@@ -415,3 +416,13 @@ class FindingsDB:
 
     def close(self):
         self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        if hasattr(self, 'conn'):
+            self.close()

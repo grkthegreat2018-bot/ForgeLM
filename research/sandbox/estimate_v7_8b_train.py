@@ -14,7 +14,7 @@ for name in configs:
         vocab = c.vocab_size
         attn_type = getattr(c, 'attn_type', 'gqa')
         use_moe = getattr(c, 'use_moe', False)
-        n_experts = getattr(c, 'moe_num_experts', 0)
+        n_experts = getattr(c, 'moe_n_experts', 0)
         print(f"\n{name}:")
         print(f"  d_model={d}, n_layers={L}, vocab={vocab}, intermediate={inter}")
         print(f"  attn_type={attn_type}, moe={use_moe}, n_experts={n_experts}")

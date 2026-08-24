@@ -1513,6 +1513,15 @@ class ConfigurableResearchLLM(nn.Module):
                 FFN — largest activation consumer), "attn" (recompute only
                 attention), "none" (no recomputation).
         """
+        valid = {"all", "ffn", "attn", "none"}
+        if strategy not in valid:
+            import warnings
+            warnings.warn(
+                f"Unknown gradient checkpointing strategy '{strategy}' — "
+                f"falling back to 'none' (no checkpointing). "
+                f"Valid strategies: {sorted(valid)}",
+                stacklevel=2,
+            )
         for block in self.blocks:
             block._gradient_checkpointing = True
             block._gradient_checkpointing_strategy = strategy
