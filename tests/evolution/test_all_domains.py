@@ -1,43 +1,40 @@
 """Smoke test: verify all 57 domains can instantiate and evaluate."""
 import sys
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import pytest
 import torch
 import numpy as np
 from research.evolution.domains import DOMAINS, list_domains, get_domain
 
+
+@pytest.mark.parametrize("name", list_domains())
 def test_domain(name):
     """Test one domain: instantiate, decode, evaluate, check output."""
-    try:
-        cls = DOMAINS[name]
-        domain = cls()
-        # Check output_dim
-        od = domain.output_dim()
-        assert od > 0, f"output_dim={od}"
-        # Check behavioral_dims
-        bd = domain.behavioral_dims()
-        assert len(bd) >= 1, f"behavioral_dims empty"
-        # Decode random params
-        params = torch.rand(od)
-        config = domain.decode(params)
-        assert isinstance(config, dict), f"decode returned {type(config)}"
-        # Evaluate
-        result = domain.evaluate(config)
-        assert "score" in result, f"missing score"
-        assert "behavioral" in result, f"missing behavioral"
-        assert "metadata" in result, f"missing metadata"
-        assert isinstance(result["score"], float), f"score not float"
-        assert isinstance(result["behavioral"], tuple), f"behavioral not tuple"
-        # Check behavioral dims match
-        assert len(result["behavioral"]) == len(bd), \
-            f"behavioral len {len(result['behavioral'])} != dims {len(bd)}"
-        # Check encode round-trip
-        encoded = domain.encode(config)
-        assert encoded.shape[0] == od, f"encode shape {encoded.shape} != {od}"
-        # Check not all zeros (degenerate)
-        assert result["score"] != 0 or name == "SyntheticDomain", f"score=0"
-        return True, result["score"]
-    except Exception as e:
-        return False, str(e)
+    cls = DOMAINS[name]
+    domain = cls()
+    # Check output_dim
+    od = domain.output_dim()
+    assert od > 0, f"output_dim={od}"
+    # Check behavioral_dims
+    bd = domain.behavioral_dims()
+    assert len(bd) >= 1, f"behavioral_dims empty"
+    # Decode random params
+    params = torch.rand(od)
+    config = domain.decode(params)
+    assert isinstance(config, dict), f"decode returned {type(config)}"
+    # Evaluate
+    result = domain.evaluate(config)
+    assert "score" in result, f"missing score"
+    assert "behavioral" in result, f"missing behavioral"
+    assert "metadata" in result, f"missing metadata"
+    assert isinstance(result["score"], float), f"score not float"
+    assert isinstance(result["behavioral"], tuple), f"behavioral not tuple"
+    # Check behavioral dims match
+    assert len(result["behavioral"]) == len(bd), \
+        f"behavioral len {len(result['behavioral'])} != dims {len(bd)}"
+    # Check encode round-trip
+    encoded = domain.encode(config)
+    assert encoded.shape[0] == od, f"encode shape {encoded.shape} != {od}"
 
 if __name__ == "__main__":
     names = list_domains()

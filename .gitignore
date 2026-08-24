@@ -86,6 +86,10 @@ research/results/*.db-wal
 research/results/*.db-shm
 tests/integration/*.db
 tests/integration/*.db-journal
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # IDE / OS
 .vscode/

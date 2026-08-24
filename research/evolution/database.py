@@ -27,6 +27,25 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy arrays and scalars (avoids default=str)."""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        return super().default(obj)
+
+
+def _dumps(obj) -> str:
+    """JSON dumps with numpy support."""
+    return json.dumps(obj, default=_NumpyEncoder().default)
+
+
 class FindingsDB:
     """SQLite-backed persistent storage for ForgeEvolve findings."""
 
@@ -132,13 +151,13 @@ class FindingsDB:
              best_config_json, device)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            run_id, domain, json.dumps(config, default=str),
+            run_id, domain, _dumps(config),
             start_time, time.time(),
             results.get("generations", 0),
             results.get("total_evaluations", 0),
             results.get("discoveries", 0),
             results.get("best_score", 0),
-            json.dumps(results.get("best_config"), default=str),
+            _dumps(results.get("best_config")),
             results.get("device", "unknown"),
         ))
         self.conn.commit()
@@ -155,10 +174,10 @@ class FindingsDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id, domain, d.get("generation", 0),
-                json.dumps(d.get("config"), default=str),
+                _dumps(d.get("config")),
                 d.get("score", 0),
-                json.dumps(d.get("behavioral"), default=str),
-                json.dumps(d.get("metadata", {}), default=str),
+                _dumps(d.get("behavioral")),
+                _dumps(d.get("metadata", {})),
             ))
         self.conn.commit()
 
@@ -172,8 +191,8 @@ class FindingsDB:
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
             run_id, domain, generation,
-            json.dumps(config, default=str), score,
-            json.dumps(metadata, default=str),
+            _dumps(config), score,
+            _dumps(metadata),
         ))
         self.conn.commit()
 
@@ -221,10 +240,14 @@ class FindingsDB:
         with torch.no_grad():
             for name, p in batched_gen.named_parameters():
                 if name in weights:
-                    p.copy_(torch.from_numpy(weights[name]).to(p.device))
-            batched_gen.fitness_ema.copy_(
-                torch.from_numpy(fitness).to(batched_gen.fitness_ema.device)
-            )
+                    saved = torch.from_numpy(weights[name]).to(p.device)
+                    if saved.shape != p.shape:
+                        continue  # skip mismatched shapes (e.g. different output_dim)
+                    p.copy_(saved)
+            if fitness.shape == batched_gen.fitness_ema.shape:
+                batched_gen.fitness_ema.copy_(
+                    torch.from_numpy(fitness).to(batched_gen.fitness_ema.device)
+                )
         return True
 
     def save_surrogate(self, run_id: str, domain: str, surrogate):
@@ -267,7 +290,10 @@ class FindingsDB:
         with torch.no_grad():
             for name, p in surrogate.net.named_parameters():
                 if name in weights:
-                    p.copy_(torch.from_numpy(weights[name]).to(p.device))
+                    saved = torch.from_numpy(weights[name]).to(p.device)
+                    if saved.shape != p.shape:
+                        continue  # skip mismatched shapes (e.g. different input_dim)
+                    p.copy_(saved)
         return True
 
     def query_discoveries(self, domain: str, min_score: float = -1e9,
@@ -426,3 +452,4 @@ class FindingsDB:
     def __del__(self):
         if hasattr(self, 'conn'):
             self.close()
+
