@@ -171,7 +171,9 @@ def get_lr(step, max_steps, max_lr, min_lr, warmup_steps):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf16_state=False):
+def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
+                        bf16_state=False, freetoken=False, double_buffer=False,
+                        bandwidth_adaptive=False, chunk_size_mb=None):
     """Return an optimizer. Default is fused AdamW (fastest on RTX 5070).
 
     Benchmarks show fused AdamW is ~26% faster than bitsandbytes 8-bit on
@@ -181,6 +183,14 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
     bf16_state=True is accepted but currently falls back to fp32 state —
     stock PyTorch AdamW cannot mix bf16 momentum with fp32 grads. Use 'bnb'
     (8-bit) instead for VRAM-constrained scenarios.
+
+    FreeToken-inspired options (R&D round 14, arXiv:2608.16157):
+      - freetoken=True: Enables double_buffer + bandwidth_adaptive on cpu_offload.
+        Equivalent to the full FreeToken training pipeline: ping-pong grad
+        buffers, bandwidth-adaptive chunked transfers, predictive offload.
+      - double_buffer=True: Ping-pong grad buffers for transfer/compute overlap.
+      - bandwidth_adaptive=True: Profile PCIe bandwidth, auto-set chunk size.
+      - chunk_size_mb: Override auto-computed chunk size for chunked transfers.
     """
     if bf16_state:
         print("NOTE: --bf16-optimizer not yet supported with stock AdamW; using bnb 8-bit instead.")
@@ -229,8 +239,32 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused", bf1
         # Eliminates the 14.4GB fp32 AdamW VRAM cost for 1.2B models.
         # Enables full-precision training on 12GB GPUs (vs 8-bit bnb fallback).
         from research.training.optim.hybrid_offload import CPUAdamW
-        print("Using CPUAdamW (ZeRO-Offload-style: optimizer states on CPU).")
-        return CPUAdamW(param_groups, lr=max_lr, weight_decay=weight_decay)
+        # FreeToken-inspired: freetoken=True enables all enhancements at once
+        if freetoken:
+            double_buffer = True
+            bandwidth_adaptive = True
+        print(f"Using CPUAdamW (ZeRO-Offload-style: optimizer states on CPU)."
+              f"{' [FreeToken: double_buffer + bandwidth_adaptive]' if freetoken else ''}")
+        return CPUAdamW(param_groups, lr=max_lr, weight_decay=weight_decay,
+                        double_buffer=double_buffer,
+                        bandwidth_adaptive=bandwidth_adaptive,
+                        chunk_size_mb=chunk_size_mb)
+
+    if optimizer_name == "badam":
+        # BAdam: block-wise Adam, updates one layer at a time.
+        # Memory: 2M + 16M/D GB (D=blocks). For V7 (2.8B, 32 layers): ~9 GB.
+        # Full-parameter training at LoRA-level memory. NeurIPS 2024.
+        from research.training.optim.badam import configure_badam
+        print("Using BAdam (block-wise Adam, one layer at a time).")
+        return configure_badam(model, lr=max_lr, weight_decay=weight_decay,
+                               blocks_per_layer=1, switch_every=1)
+
+    if optimizer_name == "fira_nlrq":
+        # Fira-NLRQ: for NLRQ models the trainable params are already low-rank
+        # (only S), so Fira degenerates to a two-group AdamW. NeurIPS 2025 basis.
+        from research.training.optim.fira_nlrq import configure_fira_nlrq
+        print("Using Fira-NLRQ (NLRQ-aware AdamW, see fira_nlrq.py docstring).")
+        return configure_fira_nlrq(model, lr=max_lr, weight_decay=weight_decay)
 
     if optimizer_name == "galore":
         try:

@@ -199,7 +199,7 @@ Planned for further integration:
 - MTP, Safety, LeRoPE, CSA, QK-Norm, SandwichNorm, LearnedSink, ValueResidual, SwiGLU Clamp, MRL
 
 ### Self-play & Training
-- `research/training/optim/hybrid_offload.py` — **CPUAdamW**: ZeRO-Offload-style hybrid CPU-GPU optimizer. Keeps fp32 optimizer states + master weights on CPU pinned RAM, model bf16 on GPU. Eliminates 14.4GB fp32 AdamW VRAM cost for 1.2B models → full-precision training on 12GB GPU. Async grad offload + optional overlap mode (CPU math on background thread, GPU param sync on main thread). Use via `--optimizer cpu_offload` in any trainer. VRAM budget: ~6-7GB GPU (weights+grads+activations), ~19GB CPU (optimizer states).
+- `research/training/optim/hybrid_offload.py` — **CPUAdamW**: ZeRO-Offload-style hybrid CPU-GPU optimizer. Keeps fp32 optimizer states + master weights on CPU pinned RAM, model bf16 on GPU. Eliminates 14.4GB fp32 AdamW VRAM cost for 1.2B models → full-precision training on 12GB GPU. Async grad offload + optional overlap mode (CPU math on background thread, GPU param sync on main thread). **R&D 14 FreeToken enhancements**: `double_buffer` (ping-pong grad buffers), `bandwidth_adaptive` (PCIe profiling + auto chunk size), `chunk_size_mb` (gradient-chunked pipeline), `BandwidthPredictor` (predictive offload). Use via `--optimizer cpu_offload --freetoken` in any trainer. VRAM budget: ~6-7GB GPU (weights+grads+activations), ~19GB CPU (optimizer states + double-buffer).
 - `research/training/runners/cpt_train.py` — **CPT with reasoning trace injection** (midtraining stage of LFM2.5-1.2B-Thinking recipe). Mixes reasoning traces (openthoughts, openr1_math, dolphin_r1) with general data (orca_math, metamath) at configurable ratio (default 60% reasoning). Full-sequence next-token prediction (no completion masking, unlike SFT). Sequence packing for efficiency. MixedDataSampler ensures every batch has the right reasoning/general ratio. CLI: `python -m research.training.runners.cpt_train --reasoning-data <files> --general-data <files> --checkpoint <ckpt> --save <out> --optimizer cpu_offload --reasoning-ratio 0.6 --lr 1e-4 --max-steps 5000`
 - `research/training/runners/curriculum_sft.py` — **Curriculum SFT: Mix Distillation + two-stage curriculum** (SFT stage of LFM2.5-1.2B-Thinking recipe, informed by Small Model Learnability Gap research arXiv 2502.12143). Three subcommands: `prepare` (classifies data into short/long CoT, filters doom-loops via n-gram repetition, applies mix distillation blending), `train-stage1` (short CoT — builds internal solver, higher LR), `train-stage2` (long CoT + mix distillation — externalizes reasoning, lower LR), `full` (runs all three). Doom-loop filter: n-gram repetition ratio detector (n=8, threshold=0.3) removes training examples with excessive repetition (#1 failure mode of reasoning models). Mix distillation: blends long CoT (teacher) + short CoT (student) at target ratio to match small model intrinsic learning capacity. CLI: `python -m research.training.runners.curriculum_sft prepare --input <files> --output-dir <dir> --filter-doom-loops --mix-ratio 0.5`
 - `research/training/runners/dpo_data_gen.py` — **DPO preference data generation with doom-loop mitigation** (DPO stage of LFM2.5-1.2B-Thinking recipe). Generates 5 temperature-sampled + 1 greedy candidate per prompt from SFT checkpoint, scores each with an LLM judge (teacher API model via distill_client), flags doom-loop candidates via n-gram repetition, constructs preference pairs where chosen=best non-looping, rejected=worst OR any looping (loops always rejected regardless of judge score). Reduces doom-loop rate from ~15% (SFT) to ~4% (DPO). CLI: `python -m research.training.runners.dpo_data_gen --prompts <jsonl> --checkpoint <sft_ckpt> --output <pairs.jsonl> --n-temp-samples 5 --judge-model qwen3-32b`. Then: `python -m research.training.runners.dpo_align --data <pairs.jsonl> --checkpoint <sft_ckpt> --save <dpo_ckpt> --optimizer cpu_offload`
@@ -290,9 +290,16 @@ Five additional techniques from latest 2026 research, all opt-in via `ForgeEngin
 
 ### NVFP4 Quantization (research/inference/quant/nvfp4_quant.py)
 - Native FP4 (E2M1) on Blackwell 5th-gen tensor cores with block scaling
-- 2× throughput vs FP8, 4× memory vs FP16. ~99% quality with calibration
+- **Two-level scaling**: per-channel fp32 global + per-block FP8 normalized scales
+- 3.8× compression (0.53 bytes/weight). ~99% quality with calibration
 - RTX 5070 (SM120) supports `mxf8f6f4.block_scale` in MMA instructions
-- `quantize="nvfp4"` — ForgeLM V4 (1.2B): 2.34GB → ~0.66GB (3.6× compression)
+- `quantize="nvfp4"` — ForgeLM V4 (1.2B): 2.34GB → ~0.62GB (3.8× compression)
+- **NOW THE DEFAULT** on Blackwell (auto-selected even when VRAM is ample)
+- V7 8B estimate: 15.0 GB bf16 → 4.0 GB NVFP4 (fits 12GB with 8GB for KV)
+- **Novel: AS-FP4** (`research/inference/quant/novel_quant.py`): MSE-optimal
+  per-block scales via grid search → 5.9% lower error than standard NVFP4
+- **Novel: R-FP4** (`research/inference/quant/novel_quant.py`): FP4 + sparse
+  INT8 residual for top-k errors → 21.7% lower error at 5% residual (2.6x compression)
 
 ### ATFlash Wavelength Pruning (research/inference/attention/atflash.py)
 - Per-RoPE-wavelength distance windows: each frequency pair prunes beyond its wavelength
@@ -851,7 +858,120 @@ Codebase-wide audit and fixes across all 12 previous R&D rounds:
   356/361 tests pass (5 pre-existing network-dependent failures in
   `test_distill_client.py`).
 
-## 2025/2026 Architecture Keys (research/keys/)
+## V4 R&D Round 14: FreeToken-Inspired Training Pipeline (2026-09)
+
+Inspired by FreeToken (arXiv:2608.16157) — edge-native MoE serving engine with
+bandwidth-adaptive CPU-GPU co-execution. Applied the key training innovations
+to ForgeAI's `CPUAdamW` optimizer and `sft_train` loop.
+
+### New Files
+- `research/runtime/bandwidth_profiler.py` — **BandwidthProfiler + BandwidthPredictor**: measures PCIe bandwidth (B_P=push, B_H=pull) via staged CUDA events, computes q* split ratio, predicts bandwidth trend from VRAM usage samples for pre-emptive offload decisions.
+- `research/sandbox/bench_freetoken_training.py` — Benchmark comparing baseline vs overlap vs freetoken vs freetoken_chunked.
+- `tests/unit/test_hybrid_offload_ft.py` — 6 tests: backward compat, double_buffer, bandwidth_adaptive, chunked, correctness (bit-exact), predictor.
+
+### Modified Files
+- `research/training/optim/hybrid_offload.py` — **CPUAdamW enhanced**:
+  - **Double-buffered gradient pipeline** (`double_buffer=True`): ping-pong grad buffers (grad_cpu + grad_cpu_b) eliminate transfer-then-compute serialization. CUDA transfer to inactive buffer overlaps with CPU AdamW reading active buffer.
+  - **Bandwidth-adaptive offload** (`bandwidth_adaptive=True`): profiles PCIe bandwidth on init, computes q* = B_P/B_H ratio, auto-sets chunk_size_mb = B_P * 0.01 (10ms worth of data per chunk).
+  - **Gradient-chunked pipeline** (`chunk_size_mb`): splits large grad tensors into bandwidth-optimal chunks, uses 4-stream pool for finer PCIe overlap.
+  - **Bandwidth predictor** (`BandwidthPredictor`): records (step, B_P, VRAM) samples, linear-regresses B_P vs VRAM, triggers `should_preempt_offload()` when predicted B_P drops below threshold or VRAM trend approaches limit.
+  - **3-stage pipeline** in `step()`: (1) start CUDA grad transfer, (2) wait for previous CPU step (overlaps with transfer), (3) launch new CPU step on background thread.
+  - **Bug fix**: `_lazy_init` async copy with dtype conversion produced stale master weights (non_blocking + bf16→fp32 conversion race). Fixed to synchronous copy.
+  - **Bug fix**: Per-tensor CUDA stream creation caused OOM on 12GB GPUs (149 streams for 1.2B model). Fixed to shared single-stream for non-chunked, 4-stream pool for chunked.
+  - **Bug fix**: `non_blocking=True` with dtype-converted copies (bf16↔fp32) allocates GPU staging buffers per-tensor, causing OOM. Fixed to synchronous copies for dtype-converted transfers.
+- `research/training/training_utils.py` — `configure_optimizer` now accepts `freetoken`, `double_buffer`, `bandwidth_adaptive`, `chunk_size_mb` params. `freetoken=True` enables all enhancements at once.
+- `research/training/runners/sft_train.py` — CLI args `--freetoken`, `--double-buffer`, `--bandwidth-adaptive`, `--chunk-size-mb`, `--elastic-grad-accum`. 3-stage pipeline integration: `optimizer.wait()` before forward (overlaps previous CPU step with current forward). Bandwidth sample recording + predictive offload check every 10 steps. Elastic grad_accum adjusts based on VRAM pressure.
+
+### Benchmark Results (201M param model, seq_len=256, batch=2, RTX 5070)
+| Mode | Fwd | Bwd | Opt | Wait | Total | tok/s | Speedup |
+|------|-----|-----|-----|------|-------|-------|---------|
+| baseline (sync) | 5ms | 11ms | 469ms | 0 | 485ms | 1056 | 1.00x |
+| overlap | 5ms | 11ms | 66ms | 225ms | 306ms | 1671 | 1.58x |
+| freetoken | 5ms | 11ms | 29ms | 226ms | 271ms | 1890 | 1.79x |
+| freetoken_chunked | 5ms | 11ms | 24ms | 219ms | 258ms | 1982 | **1.88x** |
+
+Key insight: the `opt` column drops from 469ms→24ms because CPU AdamW math
+runs entirely in the background thread, hidden behind the `wait` phase (~220ms
+is the actual CPU compute, overlapped with GPU forward+backward of next batch).
+
+### Usage
+```bash
+# Full FreeToken pipeline
+python -m research.training.runners.sft_train --optimizer cpu_offload --freetoken
+
+# Individual enhancements
+python -m research.training.runners.sft_train --optimizer cpu_offload \
+    --double-buffer --bandwidth-adaptive --chunk-size-mb 64
+
+# With elastic grad_accum (auto-adjusts to avoid OOM)
+python -m research.training.runners.sft_train --optimizer cpu_offload \
+    --freetoken --elastic-grad-accum
+```
+
+## V4 R&D Round 15: NVFP4 Quantization + Novel Quant Algorithms (2026-09)
+
+Made NVFP4 the default inference quantization on Blackwell (RTX 5070 SM120),
+with two novel quantization algorithms that improve on standard FP4.
+
+### NVFP4 (rewritten)
+- `research/inference/quant/nvfp4_quant.py` — **Complete rewrite** of NVFP4:
+  - FP4 E2M1 with 8 magnitude levels {0, 0.5, 1, 1.5, 2, 3, 4, 6}
+  - **Two-level scaling**: per-channel fp32 global scale + per-block FP8 E4M3
+    normalized scales. Critical fix: without two-level scaling, small LLM
+    weights (std~0.02) produce block scales below FP8's minimum (0.002),
+    causing all weights to dequantize to zero.
+  - Fast vectorized dequantization via `searchsorted` on FP4 boundaries
+  - W4A8 mode: FP4 weights + dynamic FP8 activations + `torch._scaled_mm`
+  - 3.8x compression (0.53 bytes/weight vs 2.0 bf16)
+  - V7 8B estimate: 15.0 GB bf16 → 4.0 GB NVFP4 (fits 12GB with 8GB for KV)
+- `research/config.py` — New config fields: `use_nvfp4`, `nvfp4_block_size`,
+  `nvfp4_w4a8`
+- `research/inference/forge_engine.py` — NVFP4 is now the **default auto-select**
+  on Blackwell (even when VRAM is ample, since it's near-lossless at ~99% quality
+  and frees VRAM for larger KV cache / longer context)
+
+### Novel Algorithm 1: AdaptScale FP4 (AS-FP4)
+- `research/inference/quant/novel_quant.py` — `ASFP4Linear`
+- **Novel insight**: standard NVFP4 uses absmax/6.0 block scaling, but this is
+  NOT the MSE-optimal scale. For weights with outliers, absmax scaling maps
+  a few outlier values to 6.0, sacrificing precision for the majority.
+  AS-FP4 uses a grid search over 10 candidate scales (absmax * {0.5..1.5})
+  to find the per-block scale that minimizes MSE.
+- **Result**: 5.9% lower Frobenius error than standard NVFP4, same memory,
+  same inference speed (the grid search is at quantization time only).
+
+### Novel Algorithm 2: ResidualFP4 (R-FP4)
+- `research/inference/quant/novel_quant.py` — `ResidualFP4Linear`
+- **Novel insight**: FP4 quantization error is concentrated in a small number
+  of "hard" elements. R-FP4 stores a sparse INT8 residual for the top-k%
+  largest errors, applied via scatter-add at dequantization time.
+- **Result**: at 5% residual, 21.7% lower error than FP4 (near-INT8 quality
+  at 2.6x compression). At 10% residual, 33.5% lower error (1.9x compression).
+- The residual is stored as (int32 index, int8 value, fp32 per-row scale) —
+  applied as `w.scatter_add_(1, indices, values * scale)` before matmul.
+
+### Benchmark Results (simulated LLM weights, 8192x2048, RTX 5070)
+| Method | Frob Err | Compression | vs INT8 quality |
+|--------|----------|-------------|-----------------|
+| INT8 | 0.023 | 2.0x | baseline |
+| INT4 | 0.199 | 3.9x | 8.6x worse |
+| NVFP4 | 0.107 | 3.8x | 4.6x worse |
+| AS-FP4 | 0.101 | 3.8x | 4.4x worse |
+| R-FP4 5% | 0.083 | 2.6x | 3.6x worse |
+| R-FP4 10% | 0.071 | 1.9x | 3.1x worse |
+
+NVFP4/AS-FP4 give INT4-level compression with significantly better quality.
+R-FP4 10% approaches INT8 quality at nearly 2x compression.
+
+### Tests
+- `tests/unit/test_nvfp4.py` — 6 tests: FP4 roundtrip, forward pass, CUDA,
+  compression, model-level, speed
+- `tests/unit/test_novel_quant.py` — 5 tests: AS-FP4 vs NVFP4, R-FP4 sweep,
+  forward comparison, model-level, CUDA speed
+- `research/sandbox/bench_quant_comparison.py` — Full benchmark across
+  matrix sizes, all quant methods, V7 8B VRAM estimate
+
+
 
 All config-driven, dimension-generic (work at LFM2.5-1.2B scale, d_model=2048). **Main `lfm25_1.2b` preset now enables ALL of them losslessly** — verified bit-exact (max logit diff 0.0) vs the plain GQA model on the real BSP checkpoint, for both plain and KV-cached prefill+decode:
 - `quantization/bitnet_b158_key.py` — BitNet b1.58 ternary QAT: `BitNetLinear` (STE, learned per-layer `qscale` re-anchored on checkpoint load, ternary ONLY in training; eval = full-precision master weights until `bitnet_force_quant`). **True BitNet integer kernels on CUDA**: default = int8 @ int8 tensor-core GEMM (`torch._int_mm`, a4.8-style activation quant); `FORGE_BITNET_KERNEL=triton` selects the b1.58 add-only Triton kernel (fp activations, zero-skip, no weight multiplies — verified bit-exact vs fp on small shapes). Applies to FFN + attention q/k/v/o projections. Enable: `use_bitnet=True` (main preset: on).
@@ -1492,6 +1612,73 @@ curl http://localhost:8000/v1/tasks
 ```
 
 - Tests: `.devin/test_task_api.py` (session manager, batch queue, task continuity, 8-task stress test)
+
+## V7-8B Full Trainer (research/sandbox/train_8b_all.py)
+
+Production trainer for ForgeLM V7 8B-class models on RTX 5070 12GB. Trains
+from scratch on the packed datasets (`research/data/v7_train/`, `research/data/`)
+with BAdam block-wise full-parameter training.
+
+- **NLRQ factor training (STE)** — `--factor-training auto|on|off` (default
+  auto): `NLRQLinear.enable_factor_training_()` creates bf16 master factors
+  (U_m/V_m) so gradients reach the factors (not just S); forward quantizes
+  masters with straight-through estimator. Checkpoints export back to pure
+  INT8 format (masters stripped by `snapshot_state`). Auto mode falls back
+  to S-only if masters don't fit VRAM (rank 1024/8B-B doesn't; rank 768/
+  `forgelm_v7` does — validated 4092 tok/s @ seq 2048).
+- **VRAM preflight + spill guard** — refuses runs that would spill into
+  Windows shared GPU memory (~18x slowdown); `--allow-spill` overrides.
+  Hard runtime check after step 1 against actual peak. `--badam-blocks-per-layer 2`
+  halves the optimizer spike; bf16 optimizer states auto-enabled with factor
+  training (`--fp32-optimizer-states` to force fp32).
+- **Chunked fused linear-CE** (`chunked_next_token_ce`) — hidden-states CE
+  without materializing [B*T, V] logits; handles FactorizedLMHead two-stage.
+  Auto-on when batch×seq ≥ 1024 (`--no-flce` to disable).
+- **Data validation** — packed `.bin` token ids are checked against the model
+  vocab at load (the 100M-token `research/data/train.bin` is a 151k-vocab
+  pack, INCOMPATIBLE with V7's 65536 vocab — use `--skip-incompatible` or
+  re-pack; feeding it raw causes CUDA gather asserts that surface as
+  misleading CUBLAS errors).
+- **Resume** — `--resume CKPT` restores step count, LR schedule, BAdam block
+  schedule + active-block states (slim `{prefix}_resume.pt`), RNG, best-val.
+- **Sampling** — `--sampling uniform|stratified --v7-weight W` (epoch-based,
+  no replacement); pin_memory + non-blocking H2D.
+- **Checkpointing** — serial background writer (one 8GB file at a time),
+  best-by-val tracking, retention via `--keep-checkpoints N`, step JSONL log
+  + final JSON summary.
+- **Init logit normalization** (`normalize_logit_scale_`, auto in build_model) —
+  kaiming init compounds through the two-stage FactorizedLMHead to logit
+  std ~5.4 → init CE ≈ 24 (ABOVE the uniform baseline ln(65536)=11.09): the
+  model started confidently wrong and never recovered (all pre-2026-08-22
+  from-scratch runs plateaued at ~24). One probe forward rescales the head
+  path so init CE ≈ ln(vocab)+0.5. Diagnostics: `research/sandbox/diag_init.py`.
+- **Dead-param probe** (`freeze_dead_params_`) — one tiny backward pass; any
+  param with `p.grad is None` is frozen and excluded from BAdam (MTP head,
+  loop_block, gated AttnRes/MHC paths ≈ 1B params). Without this, a BAdam
+  block containing only dead params crashes backward with "element 0 ...
+  does not require grad" mid-run (hit at step 320 before the fix). A
+  forward grad_fn walk does NOT work here (non-reentrant checkpointing hides
+  interior param leaves).
+- LR schedules: `linear` (D2Z default), `wsd`, `cosine`; NaN/inf loss and
+  grad-norm skip steps; EMA loss display, tok/s window, ETA; runtime WDDM
+  soft-spill detector (tok/s collapse warning).
+- From-scratch learning on 12GB (2026-08-22, post-init-fix): 8B-B S-only
+  plateaus ~11.5 (FFN = frozen random basis); `forgelm_v7` (rank 768) with
+  factor training is the config that actually learns (EMA descending past
+  11.4 by step 350 @ seq 2048). `--badam-switch-every 3` speeds early
+  descent at ~40% throughput cost; 10 sustains 4000+ tok/s.
+- NOTE: `selective_gradient_checkpointing="optimal"` maps to "none" in the
+  model (only all/ffn/attn/none exist) — this trainer forces "all".
+- Smoke: `research/sandbox/smoke_train_8b.py` uses the same build path,
+  auto-drops factor masters when VRAM is tight.
+- Tests: `tests/unit/test_badam_fira.py` (18 CPU tests: BAdam partition/
+  chunking/fp32/no-decay/slim-resume, NLRQ STE forward/grads/export,
+  FLCE parity vs full CE, LR schedules, epoch sampler).
+- BAdam (`research/training/optim/badam.py`): fp32 update math (bf16 states
+  for >1M-elem params opt-in), 1D params excluded from weight decay,
+  embeddings_head block chunked to ~layer size (was a 649M-param 5GB fp32
+  optimizer spike), parked states compressed to bf16 on CPU, MTP head
+  typically frozen by the trainer (no CE pathway → no grads).
 
 ## Environment
 

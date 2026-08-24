@@ -1,0 +1,56 @@
+{
+  "categories": {
+    "quantization": {
+      "description": "Weight & activation quantization schemes",
+      "domains": [
+        "QuantDomain", "AaacQuant", "ActivationQuant", "SharqQuant",
+        "OffqQuant", "MosaicQuant", "MixedPrecision", "GroupQuant",
+        "W8A8Quant", "Nvfp4Quant", "BitnetConfig"
+      ]
+    },
+    "attention": {
+      "description": "Attention mechanisms & variants",
+      "domains": [
+        "RopeConfig", "QkNormConfig", "DiffAttnConfig", "CsaAttention",
+        "GlaAttention", "GtaAttention", "MhcConfig", "ModConfig",
+        "AttnResidual", "SlidingWindow", "LocalGlobal",
+        "SparseAttentionDomain", "FfnSkip"
+      ]
+    },
+    "kv_cache": {
+      "description": "KV cache compression & eviction",
+      "domains": [
+        "KvZipKV", "XQuantKV", "HadamardKV", "RotorQuantKV",
+        "KVEvictionDomain", "StreamingKV", "PagedEvictKV",
+        "CrossLayerKV", "HqeKVDomain", "KARADomain",
+        "KvRecompute", "CpuKvOffload", "HybridOffload"
+      ]
+    },
+    "training": {
+      "description": "Optimizer, scheduler, loss, gradient configs",
+      "domains": [
+        "OptimizerConfig", "SchedulerConfig", "LossConfig",
+        "MuonConfig", "Fp8TrainingConfig", "CpuAdamwConfig",
+        "GradAccumConfig", "CheckpointRecompute"
+      ]
+    },
+    "decoding": {
+      "description": "Decoding strategies & speculative execution",
+      "domains": [
+        "SpeculativeDecode", "MtpConfig", "BeamSearch",
+        "BatchedDecode", "SamplingConfig"
+      ]
+    },
+    "architecture": {
+      "description": "Model architecture & embedding configs",
+      "domains": [
+        "ConvConfig", "MoeRouting", "FactorizedEmbed",
+        "TitanMemory", "MemoryBudget", "ExpertHotload"
+      ]
+    },
+    "all": {
+      "description": "All registered domains (auto-populated at runtime)",
+      "domains": []
+    }
+  }
+}

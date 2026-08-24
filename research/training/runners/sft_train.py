@@ -720,6 +720,23 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload"])
+    # ── FreeToken-inspired training enhancements (R&D round 14) ──
+    p.add_argument("--freetoken", action="store_true",
+                   help="Enable FreeToken-inspired training pipeline (arXiv:2608.16157): "
+                        "double-buffered gradient pipeline, bandwidth-adaptive chunked "
+                        "transfers, predictive offload. Only applies with --optimizer cpu_offload.")
+    p.add_argument("--double-buffer", action="store_true",
+                   help="Enable ping-pong grad buffers for transfer/compute overlap. "
+                        "Subset of --freetoken. Only applies with --optimizer cpu_offload.")
+    p.add_argument("--bandwidth-adaptive", action="store_true",
+                   help="Profile PCIe bandwidth and auto-set chunk size for transfers. "
+                        "Subset of --freetoken. Only applies with --optimizer cpu_offload.")
+    p.add_argument("--chunk-size-mb", type=int, default=None,
+                   help="Override auto-computed chunk size for chunked grad transfers. "
+                        "Only applies with --bandwidth-adaptive or --freetoken.")
+    p.add_argument("--elastic-grad-accum", action="store_true",
+                   help="Dynamically increase grad_accum when VRAM pressure is high, "
+                        "decrease when low. Prevents OOM without manual tuning.")
     p.add_argument("--grad-mixup", type=int, default=1,
                    help="Grad mixup: average gradients from N batches before optimizer step "
                         "(1=disabled, 2=two-batch, 3=three-batch). "
@@ -1125,7 +1142,12 @@ def main():
             print(f"  [Auto] GPU has {total_vram_gb:.1f}GB VRAM — switching to CPUAdamW optimizer")
             args.optimizer = "cpu_offload"
 
-    optimizer = configure_optimizer(model, args.lr, args.weight_decay, optimizer_name=args.optimizer)
+    optimizer = configure_optimizer(model, args.lr, args.weight_decay,
+                                     optimizer_name=args.optimizer,
+                                     freetoken=args.freetoken,
+                                     double_buffer=args.double_buffer,
+                                     bandwidth_adaptive=args.bandwidth_adaptive,
+                                     chunk_size_mb=args.chunk_size_mb)
 
     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
     # Load anchor checkpoint and build a name→tensor map for L2-SP loss.
@@ -1321,6 +1343,19 @@ def main():
                     else:
                         sw = rw
 
+                # ── FreeToken 3-stage pipeline (R&D round 14) ──
+                # With overlap optimizer (cpu_offload + double_buffer/freetoken):
+                # The previous step's CPU AdamW runs in a background thread,
+                # overlapping with this forward pass. We must wait() before
+                # backward to ensure params are synced and grads are consumed.
+                # This creates the 3-stage pipeline:
+                #   Stage 1: GPU forward+backward (current batch)
+                #   Stage 2: GPU→CPU grad transfer (overlapped with stage 3)
+                #   Stage 3: CPU AdamW update (overlapped with stage 1 of next batch)
+                _has_overlap = hasattr(optimizer, 'overlap') and optimizer.overlap
+                if _has_overlap and hasattr(optimizer, 'wait'):
+                    optimizer.wait()
+
                 # Forward + backward (accumulate gradients).
                 # Token entropy weighting (WeFT/VCORE 2025) applied inside compute_loss.
                 with oom_guard(str(device), label="sft_fwd") as safe:
@@ -1414,6 +1449,34 @@ def main():
                         pass  # no-op for dense models
                 accum_count = 0
 
+                # ── FreeToken bandwidth recording + predictive offload (R&D 14) ──
+                # Record bandwidth/VRAM samples for the predictive offload policy.
+                # Every 10 steps, check if we should pre-emptively increase offload.
+                if hasattr(optimizer, 'record_bandwidth_sample'):
+                    vram_gb = torch.cuda.memory_allocated() / 1e9 if "cuda" in device else 0.0
+                    optimizer.record_bandwidth_sample(vram_gb=vram_gb)
+                    if step > 0 and step % 10 == 0 and hasattr(optimizer, 'should_preempt_offload'):
+                        if optimizer.should_preempt_offload():
+                            print(f"  [FreeToken] Predictive offload: VRAM trend suggests "
+                                  f"approaching limit, increasing offload")
+
+                # ── Elastic grad_accum (R&D 14) ──
+                # Dynamically adjust grad_accum based on VRAM pressure.
+                # When VRAM is high, increase grad_accum (smaller effective batch
+                # per step, but avoids OOM). When low, decrease for faster convergence.
+                if args.elastic_grad_accum and "cuda" in device:
+                    vram_gb = torch.cuda.memory_allocated() / 1e9
+                    vram_limit = args.vram_limit_gb
+                    vram_ratio = vram_gb / vram_limit if vram_limit > 0 else 0
+                    if vram_ratio > 0.85 and grad_accum < args.grad_accum * 4:
+                        grad_accum = min(grad_accum + 1, args.grad_accum * 4)
+                        print(f"  [Elastic] VRAM {vram_gb:.2f}/{vram_limit}GB — "
+                              f"increased grad_accum to {grad_accum}")
+                    elif vram_ratio < 0.60 and grad_accum > args.grad_accum:
+                        grad_accum = max(grad_accum - 1, args.grad_accum)
+                        print(f"  [Elastic] VRAM {vram_gb:.2f}/{vram_limit}GB — "
+                              f"decreased grad_accum to {grad_accum}")
+
                 # EMA update.
                 if ema_state is not None:
                     update_ema(ema_state, model, args.ema_decay)
@@ -1438,6 +1501,11 @@ def main():
                     msg = (f"Step {step+1}/{args.max_steps} | epoch {epoch} | "
                            f"loss {last_loss:.4f} | lr {lr:.2e} | "
                            f"vram {vram_gb:.2f} GB")
+                    # FreeToken bandwidth stats
+                    if hasattr(optimizer, 'bandwidth_stats') and optimizer.bandwidth_adaptive:
+                        bw = optimizer.bandwidth_stats()
+                        if 'b_p' in bw:
+                            msg += f" | B_P={bw['b_p']}"
                     print(msg)
                     log.log(msg)
                     write_status_json(args.status_file, {

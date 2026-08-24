@@ -1,0 +1,34 @@
+{
+  "kv_eviction": {
+    "best_score": -5.535711434809006,
+    "best_config": "{'strategy': 'snapkv', 'budget': 1522, 'observation_window': 505, 'n_sinks': 2, 'window_size': 165, 'block_size': 8}",
+    "discoveries": 68,
+    "archive_coverage": 0.14,
+    "time_s": 24.325864999998885,
+    "warm_started": false
+  },
+  "sparse_attn": {
+    "best_score": -27.103881521293957,
+    "best_config": "{'strategy': 'compact', 'budget_ratio': 0.8497872948646545, 'block_size': 12, 'min_seq_len': 301, 'k_ratio': 0.3335374593734741}",
+    "discoveries": 76,
+    "archive_coverage": 0.1,
+    "time_s": 27.35507249999864,
+    "warm_started": false
+  },
+  "hqe_kv": {
+    "best_score": 4.637166402648585,
+    "best_config": "{'budget_full': 0.05, 'budget_int8': 0.5, 'budget_int4': 0.5, 'group_size': 32, 'recency_decay': 0.95}",
+    "discoveries": 108,
+    "archive_coverage": 0.28,
+    "time_s": 25.412338699999964,
+    "warm_started": false
+  },
+  "kara": {
+    "best_score": 4.995,
+    "best_config": "{'sink_size': 8, 'window_size': 1024, 'target_budget': 2048, 'chunk_expand_size': 16}",
+    "discoveries": 48,
+    "archive_coverage": 0.11,
+    "time_s": 34.40165759999945,
+    "warm_started": false
+  }
+}

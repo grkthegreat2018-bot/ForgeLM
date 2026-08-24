@@ -84,6 +84,11 @@ class NLRQLinear(nn.Module):
         # S (singular values) — bf16, only rank elements
         self.S = nn.Parameter(torch.empty(self.rank))
 
+        # Optional float masters for factor training (None unless enabled;
+        # see enable_factor_training_). Registered here so self.U_m always exists.
+        self.register_parameter("U_m", None)
+        self.register_parameter("V_m", None)
+
         # Per-channel scales (bf16, small)
         self.register_buffer('U_scale', torch.ones(out_features, 1, dtype=torch.float16))
         self.register_buffer('V_scale', torch.ones(1, in_features, dtype=torch.float16))
@@ -104,22 +109,110 @@ class NLRQLinear(nn.Module):
         else:
             self.register_parameter('bias', None)
 
-        self.reset_parameters()
+        # Skip reset_parameters on meta device — call after materialization
+        if self.S.device.type != "meta":
+            self.reset_parameters()
 
     def reset_parameters(self):
-        """Init via SVD of random matrix, then quantize factors to INT8."""
-        W = torch.randn(self.out_features, self.in_features,
-                        dtype=torch.float32, device=self.S.device) / math.sqrt(self.in_features)
+        """Initialize NLRQ factors without expensive SVD.
+
+        For training from scratch, SVD of a random matrix is unnecessary —
+        the model learns proper factors during training. We init:
+        - S: ones (equal singular value weighting)
+        - U_q, V_q: random INT8 (scaled kaiming)
+        - U_scale, V_scale: computed from the random factors
+        """
+        device = self.S.device
         with torch.no_grad():
-            U, S, Vh = torch.linalg.svd(W, full_matrices=False)
-            U_f = U[:, :self.rank].float()
-            V_f = Vh[:self.rank, :].float()
-            self.S.data = S[:self.rank].to(self.S.dtype).clone()
+            # S: ones — equal weighting, model learns proper singular values
+            self.S.data = torch.ones(self.rank, dtype=self.S.dtype, device=device)
+
+            # Random factors with conservative scaling for bf16 stability
+            # U: (out, rank), V: (rank, in)
+            # Use small scale to prevent overflow in bf16 forward pass
+            scale_u = (1.0 / self.rank) ** 0.5
+            scale_v = (1.0 / self.in_features) ** 0.5
+            U_f = torch.randn(self.out_features, self.rank, dtype=torch.float32, device=device) * scale_u
+            V_f = torch.randn(self.rank, self.in_features, dtype=torch.float32, device=device) * scale_v
+
             # Compute scales and quantize
-            self.U_scale = (U_f.abs().amax(dim=1, keepdim=True).clamp(min=1e-10) / self._max_val).to(torch.float16)
-            self.V_scale = (V_f.abs().amax(dim=0, keepdim=True).clamp(min=1e-10) / self._max_val).to(torch.float16)
+            self.U_scale = (U_f.abs().amax(dim=1, keepdim=True).clamp(min=1e-6) / self._max_val).to(torch.float16)
+            self.V_scale = (V_f.abs().amax(dim=0, keepdim=True).clamp(min=1e-6) / self._max_val).to(torch.float16)
             self.U_q = torch.round(U_f / self.U_scale.float()).clamp(-self._max_val, self._max_val).to(torch.int8)
             self.V_q = torch.round(V_f / self.V_scale.float()).clamp(-self._max_val, self._max_val).to(torch.int8)
+
+    # ── factor training (STE) ──────────────────────────────────────────────
+
+    def enable_factor_training_(self) -> None:
+        """Create float master factors and train them via straight-through
+        estimator (STE) around the INT8 quantizer.
+
+        Why: U_q/V_q are INT8 buffers — without masters the ONLY trainable
+        parameter is S (the singular values), which caps the layer at
+        rescaling a fixed random basis. Masters restore full trainability:
+
+          forward:  U_eff = U_m + (quant(U_m) - U_m).detach()   # STE
+          backward: dL/dU_m flows as if quantize were identity
+
+        The INT8 buffers are moved to CPU (they are only needed for
+        checkpoint export / inference) so GPU cost is the bf16 masters alone.
+        state_dict() gains U_m/V_m keys — strip them after export_quantized_()
+        to keep checkpoints in the pure-INT8 inference format.
+        """
+        if self.use_residual:
+            raise NotImplementedError(
+                "factor training with INT4 residual is not supported "
+                "(residual buffers must stay on GPU)")
+        if self.U_m is not None:
+            return
+        device = self.S.device
+        with torch.no_grad():
+            U_m = (self.U_q.float() * self.U_scale.float()).to(device)
+            V_m = (self.V_q.float() * self.V_scale.float()).to(device)
+            self.register_parameter("U_m", nn.Parameter(U_m.to(self.S.dtype),
+                                                        requires_grad=True))
+            self.register_parameter("V_m", nn.Parameter(V_m.to(self.S.dtype),
+                                                        requires_grad=True))
+            # INT8 buffers are dead weight on GPU during training — park on CPU
+            for name in ("U_q", "V_q", "U_scale", "V_scale"):
+                buf = getattr(self, name)
+                setattr(self, name, buf.to("cpu"))
+
+    def disable_factor_training_(self, export: bool = True) -> None:
+        """Drop master factors. With export=True (default), refresh the INT8
+        buffers from the masters first so no training progress is lost, and
+        move the buffers back to the compute device (they were parked on CPU
+        during factor training)."""
+        if self.U_m is None:
+            return
+        if export:
+            self.export_quantized_()
+        device = self.S.device
+        for name in ("U_q", "V_q", "U_scale", "V_scale"):
+            setattr(self, name, getattr(self, name).to(device))
+        self.register_parameter("U_m", None)
+        self.register_parameter("V_m", None)
+
+    @torch.no_grad()
+    def export_quantized_(self) -> None:
+        """Refresh INT8 buffers (U_q/V_q/scales, on CPU) from the masters.
+
+        Called before saving a checkpoint so the saved state stays in the
+        pure-INT8 inference format (no U_m/V_m keys needed downstream).
+        """
+        if self.U_m is None:
+            return
+        U_m = self.U_m.detach().float().cpu()
+        V_m = self.V_m.detach().float().cpu()
+        U_scale = (U_m.abs().amax(dim=1, keepdim=True).clamp(min=1e-6) / self._max_val)
+        V_scale = (V_m.abs().amax(dim=0, keepdim=True).clamp(min=1e-6) / self._max_val)
+        self.U_scale = U_scale.to(torch.float16)
+        self.V_scale = V_scale.to(torch.float16)
+        self.U_q = torch.round(U_m / U_scale).clamp(-self._max_val, self._max_val).to(torch.int8)
+        self.V_q = torch.round(V_m / V_scale).clamp(-self._max_val, self._max_val).to(torch.int8)
+
+    def factor_training_enabled(self) -> bool:
+        return self.U_m is not None
 
     @classmethod
     def from_dense(cls, weight: torch.Tensor, rank: int = 256,
@@ -198,37 +291,54 @@ class NLRQLinear(nn.Module):
                 W[:, :n_groups * gs] += res.reshape(self.out_features, n_groups * gs)
         return W.to(torch.bfloat16)
 
+    @staticmethod
+    def _ste_quantize(w: torch.Tensor, scale_dim: int, max_val: float) -> torch.Tensor:
+        """Quantize-dequantize with straight-through gradient.
+
+        scale_dim=1 → per-row scales (U, shape (out, rank));
+        scale_dim=0 → per-col scales (V, shape (rank, in)).
+        """
+        scale = w.detach().abs().amax(dim=scale_dim, keepdim=True).clamp(min=1e-6) / max_val
+        q = (w.detach() / scale).round().clamp_(-max_val, max_val) * scale
+        return w + (q - w.detach())  # identity gradient w.r.t. w
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute y = x @ W^T + b directly from INT8 factors (no W materialization).
+        """Compute y = x @ W^T + b directly from the factors (no W materialization).
 
         Instead of: W = U @ diag(S) @ V; y = x @ W^T
         Computes:    y = ((x @ V^T) * S) @ U^T  + b
 
-        Memory-optimized: dequantizes factors in-place into pre-allocated bf16
-        buffers, avoiding per-call allocation of 31MB per projection.
-        For 32 layers × 3 projections = 96 layers, this saves ~3GB of temporaries.
+        When factor training is enabled (U_m/V_m masters exist), the factors
+        are quantize-dequantized through the STE so gradients reach the
+        masters; scales are recomputed from the masters each call.
+
+        No cached buffers — creates temporaries that PyTorch's caching allocator
+        reuses across layers. Saves 4 GB VRAM vs per-layer caching (99 layers
+        × 42 MB = 4.15 GB of permanently allocated buffers).
         """
+        if self.U_m is not None:
+            compute_dtype = x.dtype if x.dtype != torch.int64 else torch.float32
+            U_m = self.U_m.to(compute_dtype)
+            V_m = self.V_m.to(compute_dtype)
+            U_f = self._ste_quantize(U_m, 1, self._max_val)
+            V_f = self._ste_quantize(V_m, 0, self._max_val)
+            S = self.S.to(compute_dtype)
+            h = torch.matmul(x.to(compute_dtype), (S.unsqueeze(1) * V_f).t())
+            out = torch.matmul(h, U_f.t())
+            if self.bias is not None:
+                out = out + self.bias.to(compute_dtype)
+            return out.to(x.dtype)
+
         compute_dtype = x.dtype if x.dtype != torch.int64 else torch.float32
 
-        # In-place dequantization into cached buffers (allocated on first call)
-        # U_f: (out, rank) in compute_dtype — reused across calls
-        if not hasattr(self, '_U_f_buf') or self._U_f_buf.dtype != compute_dtype:
-            self._U_f_buf = torch.empty(
-                self.U_q.shape, dtype=compute_dtype, device=self.U_q.device)
-            self._V_f_buf = torch.empty(
-                self.V_q.shape, dtype=compute_dtype, device=self.V_q.device)
-        # Dequantize INT8 → compute_dtype in-place (no new allocation)
-        torch.mul(self.U_q.to(compute_dtype), self.U_scale.to(compute_dtype),
-                  out=self._U_f_buf)
-        torch.mul(self.V_q.to(compute_dtype), self.V_scale.to(compute_dtype),
-                  out=self._V_f_buf)
+        # Dequantize INT8 → compute_dtype (temporaries, reused by allocator)
+        U_f = self.U_q.to(compute_dtype) * self.U_scale.to(compute_dtype)
+        V_f = self.V_q.to(compute_dtype) * self.V_scale.to(compute_dtype)
         S = self.S.to(compute_dtype)
 
-        # y = ((x @ V^T) * S) @ U^T — fused to avoid intermediates
-        # Pre-scale V by S: SV = S * V (rank, in) — small, in-place
-        # Then y = (x @ SV^T) @ U^T — two small matmuls
-        h = torch.matmul(x.to(compute_dtype), (S.unsqueeze(1) * self._V_f_buf).t())
-        out = torch.matmul(h, self._U_f_buf.t())
+        # y = ((x @ V^T) * S) @ U^T — two matmuls
+        h = torch.matmul(x.to(compute_dtype), (S.unsqueeze(1) * V_f).t())
+        out = torch.matmul(h, U_f.t())
 
         # Add residual if present
         if self.residual_q is not None:
@@ -248,7 +358,15 @@ class NLRQLinear(nn.Module):
 
     @property
     def weight(self) -> torch.Tensor:
-        """Reconstruct the approximate dense weight (for compat/checkpointing)."""
+        """Reconstruct the approximate dense weight (for compat/checkpointing).
+
+        Uses the masters when factor training is enabled (the INT8 buffers
+        may be stale / offloaded in that mode)."""
+        if self.U_m is not None:
+            U_f = self._ste_quantize(self.U_m.float(), 1, self._max_val)
+            V_f = self._ste_quantize(self.V_m.float(), 0, self._max_val)
+            SV = self.S.float().unsqueeze(1) * V_f
+            return (U_f @ SV).to(torch.bfloat16)
         return self._dequantize_weight()
 
     def compressed_storage_bytes(self) -> int:

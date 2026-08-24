@@ -96,9 +96,13 @@ class GroupedTiedAttention(nn.Module):
         q = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, hd).transpose(1, 2)
 
-        # Check gate dynamically (not cached _identity) so load_state_dict
-        # with a non-zero gate correctly activates the V_proj path.
-        is_identity = self.v_mix_gate.item() == 0.0
+        # Check gate: use pre-computed flag to avoid .item() graph break
+        # (torch.compile can't handle data-dependent .item() calls)
+        if not hasattr(self, '_v_gate_is_zero') or self._v_gate_dirty:
+            with torch.no_grad():
+                self._v_gate_is_zero = (self.v_mix_gate.item() == 0.0)
+            self._v_gate_dirty = False
+        is_identity = self._v_gate_is_zero
 
         if is_identity:
             # ── Lossless V=K path ────────────────────────────────────────

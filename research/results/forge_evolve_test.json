@@ -1,0 +1,15 @@
+{
+  "synthetic": {
+    "best_score": -9.840609888237154,
+    "evaluations": 525,
+    "discoveries": 77,
+    "time_s": 1.8847651481628418
+  },
+  "quant": {
+    "best_score": -1.6707645658427355,
+    "evaluations": 450,
+    "discoveries": 97,
+    "time_s": 13.412788152694702,
+    "best_config": "{'block_size': 16, 'scale_method': 'mse_optimal', 'residual_ratio': 0.0, 'global_scale_factor': 1.0}"
+  }
+}

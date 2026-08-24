@@ -1,0 +1,11 @@
+{
+  "generations": 100,
+  "evaluations": 10000,
+  "discoveries": 95,
+  "archive_coverage": 0.25,
+  "best_score": -1.4708492335649241,
+  "best_config": "{'block_size': 16, 'scale_method': 'mse_optimal', 'residual_ratio': 0.0, 'global_scale_factor': 1.0, 'scale_search_range': 0.5, 'scale_search_steps': 10, 'rounding_method': 'rtn', 'use_hadamard': True, 'hadamard_dim': 32, 'scale_clip_min': 0.001}",
+  "time_s": 498.4317536999988,
+  "time_per_discovery": 5.246650038947356,
+  "device": "cuda"
+}

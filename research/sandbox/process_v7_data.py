@@ -297,7 +297,7 @@ def main():
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         str(ROOT / "research" / "checkpoints" / "lfm25_tokenizer"),
-        trust_remote_code=True, use_fast=True)
+        use_fast=True)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     is_fast = getattr(tokenizer, "is_fast", False)
     print(f"Tokenizer: vocab={tokenizer.vocab_size}, pad_id={pad_id}, fast={is_fast}")

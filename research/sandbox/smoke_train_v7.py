@@ -218,22 +218,22 @@ def main():
         print(f"  GPU free after model: {free_gb:.2f} GB")
         print(f"  Gradients fit on GPU? {'YES' if free_gb > grad_gb else 'NO — NEED OFFLOAD'}")
         print(f"  ---")
-        print(f"  Strategy: CPUAdamW (opt states on CPU) + gradient offload")
-        print(f"  CPU RAM needed:       {opt_gb:.2f} GB (have 32GB)")
+        print(f"  Strategy: BAdam (block-wise, 1 layer active at a time)")
+        print(f"  GPU needed: ~{model_gb + opt_gb/32 + 0.5:.1f} GB (model + 1 block optimizer + activations)")
 
-    # ── Optimizer: CPUAdamW with overlap ──
+    # ── Optimizer: BAdam (block-wise Adam, one layer at a time) ──
     print(f"\n{'='*70}")
-    print(f"  OPTIMIZER: CPUAdamW (overlap=True, pin_memory=True)")
+    print(f"  OPTIMIZER: BAdam (block-wise, 1 layer at a time)")
     print(f"{'='*70}")
 
-    from research.training.optim.hybrid_offload import configure_hybrid_optimizer
+    from research.training.optim.badam import configure_badam
 
-    optimizer = configure_hybrid_optimizer(
+    optimizer = configure_badam(
         model, lr=3e-4, weight_decay=0.1,
-        overlap=True, pin_memory=False,
-        grad_offload=True,  # stream grads to CPU during backward (frees 5.6GB VRAM)
+        blocks_per_layer=1,  # one transformer layer per block
+        switch_every=1,      # switch blocks every step
     )
-    print(f"  Optimizer configured with grad_offload=True")
+    print(f"  Optimizer configured: BAdam (block-wise)")
 
     # ── EMA shadow weights ──
     print(f"\n  EMA shadow weights (decay=0.999)...")
@@ -246,7 +246,7 @@ def main():
     BATCH_SIZE = 1
     GRAD_ACCUM = 4
     WARMUP_STEPS = 3
-    SMOKE_SEQ_LEN = 1024  # Full V7 with grad offload fits 1024 on 12GB
+    SMOKE_SEQ_LEN = 512  # BAdam: activations are the bottleneck, not optimizer
 
     print(f"\n{'='*70}")
     print(f"  TRAINING LOOP")
@@ -254,7 +254,7 @@ def main():
     print(f"  Steps: {MAX_STEPS} | batch={BATCH_SIZE} | grad_accum={GRAD_ACCUM}")
     print(f"  seq_len={SMOKE_SEQ_LEN} (truncated from {seq_len})")
     print(f"  lr=3e-4 | bf16 | grad_checkpoint={cfg.selective_gradient_checkpointing}")
-    print(f"  Features: CPUAdamW+overlap, EMA, grad_clip, cosine LR, warmup")
+    print(f"  Features: BAdam, EMA, grad_clip, cosine LR, warmup")
     print(f"{'='*70}")
 
     step = 0
@@ -300,13 +300,9 @@ def main():
             # Gradient clipping (before optimizer step)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-            # Optimizer step (CPUAdamW with overlap — async CPU update)
+            # Optimizer step (BAdam: updates one block at a time)
             optimizer.step()
             optimizer.zero_grad()
-
-            # Wait for async CPU step to complete
-            if hasattr(optimizer, "wait"):
-                optimizer.wait()
 
             # Update EMA shadow weights
             update_ema(ema_state, model, decay=0.999)

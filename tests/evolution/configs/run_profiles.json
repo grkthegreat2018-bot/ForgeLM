@@ -1,0 +1,57 @@
+{
+  "profiles": {
+    "smoke": {
+      "generations": 5,
+      "n_generators": 50,
+      "min_evaluate": 10,
+      "max_evaluate": 25,
+      "filter_ratio": 10,
+      "exploration": 0.3,
+      "warm_start": false,
+      "log_every": 1,
+      "db_suffix": "_smoke"
+    },
+    "boot": {
+      "generations": 20,
+      "n_generators": 500,
+      "min_evaluate": 20,
+      "max_evaluate": 50,
+      "filter_ratio": 10,
+      "exploration": 0.3,
+      "warm_start": false,
+      "log_every": 5,
+      "db_suffix": "_boot"
+    },
+    "deep": {
+      "generations": 100,
+      "n_generators": 500,
+      "min_evaluate": 50,
+      "max_evaluate": 100,
+      "filter_ratio": 10,
+      "exploration": 0.3,
+      "warm_start": true,
+      "log_every": 10,
+      "db_suffix": "_deep"
+    },
+    "ultra": {
+      "generations": 500,
+      "n_generators": 1000,
+      "min_evaluate": 100,
+      "max_evaluate": 200,
+      "filter_ratio": 10,
+      "exploration": 0.2,
+      "warm_start": true,
+      "log_every": 25,
+      "db_suffix": "_ultra"
+    }
+  },
+  "defaults": {
+    "parallel_eval": 1,
+    "verbose": false
+  },
+  "paths": {
+    "db_dir": "research/results",
+    "summary_dir": "research/results",
+    "ideas_dir": "research/results"
+  }
+}

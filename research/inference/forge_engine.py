@@ -450,24 +450,17 @@ class ForgeEngine:
         """Pick the highest quantization level that fits available VRAM.
 
         Priority (highest quality first):
-          1. None (bf16) — if VRAM is ample (> 2x model size free)
-          2. nvfp4 — if Blackwell GPU (native FP4, ~99% quality)
+          1. nvfp4 — if Blackwell GPU (native FP4, ~99% quality, 3.8x compression)
+             NOW THE DEFAULT on Blackwell — quality is near-lossless and it
+             frees VRAM for larger KV cache / longer context.
+          2. None (bf16) — only if nvfp4 unavailable and VRAM is ample
           3. fp8 — if Hopper+ (hardware-native FP8)
           4. w8a8 — 2-3x speedup, minimal quality loss
           5. int4 — 4x compression, last resort
 
-        Returns None if no quantization is needed (ample VRAM).
+        Returns None if no quantization is needed (ample VRAM + no Blackwell).
         """
         if self.device.type != "cuda":
-            return None
-
-        # Estimate model size in VRAM
-        n_params = sum(p.numel() for p in self.model.parameters())
-        model_bytes_bf16 = n_params * 2  # bf16 = 2 bytes/param
-        vram_free, _ = self._memory_info(self.device)
-
-        # If we have > 2x model size free, no quantization needed
-        if vram_free > model_bytes_bf16 * 2:
             return None
 
         # Check GPU capability for hardware-native quantization
@@ -477,9 +470,11 @@ class ForgeEngine:
         # Hopper = SM 90 (H100)
         is_hopper = cap[0] >= 9
 
+        # NVFP4 is now the default on Blackwell — near-lossless quality,
+        # 3.8x compression, frees VRAM for KV cache / longer context.
+        # Only skip if the model is already BitNet (ternary) or explicitly
+        # configured to use a different quant.
         if is_blackwell:
-            # Blackwell: try nvfp4 first (native FP4, ~99% quality, 4x compression)
-            # Fall back to fp8 if nvfp4 unavailable
             try:
                 from research.inference.quant.nvfp4_quant import quantize_model_nvfp4  # noqa
                 return "nvfp4"
@@ -490,6 +485,15 @@ class ForgeEngine:
                 return "fp8"
             except ImportError:
                 pass
+
+        # Estimate model size in VRAM for non-Blackwell path
+        n_params = sum(p.numel() for p in self.model.parameters())
+        model_bytes_bf16 = n_params * 2  # bf16 = 2 bytes/param
+        vram_free, _ = self._memory_info(self.device)
+
+        # If we have > 2x model size free, no quantization needed
+        if vram_free > model_bytes_bf16 * 2:
+            return None
 
         if is_hopper:
             try:
@@ -982,8 +986,12 @@ class ForgeEngine:
             self._log(f"W8A8 quantization: {w8a8_mode}")
         elif mode == "nvfp4":
             from research.inference.quant.nvfp4_quant import quantize_model_nvfp4
-            quantize_model_nvfp4(self.model)
-            self._log("NVFP4 quantization: active (Blackwell native FP4)")
+            cfg = getattr(self.model, 'config', None)
+            block_size = getattr(cfg, 'nvfp4_block_size', 32) if cfg else 32
+            w4a8 = getattr(cfg, 'nvfp4_w4a8', False) if cfg else False
+            quantize_model_nvfp4(self.model, block_size=block_size, w4a8=w4a8)
+            self._log(f"NVFP4 quantization: active (Blackwell native FP4, "
+                      f"block={block_size}, w4a8={w4a8})")
         else:
             raise ConfigurationError(
                 f"Unknown quantization mode: {mode}",

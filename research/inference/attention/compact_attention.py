@@ -91,13 +91,9 @@ def block_union_selection(
     else:
         q_grouped = q
 
-    # Dot product: (B, n_kv, n_blocks, T)
-    # k_blocks: (B, n_kv, n_blocks, bs, hd) → mean over bs → (B, n_kv, n_blocks, hd)
-    k_block_mean = k_blocks.mean(dim=3)  # (B, n_kv, n_blocks, hd)
-    scores = torch.einsum("bntd,bnbd->bntb", q_grouped, k_block_mean)  # wrong dims
-
-    # Correct: scores = q @ k_block_mean^T
+    # Dot product: q @ k_block_mean^T
     # q: (B, n_kv, T, hd), k_block_mean: (B, n_kv, n_blocks, hd)
+    k_block_mean = k_blocks.mean(dim=3)  # (B, n_kv, n_blocks, hd)
     scores = torch.matmul(q_grouped, k_block_mean.transpose(-1, -2))  # (B, n_kv, T, n_blocks)
 
     # Max over T (any query in the chunk needs this block)
@@ -154,6 +150,8 @@ def compact_attention(
         budget_ratio=budget_ratio,
         n_kv_groups=k_cache.shape[1],
     )
+    # block_table: (B, n_select) — squeeze batch (B=1 for decode/prefill)
+    block_table = block_table.squeeze(0) if block_table.dim() > 1 else block_table
 
     # Gather selected blocks
     k_parts = []

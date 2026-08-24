@@ -1,0 +1,720 @@
+{
+  "total_domains": 57,
+  "total_time_s": 52.83757281303406,
+  "valid_runs": 56,
+  "failed_runs": 1,
+  "results": [
+    {
+      "domain": "AaacQuant",
+      "best_score": 9.943748505657885,
+      "discoveries": 6,
+      "archive_coverage": 0.01,
+      "time_s": 4.121866226196289,
+      "best_config": {
+        "n_codebooks": 4,
+        "codebook_size": 448,
+        "n_bits": 2
+      }
+    },
+    {
+      "domain": "ActivationQuant",
+      "best_score": 9.62456278896758,
+      "discoveries": 12,
+      "archive_coverage": 0.02,
+      "time_s": 0.6767141819000244,
+      "best_config": {
+        "calib_method": "percentile",
+        "percentile": 0.904705790039152,
+        "smooth_alpha": 0.5138475298881531
+      }
+    },
+    {
+      "domain": "AttnResidual",
+      "best_score": 2.9239741200581193,
+      "discoveries": 20,
+      "archive_coverage": 0.05,
+      "time_s": 0.542201042175293,
+      "best_config": {
+        "k_layers": 2,
+        "gate_init": 0.979693591594696,
+        "retrieval_dim": 114
+      }
+    },
+    {
+      "domain": "BatchedDecode",
+      "best_score": 43.25,
+      "discoveries": 45,
+      "archive_coverage": 0.24,
+      "time_s": 0.4743468761444092,
+      "best_config": {
+        "max_batch_size": 15,
+        "padding_strategy": "dynamic",
+        "merge_window_ms": 57,
+        "max_seq_diff": 449
+      }
+    },
+    {
+      "domain": "BeamSearch",
+      "best_score": 11.333672165870668,
+      "discoveries": 48,
+      "archive_coverage": 0.12,
+      "time_s": 0.44136977195739746,
+      "best_config": {
+        "beam_width": 4,
+        "length_penalty": 1.8869524002075195,
+        "early_stopping": true,
+        "diversity_penalty": 0.9733598828315735
+      }
+    },
+    {
+      "domain": "BitnetConfig",
+      "best_score": -27.46301852603449,
+      "discoveries": 30,
+      "archive_coverage": 0.08,
+      "time_s": 0.785254716873169,
+      "best_config": {
+        "learned_scale": false,
+        "quant_mode": "ternary",
+        "init_scale": 1.536653310060501
+      }
+    },
+    {
+      "domain": "CheckpointRecompute",
+      "best_score": 8.937418103218079,
+      "discoveries": 66,
+      "archive_coverage": 0.36,
+      "time_s": 0.504467248916626,
+      "best_config": {
+        "n_checkpoint_layers": 16,
+        "recompute_strategy": "selective",
+        "block_size": 512
+      }
+    },
+    {
+      "domain": "ConvConfig",
+      "best_score": 3.09375,
+      "discoveries": 48,
+      "archive_coverage": 0.34,
+      "time_s": 2.18817138671875,
+      "best_config": {
+        "kernel_size": 3,
+        "stride": 1,
+        "dilation": 3,
+        "groups": 6,
+        "n_conv_layers": 5
+      }
+    },
+    {
+      "domain": "CpuAdamwConfig",
+      "best_score": 29.911825223825872,
+      "discoveries": 48,
+      "archive_coverage": 0.26,
+      "time_s": 0.5105617046356201,
+      "best_config": {
+        "offload_ratio": 0.00480953324586153,
+        "prefetch_depth": 7,
+        "compression": "int4",
+        "update_freq": 14
+      }
+    },
+    {
+      "domain": "CpuKvOffload",
+      "best_score": 0.0,
+      "discoveries": 33,
+      "archive_coverage": 0.1,
+      "time_s": 0.43448305130004883,
+      "best_config": {
+        "offload_layers": 0,
+        "offload_threshold": 0.0,
+        "prefetch_size": 64,
+        "async_copy": false
+      }
+    },
+    {
+      "domain": "CrossLayerKV",
+      "best_score": 218453.46547851563,
+      "discoveries": 17,
+      "archive_coverage": 0.1,
+      "time_s": 0.6541023254394531,
+      "best_config": {
+        "share_ratio": 1.0,
+        "n_share_groups": 1,
+        "share_mode": "max"
+      }
+    },
+    {
+      "domain": "CsaAttention",
+      "best_score": 14.761958122253418,
+      "discoveries": 30,
+      "archive_coverage": 0.09,
+      "time_s": 0.8228156566619873,
+      "best_config": {
+        "top_k": 72,
+        "pattern_type": "csa_hca_hybrid",
+        "block_size": 13
+      }
+    },
+    {
+      "domain": "DiffAttnConfig",
+      "best_score": 9.986368998243035,
+      "discoveries": 41,
+      "archive_coverage": 0.15,
+      "time_s": 0.593397855758667,
+      "best_config": {
+        "lambda_init": 0.0066926670260727406,
+        "n_heads": 5,
+        "softmax_sep": 0.2522801458835602
+      }
+    },
+    {
+      "domain": "ExpertHotload",
+      "best_score": 8.828125,
+      "discoveries": 107,
+      "archive_coverage": 0.26,
+      "time_s": 0.3807075023651123,
+      "best_config": {
+        "n_hot_experts": 4,
+        "prefetch_ahead": 4,
+        "cache_strategy": "lfu",
+        "disk_cache_size": 4096
+      }
+    },
+    {
+      "domain": "FactorizedEmbed",
+      "best_score": 19.30577273227657,
+      "discoveries": 24,
+      "archive_coverage": 0.06,
+      "time_s": 1.0800294876098633,
+      "best_config": {
+        "rank": 68,
+        "init_mode": "svd",
+        "tie_factor": 0.08808882534503937,
+        "vocab_size": 46569
+      }
+    },
+    {
+      "domain": "FfnSkip",
+      "best_score": -6.233662628763478,
+      "discoveries": 3,
+      "archive_coverage": 0.03,
+      "time_s": 0.686983585357666,
+      "best_config": {
+        "skip_threshold": 0.004446433857083321,
+        "n_eval_layers": 9,
+        "skip_strategy": "cosine",
+        "min_keep": 0.542838703840971
+      }
+    },
+    {
+      "domain": "Fp8TrainingConfig",
+      "best_score": 38.133892338659386,
+      "discoveries": 9,
+      "archive_coverage": 0.01,
+      "time_s": 0.5707402229309082,
+      "best_config": {
+        "autocast_mode": "e5m2",
+        "smooth_swiglu": false,
+        "mu_scaling": false,
+        "loss_scale": 3176.5500564575195
+      }
+    },
+    {
+      "domain": "GlaAttention",
+      "best_score": -50.0,
+      "discoveries": 25,
+      "archive_coverage": 0.1,
+      "time_s": 0.5070958137512207,
+      "best_config": {
+        "latent_dim": 463,
+        "n_heads": 28,
+        "compression_ratio": 2.9543026983737946
+      }
+    },
+    {
+      "domain": "GradAccumConfig",
+      "best_score": 11.054104637969779,
+      "discoveries": 41,
+      "archive_coverage": 0.15,
+      "time_s": 0.44547009468078613,
+      "best_config": {
+        "accum_steps": 4,
+        "micro_batch": 15,
+        "grad_clip": 0.979671061038971,
+        "sync_freq": 10
+      }
+    },
+    {
+      "domain": "GroupQuant",
+      "best_score": 9.065913968140395,
+      "discoveries": 32,
+      "archive_coverage": 0.07,
+      "time_s": 0.5466310977935791,
+      "best_config": {
+        "group_size": 128,
+        "n_bits": 8,
+        "scheme": "symmetric"
+      }
+    },
+    {
+      "domain": "GtaAttention",
+      "best_score": 4.966250015616818,
+      "discoveries": 24,
+      "archive_coverage": 0.1,
+      "time_s": 0.550994873046875,
+      "best_config": {
+        "v_k_mix": 0.001198523910716176,
+        "n_kv_heads": 6,
+        "tie_strength": 0.14842647314071655
+      }
+    },
+    {
+      "domain": "HadamardKV",
+      "best_score": 19.7,
+      "discoveries": 0,
+      "archive_coverage": 0.03,
+      "time_s": 0.9544825553894043,
+      "best_config": {
+        "hadamard_dim": 64,
+        "n_apply": 1,
+        "quant_bits": 4
+      }
+    },
+    {
+      "domain": "HqeKVDomain",
+      "best_score": 4.458317413072913,
+      "discoveries": 82,
+      "archive_coverage": 0.28,
+      "time_s": 2.4568252563476562,
+      "best_config": {
+        "budget_full": 0.05,
+        "budget_int8": 0.5,
+        "budget_int4": 0.5,
+        "group_size": 32,
+        "recency_decay": 1.0
+      }
+    },
+    {
+      "domain": "HybridOffload",
+      "best_score": 4.348140716552734,
+      "discoveries": 73,
+      "archive_coverage": 0.28,
+      "time_s": 0.5098309516906738,
+      "best_config": {
+        "offload_ratio": 1.0,
+        "prefetch_depth": 8,
+        "pin_memory": true,
+        "overlap_compute": true
+      }
+    },
+    {
+      "domain": "KARADomain",
+      "best_score": 4.995,
+      "discoveries": 21,
+      "archive_coverage": 0.1,
+      "time_s": 0.7821364402770996,
+      "best_config": {
+        "sink_size": 8,
+        "window_size": 1024,
+        "target_budget": 4096,
+        "chunk_expand_size": 16
+      }
+    },
+    {
+      "domain": "KVEvictionDomain",
+      "best_score": -64.51879429215472,
+      "discoveries": 17,
+      "archive_coverage": 0.08,
+      "time_s": 0.9807980060577393,
+      "best_config": {
+        "strategy": "snapkv",
+        "budget": 2048,
+        "observation_window": 512,
+        "n_sinks": 2,
+        "window_size": 128,
+        "block_size": 8
+      }
+    },
+    {
+      "domain": "KvRecompute",
+      "best_score": 74.55,
+      "discoveries": 20,
+      "archive_coverage": 0.18,
+      "time_s": 0.5128815174102783,
+      "best_config": {
+        "recompute_layers": 16,
+        "recompute_strategy": "selective",
+        "threshold": 0.9
+      }
+    },
+    {
+      "domain": "KvZipKV",
+      "best_score": -166.84762674219468,
+      "discoveries": 30,
+      "archive_coverage": 0.07,
+      "time_s": 2.081489324569702,
+      "best_config": {
+        "compression_ratio": "4",
+        "codebook_size": "512",
+        "n_iter": "25"
+      }
+    },
+    {
+      "domain": "LocalGlobal",
+      "best_score": 13.45485070347786,
+      "discoveries": 42,
+      "archive_coverage": 0.22,
+      "time_s": 0.421048641204834,
+      "best_config": {
+        "local_window": 1841,
+        "global_ratio": 0.8955097794532776,
+        "n_global_heads": 15
+      }
+    },
+    {
+      "domain": "LossConfig",
+      "best_score": 1.9934539923587398,
+      "discoveries": 14,
+      "archive_coverage": 0.02,
+      "time_s": 0.6482629776000977,
+      "best_config": {
+        "loss_type": "focal",
+        "label_smoothing": 0.24055134057998656,
+        "focal_gamma": 4.7503915429115295,
+        "temperature": 1.8962695896625519
+      }
+    },
+    {
+      "domain": "MemoryBudget",
+      "best_score": 0.6059531569480896,
+      "discoveries": 31,
+      "archive_coverage": 0.12,
+      "time_s": 0.5226647853851318,
+      "best_config": {
+        "kv_budget": 0.42972683906555176,
+        "weight_budget": 0.19435393810272217,
+        "activation_budget": 0.2896943688392639,
+        "reserve": 0.06700361520051956
+      }
+    },
+    {
+      "domain": "MhcConfig",
+      "best_score": 10.091846441268665,
+      "discoveries": 31,
+      "archive_coverage": 0.09,
+      "time_s": 0.493849515914917,
+      "best_config": {
+        "rank": 103,
+        "gate_init": 0.005170447751879692,
+        "n_connections": 1
+      }
+    },
+    {
+      "domain": "MixedPrecision",
+      "best_score": -16.980978102829507,
+      "discoveries": 33,
+      "archive_coverage": 0.1,
+      "time_s": 1.4466502666473389,
+      "best_config": {
+        "n_levels": 2,
+        "assignment": "random",
+        "bits_base": 6
+      }
+    },
+    {
+      "domain": "ModConfig",
+      "best_score": 10.018705212277661,
+      "discoveries": 20,
+      "archive_coverage": 0.05,
+      "time_s": 0.6557085514068604,
+      "best_config": {
+        "keep_fraction": 0.5011560979764909,
+        "router_type": "mlp",
+        "aux_loss_weight": 0.04200257360935211,
+        "n_skip_layers": 2
+      }
+    },
+    {
+      "domain": "MoeRouting",
+      "best_score": 24.424527271711455,
+      "discoveries": 18,
+      "archive_coverage": 0.05,
+      "time_s": 0.7825579643249512,
+      "best_config": {
+        "n_experts": 5,
+        "top_k": 3,
+        "router_mode": "switch",
+        "load_balance_weight": 0.006504573673009873,
+        "shared_expert": false
+      }
+    },
+    {
+      "domain": "MosaicQuant",
+      "best_score": 3.9922933591839,
+      "discoveries": 33,
+      "archive_coverage": 0.11,
+      "time_s": 0.7266857624053955,
+      "best_config": {
+        "n_tiles": 8,
+        "tile_dim": 203,
+        "mix_ratio": 0.0047902995720505714
+      }
+    },
+    {
+      "domain": "MtpConfig",
+      "best_score": 23.477171857826466,
+      "discoveries": 63,
+      "archive_coverage": 0.21,
+      "time_s": 0.4916853904724121,
+      "best_config": {
+        "n_heads": 3,
+        "loss_weight": 0.47336957454681394,
+        "share_weights": true,
+        "depth_ratio": 0.9939395487308502
+      }
+    },
+    {
+      "domain": "MuonConfig",
+      "best_score": 11.90497091428343,
+      "discoveries": 3,
+      "archive_coverage": 0.01,
+      "time_s": 1.698521375656128,
+      "best_config": {
+        "momentum": 0.9844147086143493,
+        "nesterov": true,
+        "weight_decay": 0.005212975144386292,
+        "ns_steps": 1
+      }
+    },
+    {
+      "domain": "Nvfp4Quant",
+      "best_score": 14.286295716373251,
+      "discoveries": 10,
+      "archive_coverage": 0.04,
+      "time_s": 0.732107400894165,
+      "best_config": {
+        "block_size": 16,
+        "w4a8": true,
+        "scale_mode": "per_block"
+      }
+    },
+    {
+      "domain": "OffqQuant",
+      "best_score": -17.166339037643542,
+      "discoveries": 8,
+      "archive_coverage": 0.02,
+      "time_s": 0.8017315864562988,
+      "best_config": {
+        "offset_init": 0.1265026330947876,
+        "n_iter": 13,
+        "learn_offset": true
+      }
+    },
+    {
+      "domain": "OptimizerConfig",
+      "best_score": 14.4737609844178,
+      "discoveries": 15,
+      "archive_coverage": 0.06,
+      "time_s": 1.3216171264648438,
+      "best_config": {
+        "opt_type": "sgd",
+        "lr": 0.009973229145407677,
+        "beta1": 0.9376917898654937,
+        "beta2": 0.9576188024431467,
+        "weight_decay": 0.07795730829238892
+      }
+    },
+    {
+      "domain": "PagedEvictKV",
+      "best_score": 128.11,
+      "discoveries": 29,
+      "archive_coverage": 0.15,
+      "time_s": 0.4957873821258545,
+      "best_config": {
+        "page_size": 64,
+        "n_pages": 64,
+        "eviction_policy": "lru"
+      }
+    },
+    {
+      "domain": "QkNormConfig",
+      "best_score": 9.640414988588752,
+      "discoveries": 10,
+      "archive_coverage": 0.01,
+      "time_s": 1.9794647693634033,
+      "best_config": {
+        "norm_type": "layernorm",
+        "epsilon": 0.00015419161406159403,
+        "scale_init": 0.54457694478333
+      }
+    },
+    {
+      "domain": "QuantDomain",
+      "best_score": -1.4326378606749772,
+      "discoveries": 23,
+      "archive_coverage": 0.22,
+      "time_s": 3.84652042388916,
+      "best_config": {
+        "block_size": 16,
+        "scale_method": "hybrid",
+        "residual_ratio": 0.0,
+        "global_scale_factor": 1.0,
+        "scale_search_range": 0.8,
+        "scale_search_steps": 20,
+        "rounding_method": "rtn",
+        "use_hadamard": false,
+        "hadamard_dim": 32,
+        "scale_clip_min": 0.001
+      }
+    },
+    {
+      "domain": "RopeConfig",
+      "best_score": 36.14810645172148,
+      "discoveries": 7,
+      "archive_coverage": 0.01,
+      "time_s": 0.4910621643066406,
+      "best_config": {
+        "theta": 9984164.62957859,
+        "scaling_type": "yarn",
+        "scaling_factor": 2.7473645210266113
+      }
+    },
+    {
+      "domain": "RotorQuantKV",
+      "best_score": 17.31130850315094,
+      "discoveries": 8,
+      "archive_coverage": 0.0625,
+      "time_s": 0.7467882633209229,
+      "best_config": {
+        "rot_type": "hadamard",
+        "n_rotations": 1,
+        "quant_bits": 8
+      }
+    },
+    {
+      "domain": "SamplingConfig",
+      "best_score": 9.012814360600734,
+      "discoveries": 59,
+      "archive_coverage": 0.29,
+      "time_s": 0.6122987270355225,
+      "best_config": {
+        "temperature": 0.3476064667105675,
+        "top_p": 0.9212490022182465,
+        "top_k": 44,
+        "repetition_penalty": 1.0432766862213612,
+        "frequency_penalty": 0.0546274334192276
+      }
+    },
+    {
+      "domain": "SchedulerConfig",
+      "best_score": 9.998657299451782,
+      "discoveries": 43,
+      "archive_coverage": 0.16,
+      "time_s": 0.692009449005127,
+      "best_config": {
+        "sched_type": "linear",
+        "warmup_steps": 60,
+        "min_lr_ratio": 0.026754025369882584,
+        "decay_steps": 9724
+      }
+    },
+    {
+      "domain": "SharqQuant",
+      "best_score": -18.258488166499003,
+      "discoveries": 54,
+      "archive_coverage": 0.19,
+      "time_s": 0.923741340637207,
+      "best_config": {
+        "n_levels": 30,
+        "adaptive": false,
+        "warmup_steps": 471
+      }
+    },
+    {
+      "domain": "SlidingWindow",
+      "best_score": 9.649658203125,
+      "discoveries": 24,
+      "archive_coverage": 0.1,
+      "time_s": 1.1468710899353027,
+      "best_config": {
+        "window_size": 287,
+        "stride": 78,
+        "overlap_ratio": 0.8495826125144958
+      }
+    },
+    {
+      "domain": "SparseAttentionDomain",
+      "best_score": -26.51174063601168,
+      "discoveries": 16,
+      "archive_coverage": 0.06,
+      "time_s": 2.1677894592285156,
+      "best_config": {
+        "strategy": "compact",
+        "budget_ratio": 0.8435311317443848,
+        "block_size": 29,
+        "min_seq_len": 264,
+        "k_ratio": 0.2675241231918335
+      }
+    },
+    {
+      "domain": "SpeculativeDecode",
+      "best_score": 54.89289339780895,
+      "discoveries": 92,
+      "archive_coverage": 0.43,
+      "time_s": 0.46407461166381836,
+      "best_config": {
+        "n_draft_tokens": 7,
+        "draft_model_ratio": 0.1284830629825592,
+        "acceptance_threshold": 0.9477645397186278,
+        "temperature": 0.8862568140029907
+      }
+    },
+    {
+      "domain": "StreamingKV",
+      "best_score": 97.09717273712158,
+      "discoveries": 35,
+      "archive_coverage": 0.13,
+      "time_s": 0.5044090747833252,
+      "best_config": {
+        "chunk_size": 128,
+        "n_sink": 4,
+        "overlap": 0.1
+      }
+    },
+    {
+      "domain": "SyntheticDomain",
+      "best_score": -11.929615096460353,
+      "discoveries": 66,
+      "archive_coverage": 0.32,
+      "time_s": 0.5238521099090576,
+      "best_config": {
+        "x": "[0.21692967 0.9576393  0.5979239  0.38623297 0.3579515  0.5542498\n 0.84064656 0.0566962 ]"
+      }
+    },
+    {
+      "domain": "TitanMemory",
+      "best_score": 3.2256503105163574,
+      "discoveries": 21,
+      "archive_coverage": 0.05,
+      "time_s": 0.6567702293395996,
+      "best_config": {
+        "memory_rank": 75,
+        "gate_init": 0.4723557233810425,
+        "n_memory_slots": 1,
+        "update_freq": 6
+      }
+    },
+    {
+      "domain": "W8A8Quant",
+      "best_score": 178.13055419921875,
+      "discoveries": 9,
+      "archive_coverage": 0.01,
+      "time_s": 0.6522707939147949,
+      "best_config": {
+        "mode": "fp8",
+        "calib_samples": 75,
+        "per_channel": true,
+        "smoothquant_alpha": 0.9566946029663086
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "profile": "smoke",
+  "total_domains": 1,
+  "total_time_s": 1.2259681224822998,
+  "total_time_m": 0.020432802041371663,
+  "valid_runs": 1,
+  "failed_runs": 0,
+  "results": [
+    {
+      "domain": "SyntheticDomain",
+      "best_score": -14.523756645287136,
+      "discoveries": 30,
+      "archive_coverage": 0.22,
+      "time_s": 1.1938295364379883,
+      "best_config": {
+        "x": "[0.01958141 0.36438462 0.5451069  0.24466184 0.35684752 0.29797333\n 0.4336695  0.6110134 ]"
+      }
+    }
+  ]
+}

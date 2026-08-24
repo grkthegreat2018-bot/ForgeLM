@@ -76,6 +76,17 @@ _inspect_template.py
 _refactor_helper.py
 help.txt
 
+# Tool / agent runtime dirs
+.mimosa/
+
+# Experiment output databases & training logs (regenerable, large)
+research/results/*.db
+research/results/*.db-journal
+research/results/*.db-wal
+research/results/*.db-shm
+tests/integration/*.db
+tests/integration/*.db-journal
+
 # IDE / OS
 .vscode/
 .idea/
