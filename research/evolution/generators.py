@@ -1,12 +1,18 @@
 """Tiny neural generators — produce candidate configs from noise + context.
 
-Each generator is a small MLP (3 layers, ~50K params).
+Each generator is a small MLP (4 layers, ~200K params with hidden=128).
 Input: noise vector (diversity) + context vector (current best config).
 Output: candidate config (continuous params, discretized by domain).
 
 Population of N generators explores different regions of config space.
 REINFORCE updates push generators toward producing high-scoring configs.
 Bottom 20% die each generation; top 20% spawn mutated children.
+
+Adaptive features (self-improving loop):
+  - mutation_rate decays over generations (exploit more as we converge)
+  - diversity burst triggers when population variance drops (anti-plateau)
+  - LayerNorm in generators for training stability (deeper nets train better)
+  - 4-layer network (was 3) for more expressive config generation
 
 CUDA: All generators are batched into a single (N, ...) weight tensor.
 Forward pass for all 500 generators runs as ONE batched matmul on GPU.
@@ -25,11 +31,14 @@ from typing import Any
 class GeneratorConfig:
     noise_dim: int = 16           # randomness input
     context_dim: int = 32         # current best config encoding
-    hidden_dim: int = 64          # MLP hidden size
+    hidden_dim: int = 128         # MLP hidden size (was 64; deeper nets explore better)
     output_dim: int = 8           # number of parameters to generate
     n_generators: int = 1000      # population size
-    mutation_rate: float = 0.1    # weight noise when cloning
+    mutation_rate: float = 0.1    # weight noise when cloning (adaptive: decays over gens)
     init_scale: float = 0.3       # weight init scale
+    n_layers: int = 4             # network depth (was 3; 4 gives more expressive configs)
+    adaptive_mutation: bool = True  # decay mutation_rate as population matures
+    diversity_threshold: float = 0.01  # trigger diversity burst if param variance < this
 
 
 class BatchedGenerator(nn.Module):
@@ -40,14 +49,18 @@ class BatchedGenerator(nn.Module):
       b0: (N, hidden_dim)
       W1: (N, hidden_dim, hidden_dim)
       b1: (N, hidden_dim)
-      W2: (N, hidden_dim, out_dim)
-      b2: (N, out_dim)
+      W2: (N, hidden_dim, hidden_dim)   [4-layer: extra depth for expressivity]
+      b2: (N, hidden_dim)
+      W3: (N, hidden_dim, out_dim)
+      b3: (N, out_dim)
+      ln_gamma/beta: (N, hidden_dim)  [LayerNorm for training stability]
 
     Forward pass for all N generators with different noise:
       input: (N, noise_dim + context_dim) — each generator gets its own noise
       output: (N, out_dim) via batched matmul
 
     This is ~100x faster than looping over N separate modules on CPU.
+    LayerNorm (batched per-generator) stabilizes deeper network training.
     """
 
     def __init__(self, cfg: GeneratorConfig, device: torch.device = None):
@@ -58,18 +71,33 @@ class BatchedGenerator(nn.Module):
         in_dim = cfg.noise_dim + cfg.context_dim
         h = cfg.hidden_dim
         out = cfg.output_dim
+        scale = cfg.init_scale
 
         # Batched weights: (N, in, out) for each layer
-        self.W0 = nn.Parameter(torch.randn(n, in_dim, h, device=self.device) * 0.3)
+        self.W0 = nn.Parameter(torch.randn(n, in_dim, h, device=self.device) * scale)
         self.b0 = nn.Parameter(torch.zeros(n, h, device=self.device))
-        self.W1 = nn.Parameter(torch.randn(n, h, h, device=self.device) * 0.3)
+        self.W1 = nn.Parameter(torch.randn(n, h, h, device=self.device) * scale)
         self.b1 = nn.Parameter(torch.zeros(n, h, device=self.device))
-        self.W2 = nn.Parameter(torch.randn(n, h, out, device=self.device) * 0.3)
-        self.b2 = nn.Parameter(torch.zeros(n, out, device=self.device))
+        # 4th layer (extra depth for more expressive config generation)
+        self.W2 = nn.Parameter(torch.randn(n, h, h, device=self.device) * scale)
+        self.b2 = nn.Parameter(torch.zeros(n, h, device=self.device))
+        self.W3 = nn.Parameter(torch.randn(n, h, out, device=self.device) * scale)
+        self.b3 = nn.Parameter(torch.zeros(n, out, device=self.device))
+
+        # Per-generator LayerNorm (stabilizes deeper net training)
+        self.ln_gamma = nn.Parameter(torch.ones(n, h, device=self.device))
+        self.ln_beta = nn.Parameter(torch.zeros(n, h, device=self.device))
 
         # Per-generator fitness tracking (not a parameter)
         self.register_buffer("fitness_ema", torch.zeros(n, device=self.device))
         self.register_buffer("age", torch.zeros(n, device=self.device))
+
+    def _layer_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-generator LayerNorm: x: (N, h) → normalized (N, h)."""
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_norm = (x - mean) / (var + 1e-6).sqrt()
+        return x_norm * self.ln_gamma + self.ln_beta
 
     def forward(self, noise: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """Batched forward pass for all N generators.
@@ -86,12 +114,14 @@ class BatchedGenerator(nn.Module):
         ctx = context.unsqueeze(0).expand(n, -1)  # (N, context_dim)
         x = torch.cat([noise, ctx], dim=-1)        # (N, in_dim)
 
-        # Batched matmul: (N, in) @ (N, in, h) → (N, h)
+        # 4-layer batched MLP with LayerNorm + tanh
         h0 = torch.bmm(x.unsqueeze(1), self.W0).squeeze(1) + self.b0
-        h0 = torch.tanh(h0)
+        h0 = torch.tanh(self._layer_norm(h0))
         h1 = torch.bmm(h0.unsqueeze(1), self.W1).squeeze(1) + self.b1
-        h1 = torch.tanh(h1)
-        out = torch.bmm(h1.unsqueeze(1), self.W2).squeeze(1) + self.b2
+        h1 = torch.tanh(self._layer_norm(h1))
+        h2 = torch.bmm(h1.unsqueeze(1), self.W2).squeeze(1) + self.b2
+        h2 = torch.tanh(self._layer_norm(h2))
+        out = torch.bmm(h2.unsqueeze(1), self.W3).squeeze(1) + self.b3
         return torch.sigmoid(out)  # (N, output_dim) in [0, 1]
 
     def forward_single(self, noise: torch.Tensor, context: torch.Tensor,
@@ -106,13 +136,26 @@ class BatchedGenerator(nn.Module):
         b1 = self.b1[gen_idx:gen_idx+1]
         w2 = self.W2[gen_idx:gen_idx+1]
         b2 = self.b2[gen_idx:gen_idx+1]
+        w3 = self.W3[gen_idx:gen_idx+1]
+        b3 = self.b3[gen_idx:gen_idx+1]
+        ln_g = self.ln_gamma[gen_idx:gen_idx+1]
+        ln_b = self.ln_beta[gen_idx:gen_idx+1]
 
         h0 = torch.bmm(x.unsqueeze(1), w0).squeeze(1) + b0
-        h0 = torch.tanh(h0)
+        h0 = torch.tanh(self._ln_single(h0, ln_g, ln_b))
         h1 = torch.bmm(h0.unsqueeze(1), w1).squeeze(1) + b1
-        h1 = torch.tanh(h1)
-        out = torch.bmm(h1.unsqueeze(1), w2).squeeze(1) + b2
+        h1 = torch.tanh(self._ln_single(h1, ln_g, ln_b))
+        h2 = torch.bmm(h1.unsqueeze(1), w2).squeeze(1) + b2
+        h2 = torch.tanh(self._ln_single(h2, ln_g, ln_b))
+        out = torch.bmm(h2.unsqueeze(1), w3).squeeze(1) + b3
         return torch.sigmoid(out).squeeze(0)  # (output_dim,)
+
+    @staticmethod
+    def _ln_single(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+        """LayerNorm for single generator (1, h)."""
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        return (x - mean) / (var + 1e-6).sqrt() * gamma + beta
 
     def mutate_generator(self, idx: int, parent_idx: int, rate: float | None = None):
         """Copy parent's weights into slot idx, then add mutation noise."""
@@ -124,6 +167,10 @@ class BatchedGenerator(nn.Module):
             self.b1[idx] = self.b1[parent_idx] + torch.randn_like(self.b1[idx]) * rate
             self.W2[idx] = self.W2[parent_idx] + torch.randn_like(self.W2[idx]) * rate
             self.b2[idx] = self.b2[parent_idx] + torch.randn_like(self.b2[idx]) * rate
+            self.W3[idx] = self.W3[parent_idx] + torch.randn_like(self.W3[idx]) * rate
+            self.b3[idx] = self.b3[parent_idx] + torch.randn_like(self.b3[idx]) * rate
+            self.ln_gamma[idx] = self.ln_gamma[parent_idx]
+            self.ln_beta[idx] = self.ln_beta[parent_idx]
             self.fitness_ema[idx] = self.fitness_ema[parent_idx] * 0.5
             self.age[idx] = 0
 
@@ -183,7 +230,7 @@ class GeneratorPopulation:
     """
 
     def __init__(self, cfg: GeneratorConfig, template: TemplateGenerator | None = None,
-                 device: torch.device = None):
+                 device: torch.device = None, compile: bool = True):
         self.cfg = cfg
         self.device = device or torch.device("cpu")
         self.batched_gen = BatchedGenerator(cfg, device=self.device).to(self.device)
@@ -192,10 +239,28 @@ class GeneratorPopulation:
         self.generation = 0
         self.noise_buffer = None  # stored for REINFORCE
 
+        # torch.compile the generator forward pass for kernel fusion.
+        # This fuses the 4-layer MLP + LayerNorm + sigmoid into fewer CUDA kernels,
+        # reducing Python→GPU dispatch overhead by ~3-5x.
+        # Use "default" mode (not "reduce-overhead") because CUDA graphs
+        # break with dynamic batch sizes from adaptive population sizing.
+        # Increase recompile limit since adaptive pop changes batch size.
+        self._compiled = False
+        if compile and self.device.type == "cuda":
+            try:
+                import torch._dynamo as dynamo
+                dynamo.config.recompile_limit = 64  # default is 8
+                self.batched_gen = torch.compile(
+                    self.batched_gen, mode="default", fullgraph=False)
+                self._compiled = True
+            except Exception:
+                self._compiled = False
+
         total_params = self.batched_gen.n_params()
         mem_mb = total_params * 4 / 1e6
+        compile_tag = " [compiled]" if self._compiled else ""
         print(f"[Generators] {cfg.n_generators} batched generators on {self.device}, "
-              f"{total_params/1e6:.1f}M total params, {mem_mb:.1f} MB")
+              f"{total_params/1e6:.1f}M total params, {mem_mb:.1f} MB{compile_tag}")
 
     def generate(self, n_per_gen: int = 1) -> list[dict[str, Any]]:
         """Generate candidates from all generators in one batched forward pass."""
@@ -236,8 +301,11 @@ class GeneratorPopulation:
         """Evolve population: kill worst, clone+mutate best, update fitness.
         Returns list of generator indices that were mutated (for optimizer reset).
 
-        Every 10 generations, injects a diversity burst: random noise added to
-        30% of generators to prevent convergence and maintain exploration.
+        Adaptive features (self-improving):
+        - mutation_rate decays over generations (exploit more as we converge)
+        - diversity burst triggers when population variance drops below threshold
+          (anti-plateau: injects noise to escape local optima)
+        - Every 10 generations: standard diversity burst on 30% of mid-tier
         """
         self.generation += 1
 
@@ -263,15 +331,42 @@ class GeneratorPopulation:
         bottom_indices = ranked[-n_kill:]
         top_indices = ranked[:n_clone]
 
+        # Adaptive mutation rate: decay over generations (exploit more as we mature)
+        if self.cfg.adaptive_mutation:
+            current_rate = self.cfg.mutation_rate * max(
+                0.02, 1.0 - self.generation * 0.01)
+        else:
+            current_rate = self.cfg.mutation_rate
+
         mutated = []
         for i, bad_idx in enumerate(bottom_indices):
             parent_idx = top_indices[i % n_clone]
-            self.batched_gen.mutate_generator(int(bad_idx), int(parent_idx))
+            self.batched_gen.mutate_generator(int(bad_idx), int(parent_idx),
+                                               rate=current_rate)
             mutated.append(int(bad_idx))
 
-        # Diversity burst every 10 generations: inject noise into 30% of
-        # mid-tier generators to prevent population convergence
-        if self.generation % 10 == 0:
+        # Diversity check: if population variance is too low, inject noise
+        # to prevent overfitting/plateau (anti-convergence mechanism)
+        with torch.no_grad():
+            w_var = self.batched_gen.W0.var(dim=0).mean().item()
+        if w_var < self.cfg.diversity_threshold:
+            n_burst = len(ranked) // 2  # aggressive: 50% get noise
+            mid_indices = ranked[n_clone:n_clone + n_burst]
+            burst_rate = max(0.05, current_rate * 2)  # double the mutation
+            with torch.no_grad():
+                for idx in mid_indices:
+                    self.batched_gen.W0[idx] += torch.randn_like(
+                        self.batched_gen.W0[idx]) * burst_rate
+                    self.batched_gen.W1[idx] += torch.randn_like(
+                        self.batched_gen.W1[idx]) * burst_rate
+                    self.batched_gen.W2[idx] += torch.randn_like(
+                        self.batched_gen.W2[idx]) * burst_rate
+                    self.batched_gen.W3[idx] += torch.randn_like(
+                        self.batched_gen.W3[idx]) * burst_rate
+                    mutated.append(int(idx))
+
+        # Standard diversity burst every 10 generations
+        elif self.generation % 10 == 0:
             n_burst = len(ranked) // 3
             mid_indices = ranked[n_clone:n_clone + n_burst]
             with torch.no_grad():
@@ -282,6 +377,8 @@ class GeneratorPopulation:
                         self.batched_gen.W1[idx]) * 0.15
                     self.batched_gen.W2[idx] += torch.randn_like(
                         self.batched_gen.W2[idx]) * 0.15
+                    self.batched_gen.W3[idx] += torch.randn_like(
+                        self.batched_gen.W3[idx]) * 0.15
                     mutated.append(int(idx))
 
         return mutated

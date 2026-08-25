@@ -69,13 +69,13 @@ class RotorQuantKV(BaseDomain):
 
     def encode(self, c: dict[str, Any]) -> torch.Tensor:
         ri = self.ROT_TYPES.index(c.get("rot_type", "hadamard"))
-        bi = 0 if c.get("quant_bits", 8) == 4 else 1
-        return torch.tensor([ri / 3, (c.get("n_rotations", 4) - 1) / 7, bi], dtype=torch.float32)
+        bi = 0 if int(c.get("quant_bits", 8)) == 4 else 1
+        return torch.tensor([ri / 3, (int(c.get("n_rotations", 4)) - 1) / 7, bi], dtype=torch.float32)
 
     def evaluate(self, c: dict[str, Any]) -> dict:
         K = self.K.clone()
         d = self.d
-        for _ in range(c["n_rotations"]):
+        for _ in range(int(c["n_rotations"])):
             if c["rot_type"] == "hadamard":
                 H = _hadamard(d, device=self.device); K = torch.einsum("shd,df->shf", K, H)
             elif c["rot_type"] == "dct":
@@ -84,9 +84,9 @@ class RotorQuantKV(BaseDomain):
                 K = torch.einsum("shd,df->shf", K, D)
             else:
                 R = self._randn(d, d) / np.sqrt(d); K = torch.einsum("shd,df->shf", K, R)
-        err = _quant_error(K, c["quant_bits"])
-        comp = 16.0 / c["quant_bits"]                      # bf16 → bits
-        compute = c["n_rotations"] * (1.0 if c["rot_type"] == "hadamard" else 2.5)
+        err = _quant_error(K, int(c["quant_bits"]))
+        comp = 16.0 / int(c["quant_bits"])                      # bf16 → bits
+        compute = int(c["n_rotations"]) * (1.0 if c["rot_type"] == "hadamard" else 2.5)
         score = comp * 10 - err * 200 - compute * 0.5
         return {"score": float(score), "behavioral": (comp, err),
                 "metadata": {"rot_type": c["rot_type"], "n_rotations": c["n_rotations"],
@@ -199,7 +199,9 @@ class StreamingKV(BaseDomain):
         covered = n_sink + n_chunks * chunk
         coverage = min(1.0, covered / self.seq_len)
         # Memory: sink + last chunk (streaming keeps only sink + current)
-        mem_ratio = (n_sink + chunk) / self.seq_len
+        # Overlap means keeping parts of previous chunks, which increases memory.
+        # overlap=0.5 means keeping 50% of previous chunk = +0.5*chunk memory.
+        mem_ratio = (n_sink + chunk * (1 + overlap)) / self.seq_len
         # Attention quality: estimate via variance of covered tokens
         sink_idx = torch.linspace(0, self.seq_len - 1, n_sink).long()
         chunk_start = self.seq_len - chunk
@@ -209,7 +211,8 @@ class StreamingKV(BaseDomain):
         score = coverage * 100 - mem_ratio * 80 - coverage_err * 50
         return {"score": float(score), "behavioral": (coverage, mem_ratio),
                 "metadata": {"chunk_size": chunk, "n_sink": n_sink, "overlap": overlap,
-                             "n_chunks": n_chunks, "coverage_err": coverage_err}}
+                             "n_chunks": n_chunks, "coverage_err": coverage_err,
+                             "mem_with_overlap": mem_ratio}}
 
     def behavioral_dims(self) -> list[tuple[str, int, float, float]]:
         return [("coverage", 10, 0.0, 1.0), ("mem_ratio", 10, 0.0, 1.0)]
@@ -249,18 +252,18 @@ class KvZipKV(BaseDomain):
         return {"compression_ratio": comp, "codebook_size": codebook, "n_iter": n_iter}
 
     def encode(self, c: dict[str, Any]) -> torch.Tensor:
-        return torch.tensor([(c.get("compression_ratio", 8) - 2) / 14,
-                             (c.get("codebook_size", 256) - 64) / 448,
-                             (c.get("n_iter", 50) - 10) / 90], dtype=torch.float32)
+        return torch.tensor([(float(c.get("compression_ratio", 8)) - 2) / 14,
+                             (int(c.get("codebook_size", 256)) - 64) / 448,
+                             (int(c.get("n_iter", 50)) - 10) / 90], dtype=torch.float32)
 
     def evaluate(self, c: dict[str, Any]) -> dict:
         K = self.K[:256]  # reduced from 1024 for speed
         n_sub = K.shape[0]
-        cb_size = min(c["codebook_size"], n_sub)
+        cb_size = min(int(c["codebook_size"]), n_sub)
         idx = torch.randperm(n_sub, device=K.device)[:cb_size]
         codebook = K[idx].clone()
         K_sub = K
-        for _ in range(min(c["n_iter"], 5)):  # capped at 5 (was 20)
+        for _ in range(min(int(c["n_iter"]), 5)):  # capped at 5 (was 20)
             dist = torch.cdist(K_sub, codebook)   # (256, cb_size)
             assign = dist.argmin(dim=1)
             one_hot = torch.zeros(K_sub.shape[0], cb_size, device=K.device)
@@ -275,7 +278,7 @@ class KvZipKV(BaseDomain):
         mem_bytes = cb_size * self.d * 2 + 1024 * 4
         orig_bytes = 1024 * self.d * 2
         actual_comp = orig_bytes / max(mem_bytes, 1)
-        score = actual_comp * 8 - recon_err * 300 - c["n_iter"] * 0.02
+        score = actual_comp * 8 - recon_err * 300 - int(c["n_iter"]) * 0.02
         return {"score": float(score), "behavioral": (actual_comp, recon_err),
                 "metadata": {"compression_ratio": comp, "codebook_size": cb_size,
                              "n_iter": c["n_iter"], "recon_err": recon_err, "actual_comp": actual_comp}}
@@ -335,17 +338,31 @@ class XQuantKV(BaseDomain):
         mem_ratio = mem_total / mem_full
         # Recomputation cost: proportional to n_recompute / interval
         recompute_cost = n_recompute / interval
+        # Inference latency: recomputing KV during generation is MUCH more
+        # expensive than during training (no parallelism, sequential token gen).
+        # ratio=1.0 means NO KV cache = every token recomputes all layers = O(n^2) generation.
+        # This is the critical penalty the old scoring missed.
+        if ratio >= 1.0:
+            # Full recompute = no KV cache = quadratic generation cost
+            inference_penalty = 50.0
+        elif ratio > 0.5:
+            # High recompute = significant generation slowdown
+            inference_penalty = (ratio - 0.5) * 60  # 0.5→0, 1.0→30
+        else:
+            inference_penalty = ratio * 10  # mild penalty for low recompute
         # Quantization error on stored layers (guard against n_stored=0)
         if n_stored > 0:
             err = np.mean([_quant_error(self.K[i][:512], bits) for i in range(min(n_stored, 4))])
             err = float(err) if np.isfinite(err) else 1.0
         else:
             err = 0.0  # no stored layers = no quant error
-        score = (1 - mem_ratio) * 100 - recompute_cost * 5 - err * 200
+        score = ((1 - mem_ratio) * 100 - recompute_cost * 5 - err * 200
+                 - inference_penalty)
         return {"score": float(score), "behavioral": (1 - mem_ratio, recompute_cost),
                 "metadata": {"recomputation_ratio": ratio, "quant_bits": bits,
                              "checkpoint_interval": interval, "n_recompute": n_recompute,
-                             "mem_ratio": mem_ratio, "quant_err": err}}
+                             "mem_ratio": mem_ratio, "quant_err": err,
+                             "inference_penalty": inference_penalty}}
 
     def behavioral_dims(self) -> list[tuple[str, int, float, float]]:
         return [("memory_saved", 10, 0.0, 1.0), ("recompute_cost", 10, 0.0, 8.0)]
@@ -412,10 +429,22 @@ class KvRecompute(BaseDomain):
         compute_cost = n_actual * cost_per_layer
         # Quality: recompute is exact (no quant), so error = 0 for recomputed, small for stored
         quality = 1.0 - n_stored * 0.01                    # stored layers have minor cache miss
-        score = mem_saved_ratio * 100 - compute_cost * 2 + quality * 20
+        # Inference latency: recomputing all layers during generation is O(n^2).
+        # n_actual=16 (all layers) = no KV cache = quadratic generation.
+        # This is the critical penalty the old scoring missed.
+        recomp_ratio = n_actual / self.n_layers
+        if recomp_ratio >= 1.0:
+            inference_penalty = 40.0  # full recompute = no KV cache
+        elif recomp_ratio > 0.5:
+            inference_penalty = (recomp_ratio - 0.5) * 50
+        else:
+            inference_penalty = recomp_ratio * 8
+        score = (mem_saved_ratio * 100 - compute_cost * 2 + quality * 20
+                 - inference_penalty)
         return {"score": float(score), "behavioral": (mem_saved_ratio, compute_cost),
                 "metadata": {"recompute_layers": n_recomp, "strategy": strat,
-                             "threshold": threshold, "n_actual_recomp": n_actual, "quality": quality}}
+                             "threshold": threshold, "n_actual_recomp": n_actual,
+                             "quality": quality, "inference_penalty": inference_penalty}}
 
     def behavioral_dims(self) -> list[tuple[str, int, float, float]]:
         return [("memory_saved", 10, 0.0, 1.0), ("compute_cost", 10, 0.0, 32.0)]
@@ -478,15 +507,26 @@ class CrossLayerKV(BaseDomain):
             elif mode == "max":
                 shared = group.abs().argmax(dim=0)  # index of max
                 shared = group.gather(0, shared.unsqueeze(0))
-            else:  # learned → weighted average (simulated with uniform)
-                shared = group.mean(dim=0, keepdim=True)
+            else:  # learned → weighted average with learned weights (simulated)
+                # Learned mode: optimal weighting minimizes recon error.
+                # Simulate by using SVD-based optimal combination.
+                group_flat = group.reshape(group.shape[0], -1)  # (n_layers, rest)
+                # Optimal shared = weighted combo that minimizes ||target - shared||^2
+                # Approximate: use the first principal component direction
+                U, S, Vh = torch.linalg.svd(group_flat, full_matrices=False)
+                weights = torch.softmax(S, dim=0)  # higher singular values = more weight
+                shared_flat = (weights.unsqueeze(0) @ U.T @ group_flat)  # weighted combo
+                shared = shared_flat.reshape(1, *group.shape[1:])
             # Share ratio: fraction of layers that use shared KV
             n_share_in_group = max(1, int((end - start) * ratio))
-            recon_err += float((group[-n_share_in_group:] - shared.expand(n_share_in_group, *group.shape[1:]).norm()).mean())
+            target = group[-n_share_in_group:]
+            recon = shared.expand(n_share_in_group, *group.shape[1:])
+            # Relative L2 reconstruction error (always non-negative)
+            recon_err += float((target - recon).norm().item() / (target.norm().item() + 1e-8))
             n_shared += n_share_in_group
         param_reduction = n_shared / n_layers
         recon_err /= max(1, n_groups)
-        # Compute overhead for learned mode
+        # Compute overhead for learned mode (higher due to weight params + compute)
         overhead = 1.5 if mode == "learned" else (1.2 if mode == "max" else 1.0)
         score = param_reduction * 100 - recon_err * 500 - overhead * 2
         return {"score": float(score), "behavioral": (param_reduction, recon_err),

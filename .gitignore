@@ -84,12 +84,19 @@ research/results/*.db
 research/results/*.db-journal
 research/results/*.db-wal
 research/results/*.db-shm
+research/results/*.db.backup_*
+research/results/*.db.bak_*
 tests/integration/*.db
 tests/integration/*.db-journal
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+*.db.backup_*
+*.db.bak_*
+
+# Training logs
+train_log.txt
 
 # IDE / OS
 .vscode/

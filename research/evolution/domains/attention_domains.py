@@ -36,18 +36,44 @@ class RopeConfig(BaseDomain):
         theta = config["theta"]
         scaling = config["scaling_factor"]
         d = 64
-        pos = torch.arange(32, dtype=torch.float32)
+        # Test at BOTH short (32) and long (4096) range — catches theta that
+        # only looks good at short range but fails at 32K context.
+        pos_short = torch.arange(32, dtype=torch.float32)
+        pos_long = torch.arange(4096, dtype=torch.float32)
         freqs = 1.0 / (theta ** (torch.arange(0, d, 2).float() / d))
         if config["scaling_type"] == "yarn":
             freqs = freqs / scaling
         elif config["scaling_type"] == "linear":
-            pos = pos / scaling
-        angles = pos.unsqueeze(1) * freqs.unsqueeze(0)
-        rot_div = float(angles.std().item() / (angles.abs().mean().item() + 1e-8))
-        stability = 1.0 / (1.0 + float((angles.abs() > 1e4).float().mean().item()) * 10)
-        score = rot_div * 10 + stability * 5
-        return {"score": float(score), "behavioral": (rot_div, stability),
-                "metadata": {"theta": theta, "scaling": scaling}}
+            pos_short = pos_short / scaling
+            pos_long = pos_long / scaling
+        # Short-range rotation diversity
+        angles_short = pos_short.unsqueeze(1) * freqs.unsqueeze(0)
+        rot_div_short = float(angles_short.std().item() / (angles_short.abs().mean().item() + 1e-8))
+        # Long-range: check for attention collapse (all angles converge → no diversity)
+        angles_long = pos_long.unsqueeze(1) * freqs.unsqueeze(0)
+        rot_div_long = float(angles_long.std().item() / (angles_long.abs().mean().item() + 1e-8))
+        # Stability: penalize extreme angles that cause numerical issues
+        stability = 1.0 / (1.0 + float((angles_long.abs() > 1e4).float().mean().item()) * 10)
+        # Checkpoint compatibility penalty: deviating far from base theta (1M)
+        # breaks RoPE for models trained with 1M. Only reward high theta if
+        # the model is trained from scratch with that theta.
+        base_theta = 1_000_000.0
+        theta_ratio = max(theta, base_theta) / min(theta, base_theta)
+        compat_penalty = 0.0
+        if theta_ratio > 10:  # >10x deviation from base
+            compat_penalty = (np.log10(theta_ratio) - 1) * 8  # log-scaled penalty
+        # Long-range attention quality: high theta compresses low-freq dims
+        # so much they barely rotate → attention becomes too local at long range.
+        # Measure the fraction of dimensions that are "frozen" (angle change < 0.01 rad over 4096 positions)
+        angle_change = (angles_long[-1] - angles_long[0]).abs()
+        frozen_frac = float((angle_change < 0.01).float().mean().item())
+        frozen_penalty = frozen_frac * 10  # penalize frozen dimensions
+        score = (rot_div_short * 5 + rot_div_long * 5 + stability * 5
+                 - compat_penalty - frozen_penalty)
+        return {"score": float(score), "behavioral": (rot_div_short, stability),
+                "metadata": {"theta": theta, "scaling": scaling,
+                             "frozen_frac": frozen_frac,
+                             "compat_penalty": compat_penalty}}
     def seed_configs(self):
         return [{"theta": 10000, "scaling_type": "none", "scaling_factor": 1.0},
                 {"theta": 1000000, "scaling_type": "none", "scaling_factor": 1.0},
@@ -152,20 +178,27 @@ class GlaAttention(BaseDomain):
         ], dtype=torch.float32)
     def evaluate(self, config):
         ld = config["latent_dim"]
+        n_h = config["n_heads"]
         d = 512
-        k = self._randn(4, 8, 32, d)
-        proj_down = self._randn(d, ld) / (d ** 0.5)
-        proj_up = self._randn(ld, d) / (ld ** 0.5)
+        # Use n_heads in the evaluation — more heads = better parallelism
+        # but each head has smaller dim, affecting reconstruction quality.
+        head_dim = d // max(n_h, 1)
+        k = self._randn(4, n_h, 32, head_dim)
+        # Project each head's K separately
+        proj_down = self._randn(head_dim, ld) / (head_dim ** 0.5)
+        proj_up = self._randn(ld, head_dim) / (ld ** 0.5)
         k_latent = k @ proj_down
         k_recon = k_latent @ proj_up
         recon_err = float((k - k_recon).norm().item() / (k.norm().item() + 1e-8))
         compression = d / ld
+        # More heads = better parallelism but more projection params
+        head_overhead = n_h * 0.02  # param cost per head
         if compression < 1.5:
             score = -50
         else:
-            score = -recon_err * 100 + compression * 5
+            score = -recon_err * 100 + compression * 5 - head_overhead
         return {"score": float(score), "behavioral": (recon_err, compression),
-                "metadata": {"latent_dim": ld, "recon_err": recon_err}}
+                "metadata": {"latent_dim": ld, "n_heads": n_h, "recon_err": recon_err}}
 
 
 class GtaAttention(BaseDomain):
@@ -186,18 +219,28 @@ class GtaAttention(BaseDomain):
         ], dtype=torch.float32)
     def evaluate(self, config):
         mix = config["v_k_mix"]
+        n_kv = config["n_kv_heads"]
+        tie = config["tie_strength"]
         d = 64
-        k = self._randn(4, 8, 32, d)
-        v = self._randn(4, 8, 32, d)
-        v_tied = mix * k + (1 - mix) * v
+        # Use n_kv_heads: fewer KV heads = more compression but more deviation
+        n_q_heads = 32
+        k = self._randn(4, n_kv, 32, d)
+        v = self._randn(4, n_kv, 32, d)
+        # V=K mixing with tie_strength controlling how strongly V is pulled toward K
+        # tie_strength=0: no tying (V independent), tie_strength=1: V fully tied to K
+        v_tied = mix * k * tie + (1 - mix * tie) * v
         dev = float((v - v_tied).norm().item() / (v.norm().item() + 1e-8))
-        kv_red = 0.5  # GTA halves KV cache
+        # KV reduction: fewer KV heads = more compression (GQA ratio)
+        kv_red = 1.0 - n_kv / n_q_heads
+        # tie_strength tradeoff: high tying saves more params but increases deviation
+        tying_savings = tie * 0.3  # param savings from tying
         if dev > 0.5:
             score = -50
         else:
-            score = kv_red * 10 - dev * 20
+            score = kv_red * 10 - dev * 20 + tying_savings * 3
         return {"score": float(score), "behavioral": (kv_red, dev),
-                "metadata": {"mix": mix, "deviation": dev}}
+                "metadata": {"mix": mix, "n_kv_heads": n_kv, "tie_strength": tie,
+                             "deviation": dev, "kv_reduction": kv_red}}
 
 
 class QkNormConfig(BaseDomain):

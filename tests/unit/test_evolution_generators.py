@@ -37,7 +37,8 @@ class TestBatchedGeneratorInit:
     def test_has_all_weight_params(self, gen_cfg):
         gen = BatchedGenerator(gen_cfg, device=torch.device("cpu"))
         names = dict(gen.named_parameters())
-        for key in ("W0", "b0", "W1", "b1", "W2", "b2"):
+        # 4-layer network: W0,b0,W1,b1,W2,b2,W3,b3 + LayerNorm params
+        for key in ("W0", "b0", "W1", "b1", "W2", "b2", "W3", "b3"):
             assert key in names, f"missing parameter {key}"
 
     def test_has_fitness_ema_buffer(self, gen_cfg):
@@ -56,8 +57,14 @@ class TestBatchedGeneratorInit:
         assert gen.b0.shape == (n, h)
         assert gen.W1.shape == (n, h, h)
         assert gen.b1.shape == (n, h)
-        assert gen.W2.shape == (n, h, out)
-        assert gen.b2.shape == (n, out)
+        # 4-layer: W2 is hidden→hidden, W3 is hidden→out
+        assert gen.W2.shape == (n, h, h)
+        assert gen.b2.shape == (n, h)
+        assert gen.W3.shape == (n, h, out)
+        assert gen.b3.shape == (n, out)
+        # LayerNorm params
+        assert gen.ln_gamma.shape == (n, h)
+        assert gen.ln_beta.shape == (n, h)
 
 
 class TestBatchedGeneratorForward:

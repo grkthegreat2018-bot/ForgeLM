@@ -52,14 +52,19 @@ class HybridOffload(BaseDomain):
         vram_saved = torch.tensor(r * 2.34)  # bf16 weight bytes
         # Latency: PCIe transfer cost decreases with prefetch depth + overlap
         base_lat = torch.tensor(r * 8.0)  # ms baseline for full offload
-        speedup = torch.tensor(1.0 + depth * 0.12 + (0.3 if overlap else 0.0))
+        # Prefetch depth: logarithmic (diminishing returns) + memory cost.
+        # Each extra prefetch layer uses ~150MB VRAM for staging buffer.
+        speedup = torch.tensor(1.0 + np.log2(depth + 1) * 0.3 + (0.3 if overlap else 0.0))
         pin_bonus = torch.tensor(0.2 if pin else 0.0)
         latency = base_lat / speedup - pin_bonus
-        score = (vram_saved * 3.0 - latency * 0.8).item()
+        # Prefetch memory cost: deeper prefetch = more staging VRAM
+        prefetch_mem_cost = depth * 0.05  # 150MB per layer / 3GB scale
+        score = (vram_saved * 3.0 - latency * 0.8 - prefetch_mem_cost).item()
         return {
             "score": float(score),
             "behavioral": (float(vram_saved), float(latency.clamp(min=0))),
-            "metadata": {"vram_saved_gb": float(vram_saved), "latency_ms": float(latency.clamp(min=0))},
+            "metadata": {"vram_saved_gb": float(vram_saved), "latency_ms": float(latency.clamp(min=0)),
+                         "prefetch_mem_cost": prefetch_mem_cost},
         }
 
     def behavioral_dims(self) -> list[tuple[str, int, float, float]]:

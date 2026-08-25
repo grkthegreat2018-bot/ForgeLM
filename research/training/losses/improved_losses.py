@@ -37,16 +37,22 @@ class FocalCrossEntropy(nn.Module):
 
     Args:
         gamma: focusing parameter (0 = standard CE, 2 = typical focal)
+            Evolution-discovered default: 4.93 (higher than typical 2.0)
         alpha: class weight (optional, for imbalanced tokens)
         reduction: 'mean', 'sum', or 'none'
+        label_smoothing: smoothing factor (evolution-discovered: 0.289)
+        temperature: logits temperature scaling (evolution-discovered: 1.95)
     """
 
-    def __init__(self, gamma: float = 2.0, alpha: float | None = None,
-                 reduction: str = "mean"):
+    def __init__(self, gamma: float = 4.93, alpha: float | None = None,
+                 reduction: str = "mean",
+                 label_smoothing: float = 0.289, temperature: float = 1.95):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
         self.reduction = reduction
+        self.label_smoothing = label_smoothing
+        self.temperature = temperature
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor,
                 mask: torch.Tensor | None = None) -> torch.Tensor:

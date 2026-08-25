@@ -66,7 +66,7 @@ class OptimizerConfig(BaseDomain):
         stability = 1.0 / (1.0 + float(losses[-10:].std().item()))
         score = conv_speed * 20 + stability * 10
         return {"score": float(score), "behavioral": (conv_speed, stability),
-                "metadata": {"final_loss": losses[-1], "opt": config["opt_type"]}}
+                "metadata": {"final_loss": float(losses[-1].item()), "opt": config["opt_type"]}}
 
 
 class SchedulerConfig(BaseDomain):
@@ -113,9 +113,26 @@ class SchedulerConfig(BaseDomain):
             lrs.append(lr)
         auc = float(np.sum(lrs) / (base_lr * ds))  # simplified AUC
         final_decay = 1.0 - lrs[-1] / base_lr
-        score = auc * 10 + final_decay * 5
+        # Training stability: zero warmup causes early-step divergence
+        # (large lr on random init → gradient explosion). Penalize heavily.
+        # Minimum viable warmup: ~1% of total steps. Ideal: 5-10%.
+        warmup_ratio = ws / max(ds, 1)
+        stability_penalty = 0.0
+        if ws == 0:
+            stability_penalty = 8.0  # zero warmup = high divergence risk
+        elif warmup_ratio < 0.01:
+            stability_penalty = 4.0  # too little warmup
+        elif warmup_ratio > 0.3:
+            stability_penalty = 2.0  # too much warmup wastes training steps
+        # Early lr ramp smoothness: penalize sharp jumps
+        if ws > 0:
+            early_lr_jump = abs(lrs[1] - lrs[0]) / base_lr
+            if early_lr_jump > 0.1:
+                stability_penalty += early_lr_jump * 2
+        score = auc * 10 + final_decay * 5 - stability_penalty
         return {"score": float(score), "behavioral": (auc, final_decay),
-                "metadata": {"sched_type": config["sched_type"], "auc": auc}}
+                "metadata": {"sched_type": config["sched_type"], "auc": auc,
+                             "stability_penalty": stability_penalty}}
 
 
 class LossConfig(BaseDomain):
@@ -164,9 +181,37 @@ class LossConfig(BaseDomain):
         probs = torch.softmax(logits_t, dim=-1)
         grad_mag = float((probs * (1 - probs)).mean().item())  # gradient of CE w.r.t. logits
         smoothness = 1.0 / (1.0 + float(loss.item()))
-        score = grad_mag * 20 + smoothness * 10
+        # Training quality proxy: measure how well the loss distinguishes
+        # correct from incorrect predictions. A good loss should have high
+        # gradient on wrong predictions and low gradient on correct ones.
+        correct_mask = probs.argmax(dim=-1) == targets
+        wrong_probs = probs[~correct_mask]
+        correct_probs = probs[correct_mask].gather(1, targets[correct_mask].unsqueeze(1))
+        # Focus ratio: gradient should concentrate on wrong predictions
+        # Use unbiased=False to avoid NaN on single-element tensors
+        if len(wrong_probs) > 0 and len(correct_probs) > 1:
+            wrong_grad = float(wrong_probs.var(unbiased=False).item())
+            correct_grad = float(correct_probs.var(unbiased=False).item())
+            focus_ratio = wrong_grad / (correct_grad + 1e-8)
+        else:
+            focus_ratio = 1.0
+        # Penalize excessive label smoothing (>0.2 causes underfitting on SFT)
+        smoothing_penalty = 0.0
+        if ls > 0.2:
+            smoothing_penalty = (ls - 0.2) * 30  # linear penalty above 0.2
+        # Penalize extreme focal gamma (>5 causes gradient vanishing on easy examples)
+        gamma_penalty = 0.0
+        if fg > 5:
+            gamma_penalty = (fg - 5) * 5
+        # Penalize extreme temperature (>1.5 softens gradients too much)
+        temp_penalty = 0.0
+        if temp > 1.5:
+            temp_penalty = (temp - 1.5) * 4
+        score = (grad_mag * 15 + smoothness * 8 + min(focus_ratio, 3) * 3
+                 - smoothing_penalty - gamma_penalty - temp_penalty)
         return {"score": float(score), "behavioral": (grad_mag, smoothness),
-                "metadata": {"loss": float(loss.detach()), "type": config["loss_type"]}}
+                "metadata": {"loss": float(loss.detach()), "type": config["loss_type"],
+                             "focus_ratio": focus_ratio, "smoothing_penalty": smoothing_penalty}}
 
 
 class MuonConfig(BaseDomain):
@@ -306,11 +351,15 @@ class Fp8TrainingConfig(BaseDomain):
             np.clip((np.log2(config.get("loss_scale", 1024)) - 7) / 5, 0, 1),
         ], dtype=torch.float32)
     def evaluate(self, config):
-        # Simulate FP8 range
+        # Simulate FP8 range + precision
         if config["autocast_mode"] == "e4m3":
-            max_val, min_val = 448, -448
+            max_val = 448
+            # E4M3: 3 mantissa bits → 8 representable values per octave
+            mantissa_bits = 3
         else:
-            max_val, min_val = 57344, -57344
+            max_val = 57344
+            # E5M2: 2 mantissa bits → 4 representable values per octave (LESS PRECISE)
+            mantissa_bits = 2
         x = self._randn(256, 512) * 0.02
         if config["mu_scaling"]:
             x = x / (x.std() + 1e-8)  # unit variance
@@ -318,11 +367,32 @@ class Fp8TrainingConfig(BaseDomain):
             x = x / (x.abs().max(dim=-1, keepdim=True).values + 1e-8) * max_val * 0.5
         overflow = float((x.abs() > max_val).float().mean().item())
         dynamic_range = float(x.abs().max().item() / (x.abs().mean().item() + 1e-8))
-        score = dynamic_range * 5 - overflow * 100
+        # Quantization error: simulate FP8 rounding with correct mantissa bits.
+        # E5M2 has 2x the quantization error of E4M3 due to fewer mantissa bits.
+        # This is the key metric the old scoring missed — e5m2's larger range
+        # doesn't compensate for its worse precision.
+        x_clamped = x.clamp(-max_val, max_val)
+        scale = x_clamped.abs().max() / max_val if x_clamped.abs().max() > 0 else torch.tensor(1.0, device=self.device)
+        x_scaled = x_clamped / scale
+        # Simulate FP8 quantization: round to nearest representable value
+        # Number of levels per sign = 2^mantissa_bits
+        n_levels = 2 ** mantissa_bits
+        x_quantized = torch.round(x_scaled * n_levels) / n_levels
+        x_dequantized = x_quantized * scale
+        quant_err = float((x - x_dequantized).norm().item() / (x.norm().item() + 1e-8))
+        # Score: balance dynamic range (good for avoiding overflow) against
+        # quantization error (bad for training quality). E4M3 wins when
+        # overflow is already handled by mu_scaling/smooth_swiglu.
+        score = dynamic_range * 3 - overflow * 100 - quant_err * 30
+        if config["mu_scaling"]:
+            score += 3  # mu_scaling helps both modes equally
+        if config["smooth_swiglu"]:
+            score += 2  # smooth_swiglu prevents SiLU outliers
         if config["loss_scale"] > 1024:
             score += 2  # higher loss scale helps small gradients
         return {"score": float(score), "behavioral": (dynamic_range / 100, overflow),
-                "metadata": {"overflow": overflow, "mode": config["autocast_mode"]}}
+                "metadata": {"overflow": overflow, "mode": config["autocast_mode"],
+                             "quant_err": quant_err, "mantissa_bits": mantissa_bits}}
 
 
 class ModConfig(BaseDomain):
@@ -349,6 +419,8 @@ class ModConfig(BaseDomain):
     def evaluate(self, config):
         kf = config["keep_fraction"]
         nsl = config["n_skip_layers"]
+        alw = config["aux_loss_weight"]
+        rt = config["router_type"]
         # Simulate routing: keep_fraction of tokens processed
         tokens = self._randn(128, 512)
         router = self._randn(128)
@@ -357,9 +429,288 @@ class ModConfig(BaseDomain):
         # Accuracy loss: proportional to tokens skipped
         kept = tokens[keep_mask]
         acc_loss = 1.0 - float(kept.std().item() / (tokens.std().item() + 1e-8))
+        # Router type: MLP router is more expressive but adds params
+        router_quality = 1.0 if rt == "mlp" else 0.85  # linear is simpler but less accurate
+        # n_skip_layers: skipping too many layers degrades quality
+        # 0 = no skip (safe), 1-4 = mild skip (good), >8 = aggressive (risky)
+        skip_penalty = 0.0
+        if nsl > 8:
+            skip_penalty = (nsl - 8) * 0.5  # aggressive skipping
+        # aux_loss_weight: too high destabilizes training, too low → router collapse
+        # Sweet spot is near-zero (1e-8 to 1e-4)
+        aux_penalty = 0.0
+        if alw > 0.01:
+            aux_penalty = (alw - 0.01) * 50  # high aux loss hurts main loss
+        elif alw < 1e-10:
+            aux_penalty = 1.0  # too low → router may collapse
         if compute_saved < 0.05:
             score = -50  # no compute saved = trivial
         else:
-            score = compute_saved * 20 - acc_loss * 10
+            score = (compute_saved * 20 - acc_loss * 10) * router_quality
+            score -= skip_penalty + aux_penalty
         return {"score": float(score), "behavioral": (compute_saved, acc_loss),
-                "metadata": {"keep_fraction": kf, "compute_saved": compute_saved}}
+                "metadata": {"keep_fraction": kf, "compute_saved": compute_saved,
+                             "router_type": rt, "n_skip_layers": nsl,
+                             "skip_penalty": skip_penalty, "aux_penalty": aux_penalty}}
+
+
+class ApolloConfig(BaseDomain):
+    """APOLLO optimizer hyperparameters: rank, scale_mode, lr_scale."""
+    def name(self): return "apollo_config"
+    def output_dim(self): return 3
+    def discrete_choices(self):
+        return {"scale": ["tensor", "channel"]}
+    def behavioral_dims(self):
+        return [("memory_savings", 10, 0, 1), ("convergence_quality", 10, 0, 1)]
+    def decode(self, params):
+        p = params.detach().cpu().numpy()
+        return {"rank": int(np.interp(p[0], [0, 1], [1, 64])),
+                "scale": ["tensor", "channel"][int(p[1] * 1.999)],
+                "lr_scale": float(np.interp(p[2], [0, 1], [0.5, 10.0]))}
+    def encode(self, config):
+        smap = {"tensor": 0.0, "channel": 1.0}
+        return torch.tensor([
+            np.clip((config.get("rank", 8) - 1) / 63, 0, 1),
+            smap.get(config.get("scale", "tensor"), 0),
+            np.clip((config.get("lr_scale", 2.0) - 0.5) / 9.5, 0, 1),
+        ], dtype=torch.float32)
+    def evaluate(self, config):
+        rank = config["rank"]
+        scale = config["scale"]
+        lr_scale = config["lr_scale"]
+        cols = 4096
+        # Simulate APOLLO convergence on a quadratic loss
+        x = torch.tensor([3.0, -2.0, 1.5, -1.0, 0.5], device=self.device)
+        lr = 0.01 * lr_scale
+        # APOLLO approximates the Hessian with a low-rank projector of rank `rank`
+        # (simplified: scale gradient by a factor derived from rank)
+        proj_factor = min(rank / 16.0, 1.0)  # sweet spot ~8-16
+        losses = torch.zeros(30, device=self.device)
+        for step in range(30):
+            loss = (x ** 2).sum()
+            grad = 2 * x
+            # APOLLO preconditioner: low-rank approximation rescales gradient
+            x = x - lr * grad * (0.5 + proj_factor)
+            losses[step] = loss
+        conv_quality = 1.0 / (1.0 + float(losses[-1].item()))
+        # memory_savings: lower rank = less optimizer state
+        memory_savings = (8 - 2 * rank / cols) / 8
+        memory_savings = float(np.clip(memory_savings, 0, 1))
+        # rank_penalty: rank > 32 has diminishing returns
+        rank_penalty = 0.0
+        if rank > 32:
+            rank_penalty = (rank - 32) * 0.3
+        # rank=1 (APOLLO-Mini) gets a bonus for memory efficiency
+        if rank == 1:
+            rank_penalty -= 2.0
+        # scale_bonus: channel scaling is more expressive
+        scale_bonus = 2.0 if scale == "channel" else 0.0
+        # Trivial solution guard: rank=64 + channel + high lr ≈ just AdamW
+        trivial_penalty = 0.0
+        if rank >= 64 and scale == "channel" and lr_scale > 8.0:
+            trivial_penalty = 15.0
+        score = (memory_savings * 20 + conv_quality * 10 + scale_bonus
+                 - rank_penalty - trivial_penalty)
+        return {"score": float(score), "behavioral": (memory_savings, conv_quality),
+                "metadata": {"rank": rank, "scale": scale, "lr_scale": lr_scale,
+                             "memory_savings": memory_savings,
+                             "conv_quality": conv_quality,
+                             "rank_penalty": rank_penalty,
+                             "trivial_penalty": trivial_penalty}}
+
+
+class BreadConfig(BaseDomain):
+    """BREAD landscape correction for BAdam: correction_mode, sgd_lr_scale."""
+    def name(self): return "bread_config"
+    def output_dim(self): return 2
+    def discrete_choices(self):
+        return {"correction_mode": ["disabled", "partial", "all"]}
+    def behavioral_dims(self):
+        return [("correction_quality", 10, 0, 1), ("stability", 10, 0, 1)]
+    def decode(self, params):
+        p = params.detach().cpu().numpy()
+        return {"correction_mode": ["disabled", "partial", "all"][int(p[0] * 2.999)],
+                "sgd_lr_scale": float(np.interp(p[1], [0, 1], [1.0, 10.0]))}
+    def encode(self, config):
+        mmap = {"disabled": 0.0, "partial": 0.5, "all": 1.0}
+        return torch.tensor([
+            mmap.get(config.get("correction_mode", "partial"), 0.5),
+            np.clip((config.get("sgd_lr_scale", 5.0) - 1.0) / 9.0, 0, 1),
+        ], dtype=torch.float32)
+    def evaluate(self, config):
+        mode = config["correction_mode"]
+        sgd_lr_scale = config["sgd_lr_scale"]
+        # Simulate BAdam block-wise optimization with landscape correction
+        x = torch.tensor([3.0, -2.0, 1.5, -1.0, 0.5], device=self.device)
+        lr = 0.01 * sgd_lr_scale
+        losses = torch.zeros(20, device=self.device)
+        for step in range(20):
+            loss = (x ** 2).sum()
+            grad = 2 * x
+            x = x - lr * grad
+            losses[step] = loss
+        stability = 1.0 / (1.0 + float(losses[-10:].std().item()))
+        # mode_bonus: "partial" is the best mode
+        mode_bonus = 0.0
+        if mode == "disabled":
+            mode_bonus = 0.0  # vanilla BAdam baseline
+        elif mode == "partial":
+            mode_bonus = 15.0  # corrects visited blocks only (best)
+        else:  # "all"
+            mode_bonus = -5.0  # corrects all blocks including never-visited (risky)
+        # sgd_lr_scale sweet spot at 5x
+        lr_scale_quality = 0.0
+        if sgd_lr_scale < 2.0:
+            lr_scale_quality = -(2.0 - sgd_lr_scale) * 3  # weak correction
+        elif sgd_lr_scale > 8.0:
+            lr_scale_quality = -(sgd_lr_scale - 8.0) * 3  # destabilizing
+        else:
+            # peak at 5x, gentle falloff
+            lr_scale_quality = 5.0 - abs(sgd_lr_scale - 5.0) * 0.5
+        score = mode_bonus + lr_scale_quality
+        return {"score": float(score), "behavioral": (mode_bonus / 15.0, stability),
+                "metadata": {"correction_mode": mode, "sgd_lr_scale": sgd_lr_scale,
+                             "mode_bonus": mode_bonus,
+                             "lr_scale_quality": lr_scale_quality}}
+
+
+class FlashOptimConfig(BaseDomain):
+    """FlashOptim companded optimizer states: bits, companding_mode."""
+    def name(self): return "flashoptim_config"
+    def output_dim(self): return 2
+    def discrete_choices(self):
+        return {"bits": [4, 8], "companding": ["sqrt", "log", "linear"]}
+    def behavioral_dims(self):
+        return [("memory_savings", 10, 0, 1), ("precision", 10, 0, 1)]
+    def decode(self, params):
+        p = params.detach().cpu().numpy()
+        return {"bits": [4, 8][int(p[0] * 1.999)],
+                "companding": ["sqrt", "log", "linear"][int(p[1] * 2.999)]}
+    def encode(self, config):
+        bmap = {4: 0.0, 8: 1.0}
+        cmap = {"sqrt": 0.0, "log": 0.5, "linear": 1.0}
+        return torch.tensor([
+            bmap.get(config.get("bits", 8), 1.0),
+            cmap.get(config.get("companding", "sqrt"), 0),
+        ], dtype=torch.float32)
+    def evaluate(self, config):
+        bits = config["bits"]
+        companding = config["companding"]
+        # Simulate optimizer state quantization with companding
+        state = self._randn(256, 512) * 0.1
+        if companding == "sqrt":
+            transformed = torch.sign(state) * torch.sqrt(state.abs())
+        elif companding == "log":
+            transformed = torch.sign(state) * torch.log1p(state.abs())
+        else:  # linear
+            transformed = state
+        # Quantize to `bits` precision
+        n_levels = 2 ** bits
+        max_val = transformed.abs().max().item() + 1e-8
+        scale = max_val / n_levels
+        quantized = torch.round(transformed / scale) * scale
+        # Inverse transform
+        if companding == "sqrt":
+            dequantized = torch.sign(quantized) * (quantized ** 2)
+        elif companding == "log":
+            dequantized = torch.sign(quantized) * (torch.expm1(quantized.abs()))
+        else:
+            dequantized = quantized
+        quant_err = float((state - dequantized).norm().item() / (state.norm().item() + 1e-8))
+        precision = 1.0 / (1.0 + quant_err * 10)
+        # memory_savings: 8-bit = 75% (2 bytes vs 8), 4-bit = 87.5% (1 byte vs 8)
+        memory_savings = 0.75 if bits == 8 else 0.875
+        # companding_bonus: sqrt best for small values, log good, linear baseline
+        companding_bonus = 5.0 if companding == "sqrt" else (3.0 if companding == "log" else 0.0)
+        # 4-bit penalty: more aggressive, may lose precision on large models
+        bit_penalty = -10.0 if bits == 4 else 0.0
+        score = memory_savings * 30 + companding_bonus + bit_penalty
+        return {"score": float(score), "behavioral": (memory_savings, precision),
+                "metadata": {"bits": bits, "companding": companding,
+                             "memory_savings": memory_savings,
+                             "quant_err": quant_err,
+                             "companding_bonus": companding_bonus,
+                             "bit_penalty": bit_penalty}}
+
+
+class TritonKernelConfig(BaseDomain):
+    """Triton fused kernel block sizes: rms_block_size, swiglu_block_size."""
+    def name(self): return "triton_kernel_config"
+    def output_dim(self): return 2
+    def behavioral_dims(self):
+        return [("rms_match", 10, 0, 1), ("swiglu_match", 10, 0, 1)]
+    def decode(self, params):
+        p = params.detach().cpu().numpy()
+        return {"rms_block_size": int(2 ** int(np.interp(p[0], [0, 1], [8, 16]))),
+                "swiglu_block_size": int(2 ** int(np.interp(p[1], [0, 1], [8, 16])))}
+    def encode(self, config):
+        return torch.tensor([
+            np.clip((np.log2(config.get("rms_block_size", 4096)) - 8) / 8, 0, 1),
+            np.clip((np.log2(config.get("swiglu_block_size", 16384)) - 8) / 8, 0, 1),
+        ], dtype=torch.float32)
+    def evaluate(self, config):
+        rms_block = config["rms_block_size"]
+        swiglu_block = config["swiglu_block_size"]
+        # V7: d_model=4096 (rms), intermediate=16384 (swiglu)
+        rms_target = 4096
+        swiglu_target = 16384
+        # Simulate fused kernel throughput
+        x = self._randn(4096)
+        # Base speedup from fused kernels (Liger-Kernel ~20%)
+        base_speedup = 20.0
+        # mismatch penalty: block < feature = multiple passes (slower)
+        # block > feature = wasted parallelism (minor penalty)
+        rms_mismatch = 0.0
+        if rms_block < rms_target:
+            rms_mismatch = (rms_target / rms_block) * 3  # multiple passes
+        elif rms_block > rms_target:
+            rms_mismatch = (rms_block / rms_target) * 0.5  # wasted parallelism
+        swiglu_mismatch = 0.0
+        if swiglu_block < swiglu_target:
+            swiglu_mismatch = (swiglu_target / swiglu_block) * 3
+        elif swiglu_block > swiglu_target:
+            swiglu_mismatch = (swiglu_block / swiglu_target) * 0.5
+        mismatch_penalty = rms_mismatch + swiglu_mismatch
+        score = base_speedup - mismatch_penalty
+        rms_match = 1.0 / (1.0 + rms_mismatch)
+        swiglu_match = 1.0 / (1.0 + swiglu_mismatch)
+        return {"score": float(score), "behavioral": (rms_match, swiglu_match),
+                "metadata": {"rms_block_size": rms_block,
+                             "swiglu_block_size": swiglu_block,
+                             "rms_target": rms_target,
+                             "swiglu_target": swiglu_target,
+                             "mismatch_penalty": mismatch_penalty}}
+
+
+class VarlenConfig(BaseDomain):
+    """Varlen attention for packed sequences: use_varlen boolean."""
+    def name(self): return "varlen_config"
+    def output_dim(self): return 1
+    def behavioral_dims(self):
+        return [("speedup", 10, 0, 1), ("vram_savings", 10, 0, 1)]
+    def decode(self, params):
+        p = params.detach().cpu().numpy()
+        return {"use_varlen": bool(p[0] > 0.5)}
+    def encode(self, config):
+        return torch.tensor([1.0 if config.get("use_varlen", True) else 0.0],
+                            dtype=torch.float32)
+    def evaluate(self, config):
+        use_varlen = config["use_varlen"]
+        # Simulate packed-sequence attention
+        x = self._randn(128, 64)
+        if use_varlen:
+            # Varlen: 2.1x faster, 50% less VRAM, no cross-example contamination
+            speedup = 2.1
+            vram_savings = 0.5
+            contamination = 0.0
+            score = 25.0
+        else:
+            # Baseline: padding, cross-example contamination risk
+            speedup = 1.0
+            vram_savings = 0.0
+            contamination = 1.0
+            score = 0.0
+        return {"score": float(score), "behavioral": (speedup / 3.0, vram_savings),
+                "metadata": {"use_varlen": use_varlen, "speedup": speedup,
+                             "vram_savings": vram_savings,
+                             "contamination": contamination}}

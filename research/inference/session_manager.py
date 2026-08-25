@@ -377,7 +377,7 @@ class BatchQueue:
     """
 
     def __init__(self, registry, session_manager: SessionManager | None = None,
-                 batch_window_ms: int = 50, max_batch_size: int = 8,
+                 batch_window_ms: int = 52, max_batch_size: int = 15,
                  use_feather_scheduler: bool = False):
         self.registry = registry
         self.session_manager = session_manager or SessionManager()

@@ -60,9 +60,20 @@ class MoeRouting(BaseDomain):
             balance = 1.0 - float(expert_counts.std().item() / (expert_counts.mean().item() + 1e-8))
             util = float((expert_counts > 0).float().mean().item())
         active_ratio = tk / ne + (0.2 if se else 0)
-        score = balance * 15 + util * 10 - lbw * 20
+        # Expert diversity: top_k=1 is a trivial solution (no ensemble).
+        # Penalize top_k=1 heavily — MoE exists for multi-expert ensembling.
+        # top_k >= 2 gives real expert diversity; top_k >= 3 is ideal for ne >= 4.
+        diversity_penalty = 0.0
+        if tk == 1:
+            diversity_penalty = 15.0  # top_k=1 = no ensemble, defeats MoE purpose
+        elif tk == 2:
+            diversity_penalty = 3.0   # minimal ensemble
+        # Reward shared expert (always-active improves quality)
+        shared_bonus = 2.0 if se else 0.0
+        score = balance * 15 + util * 10 - lbw * 20 - diversity_penalty + shared_bonus
         return {"score": float(score), "behavioral": (balance, util),
-                "metadata": {"n_experts": ne, "balance": balance, "util": util}}
+                "metadata": {"n_experts": ne, "balance": balance, "util": util,
+                             "diversity_penalty": diversity_penalty}}
 
 
 class FactorizedEmbed(BaseDomain):
@@ -89,12 +100,15 @@ class FactorizedEmbed(BaseDomain):
     def evaluate(self, config):
         r = config["rank"]
         vs = config["vocab_size"]
+        tf = config["tie_factor"]  # tying factor: 0=no tying, 1=full tying
         d = 2048
         # Full embedding: vs × d params
         full_params = vs * d
-        # Factorized: vs × r + r × d
+        # Factorized: vs × r + r × d, reduced by tying factor
+        # tie_factor shares rows between input/output embeddings
+        tied_params = vs * r + r * d * (1 - tf * 0.5)  # tying saves up to 50% output side
         fact_params = vs * r + r * d
-        reduction = 1.0 - fact_params / full_params
+        reduction = 1.0 - tied_params / full_params
         # Reconstruction error: SVD gives ~0, random gives higher
         d_sample = min(d, 512)
         n_sample = min(vs, 64)
@@ -108,9 +122,15 @@ class FactorizedEmbed(BaseDomain):
             back = self._randn(r, d_sample) / (r ** 0.5)
             emb_recon = emb @ proj @ back
         err = float((emb - emb_recon).norm().item() / (emb.norm().item() + 1e-8))
-        score = reduction * 20 - err * 100
-        return {"score": float(score), "behavioral": (reduction, err),
-                "metadata": {"rank": r, "reduction": reduction, "err": err}}
+        # Tying quality: high tying can hurt output embedding quality
+        # (input and output embeddings have different optimal geometries)
+        # Simulate: tied output = input + noise proportional to (1 - tie_factor)
+        tied_err_bonus = tf * 0.1  # up to 10% extra error from tying
+        total_err = err + tied_err_bonus
+        score = reduction * 20 - total_err * 100
+        return {"score": float(score), "behavioral": (reduction, total_err),
+                "metadata": {"rank": r, "reduction": reduction, "err": total_err,
+                             "tie_factor": tf}}
 
 
 class TitanMemory(BaseDomain):
@@ -147,9 +167,25 @@ class TitanMemory(BaseDomain):
         capacity = float(retrieved.std().item() / (h.std().item() + 1e-8))
         # Param ratio: memory params / model params
         param_ratio = (ns * r * d) / (d * d * 16)
-        score = capacity * 15 - param_ratio * 10 + gate * 5
+        # Update frequency tradeoff: frequent updates keep memory fresh
+        # but cost compute. uf=1 (every step) = best memory but 2x compute.
+        # uf=10 (rare) = cheap but stale memory. Sweet spot 3-7.
+        if uf <= 7:
+            freshness = 1.0 - (uf - 1) * 0.05  # slight staleness penalty
+            update_cost = uf * 0.02  # compute cost (low)
+        else:
+            freshness = 0.7 - (uf - 7) * 0.08  # rapid staleness
+            update_cost = 0.14  # capped compute cost
+        # Gate interference: high gate means memory dominates the output,
+        # which can hurt the main signal. Sweet spot is 0.2-0.4 (gi=0.0-0.1).
+        gate_interference = 0.0
+        if float(gate) > 0.5:
+            gate_interference = (float(gate) - 0.5) * 10
+        score = (capacity * 15 - param_ratio * 10 + gate * 5
+                 + freshness * 3 - update_cost - gate_interference)
         return {"score": float(score), "behavioral": (capacity, param_ratio),
-                "metadata": {"rank": r, "capacity": capacity, "gate": float(gate)}}
+                "metadata": {"rank": r, "capacity": capacity, "gate": float(gate),
+                             "freshness": freshness, "gate_interference": gate_interference}}
 
 
 class FfnSkip(BaseDomain):

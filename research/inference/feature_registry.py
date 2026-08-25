@@ -281,10 +281,18 @@ def _h_lampe(eng, _flags):
 # ── Speculative features ─────────────────────────────────────────────────────
 
 def _h_peagle(eng, _flags):
-    from research.decoding.peagle import PEAGLEDraftHead
+    from research.decoding.peagle import PEAGLEDraftHead, PEAGLEDraftHeadTied
     d_model = _cfg(eng, "d_model", 2048)
     vocab_size = _cfg(eng, "vocab_size", 65536)
-    eng._peagle = PEAGLEDraftHead(d_model, vocab_size, n_draft_tokens=4)
+    n_draft = _cfg(eng, "mtp_n_heads", 4)  # reuse MTP n_heads or default 4
+    use_tied = _cfg(eng, "use_peagle_tied", False)
+    if use_tied:
+        lora_rank = _cfg(eng, "peagle_lora_rank", 32)
+        eng._peagle = PEAGLEDraftHeadTied(d_model, vocab_size,
+                                           n_draft_tokens=n_draft,
+                                           lora_rank=lora_rank)
+    else:
+        eng._peagle = PEAGLEDraftHead(d_model, vocab_size, n_draft_tokens=n_draft)
     eng._peagle = eng._peagle.to(eng.device)
     return "P-EAGLE: parallel speculative decoding (K=4 in 1 pass)"
 

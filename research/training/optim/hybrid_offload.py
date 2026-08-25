@@ -71,6 +71,133 @@ from torch.optim.optimizer import Optimizer
 from typing import Iterable, Optional
 
 
+# ---------------------------------------------------------------------------
+# int4 gradient compression utilities (EF21 error feedback, R&D round 14)
+# ---------------------------------------------------------------------------
+# Per-row symmetric quantization to int4 [-8, 7] with 2-values-per-byte
+# packing.  bf16 (2 bytes) → int4 (0.5 bytes) = 4x compression ratio.
+# Used with EF21 error feedback (Richtárik et al., 2021) to preserve
+# convergence: the residual (grad_to_send - decompressed) is accumulated
+# on GPU and added to the next gradient before compression.
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def _compress_grad_int4(grad: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compress bf16/fp32 gradient to packed int4 + per-channel scales.
+
+    Uses per-row (per-output-channel) symmetric quantization to int4 [-8, 7].
+    Packs 2 int4 values into 1 int8 byte for transfer efficiency.
+
+    For 1D tensors (biases, norms): uses a single per-tensor scale.
+    For 2D+ tensors: per-row scale (first dim = output channels).
+
+    Returns:
+        packed: (N//2,) int8 tensor — 2 int4 values packed per byte
+        scales: (out_channels, 1) fp16 — per-row absmax / 7
+    """
+    orig_shape = grad.shape
+    orig_numel = grad.numel()
+
+    # Edge case: empty tensor
+    if orig_numel == 0:
+        packed = torch.zeros(0, dtype=torch.int8, device=grad.device)
+        n_rows = orig_shape[0] if len(orig_shape) > 1 else 1
+        scales = torch.zeros(n_rows, 1, dtype=torch.float16, device=grad.device)
+        return packed, scales
+
+    # Reshape for per-row quantization
+    # 1D → (1, N), 2D+ → (first_dim, -1)
+    if grad.ndim <= 1:
+        flat = grad.detach().reshape(1, -1)
+    else:
+        flat = grad.detach().reshape(grad.shape[0], -1)
+
+    # Per-row absmax (avoid division by zero for all-zero rows)
+    absmax = flat.abs().amax(dim=-1, keepdim=True)  # (out_channels, 1)
+    absmax_safe = absmax.clamp(min=1e-12)
+    scale = (absmax_safe / 7.0).to(torch.float16)  # fp16 for transfer efficiency
+
+    # Quantize: round to int, clamp to int4 range [-8, 7]
+    q = torch.round(flat / scale.to(torch.float32)).to(torch.int8)
+    q = q.clamp(-8, 7)
+
+    # Pack 2 int4 values into 1 int8 byte
+    # High nibble = even-indexed value, low nibble = odd-indexed value
+    q_flat = q.reshape(-1)
+    n = q_flat.numel()
+    if n % 2 != 0:
+        # Pad with zero to make even length
+        q_flat = torch.cat(
+            [q_flat, torch.zeros(1, dtype=torch.int8, device=grad.device)]
+        )
+
+    # Shift from signed [-8, 7] to unsigned [0, 15] for nibble packing
+    q_uint = (q_flat + 8).to(torch.uint8)  # (N_padded,)
+    high = q_uint[0::2]  # (N//2,)
+    low = q_uint[1::2]   # (N//2,)
+    packed = ((high << 4) | low).view(torch.int8)  # bit-pattern preserved as int8
+
+    return packed, scale
+
+
+@torch.no_grad()
+def _decompress_grad_int4(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    original_shape: torch.Size,
+) -> torch.Tensor:
+    """Decompress packed int4 + scales back to fp32 gradient.
+
+    Args:
+        packed: (N//2,) int8 tensor from _compress_grad_int4
+        scales: (out_channels, 1) fp16 per-row scales
+        original_shape: shape of the original gradient tensor
+
+    Returns:
+        fp32 gradient tensor of shape *original_shape*
+    """
+    orig_numel = 1
+    for s in original_shape:
+        orig_numel *= s
+
+    # Edge case: empty tensor
+    if packed.numel() == 0:
+        return torch.zeros(original_shape, dtype=torch.float32, device=packed.device)
+
+    # Unpack nibbles: view as uint8 to extract high/low 4 bits
+    packed_uint = packed.view(torch.uint8)
+    high = (packed_uint >> 4) & 0x0F  # (N//2,)
+    low = packed_uint & 0x0F          # (N//2,)
+
+    # Interleave back to (N_padded,)
+    n_packed = packed_uint.numel()
+    q_uint = torch.empty(n_packed * 2, dtype=torch.uint8, device=packed.device)
+    q_uint[0::2] = high
+    q_uint[1::2] = low
+
+    # Convert unsigned [0, 15] back to signed [-8, 7]
+    q = q_uint.to(torch.int32) - 8  # (N_padded,)
+
+    # Trim padding if original had odd number of elements
+    q = q[:orig_numel]
+
+    # Reshape to (out_channels, -1) for per-row dequantization
+    if len(original_shape) <= 1:
+        q = q.reshape(1, -1)
+        scale = scales.to(torch.float32).reshape(1, 1)
+    else:
+        out_channels = original_shape[0]
+        q = q.reshape(out_channels, -1)
+        scale = scales.to(torch.float32)
+
+    # Dequantize: grad = q * scale
+    grad = q.to(torch.float32) * scale
+
+    # Reshape back to original shape
+    return grad.reshape(original_shape)
+
+
 class CPUAdamW(Optimizer):
     """AdamW with optimizer states and fp32 master weights on CPU.
 
@@ -112,6 +239,8 @@ class CPUAdamW(Optimizer):
         bandwidth_adaptive: bool = False,
         chunk_size_mb: int | None = None,
         bf16_state: bool = False,
+        grad_compression: str = "none",  # "none", "int4", "int8" (evolution: int4 best)
+        prefetch_depth: int = 7,  # evolution-discovered: 7 steps ahead
     ):
         if lr <= 0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -138,6 +267,8 @@ class CPUAdamW(Optimizer):
         self._active_buffer = 0      # 0 or 1 for ping-pong
         self._step_count = 0
         self.bf16_state = bf16_state  # bf16 m,v states (saves CPU RAM for large models)
+        self.grad_compression = grad_compression
+        self.prefetch_depth = prefetch_depth
         self._state_dtype = torch.bfloat16 if bf16_state else torch.float32
 
         # Auto-enable overlap when double_buffer is requested
@@ -193,6 +324,14 @@ class CPUAdamW(Optimizer):
                 print(f"  Grad offload: {grad_cpu_mem:.2f} GB grads streamed to CPU during backward")
             if double_buffer:
                 print(f"  Double buffer: +{db_mem:.2f} GB CPU for ping-pong grad buffers")
+            if grad_compression == "int4":
+                ef_mem = total_params * 4 / 1e9  # fp32 ef_error on GPU
+                print(f"  [FreeToken] Grad compression: int4 (4x PCIe bandwidth reduction, "
+                      f"EF21 error feedback, +{ef_mem:.2f} GB GPU for error buffers)")
+            elif grad_compression == "int8":
+                print(f"  Grad compression: int8 (2x reduction) [not yet implemented — pass-through]")
+            if prefetch_depth > 0:
+                print(f"  Prefetch depth: {prefetch_depth} steps ahead")
 
     @torch.no_grad()
     def _lazy_init(self):
@@ -250,6 +389,18 @@ class CPUAdamW(Optimizer):
                     state["grad_cpu_b"] = torch.empty(p.shape, dtype=torch.float32)
                     state["grad_cpu_b"].zero_()
 
+                # EF21 error feedback buffer (stays on GPU — same device as param)
+                # Allocated when gradient compression is enabled. This is the
+                # residual (grad_to_send - decompressed) that accumulates across
+                # steps to preserve convergence under int4 quantization.
+                # Memory cost: fp32, same size as param (4 bytes/param on GPU).
+                # For V7 with BAdam (1 block active), only the active block's
+                # error buffer needs to be on GPU.
+                if self.grad_compression != "none":
+                    state["ef_error"] = torch.zeros(
+                        p.shape, dtype=torch.float32, device=p.device
+                    )
+
                 # Pin memory in batch (after all allocations done)
                 # Skip pin_memory for now — it's slow on Windows and the
                 # non-pinned path is fast enough with DDR5
@@ -263,7 +414,15 @@ class CPUAdamW(Optimizer):
 
                     def _make_hook(param, buf):
                         def _grad_hook(grad):
-                            buf.copy_(grad, non_blocking=True)
+                            if self.grad_compression == "int4":
+                                # EF21: compress on GPU, transfer packed int4
+                                # to CPU (4x smaller), decompress on CPU
+                                grad_cpu = self._compress_and_offload_grad(
+                                    grad, param
+                                )
+                                buf.copy_(grad_cpu, non_blocking=False)
+                            else:
+                                buf.copy_(grad, non_blocking=True)
                             param.grad = None  # free GPU memory immediately
                             self._grad_ready[id(param)] = True
                             return None
@@ -411,6 +570,56 @@ class CPUAdamW(Optimizer):
 
         return loss
 
+    @torch.no_grad()
+    def _compress_and_offload_grad(
+        self, grad: torch.Tensor, p: torch.nn.Parameter
+    ) -> torch.Tensor:
+        """Apply EF21 error feedback, compress to int4, decompress on CPU.
+
+        EF21 algorithm (Richtárik et al., 2021):
+          1. grad_to_send = grad + ef_error  (accumulate previous residual)
+          2. packed, scales = compress(grad_to_send)  (on GPU)
+          3. grad_decompressed_gpu = decompress(packed, scales)  (on GPU, for error)
+          4. ef_error = grad_to_send - grad_decompressed_gpu  (stays on GPU)
+          5. Transfer packed + scales to CPU (4x smaller than full grad)
+          6. grad_cpu = decompress(packed_cpu, scales_cpu)  (on CPU, for optimizer)
+
+        The error buffer is fp32, same size as param, and stays on GPU.
+        This is the convergence-preserving cost of int4 compression.
+
+        Args:
+            grad: GPU gradient tensor (bf16 or fp32)
+            p: The parameter this gradient belongs to (for state lookup)
+
+        Returns:
+            fp32 gradient tensor on CPU (decompressed from int4)
+        """
+        state = self.state[p]
+        ef_error = state["ef_error"]
+
+        # Step 1: accumulate previous error (EF21)
+        grad_to_send = grad.to(torch.float32) + ef_error
+
+        # Step 2: compress on GPU
+        packed, scales = _compress_grad_int4(grad_to_send)
+
+        # Step 3: decompress on GPU to compute residual error
+        grad_decompressed_gpu = _decompress_grad_int4(
+            packed, scales, grad.shape
+        )
+
+        # Step 4: update error feedback buffer (stays on GPU)
+        ef_error.copy_(grad_to_send - grad_decompressed_gpu)
+
+        # Step 5: transfer compressed data to CPU (4x smaller than full grad)
+        packed_cpu = packed.to("cpu", non_blocking=False)
+        scales_cpu = scales.to("cpu", non_blocking=False)
+
+        # Step 6: decompress on CPU for the optimizer update
+        grad_cpu = _decompress_grad_int4(packed_cpu, scales_cpu, grad.shape)
+
+        return grad_cpu
+
     def _copy_grads_to_cpu(self, buf_key: str) -> list:
         """Copy grads GPU→CPU with optional chunked transfers.
 
@@ -434,11 +643,15 @@ class CPUAdamW(Optimizer):
         # simultaneously, causing OOM on 12GB GPUs. We avoid this by doing
         # synchronous copies (the CPU AdamW math is the bottleneck anyway,
         # so transfer overlap provides minimal benefit).
-        if not chunk_bytes:
+        if not chunk_bytes or self.grad_compression == "int4":
             # Synchronous copy path: no stream needed (copies are non_blocking=False
             # to avoid GPU temp buffer accumulation from dtype-converted async copies).
             # The CPU AdamW math is the bottleneck, so transfer overlap provides
             # minimal benefit here.
+            #
+            # With int4 compression: compress on GPU (EF21), transfer packed int4
+            # to CPU (4x smaller), decompress on CPU. Chunking is skipped since
+            # packed data is already 4x smaller.
             for group in self.param_groups:
                 for p in group["params"]:
                     if p.grad is None:
@@ -447,7 +660,13 @@ class CPUAdamW(Optimizer):
                         continue
                     state = self.state[p]
                     grad_cpu = state[buf_key]
-                    grad_cpu.copy_(p.grad, non_blocking=False)
+                    if self.grad_compression == "int4":
+                        grad_decompressed = self._compress_and_offload_grad(
+                            p.grad, p
+                        )
+                        grad_cpu.copy_(grad_decompressed, non_blocking=False)
+                    else:
+                        grad_cpu.copy_(p.grad, non_blocking=False)
             return copy_streams  # empty list — caller's stream sync loop is a no-op
 
         # Chunked transfer path: use a small pool of streams (max 4)
@@ -651,6 +870,27 @@ class CPUAdamW(Optimizer):
         if self._bw_predictor is not None:
             stats["predictor"] = self._bw_predictor.stats()
         return stats
+
+    def cleanup_compression(self):
+        """Free EF21 error feedback buffers from GPU memory.
+
+        Call this when compression is no longer needed or before switching
+        compression modes. The ef_error buffers are fp32 on GPU (same size
+        as params) and should not leak.
+        """
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p in self.state and "ef_error" in self.state[p]:
+                    del self.state[p]["ef_error"]
+        if self._verbose and self.grad_compression != "none":
+            print("  [FreeToken] Cleaned up EF21 error feedback buffers")
+
+    def __del__(self):
+        """Best-effort cleanup of GPU error feedback buffers."""
+        try:
+            self.cleanup_compression()
+        except Exception:
+            pass  # optimizer may be partially initialized during GC
 
 
 def configure_hybrid_optimizer(

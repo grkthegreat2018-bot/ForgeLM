@@ -1,0 +1,63 @@
+{
+  "focus_profiles": {
+    "memory": {
+      "description": "Minimize param size / VRAM usage with minimal quality loss. Focus: quantization, KV compression, offload, architecture param reduction.",
+      "categories": ["memory_efficiency"],
+      "extra_domains": ["ApolloConfig", "FlashOptimConfig"],
+      "exclude_domains": [
+        "OptimizerConfig", "SchedulerConfig", "LossConfig", "MuonConfig",
+        "Fp8TrainingConfig", "CpuAdamwConfig", "GradAccumConfig",
+        "SpeculativeDecode", "MtpConfig", "BeamSearch", "BatchedDecode",
+        "SamplingConfig", "RopeConfig", "QkNormConfig", "DiffAttnConfig",
+        "CsaAttention", "AttnResidual", "ConvConfig", "TitanMemory",
+        "SyntheticDomain", "ActivationQuant"
+      ],
+      "score_weights": {
+        "compression_bonus": 1.5,
+        "error_penalty": 1.3
+      }
+    },
+    "speed": {
+      "description": "Maximize inference speed / throughput. Focus: decoding, batching, speculative, KV cache speed.",
+      "categories": ["decoding", "kv_cache"],
+      "extra_domains": ["MtpConfig", "SpeculativeDecode", "BatchedDecode", "BeamSearch", "SamplingConfig", "TritonKernelConfig", "VarlenConfig"],
+      "exclude_domains": [
+        "OptimizerConfig", "SchedulerConfig", "LossConfig", "MuonConfig",
+        "Fp8TrainingConfig", "CpuAdamwConfig", "GradAccumConfig",
+        "RopeConfig", "QkNormConfig", "ConvConfig", "TitanMemory",
+        "SyntheticDomain", "FactorizedEmbed"
+      ],
+      "score_weights": {
+        "speedup_bonus": 1.5
+      }
+    },
+    "quality": {
+      "description": "Maximize model quality / accuracy. Focus: attention, loss, optimizer, architecture.",
+      "categories": ["attention", "training", "architecture"],
+      "extra_domains": ["ApolloConfig", "BreadConfig", "FlashOptimConfig", "TritonKernelConfig", "VarlenConfig"],
+      "exclude_domains": [
+        "SpeculativeDecode", "BatchedDecode", "SamplingConfig", "BeamSearch",
+        "SyntheticDomain", "ConvConfig"
+      ],
+      "score_weights": {
+        "accuracy_bonus": 1.5
+      }
+    },
+    "training": {
+      "description": "Optimize training efficiency: optimizer, scheduler, loss, gradient, checkpointing.",
+      "categories": ["training"],
+      "extra_domains": ["CheckpointRecompute", "MemoryBudget", "ApolloConfig", "BreadConfig", "FlashOptimConfig"],
+      "exclude_domains": [],
+      "score_weights": {
+        "convergence_bonus": 1.5
+      }
+    },
+    "all": {
+      "description": "All domains (default, no filtering).",
+      "categories": [],
+      "extra_domains": [],
+      "exclude_domains": [],
+      "score_weights": {}
+    }
+  }
+}

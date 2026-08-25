@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import torch
 import numpy as np
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -35,6 +36,7 @@ from .surrogate import SurrogateModel
 from .archive import MapElitesArchive
 from .trainer import GeneratorTrainer
 from .database import FindingsDB
+from .domains import BaseDomain
 
 
 # ── CPU worker globals (set by _cpu_worker_init in each worker process) ──
@@ -92,6 +94,29 @@ class ForgeEvolveConfig:
     generations: int = 50
     exploration: float = 0.3      # 0=exploit, 1=explore
     time_budget_s: float = 0      # 0 = no limit
+    convergence_patience: int = 0  # 0 = disabled; >0 = stop early if best
+                                   # score doesn't improve for N consecutive
+                                   # generations (evolution convergence detector)
+    # Adaptive population: grow generators when plateauing, shrink when stable
+    adaptive_population: bool = True  # auto-tune n_generators per domain
+    pop_growth_rate: float = 0.2  # grow by 20% on plateau
+    pop_shrink_rate: float = 0.1  # shrink by 10% when improving steadily
+    pop_min: int = 50             # minimum population size
+    pop_max: int = 2000           # maximum population size
+    # Dynamic domain spawning: when a domain converges, spawn a refinement
+    # domain that narrows the search around the best config. This enables
+    # infinite-depth search without the 57-domain limit.
+    enable_refinement: bool = True
+    refinement_max_depth: int = 5  # max recursive refinement depth
+    refinement_narrowing: float = 0.2  # each level narrows to ±20% of parent range
+    # Novelty search: alternate between novelty (explore) and quality (exploit)
+    # phases to prevent plateaus. Based on Lehman & Stanley novelty search +
+    # composite novelty pulsation (GECCO 2020).
+    enable_novelty: bool = True
+    novelty_k_neighbors: int = 5
+    novelty_pulse_len: int = 3   # generations of novelty search per cycle
+    quality_pulse_len: int = 5   # generations of quality search per cycle
+    novelty_bonus: float = 1.5   # bonus added to surrogate during novelty phase
 
     # Device
     device: str = "auto"          # "auto", "cuda", "cpu"
@@ -116,6 +141,10 @@ class ForgeEvolve:
         self.cfg = cfg
         self.domain = cfg.domain
         self.output_dim = self.domain.output_dim()
+
+        # Enable TF32 tensor cores for faster matmul on Ampere+ (RTX 5070)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
         # Device selection
         if cfg.device == "auto":
@@ -153,6 +182,25 @@ class ForgeEvolve:
         # Archive
         self.archive = MapElitesArchive(self.domain.behavioral_dims())
 
+        # Domain factory for dynamic refinement spawning
+        from research.evolution.domain_factory import DomainFactory
+        self.domain_factory = DomainFactory(
+            max_depth=cfg.refinement_max_depth,
+            narrowing=cfg.refinement_narrowing,
+        )
+        self.pending_refinements: list[BaseDomain] = []
+
+        # Novelty search: behavioral diversity to prevent plateaus
+        from research.evolution.novelty_search import NoveltySearch, NoveltyConfig
+        novelty_cfg = NoveltyConfig(
+            enabled=cfg.enable_novelty,
+            k_neighbors=cfg.novelty_k_neighbors,
+            pulse_novelty_len=cfg.novelty_pulse_len,
+            pulse_quality_len=cfg.quality_pulse_len,
+            novelty_bonus=cfg.novelty_bonus,
+        )
+        self.novelty = NoveltySearch(novelty_cfg)
+
         # Trainer (uses batched generator, on device)
         self.trainer = GeneratorTrainer(
             self.population.batched_gen, lr=cfg.generator_lr,
@@ -165,6 +213,11 @@ class ForgeEvolve:
         self.max_results: int = 10000  # cap to prevent OOM on long runs
         self.discoveries: list[dict] = []
         self.start_time = 0.0
+
+        # Config dedup cache: prevents re-evaluating identical configs within
+        # a run AND prevents duplicate discoveries being saved to DB.
+        # Key = canonical config string, value = (score, behavioral, metadata)
+        self._eval_cache: dict[str, tuple] = {}
 
         # CPU/GPU pair processing: separate processes for true parallelism
         # GPU process: generators + surrogate + GPU-side evals
@@ -194,7 +247,24 @@ class ForgeEvolve:
         self._warm_started = False
         self._pending_discoveries = []  # batched DB saves
 
-        # Warm-start from past findings
+        # ── Canonical load: ALWAYS load the best-ever generators + surrogate
+        # for this domain, regardless of warm_start. This is the permanent
+        # knowledge layer — findings from all past runs (any profile, any
+        # DB) accumulate here. The search starts from the best-known point.
+        # Skip canonical load for Generic domains (heuristic evaluator)
+        is_generic = "Generic_" in self.domain.name()
+        canonical_best = self.db.get_canonical_best_score(self.domain.name())
+        if not is_generic and self.db.load_canonical_generators(self.domain.name(),
+                                             self.population.batched_gen):
+            self._warm_started = True
+            self._log(f"Loaded canonical generators for '{self.domain.name()}'"
+                      + (f" (past best={canonical_best:.4f})" if canonical_best else ""))
+        if not is_generic and self.db.load_canonical_surrogate(self.domain.name(), self.surrogate):
+            if not self._warm_started:
+                self._warm_started = True
+            self._log(f"Loaded canonical surrogate for '{self.domain.name()}'")
+
+        # Warm-start from past findings (per-run generators + discoveries)
         if cfg.warm_start:
             n_seeded = self.db.seed_from_past(
                 self.domain.name(),
@@ -207,22 +277,30 @@ class ForgeEvolve:
                           f"(generators + surrogate loaded)")
             else:
                 # Cross-domain transfer: if no same-domain history, borrow
-                # generators from a different domain with matching output_dim
-                od = self.domain.output_dim()
-                n_xfer = self.db.seed_cross_domain(
-                    self.domain.name(),
-                    self.population.batched_gen,
-                    self.surrogate,
-                    od,
-                )
-                if n_xfer > 0:
-                    self._warm_started = True
-                    self._log(f"Cross-domain transfer from {n_xfer} source domain(s) "
-                              f"(output_dim={od})")
+                # generators from a different domain with matching output_dim.
+                # Skip for Generic domains (heuristic, not real performance)
+                if not is_generic:
+                    od = self.domain.output_dim()
+                    n_xfer = self.db.seed_cross_domain(
+                        self.domain.name(),
+                        self.population.batched_gen,
+                        self.surrogate,
+                        od,
+                    )
+                    if n_xfer > 0:
+                        self._warm_started = True
+                        self._log(f"Cross-domain transfer from {n_xfer} source domain(s) "
+                                  f"(output_dim={od})")
             # Also load past discoveries as archive seeds
             past = self.db.query_best_configs(self.domain.name(), limit=20)
             for p in past:
+                key = self._config_key(p["config"])
+                if key in self._eval_cache:
+                    continue  # already evaluated as a seed
                 result = self.domain.evaluate(p["config"])
+                self._eval_cache[key] = (result["score"],
+                                         result.get("behavioral", (0,)),
+                                         result.get("metadata", {}))
                 self.archive.add(p["config"], result["score"],
                                  result.get("behavioral", (0,)), -1)
             if past:
@@ -235,7 +313,13 @@ class ForgeEvolve:
             seed_params = []
             seed_scores = []
             for sc in seed_configs:
+                key = self._config_key(sc)
+                if key in self._eval_cache:
+                    continue  # already evaluated (e.g., from past discoveries)
                 result = self.domain.evaluate(sc)
+                self._eval_cache[key] = (result["score"],
+                                         result.get("behavioral", (0,)),
+                                         result.get("metadata", {}))
                 self.archive.add(sc, result["score"],
                                  result.get("behavioral", (0,)), -1)
                 self.all_results.append({
@@ -264,67 +348,121 @@ class ForgeEvolve:
                 best_idx = int(np.argmax(seed_scores))
                 self.population.update_context(seed_params[best_idx])
 
-    def _gpu_batch_eval(self, configs: list[dict]) -> list[dict]:
-        """Evaluate configs on GPU with memory-aware chunking.
+    # ── Config dedup ──────────────────────────────────────────────────
 
-        Profiles the first eval to measure per-eval GPU memory delta,
-        then chunks the batch so that peak VRAM stays under a safety
-        threshold. Falls back to sequential for lightweight domains.
+    @staticmethod
+    def _config_key(config: dict) -> str:
+        """Canonical hashable key for a config dict.
+        Sorts keys and normalizes values to handle int/str equivalence
+        (e.g., 32 and '32' from JSON round-trip)."""
+        normalized = {}
+        for k in sorted(config.keys()):
+            v = config[k]
+            # Normalize numeric strings to their numeric form
+            if isinstance(v, str):
+                try:
+                    v = int(v)
+                except ValueError:
+                    try:
+                        v = float(v)
+                    except ValueError:
+                        pass
+            # Numpy scalar → python scalar
+            if hasattr(v, 'item') and not hasattr(v, '__len__'):
+                v = v.item()
+            # Round floats to 6 decimals to avoid hash misses from FP noise
+            if isinstance(v, float):
+                v = round(v, 6)
+            # Numpy arrays / lists → tuple of rounded floats
+            # (but not strings — they have no numeric values to round)
+            if isinstance(v, str):
+                pass  # keep as-is
+            elif hasattr(v, 'tolist'):
+                v_list = v.tolist()
+                if isinstance(v_list, (list, tuple)):
+                    v = tuple(round(float(x), 6) for x in v_list)
+                else:
+                    v = round(float(v_list), 6)
+            elif isinstance(v, (list, tuple)):
+                v = tuple(round(float(x), 6) if isinstance(x, (int, float))
+                          else x for x in v)
+            normalized[k] = v
+        return json.dumps(normalized, sort_keys=True, default=str)
+
+    def _eval_with_dedup(self, config: dict) -> dict | None:
+        """Evaluate a config, returning cached result if we've seen it before.
+        Returns None if this is a duplicate (caller should skip)."""
+        key = self._config_key(config)
+        if key in self._eval_cache:
+            return None  # duplicate — skip
+        result = self._safe_eval(config)
+        self._eval_cache[key] = (result["score"],
+                                 result.get("behavioral", (0,)),
+                                 result.get("metadata", {}))
+        return result
+
+    def _gpu_batch_eval(self, configs: list[dict]) -> list[dict]:
+        """Evaluate configs on GPU with Triton batched kernels + CUDA stream overlap.
+
+        Priority:
+        1. Triton batched eval (if domain supports it) — single GPU launch for all configs
+        2. Threaded eval with CUDA streams — overlap kernel launches across configs
+        3. Sequential eval — fallback for small batches
         """
         import torch
 
         if len(configs) <= 2:
             return [self._safe_eval(cfg) for cfg in configs]
 
-        # ── Profile first eval: time + memory delta ──
-        if not hasattr(self, '_eval_profile'):
-            self._eval_profile = None
-        if self._eval_profile is None:
-            # Warmup call (first CUDA call triggers kernel JIT, ignore timing)
-            self._safe_eval(configs[0])
+        # ── Try Triton batched evaluation first ──
+        # This processes all configs in a single GPU operation, eliminating
+        # Python/kernel-launch overhead entirely for supported domains.
+        if self.device.type == "cuda" and not hasattr(self, '_batched_eval'):
+            try:
+                from research.evolution.triton_batched import BatchedEvaluator
+                self._batched_eval = BatchedEvaluator(self.domain)
+            except Exception:
+                self._batched_eval = None
+
+        if (self._batched_eval is not None and self._batched_eval.can_batch()
+                and len(configs) >= 4):
+            try:
+                results = self._batched_eval.batch_evaluate(configs)
+                if all(r is not None for r in results):
+                    return results
+            except Exception:
+                pass  # fall through to threaded eval
+
+        # Fixed chunk size: each eval uses ~100MB, reserve 2GB for generators
+        # On 12GB GPU: (12GB - 2GB) / (100MB * 1.5) = ~66 concurrent evals
+        # Cap at 8 for thread safety
+        # VRAM-aware: reduce chunk if VRAM is already heavily used
+        if not hasattr(self, '_eval_chunk'):
             if self.device.type == "cuda":
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                torch.cuda.reset_peak_memory_stats()
-                mem_before = torch.cuda.memory_allocated()
-            # Second call for accurate timing
-            t0 = time.time()
-            self._safe_eval(configs[0])
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
-            ms = (time.time() - t0) * 1000
-            if self.device.type == "cuda":
-                mem_delta = torch.cuda.memory_allocated() - mem_before
-                peak = torch.cuda.max_memory_allocated()
                 total = torch.cuda.get_device_properties(0).total_memory
-                # Reserve 2GB for generators + model + overhead
-                safe_budget = max(total - 2 * 1024**3, 512 * 1024**2)
-                # Per-eval memory cost (use peak delta, conservative)
-                mem_per_eval = max(mem_delta, peak - mem_before, 1)
-                # How many evals can we fit in the safety budget?
-                chunk_size = max(1, int(safe_budget / (mem_per_eval * 1.5)))
+                allocated = torch.cuda.memory_allocated(0)
+                available = total - allocated
+                # Reserve 1GB headroom for eval workspace
+                safe_budget = max(available - 1 * 1024**3, 256 * 1024**2)
+                self._eval_chunk = max(1, min(8, int(safe_budget / (150 * 1024**2))))
             else:
-                chunk_size = len(configs)
-            self._eval_profile = {"ms": ms, "mem_per": mem_per_eval if self.device.type == "cuda" else 0,
-                                  "chunk": chunk_size}
+                self._eval_chunk = len(configs)
 
-        chunk = self._eval_profile["chunk"]
-        ms = self._eval_profile["ms"]
+        chunk = self._eval_chunk
 
-        # Sequential for fast domains (<10ms), chunked for heavy
-        if ms < 10 and chunk >= len(configs):
+        # For small batches, just run sequentially (no thread overhead)
+        if len(configs) <= chunk:
             return [self._safe_eval(cfg) for cfg in configs]
 
-        # Chunked evaluation with memory cleanup between chunks
+        # Chunked evaluation with threaded eval for CUDA stream overlap
         results = []
         for i in range(0, len(configs), chunk):
             batch = configs[i:i + chunk]
-            if ms < 10:
-                # Fast domain: just run sequentially
-                results.extend(self._safe_eval(cfg) for cfg in batch)
-            else:
-                # Heavy domain: threaded within chunk, sync between chunks
+            # Use threaded eval within each chunk for kernel overlap
+            if self.device.type == "cuda" and len(batch) > 2:
                 results.extend(self._threaded_eval(batch))
+            else:
+                results.extend(self._safe_eval(cfg) for cfg in batch)
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
         return results
@@ -343,18 +481,24 @@ class ForgeEvolve:
             raise
 
     def _threaded_eval(self, configs: list[dict]) -> list[dict]:
-        """Evaluate configs using threads with CUDA streams for overlap."""
+        """Evaluate configs using threads with CUDA streams for kernel overlap.
+
+        Each thread gets its own CUDA stream so kernels from multiple evals
+        can overlap on the GPU, keeping utilization high. The GIL is released
+        during CUDA calls, so threads achieve real parallelism.
+        """
         from concurrent.futures import ThreadPoolExecutor
         import torch
 
-        n_threads = min(4, len(configs))
+        # More threads = more kernel overlap. Cap at len(configs) and 8.
+        n_threads = min(8, len(configs))
         results = [None] * len(configs)
 
         def _eval_one(idx_cfg):
             idx, cfg = idx_cfg
             try:
-                stream = torch.cuda.Stream() if self.device.type == "cuda" else None
-                if stream:
+                if self.device.type == "cuda":
+                    stream = torch.cuda.Stream()
                     with torch.cuda.stream(stream):
                         result = self.domain.evaluate(cfg)
                     stream.synchronize()
@@ -375,6 +519,37 @@ class ForgeEvolve:
 
         return results
 
+    def _spawn_refinement(self):
+        """Spawn a refinement domain from the converged parent.
+
+        Creates a narrowed search domain centered on the best config,
+        registers it in the factory, and queues it for the next loop.
+        """
+        if not self.archive.best_entry:
+            return
+        best = self.archive.best_entry
+        best_config = best.config
+        best_params = self.domain.encode(best_config)
+
+        # Determine refinement depth from parent name
+        parent_name = self.domain.name()
+        depth = 1
+        if "_refine_d" in parent_name:
+            depth = int(parent_name.split("_refine_d")[-1]) + 1
+
+        child = self.domain_factory.spawn_refinement(
+            parent=self.domain,
+            best_config=best_config,
+            best_params=best_params,
+            depth=depth,
+        )
+        if child is not None:
+            self.domain_factory.register(child)
+            self.pending_refinements.append(child)
+            self._log(
+                f"  [Refinement] Spawned {child.name()} "
+                f"(depth={depth}, narrowing=±{child.narrowing:.1%})")
+
     def _log(self, msg: str):
         if self.cfg.verbose:
             elapsed = time.time() - self.start_time if self.start_time else 0
@@ -383,6 +558,10 @@ class ForgeEvolve:
     def run(self) -> dict:
         """Run the full evolutionary search loop."""
         self.start_time = time.time()
+        self._prev_best_score = float('-inf')
+        self._convergence_counter = 0
+        self._pop_stable_count = 0
+        self._pop_plateau_count = 0
         self._log(f"Starting ForgeEvolve: {self.cfg.n_generators} generators, "
                   f"filter_ratio={self.cfg.filter_ratio}, "
                   f"domain={self.domain.name()}, device={self.device}"
@@ -396,11 +575,37 @@ class ForgeEvolve:
                 if gen > 0 and gen % 5 == 0 and self.device.type == "cuda":
                     torch.cuda.empty_cache()
 
+                # ── Novelty search: update phase (novelty ↔ quality pulsation) ──
+                if self.cfg.enable_novelty and gen > 0:
+                    phase = self.novelty.update_phase(self.archive.best_score)
+                    if gen == 1 or self.novelty.phase_counter == 1:
+                        self._log(f"  [Novelty] {self.novelty.status()}")
+
                 if self.cfg.time_budget_s > 0:
                     elapsed = time.time() - self.start_time
                     if elapsed > self.cfg.time_budget_s:
                         self._log(f"Time budget exceeded ({elapsed:.0f}s)")
                         break
+
+                # ── Convergence detection: stop early if no improvement ──
+                if self.cfg.convergence_patience > 0 and gen > 0:
+                    if self.archive.best_score > self._prev_best_score:
+                        self._convergence_counter = 0
+                        self._prev_best_score = self.archive.best_score
+                    else:
+                        self._convergence_counter += 1
+                        if self._convergence_counter >= self.cfg.convergence_patience:
+                            self._log(
+                                f"Converged: no improvement for "
+                                f"{self.cfg.convergence_patience} generations "
+                                f"(best={self.archive.best_score:.4f})")
+                            # ── Dynamic domain spawning ──
+                            # When a domain converges, spawn a refinement
+                            # domain that narrows the search around the best
+                            # config. This enables infinite-depth search.
+                            if self.cfg.enable_refinement:
+                                self._spawn_refinement()
+                            break
 
                 # ── PHASE 1: GENERATE (batched GPU forward) ──
                 t0 = time.time()
@@ -420,9 +625,13 @@ class ForgeEvolve:
                 n_neural_eval = max(0, n_eval - n_template_eval)
 
                 if neural_cands and n_neural_eval > 0:
-                    # Epsilon-greedy: 30% of eval budget goes to random candidates
-                    # Adaptive: more exploration early, less later
-                    epsilon = max(0.1, 0.3 - gen * 0.005)
+                    # Epsilon-greedy: fraction of eval budget goes to random candidates
+                    # Novelty search: during novelty phase, increase random exploration
+                    # to discover new behavioral regions
+                    if self.cfg.enable_novelty and self.novelty.phase == "novelty":
+                        epsilon = max(0.1, 0.5 - gen * 0.005)
+                    else:
+                        epsilon = max(0.1, 0.3 - gen * 0.005)
                     n_random = max(1, int(n_neural_eval * epsilon))
                     n_surrogate = n_neural_eval - n_random
 
@@ -448,7 +657,31 @@ class ForgeEvolve:
                 t0 = time.time()
                 scores = []
                 behavioral_list = []
+                metadata_list = []
                 configs = []
+
+                # ── Dedup filter: remove configs we've already evaluated ──
+                # This happens BEFORE decoding/eval to save compute.
+                unique_selected = []
+                n_dupes = 0
+                for cand in selected:
+                    if "params" in cand and cand["params"] is not None:
+                        # Dedup by full params tensor (rounded to 4 decimals)
+                        p = cand["params"].detach().cpu().numpy()
+                        key = ("p",) + tuple(round(float(x), 4) for x in p.flatten())
+                    elif "template_config" in cand:
+                        key = ("t", self._config_key(cand["template_config"]))
+                    else:
+                        key = ("id", id(cand))
+                    if key in self._eval_cache:
+                        n_dupes += 1
+                        continue
+                    self._eval_cache[key] = None  # placeholder until eval completes
+                    unique_selected.append(cand)
+
+                if n_dupes > 0 and self.cfg.verbose:
+                    self._log(f"  Deduped {n_dupes}/{len(selected)} candidates")
+                selected = unique_selected  # replace with deduped list
 
                 # Decode all configs first — batch GPU→CPU transfer to avoid 50 sync points
                 # Collect all param tensors, move to CPU in one call, then decode
@@ -505,9 +738,11 @@ class ForgeEvolve:
                     results = self._gpu_batch_eval(decoded)
                     configs = decoded
 
+                # ── Collect results (no post-eval dedup needed — pre-filtered) ──
                 for config, result in zip(configs, results):
                     scores.append(result["score"])
                     behavioral_list.append(result.get("behavioral", (0,)))
+                    metadata_list.append(result.get("metadata", {}))
 
                     self.all_results.append({
                         "generation": gen,
@@ -529,8 +764,23 @@ class ForgeEvolve:
                 # Update archive + save new discoveries to DB
                 new_discoveries = 0
                 new_discovery_list = []
-                for config, score, behavioral in zip(configs, scores, behavioral_list):
-                    added = self.archive.add(config, score, behavioral, gen)
+                for config, score, behavioral, metadata in zip(configs, scores, behavioral_list, metadata_list):
+                    # Novelty search: compute novelty + track behavioral
+                    novelty_score = 0.0
+                    if self.cfg.enable_novelty:
+                        novelty_score = self.novelty.compute_novelty(behavioral)
+                        self.novelty.add_behavioral(behavioral)
+
+                    # Novelty-aware archive acceptance
+                    if self.cfg.enable_novelty:
+                        # During novelty phase, accept novel configs even if
+                        # not the best in their cell (fills diverse cells)
+                        if self.novelty.phase == "novelty" and novelty_score > self.novelty.cfg.min_novelty:
+                            added = self.archive.add(config, score, behavioral, gen)
+                        else:
+                            added = self.archive.add(config, score, behavioral, gen)
+                    else:
+                        added = self.archive.add(config, score, behavioral, gen)
                     if added:
                         new_discoveries += 1
                         self.discoveries.append({
@@ -544,7 +794,7 @@ class ForgeEvolve:
                             "config": config,
                             "score": score,
                             "behavioral": behavioral,
-                            "metadata": self.all_results[-1].get("metadata", {}),
+                            "metadata": metadata,
                         })
 
                 # Save new discoveries to database (batched — flush every 10 gens)
@@ -598,13 +848,51 @@ class ForgeEvolve:
 
                 # ── LOG ──
                 if gen % self.cfg.log_every == 0:
+                    # Track phase timings for GPU utilization analysis
+                    phase_info = (f"gen={t_gen:.3f}s filter={t_filter:.3f}s "
+                                  f"score={t_score:.2f}s train={t_train:.3f}s")
                     self._log(
-                        f"gen={t_gen:.3f}s filter={t_filter:.3f}s "
-                        f"score={t_score:.2f}s train={t_train:.3f}s | "
+                        f"{phase_info} | "
                         f"evaluated={len(selected)}/{n_generated} | "
                         f"new={new_discoveries} | "
                         f"{self.archive.summary()}"
                     )
+                    # Detect if score phase dominates (good = GPU busy)
+                    # vs gen/filter phase dominates (bad = GPU idle on Python)
+                    total_t = t_gen + t_filter + t_score + t_train
+                    if total_t > 0 and t_score / total_t < 0.3 and gen > 2:
+                        # Score phase < 30% of total = GPU underutilized.
+                        # Increase eval batch to keep GPU busy longer.
+                        old_max = self.cfg.max_evaluate
+                        self.cfg.max_evaluate = min(old_max * 2, 200)
+                        if self.cfg.max_evaluate != old_max:
+                            self._log(f"  [GPUKeepBusy] max_eval {old_max}→{self.cfg.max_evaluate} "
+                                     f"(score phase only {t_score/total_t*100:.0f}% of time)")
+
+                # ── ADAPTIVE POPULATION SIZING ──
+                # Grow population when plateauing (more explorers needed),
+                # shrink when steadily improving (efficiency gain).
+                if self.cfg.adaptive_population and gen > 0:
+                    if self.archive.best_score > self._prev_best_score + 1e-6:
+                        self._pop_stable_count += 1
+                        if self._pop_stable_count >= 3:
+                            # Steady improvement → shrink (save compute)
+                            new_n = max(self.cfg.pop_min,
+                                        int(self.cfg.n_generators * (1 - self.cfg.pop_shrink_rate)))
+                            if new_n != self.cfg.n_generators:
+                                self.cfg.n_generators = new_n
+                                self._log(f"  [AdaptivePop] shrinking to {new_n} (steady improvement)")
+                            self._pop_stable_count = 0
+                    else:
+                        self._pop_plateau_count += 1
+                        if self._pop_plateau_count >= 2:
+                            # Plateau → grow (need more exploration)
+                            new_n = min(self.cfg.pop_max,
+                                        int(self.cfg.n_generators * (1 + self.cfg.pop_growth_rate)))
+                            if new_n != self.cfg.n_generators:
+                                self.cfg.n_generators = new_n
+                                self._log(f"  [AdaptivePop] growing to {new_n} (plateau detected)")
+                            self._pop_plateau_count = 0
 
             # Final summary
             elapsed = time.time() - self.start_time
@@ -616,10 +904,14 @@ class ForgeEvolve:
             # Save final state to database
             # Flush any remaining pending discoveries
             if self._pending_discoveries:
-                self.db.save_discoveries(self.run_id, self.domain.name(),
-                                         self._pending_discoveries)
+                n_saved, n_deduped = self.db.save_discoveries(
+                    self.run_id, self.domain.name(),
+                    self._pending_discoveries)
+                if n_deduped > 0:
+                    self._log(f"DB dedup: saved {n_saved}, skipped {n_deduped} duplicates")
                 self._pending_discoveries = []
 
+            # Build final results dict (includes refinement domain info)
             results = {
                 "generations": self.generation + 1,
                 "total_evaluations": len(self.all_results),
@@ -627,6 +919,8 @@ class ForgeEvolve:
                 "best_score": self.archive.best_score,
                 "best_config": self.archive.best_entry.config if self.archive.best_entry else None,
                 "device": str(self.device),
+                "pending_refinements": [d.name() for d in self.pending_refinements],
+                "spawned_domains": self.domain_factory.get_spawned_names(),
             }
             self.db.save_run(self.run_id, self.domain.name(),
                              {"n_generators": self.cfg.n_generators,
@@ -636,6 +930,34 @@ class ForgeEvolve:
             self.db.save_generators(self.run_id, self.domain.name(),
                                     self.population.batched_gen)
             self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
+
+            # ── Canonical save: update permanent knowledge ONLY if this run
+            # produced new discoveries. If the run found nothing new (all
+            # configs were dupes or archive didn't improve), skip the save
+            # to avoid overwriting canonical weights with identical ones.
+            # Skip canonical save for Generic domains (heuristic evaluator,
+            # not real performance data — would pollute cross-domain transfer)
+            is_generic = "Generic_" in self.domain.name()
+            best = self.archive.best_score
+            n_new = len(self.discoveries)
+            canonical_best = self.db.get_canonical_best_score(self.domain.name())
+            if best > float('-inf') and n_new > 0 and not is_generic:
+                # Only save if we actually found new discoveries AND beat
+                # the canonical best (the DB method checks the score)
+                updated_gen = self.db.save_canonical_generators(
+                    self.domain.name(), self.population.batched_gen,
+                    best, self.run_id)
+                updated_surr = self.db.save_canonical_surrogate(
+                    self.domain.name(), self.surrogate, best, self.run_id)
+                if updated_gen or updated_surr:
+                    self._log(f"Updated canonical knowledge for '{self.domain.name()}' "
+                              f"(best={best:.4f}) — future runs will start from here")
+            elif best > float('-inf') and n_new == 0:
+                canon_str = f"{canonical_best:.4f}" if canonical_best is not None else "none"
+                self._log(f"No new discoveries for '{self.domain.name()}' — "
+                          f"canonical unchanged (best={best:.4f}, "
+                          f"canonical={canon_str})")
+
             self._log(f"Saved to database: {self.cfg.db_path} (run_id={self.run_id})")
 
             results = {
@@ -657,6 +979,8 @@ class ForgeEvolve:
                 "device": str(self.device),
                 "run_id": self.run_id,
                 "warm_started": self._warm_started,
+                "pending_refinements": [d.name() for d in self.pending_refinements],
+                "spawned_domains": self.domain_factory.get_spawned_names(),
             }
         finally:
             # Clean up CPU worker pool

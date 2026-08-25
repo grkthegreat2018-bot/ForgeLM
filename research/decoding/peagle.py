@@ -44,7 +44,7 @@ class PEAGLEDraftHead(nn.Module):
     """
 
     def __init__(self, d_model: int, vocab_size: int,
-                 n_draft_tokens: int = 4,
+                 n_draft_tokens: int = 7,  # evolution: 7 draft tokens (was 4), score 57.05
                  hidden_dim: int = 1024):
         super().__init__()
         self.d_model = d_model
@@ -101,11 +101,13 @@ class PEAGLEDraftHead(nn.Module):
         k_features = features.expand(B, self.n_draft, -1) + pos_embeds.unsqueeze(0)
 
         # Cross-position attention: position i attends to 0..i-1
-        # Causal mask for draft positions
-        causal_mask = torch.tril(torch.ones(self.n_draft, self.n_draft,
-                                            device=hidden_states.device))
+        # Causal mask: True = mask (prevent attending), False = attend
+        # Upper triangle (future positions) should be masked
+        causal_mask = torch.triu(torch.ones(self.n_draft, self.n_draft,
+                                            device=hidden_states.device),
+                                 diagonal=1).bool()
         attn_out, _ = self.cross_attn(k_features, k_features, k_features,
-                                       attn_mask=causal_mask.bool())
+                                       attn_mask=causal_mask)
         k_features = k_features + attn_out  # residual
 
         # Generate logits for each position
@@ -141,6 +143,183 @@ class PEAGLEDraftHead(nn.Module):
             return logits.argmax(dim=-1)  # (B, K)
 
 
+class PEAGLEDraftHeadTied(nn.Module):
+    """P-EAGLE draft head with tied output projection + position LoRA.
+
+    Instead of K separate Linear(hidden_dim, vocab_size) heads (K × 67M params),
+    uses ONE shared head + K small LoRA adapters:
+
+        logits_i = shared_head(features_i + pos_lora_i(features_i))
+
+    where pos_lora_i is a low-rank adapter:
+        pos_lora_i(x) = B_i @ (A_i @ x)
+        A_i: (rank, hidden_dim), B_i: (hidden_dim, rank)
+
+    Param count for K=7, hidden_dim=1024, vocab=65536, rank=32:
+        - Shared head: 1024 × 65536 = 67M params (1 head instead of 7)
+        - LoRA adapters: 7 × (32×1024 + 1024×32) = 7 × 65K = 459K params
+        - Total: 67.5M params = 135 MB (vs 471M = 958 MB)
+        - Savings: 6.2x reduction
+
+    The LoRA adapters are initialized to zero (B_i = 0), so at init the tied
+    head produces identical logits for all positions (same as shared head).
+    During training, the adapters learn position-specific corrections.
+
+    evolution: tied+lora variant (2026-08-25), 6.2x param reduction vs K-head.
+    """
+
+    def __init__(self, d_model: int, vocab_size: int,
+                 n_draft_tokens: int = 7,  # evolution: 7 draft tokens (was 4), score 57.05
+                 hidden_dim: int = 1024,
+                 lora_rank: int = 32):
+        super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.n_draft = n_draft_tokens
+        self.hidden_dim = hidden_dim
+        self.lora_rank = lora_rank
+
+        # Shared feature extractor (same as PEAGLEDraftHead)
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        # Position embeddings for draft positions
+        self.draft_pos_embed = nn.Embedding(n_draft_tokens, hidden_dim)
+
+        # Single shared output projection (replaces K separate heads)
+        self.shared_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+
+        # Position-specific LoRA adapters: A down-projects, B up-projects
+        # A: (K, rank, hidden_dim), B: (K, hidden_dim, rank)
+        self.pos_lora_A = nn.Parameter(
+            torch.empty(n_draft_tokens, lora_rank, hidden_dim))
+        self.pos_lora_B = nn.Parameter(
+            torch.zeros(n_draft_tokens, hidden_dim, lora_rank))
+
+        # Cross-position attention (draft position i attends to 0..i-1)
+        self.cross_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads=8, batch_first=True)
+
+        # Initialize shared head: same as original first head (std=0.02)
+        nn.init.normal_(self.shared_head.weight, std=0.02)
+
+        # LoRA init: A = kaiming_uniform, B = zeros (standard LoRA)
+        # At init, adapter output = 0 → tied head == shared head for all positions
+        nn.init.kaiming_uniform_(self.pos_lora_A, a=5 ** 0.5)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Generate K draft token logits in a single forward pass.
+
+        Args:
+            hidden_states: (B, T, d_model) from the target model's last layer
+
+        Returns:
+            draft_logits: (B, K, vocab_size) logits for K draft tokens
+        """
+        B, T, D = hidden_states.shape
+
+        # Use the LAST hidden state as the seed for drafting
+        seed = hidden_states[:, -1:, :]  # (B, 1, d_model)
+
+        # Extract features
+        features = self.feature_extractor(seed)  # (B, 1, hidden_dim)
+
+        # Expand to K positions
+        pos_ids = torch.arange(self.n_draft, device=hidden_states.device)
+        pos_embeds = self.draft_pos_embed(pos_ids)  # (K, hidden_dim)
+
+        # Add position embeddings
+        k_features = features.expand(B, self.n_draft, -1) + pos_embeds.unsqueeze(0)
+
+        # Cross-position attention: position i attends to 0..i-1
+        # Causal mask: True = mask (prevent attending), False = attend
+        causal_mask = torch.triu(torch.ones(self.n_draft, self.n_draft,
+                                            device=hidden_states.device),
+                                 diagonal=1).bool()
+        attn_out, _ = self.cross_attn(k_features, k_features, k_features,
+                                       attn_mask=causal_mask)
+        k_features = k_features + attn_out  # residual
+
+        # Apply position-specific LoRA adapters (vectorized across positions)
+        # k_features: (B, K, hidden_dim)
+        # A: (K, rank, hidden_dim), B: (K, hidden_dim, rank)
+        # adapter = B @ (A @ x) for each position
+        # x.unsqueeze(-1): (B, K, hidden_dim, 1)
+        # A @ x: (K, rank, hidden_dim) @ (B, K, hidden_dim, 1) → (B, K, rank, 1)
+        Ax = torch.einsum('krd,bkd->bkr', self.pos_lora_A, k_features)  # (B, K, rank)
+        adapter = torch.einsum('khr,bkr->bkh', self.pos_lora_B, Ax)  # (B, K, hidden_dim)
+
+        adapted = k_features + adapter  # (B, K, hidden_dim)
+
+        # Single shared matmul for all positions
+        draft_logits = self.shared_head(adapted)  # (B, K, vocab)
+
+        return draft_logits  # (B, K, vocab)
+
+    def generate_parallel(self, hidden_states: torch.Tensor,
+                          temperature: float = 1.0) -> torch.Tensor:
+        """Generate K draft tokens in parallel.
+
+        Args:
+            hidden_states: (B, T, d_model) from target model
+            temperature: sampling temperature
+
+        Returns:
+            draft_tokens: (B, K) sampled draft token IDs
+        """
+        logits = self.forward(hidden_states)  # (B, K, vocab)
+
+        if temperature > 0:
+            logits = logits / temperature
+            probs = F.softmax(logits, dim=-1)
+            B, K, V = probs.shape
+            flat_probs = probs.view(B * K, V)
+            sampled = torch.multinomial(flat_probs, 1)
+            return sampled.view(B, K)
+        else:
+            return logits.argmax(dim=-1)  # (B, K)
+
+    @classmethod
+    def from_existing(cls, existing: 'PEAGLEDraftHead',
+                      lora_rank: int = 32) -> 'PEAGLEDraftHeadTied':
+        """Convert a PEAGLEDraftHead to PEAGLEDraftHeadTied.
+
+        Strategy: average the K existing heads to initialize the shared head,
+        then zero-init the LoRA adapters (they'll learn the differences).
+        This is a lossy conversion — the tied head needs retraining to recover
+        position-specific behavior.
+        """
+        tied = cls(
+            d_model=existing.d_model,
+            vocab_size=existing.vocab_size,
+            n_draft_tokens=existing.n_draft,
+            hidden_dim=existing.hidden_dim,
+            lora_rank=lora_rank,
+        )
+
+        # Copy shared trunk components (feature_extractor, pos_embed, cross_attn)
+        tied.feature_extractor.load_state_dict(
+            existing.feature_extractor.state_dict())
+        tied.draft_pos_embed.load_state_dict(
+            existing.draft_pos_embed.state_dict())
+        tied.cross_attn.load_state_dict(
+            existing.cross_attn.state_dict())
+
+        # Average the K output heads → shared head
+        with torch.no_grad():
+            avg_weight = torch.stack(
+                [h.weight for h in existing.output_heads]).mean(dim=0)
+            tied.shared_head.weight.copy_(avg_weight)
+
+        # LoRA adapters already zero-init (B=0) → adapter = 0 at init
+        # Tied head starts as the average of all K heads
+
+        return tied
+
+
 class PEAGLESpeculator:
     """P-EAGLE speculative decoding wrapper.
 
@@ -149,12 +328,13 @@ class PEAGLESpeculator:
     by the target model in one pass.
 
     Usage:
-        spec = PEAGLESpeculator(model, draft_head, n_draft=4)
+        spec = PEAGLESpeculator(model, draft_head, n_draft=7)  # evolution: 7 (was 4)
         tokens = spec.generate(prompt_ids, max_new_tokens=100)
     """
 
-    def __init__(self, model: nn.Module, draft_head: PEAGLEDraftHead,
-                 n_draft: int = 4, device: str = "cuda"):
+    def __init__(self, model: nn.Module,
+                 draft_head: 'PEAGLEDraftHead | PEAGLEDraftHeadTied',
+                 n_draft: int = 7, device: str = "cuda"):  # evolution: 7 (was 4)
         self.model = model
         self.draft_head = draft_head
         self.n_draft = n_draft

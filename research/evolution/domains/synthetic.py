@@ -61,9 +61,18 @@ class SyntheticDomain(BaseDomain):
         x = np.clip(x, 0, 1)
         return {"x": x}
 
+    def _parse_x(self, x_val) -> np.ndarray:
+        """Parse x from config, handling JSON round-trip type loss.
+        x can be: np.ndarray, list, or string repr of np.ndarray."""
+        if isinstance(x_val, str):
+            # Numpy array string repr: "[0.1 0.2 0.3 ...]"
+            s = x_val.strip().strip('[]')
+            return np.array([float(v) for v in s.split()], dtype=np.float64)
+        return np.array(x_val, dtype=np.float64)
+
     def encode(self, config: dict[str, Any]) -> torch.Tensor:
         if "x" in config:
-            return torch.tensor(config["x"], dtype=torch.float32)
+            return torch.tensor(self._parse_x(config["x"]), dtype=torch.float32)
         elif "grid_2" in config:
             return torch.full((self.dim,), float(config["grid_2"]))
         else:
@@ -71,7 +80,7 @@ class SyntheticDomain(BaseDomain):
 
     def evaluate(self, config: dict[str, Any]) -> dict:
         if "x" in config:
-            x = config["x"]
+            x = self._parse_x(config["x"])
         elif "grid_2" in config:
             # Template generator: single value, expand to dim
             val = config["grid_2"]

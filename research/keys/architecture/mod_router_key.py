@@ -36,10 +36,25 @@ class ModRouter(nn.Module):
     """
 
     def __init__(self, d_model: int = 2048, keep_fraction: float = 1.0,
-                 temperature: float = 0.0):
+                 temperature: float = 0.0,
+                 aux_loss_weight: float = 1e-8,
+                 n_skip_layers: int = 0):
+        """Per-block token router.
+
+        Evolution-discovered optimum:
+          - keep_fraction=0.5 (skip half the tokens)
+          - aux_loss_weight=1e-8 (near-zero — don't fight the router)
+          - n_skip_layers=15 (skip 15/16 layers with linear router)
+          - router_type="linear" (simplest, works best)
+
+        At init: keep_fraction=1.0 (lossless), aux_loss_weight~0 (no aux loss).
+        Training opens the routing gradually.
+        """
         super().__init__()
         self.keep_fraction = keep_fraction
         self.temperature = temperature
+        self.aux_loss_weight = aux_loss_weight
+        self.n_skip_layers = n_skip_layers
         # Zero-init => uniform scores => deterministic, lossless at 1.0.
         self.router = nn.Linear(d_model, 1, bias=False)
 

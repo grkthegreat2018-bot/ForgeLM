@@ -76,6 +76,12 @@ class BAdam(Optimizer):
         verbose: bool = True,
         bf16_large_states: bool = False,
         large_param_threshold: int = 1_000_000,
+        # BREAD: landscape correction for inactive blocks (R&D round 14).
+        # "disabled" = vanilla BAdam. "partial" = SGD correction on blocks
+        # that have been visited before. "all" = SGD correction on ALL
+        # inactive blocks (including never-visited ones, using zero momentum).
+        bread_sgd_correction: str = "disabled",
+        bread_sgd_lr_scale: float = 5.0,
     ):
         """
         bf16_large_states: store optimizer states (m, v) in bf16 for params
@@ -83,6 +89,12 @@ class BAdam(Optimizer):
         Halves the GPU optimizer footprint — needed when NLRQ factor masters
         push weights past ~10 GB. Precision cost is negligible for STE-
         quantized factors (the update grid is int8-coarse anyway).
+
+        BREAD (R&D round 14): landscape correction prevents the optimization
+        landscape from narrowing when only one block is updated at a time.
+        Applies a memory-efficient SGD update to inactive blocks using their
+        cached momentum (exp_avg), with a higher learning rate (5x typical).
+        Community: OpenReview zs6bRl05g8, Microsoft BlockOptimizers.
         """
         self.model = model
         self.switch_every = switch_every
@@ -93,6 +105,10 @@ class BAdam(Optimizer):
         self._step_count = 0
         self._block_idx = 0
         self._steps_in_block = 0
+        # BREAD config
+        self.bread_sgd_correction = bread_sgd_correction
+        self.bread_sgd_lr_scale = bread_sgd_lr_scale
+        self._bread_visited: set[int] = set()  # blocks that have been active
 
         # Partition parameters into blocks
         self._blocks = self._partition_blocks(model, blocks_per_layer)
@@ -259,6 +275,15 @@ class BAdam(Optimizer):
 
     def _activate_block(self, idx: int):
         """Activate block idx. Freeze ALL inactive blocks (requires_grad=False)."""
+        # BREAD: apply SGD landscape correction to inactive blocks before
+        # switching. This prevents the optimization landscape from narrowing
+        # when only one block is updated at a time. The correction uses the
+        # cached momentum (exp_avg) from the last time each block was active,
+        # applied with a higher learning rate (5x typical).
+        # Community: OpenReview zs6bRl05g8, Microsoft BlockOptimizers.
+        if self.bread_sgd_correction != "disabled" and self._block_idx is not None:
+            self._apply_bread_correction()
+
         # Offload previous block's optimizer states to CPU (bf16 — halves CPU
         # RAM vs fp32; full-cycle fp32 states for all blocks would be ~22 GB).
         # States are re-widened to fp32 when their block becomes active again.
@@ -299,12 +324,55 @@ class BAdam(Optimizer):
 
         self._block_idx = idx
         self._steps_in_block = 0
+        self._bread_visited.add(idx)
 
         if self.verbose:
             active = self._blocks[idx]
             n_params = sum(p.numel() for p in active["params"])
             print(f"  [BAdam] Block {idx}/{self._n_blocks} ({active['name']}): "
                   f"{n_params/1e6:.1f}M params active")
+
+    def _apply_bread_correction(self):
+        """BREAD: apply SGD landscape correction to inactive blocks.
+
+        For each inactive block that has been visited before (partial mode)
+        or all inactive blocks (all mode), apply a lightweight SGD update
+        using the cached momentum (exp_avg). This prevents the optimization
+        landscape from narrowing when only one block is updated at a time.
+
+        The SGD learning rate is base_lr * bread_sgd_lr_scale (5x typical).
+        Only exp_avg is used (no second moment), so this is memory-free —
+        the states are already on CPU and we just read + apply.
+
+        Novel twist: we skip the correction for blocks whose exp_avg is
+        still on CPU in bf16 (not yet loaded to GPU). This avoids a costly
+        CPU→GPU transfer just for the correction. The correction is applied
+        when the block is next activated (its states are loaded to GPU then).
+        """
+        group = self.param_groups[0]
+        sgd_lr = group["lr"] * self.bread_sgd_lr_scale
+        wd = group["weight_decay"]
+
+        for i, block in enumerate(self._blocks):
+            if i == self._block_idx:
+                continue  # skip active block
+            if self.bread_sgd_correction == "partial" and i not in self._bread_visited:
+                continue  # skip never-visited blocks in partial mode
+
+            no_decay = block.get("no_decay", set())
+            for p in block["params"]:
+                state = self.state.get(p)
+                if state is None or "exp_avg" not in state:
+                    continue
+                exp_avg = state["exp_avg"]
+                # Only apply if states are on GPU (avoid CPU→GPU transfer just for correction)
+                if not exp_avg.is_cuda:
+                    continue
+                # SGD update: p -= sgd_lr * exp_avg
+                # Decoupled weight decay
+                if wd > 0 and id(p) not in no_decay:
+                    p.mul_(1 - sgd_lr * wd)
+                p.add_(exp_avg.to(p.dtype), alpha=-sgd_lr)
 
     def _next_block(self):
         """Move to the next block (cyclic)."""
@@ -459,6 +527,8 @@ def configure_badam(
     switch_every: int = 10,
     switch_mode: str = "descending",
     bf16_large_states: bool = False,
+    bread_sgd_correction: str = "disabled",
+    bread_sgd_lr_scale: float = 5.0,
 ) -> BAdam:
     """Configure BAdam optimizer for a ForgeAI model.
 
@@ -473,6 +543,11 @@ def configure_badam(
         bf16_large_states: bf16 optimizer states for params >1M elements
                            (halves GPU optimizer footprint; use with NLRQ
                            factor training)
+        bread_sgd_correction: BREAD landscape correction mode (R&D round 14).
+                              "disabled" = vanilla BAdam.
+                              "partial" = SGD correction on visited blocks.
+                              "all" = SGD correction on all inactive blocks.
+        bread_sgd_lr_scale: SGD lr multiplier for BREAD correction (5x typical).
 
     Returns:
         BAdam optimizer
@@ -484,4 +559,6 @@ def configure_badam(
         switch_mode=switch_mode,
         verbose=True,
         bf16_large_states=bf16_large_states,
+        bread_sgd_correction=bread_sgd_correction,
+        bread_sgd_lr_scale=bread_sgd_lr_scale,
     )

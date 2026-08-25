@@ -9,18 +9,20 @@
       "exploration": 0.3,
       "warm_start": false,
       "log_every": 1,
-      "db_suffix": "_smoke"
+      "db_suffix": ""
     },
     "boot": {
-      "generations": 20,
-      "n_generators": 500,
-      "min_evaluate": 20,
-      "max_evaluate": 50,
+      "generations": 10,
+      "n_generators": 300,
+      "min_evaluate": 10,
+      "max_evaluate": 25,
       "filter_ratio": 10,
       "exploration": 0.3,
-      "warm_start": false,
+      "warm_start": true,
       "log_every": 5,
-      "db_suffix": "_boot"
+      "time_budget_s": 2.0,
+      "convergence_patience": 5,
+      "db_suffix": ""
     },
     "deep": {
       "generations": 100,
@@ -31,7 +33,8 @@
       "exploration": 0.3,
       "warm_start": true,
       "log_every": 10,
-      "db_suffix": "_deep"
+      "convergence_patience": 20,
+      "db_suffix": ""
     },
     "ultra": {
       "generations": 500,
@@ -42,7 +45,7 @@
       "exploration": 0.2,
       "warm_start": true,
       "log_every": 25,
-      "db_suffix": "_ultra"
+      "db_suffix": ""
     }
   },
   "defaults": {

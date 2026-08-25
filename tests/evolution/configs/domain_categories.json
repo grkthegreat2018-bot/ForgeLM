@@ -31,7 +31,9 @@
       "domains": [
         "OptimizerConfig", "SchedulerConfig", "LossConfig",
         "MuonConfig", "Fp8TrainingConfig", "CpuAdamwConfig",
-        "GradAccumConfig", "CheckpointRecompute"
+        "GradAccumConfig", "CheckpointRecompute",
+        "ApolloConfig", "BreadConfig", "FlashOptimConfig",
+        "TritonKernelConfig", "VarlenConfig"
       ]
     },
     "decoding": {
@@ -46,6 +48,20 @@
       "domains": [
         "ConvConfig", "MoeRouting", "FactorizedEmbed",
         "TitanMemory", "MemoryBudget", "ExpertHotload"
+      ]
+    },
+    "memory_efficiency": {
+      "description": "Minimize param size / VRAM with minimal quality loss: quantization, KV compression, offload, arch param reduction",
+      "domains": [
+        "BitnetConfig", "W8A8Quant", "Nvfp4Quant", "GroupQuant",
+        "MixedPrecision", "AaacQuant", "SharqQuant", "OffqQuant",
+        "MosaicQuant", "QuantDomain",
+        "KvZipKV", "XQuantKV", "HadamardKV", "RotorQuantKV",
+        "StreamingKV", "PagedEvictKV", "CrossLayerKV",
+        "CpuKvOffload", "HybridOffload", "ExpertHotload",
+        "CheckpointRecompute", "MemoryBudget",
+        "MoeRouting", "GlaAttention", "GtaAttention",
+        "FfnSkip", "FactorizedEmbed", "ModConfig"
       ]
     },
     "all": {

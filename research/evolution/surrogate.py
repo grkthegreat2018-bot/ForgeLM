@@ -4,12 +4,15 @@ Learns to predict evaluation scores from config parameters.
 Trained online on all (config, score) pairs seen so far.
 Used to filter 1000 candidates → top 50 for real evaluation.
 
-Anti-overfitting techniques (from literature):
-- Ensemble of 3 MLPs with different seeds → average predictions
+Anti-overfitting techniques (from literature + evolution-tuned):
+- Ensemble of 5 MLPs (was 3) with different seeds → average predictions
+- 4-layer MLPs (was 3) with hidden=256 (was 128) for better score landscape fit
+- LayerNorm in each MLP for training stability
 - Disagreement between ensemble members = uncertainty signal
 - Ranking-based loss (Spearman correlation) alongside MSE
 - UCB-style acquisition: pred_mean + bonus * uncertainty
 - Adaptive exploration: bonus decays over generations
+- 5 training epochs per gen (was 3) for better convergence
 
 CUDA: surrogate networks run on GPU when available.
 """
@@ -22,14 +25,19 @@ from typing import Optional
 
 
 def _make_mlp(input_dim: int, hidden_dim: int, seed: int = 0) -> nn.Sequential:
-    """Create a small MLP surrogate with given random seed."""
+    """Create a 4-layer MLP surrogate with LayerNorm for stability."""
     torch.manual_seed(seed)
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim),
+        nn.LayerNorm(hidden_dim),
         nn.ReLU(),
         nn.Linear(hidden_dim, hidden_dim),
+        nn.LayerNorm(hidden_dim),
         nn.ReLU(),
-        nn.Linear(hidden_dim, 1),
+        nn.Linear(hidden_dim, hidden_dim // 2),
+        nn.LayerNorm(hidden_dim // 2),
+        nn.ReLU(),
+        nn.Linear(hidden_dim // 2, 1),
     )
 
 
@@ -41,11 +49,11 @@ class SurrogateModel:
     as an uncertainty signal for UCB-style exploration.
     """
 
-    def __init__(self, input_dim: int = 8, hidden_dim: int = 128,
+    def __init__(self, input_dim: int = 8, hidden_dim: int = 256,
                  mode: str = "mlp", lr: float = 1e-3,
                  device: torch.device = None,
                  exploration_bonus: float = 2.0,
-                 n_ensemble: int = 3):
+                 n_ensemble: int = 5):
         self.input_dim = input_dim
         self.mode = mode
         self.lr = lr
@@ -64,6 +72,10 @@ class SurrogateModel:
             self.loss_fn = nn.MSELoss()
             # Keep reference to first net for backward compat
             self.net = self.nets[0]
+
+            # Note: torch.compile on surrogate nets causes FX tracing conflicts
+            # with domain evaluation code. Skip compilation — the generator
+            # forward pass is the hot path, not the surrogate.
         elif mode == "gp":
             self.x_history = None
             self.y_history = None
@@ -130,7 +142,7 @@ class SurrogateModel:
                 return self._gp_predict(candidates)
 
     def train(self, candidates: torch.Tensor, scores: torch.Tensor,
-              epochs: int = 3):
+              epochs: int = 5):
         """Update ensemble surrogate on new (config, score) pairs.
 
         Each MLP trained independently with MSE + ranking loss.

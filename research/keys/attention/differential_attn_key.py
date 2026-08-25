@@ -130,7 +130,8 @@ class DifferentialAttention(nn.Module):
     def forward(self, x, past_key_value=None, use_cache=False,
                 preallocated_cache=None, layer_idx: int = 0,
                 attention_bias: torch.Tensor | None = None,
-                position_ids: torch.Tensor | None = None):
+                position_ids: torch.Tensor | None = None,
+                cu_seqlens: torch.Tensor | None = None):
         B, T, C = x.shape
         hd = self.head_dim
 

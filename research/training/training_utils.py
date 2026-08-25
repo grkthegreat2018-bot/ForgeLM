@@ -196,8 +196,12 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
         print("NOTE: --bf16-optimizer not yet supported with stock AdamW; using bnb 8-bit instead.")
         optimizer_name = "bnb"
 
-    matrix_params = [p for p in model.parameters() if p.ndim >= 2]
-    other_params = [p for p in model.parameters() if p.ndim < 2]
+    # Only collect trainable params — frozen params (e.g. LoRA base weights,
+    # BAdam inactive blocks) must NOT get optimizer states.
+    # Without this filter, CPUAdamW allocates 33+ GB CPU for all 2.8B params
+    # even when only 16M LoRA params are trainable → OOM on 32GB RAM.
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2 and p.requires_grad]
+    other_params = [p for p in model.parameters() if p.ndim < 2 and p.requires_grad]
 
     param_groups = [
         {"params": matrix_params, "weight_decay": weight_decay},
@@ -254,10 +258,48 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
         # BAdam: block-wise Adam, updates one layer at a time.
         # Memory: 2M + 16M/D GB (D=blocks). For V7 (2.8B, 32 layers): ~9 GB.
         # Full-parameter training at LoRA-level memory. NeurIPS 2024.
+        # BREAD (R&D round 14): landscape correction for inactive blocks.
         from research.training.optim.badam import configure_badam
-        print("Using BAdam (block-wise Adam, one layer at a time).")
+        bread_mode = getattr(model, 'config', getattr(model, '_config', None))
+        bread_mode = getattr(bread_mode, 'bread_sgd_correction', 'disabled') if bread_mode else 'disabled'
+        bread_scale = getattr(model, 'config', getattr(model, '_config', None))
+        bread_scale = getattr(bread_scale, 'bread_sgd_lr_scale', 5.0) if bread_scale else 5.0
+        print(f"Using BAdam (block-wise Adam, one layer at a time)"
+              f"{f' + BREAD ({bread_mode})' if bread_mode != 'disabled' else ''}.")
         return configure_badam(model, lr=max_lr, weight_decay=weight_decay,
-                               blocks_per_layer=1, switch_every=1)
+                               blocks_per_layer=1, switch_every=1,
+                               bread_sgd_correction=bread_mode,
+                               bread_sgd_lr_scale=bread_scale)
+
+    if optimizer_name == "apollo":
+        # APOLLO: SVD-free random-projection gradient scaling.
+        # SGD-like memory with AdamW-level performance. ICLR 2025.
+        # rank=1 = APOLLO-Mini (SGD-level memory). No SVD overhead vs GaLore.
+        try:
+            from research.training.optim.apollo import configure_apollo
+            cfg = getattr(model, 'config', getattr(model, '_config', None))
+            rank = getattr(cfg, 'apollo_rank', 8) if cfg else 8
+            scale = getattr(cfg, 'apollo_scale', 'tensor') if cfg else 'tensor'
+            print(f"Using APOLLO (SVD-free, rank={rank}, scale={scale}).")
+            return configure_apollo(model, lr=max_lr, weight_decay=weight_decay,
+                                     rank=rank, scale=scale)
+        except Exception as e:
+            print(f"APOLLO unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
+    if optimizer_name == "flashoptim":
+        # FlashOptim: companded 8-bit optimizer states (7 bytes/param vs 16).
+        # >50% memory reduction with tight error bounds via sqrt companding.
+        # arXiv 2602.23349 (Databricks).
+        try:
+            from research.training.optim.flashoptim import configure_flashoptim
+            cfg = getattr(model, 'config', getattr(model, '_config', None))
+            bits = getattr(cfg, 'flashoptim_bits', 8) if cfg else 8
+            print(f"Using FlashOptim AdamW (companded {bits}-bit states, ~50% memory cut).")
+            return configure_flashoptim(model, lr=max_lr, weight_decay=weight_decay, bits=bits)
+        except Exception as e:
+            print(f"FlashOptim unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
     if optimizer_name == "fira_nlrq":
         # Fira-NLRQ: for NLRQ models the trainable params are already low-rank
@@ -502,8 +544,8 @@ def switch_optimizer_to_adamw(model, max_lr, weight_decay=0.1):
     good for final convergence in the "river-valley" picture). The momentum
     state is not transferred — the river-valley paper does a clean switch.
     """
-    matrix_params = [p for p in model.parameters() if p.ndim >= 2]
-    other_params = [p for p in model.parameters() if p.ndim < 2]
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2 and p.requires_grad]
+    other_params = [p for p in model.parameters() if p.ndim < 2 and p.requires_grad]
     param_groups = [
         {"params": matrix_params, "weight_decay": weight_decay},
         {"params": other_params, "weight_decay": 0.0},

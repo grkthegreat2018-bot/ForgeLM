@@ -100,6 +100,10 @@ class FindingsDB:
             CREATE INDEX IF NOT EXISTS idx_discoveries_score
             ON discoveries(domain, score DESC)
         """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_discoveries_dedup
+            ON discoveries(domain, config_json)
+        """)
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
@@ -138,6 +142,33 @@ class FindingsDB:
             )
         """)
 
+        # Canonical generators/surrogate: the best-ever weights per domain,
+        # persisted across ALL runs and profiles. Not keyed by run_id —
+        # keyed by domain only. Updated only when a run beats the stored
+        # best_score. This is the "permanent knowledge" layer.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS canonical_generators (
+                domain TEXT PRIMARY KEY,
+                weights_blob BLOB NOT NULL,
+                fitness_blob BLOB NOT NULL,
+                config_json TEXT,
+                best_score REAL NOT NULL,
+                run_id TEXT,
+                timestamp REAL DEFAULT (strftime('%s','now'))
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS canonical_surrogate (
+                domain TEXT PRIMARY KEY,
+                weights_blob BLOB NOT NULL,
+                n_trained INTEGER,
+                config_json TEXT,
+                best_score REAL NOT NULL,
+                run_id TEXT,
+                timestamp REAL DEFAULT (strftime('%s','now'))
+            )
+        """)
+
         self.conn.commit()
 
     def save_run(self, run_id: str, domain: str, config: dict,
@@ -164,9 +195,41 @@ class FindingsDB:
 
     def save_discoveries(self, run_id: str, domain: str,
                          discoveries: list[dict]):
-        """Save all discoveries from a run."""
+        """Save discoveries from a run. One row per unique (domain, config).
+        If a config already exists, UPDATE its score if the new one is higher
+        (don't insert a duplicate). This keeps the DB strictly unique."""
         c = self.conn.cursor()
+        n_saved = 0
+        n_updated = 0
+        n_skipped = 0
         for d in discoveries:
+            config_json = _dumps(d.get("config"))
+            score = d.get("score", 0)
+            # Check if this exact config already exists for this domain
+            c.execute(
+                "SELECT id, score FROM discoveries WHERE domain=? AND config_json=? "
+                "ORDER BY score DESC LIMIT 1",
+                (domain, config_json))
+            row = c.fetchone()
+            if row is not None:
+                existing_id, existing_score = row[0], row[1]
+                if score > existing_score:
+                    # Update the existing row with the better score + metadata
+                    c.execute("""
+                        UPDATE discoveries
+                        SET run_id=?, generation=?, score=?,
+                            behavioral_json=?, metadata_json=?
+                        WHERE id=?
+                    """, (
+                        run_id, d.get("generation", 0), score,
+                        _dumps(d.get("behavioral")),
+                        _dumps(d.get("metadata", {})),
+                        existing_id,
+                    ))
+                    n_updated += 1
+                else:
+                    n_skipped += 1
+                continue
             c.execute("""
                 INSERT INTO discoveries
                 (run_id, domain, generation, config_json, score,
@@ -174,12 +237,14 @@ class FindingsDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id, domain, d.get("generation", 0),
-                _dumps(d.get("config")),
-                d.get("score", 0),
+                config_json,
+                score,
                 _dumps(d.get("behavioral")),
                 _dumps(d.get("metadata", {})),
             ))
+            n_saved += 1
         self.conn.commit()
+        return n_saved, n_skipped + n_updated
 
     def save_evaluation(self, run_id: str, domain: str, generation: int,
                         config: dict, score: float, metadata: dict):
@@ -295,6 +360,114 @@ class FindingsDB:
                         continue  # skip mismatched shapes (e.g. different input_dim)
                     p.copy_(saved)
         return True
+
+    # ── Canonical generators/surrogate (permanent knowledge layer) ──────
+
+    def save_canonical_generators(self, domain: str, batched_gen,
+                                  best_score: float, run_id: str) -> bool:
+        """Save generators as canonical for this domain if best_score beats
+        the stored value. Returns True if updated."""
+        c = self.conn.cursor()
+        c.execute("SELECT best_score FROM canonical_generators WHERE domain=?",
+                  (domain,))
+        row = c.fetchone()
+        if row is not None and row[0] >= best_score:
+            return False  # stored is better, don't overwrite
+
+        weights = {}
+        for name, p in batched_gen.named_parameters():
+            weights[name] = p.detach().cpu().numpy()
+        fitness = batched_gen.fitness_ema.detach().cpu().numpy()
+        config = {
+            "noise_dim": batched_gen.cfg.noise_dim,
+            "context_dim": batched_gen.cfg.context_dim,
+            "hidden_dim": batched_gen.cfg.hidden_dim,
+            "output_dim": batched_gen.cfg.output_dim,
+            "n_generators": batched_gen.cfg.n_generators,
+        }
+        c.execute("""
+            INSERT OR REPLACE INTO canonical_generators
+            (domain, weights_blob, fitness_blob, config_json, best_score, run_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (domain, pickle.dumps(weights), pickle.dumps(fitness),
+              json.dumps(config), best_score, run_id))
+        self.conn.commit()
+        return True
+
+    def load_canonical_generators(self, domain: str, batched_gen) -> bool:
+        """Load canonical generators for a domain. Returns True if loaded."""
+        c = self.conn.cursor()
+        c.execute("SELECT weights_blob, fitness_blob FROM canonical_generators WHERE domain=?",
+                  (domain,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        weights = pickle.loads(row[0])
+        fitness = pickle.loads(row[1])
+        with torch.no_grad():
+            for name, p in batched_gen.named_parameters():
+                if name in weights:
+                    saved = torch.from_numpy(weights[name]).to(p.device)
+                    if saved.shape == p.shape:
+                        p.copy_(saved)
+            if fitness.shape == batched_gen.fitness_ema.shape:
+                batched_gen.fitness_ema.copy_(
+                    torch.from_numpy(fitness).to(batched_gen.fitness_ema.device))
+        return True
+
+    def save_canonical_surrogate(self, domain: str, surrogate,
+                                 best_score: float, run_id: str) -> bool:
+        """Save surrogate as canonical for this domain if best_score beats
+        the stored value. Returns True if updated."""
+        if surrogate.mode != "mlp":
+            return False
+        c = self.conn.cursor()
+        c.execute("SELECT best_score FROM canonical_surrogate WHERE domain=?",
+                  (domain,))
+        row = c.fetchone()
+        if row is not None and row[0] >= best_score:
+            return False
+
+        weights = {}
+        for name, p in surrogate.net.named_parameters():
+            weights[name] = p.detach().cpu().numpy()
+        c.execute("""
+            INSERT OR REPLACE INTO canonical_surrogate
+            (domain, weights_blob, n_trained, config_json, best_score, run_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (domain, pickle.dumps(weights), surrogate.n_trained,
+              json.dumps({"mode": surrogate.mode, "input_dim": surrogate.input_dim}),
+              best_score, run_id))
+        self.conn.commit()
+        return True
+
+    def load_canonical_surrogate(self, domain: str, surrogate) -> bool:
+        """Load canonical surrogate for a domain. Returns True if loaded."""
+        if surrogate.mode != "mlp":
+            return False
+        c = self.conn.cursor()
+        c.execute("SELECT weights_blob, n_trained FROM canonical_surrogate WHERE domain=?",
+                  (domain,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        weights = pickle.loads(row[0])
+        surrogate.n_trained = row[1]
+        with torch.no_grad():
+            for name, p in surrogate.net.named_parameters():
+                if name in weights:
+                    saved = torch.from_numpy(weights[name]).to(p.device)
+                    if saved.shape == p.shape:
+                        p.copy_(saved)
+        return True
+
+    def get_canonical_best_score(self, domain: str) -> float | None:
+        """Get the best score ever stored canonically for a domain."""
+        c = self.conn.cursor()
+        c.execute("SELECT best_score FROM canonical_generators WHERE domain=?",
+                  (domain,))
+        row = c.fetchone()
+        return row[0] if row else None
 
     def query_discoveries(self, domain: str, min_score: float = -1e9,
                           limit: int = 100) -> list[dict]:

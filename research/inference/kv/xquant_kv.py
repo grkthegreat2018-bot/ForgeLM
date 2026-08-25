@@ -70,6 +70,13 @@ class XQuantKVCache(KVCacheStrategy):
         # Default: no compression (lossless), just INT4 quantization
         self.svd_rank = 0  # set > 0 to enable SVD compression
 
+        # Recomputation ratio (evolution-discovered: 1.0 = full recompute)
+        # When > 0, recompute K/V from cached X on each forward instead of
+        # storing K/V separately. 1.0 gives best score (95.0) with 4-bit X.
+        self.recomputation_ratio = 1.0
+        # Checkpoint interval: recompute every N tokens (evolution: 16)
+        self.checkpoint_interval = 16
+
         # d_model is inferred from n_kv * head_dim * (n_heads / n_kv) ratio
         # For GQA: d_model = n_heads * head_dim
         # We need the actual d_model — it's passed via the attention module

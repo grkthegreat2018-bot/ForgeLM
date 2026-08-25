@@ -1078,6 +1078,14 @@ class ForgeEngine:
                     self._log(
                         f"Proactive CPU offload failed: {e}", level="warn")
 
+    # Evolution-discovered creative sampling preset (score 10.45):
+    # High temperature + high top_p + moderate top_k + low penalties.
+    # Use for creative/diverse generation tasks.
+    CREATIVE_SAMPLING = {
+        "temperature": 1.98, "top_p": 0.989, "top_k": 69,
+        "repetition_penalty": 1.011, "frequency_penalty": 0.014,
+    }
+
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 100,
                  temperature: float = 0.0, top_p: float = 1.0,

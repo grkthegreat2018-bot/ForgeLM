@@ -343,8 +343,8 @@ class GroupQuant(BaseDomain):
         ], dtype=torch.float32)
     def evaluate(self, config):
         w = self._randn(256, 512) * 0.02
-        gs = config["group_size"]
-        bits = config["n_bits"]
+        gs = int(config["group_size"])
+        bits = int(config["n_bits"])
         w_groups = w.view(-1, gs)
         w_q = _quantize(w_groups, bits, config["scheme"])
         w_q = w_q.view_as(w)

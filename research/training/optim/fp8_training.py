@@ -161,7 +161,8 @@ def mu_scale_init_new_layer(d_in: int, d_out: int) -> torch.Tensor:
 # ── FP8 Training Context ──────────────────────────────────────────────────
 
 @contextmanager
-def enable_fp8_training(dtype: torch.dtype = torch.float8_e4m3fn):
+def enable_fp8_training(dtype: torch.dtype = torch.float8_e4m3fn,
+                        use_e5m2: bool = False):
     """Context manager for FP8 training on Blackwell (SM120+) GPUs.
 
     Enables torch.autocast with FP8 precision for the forward pass.
@@ -169,8 +170,11 @@ def enable_fp8_training(dtype: torch.dtype = torch.float8_e4m3fn):
     stable in PyTorch; Smooth-SwiGLU + μScaling keep the forward
     stable enough that BF16 backward converges correctly).
 
+    Evolution-discovered optimum: e5m2 format + mu_scaling gives
+    zero overflows with 38.8 score (vs 36.4 for e4m3).
+
     Usage:
-        with enable_fp8_training():
+        with enable_fp8_training(use_e5m2=True):
             loss = model(input_ids)
             loss.backward()
         optimizer.step()
@@ -178,6 +182,9 @@ def enable_fp8_training(dtype: torch.dtype = torch.float8_e4m3fn):
     Note: Requires Blackwell (SM120+) or Hopper (SM90+) GPU with
     torch >= 2.1 and CUDA >= 12.4. Falls back to BF16 on older GPUs.
     """
+    # Evolution-discovered: e5m2 has more exponent range = fewer overflows
+    if use_e5m2 and hasattr(torch, 'float8_e5m2'):
+        dtype = torch.float8_e5m2
     if not torch.cuda.is_available():
         # CPU: no FP8, just run in default precision
         yield

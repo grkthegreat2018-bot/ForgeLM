@@ -1,107 +1,77 @@
-# Quantization Research — 2026 State of the Art
+# R&D Round 15: Param Memory Cost Minimization
 
-## What ForgeAI already has
-- **BitNet b1.58** (ternary QAT, STE, int8@int8 CUDA kernel + Triton b1.58 add-only kernel)
-- **W8A8 INT8** (weight-only, `QuantizedLinear`, `FastINT8Linear`)
-- **INT4 weight-only** (group_size=128, `quantize_model_int4`)
-- **NLRQ** (Non-Linear RQ, used in V7-8B training, INT8 factor format)
-- **OffQ, AAAC, SharQ, MosaicQuant** (various PTQ/QAT variants)
-- **KV compression**: rotorquant, kv_2bit, paged_kv, kv_compress, kvzip
-- **FP8 inference** (`fp8_infer.py`)
+## Date: 2026-08-24
+## Target: ForgeLM V7, ForgeEngine, Trainer
 
-## What's missing / better (from web research, 2025-2026)
+## Current State (verified)
 
-### Tier 1: High-impact, directly relevant to RTX 5070 SM120
+### V7 Weight Memory Breakdown
+| Component | Dense | Compressed | Technique | Savings |
+|-----------|-------|-----------|-----------|---------|
+| Embedding | 268M | 35.7M | Factorized (rank=512) | 86.7% |
+| Attention | 537M | ~67M | BitNet b1.58 ternary | 87.5% |
+| FFN | 12.88 GB | 1.52 GB | NLRQ INT8 (rank=768) | 88.2% |
+| Other | ~200M | ~200M | - | - |
+| **Total** | ~18.3 GB | ~2.86 GB | - | 84.4% |
 
-1. **NVFP4 (hardware FP4 on Blackwell SM120)**
-   - 4-bit floating-point (E2M1) with FP8 (E4M3) micro-scale per 32 elements
-   - **RTX 5070 supports this natively** via CUTLASS Example 79b
-   - 3x speedup over FP16 on RTX 5090, 4x memory savings
-   - SM120 limitation: `kind::mxf8f6f4` stores 4-bit in 8-bit container (half throughput vs SM100)
-   - **ARCQuant** (ACL 2026): augmented residual channels, SOTA NVFP4 accuracy, 3x speedup on RTX 5090/6000
-   - **ScaleSweep** (arXiv 2606.07618): better scale initialization for NVFP4
-   - **MR-GPTQ** (arXiv 2509.23202): block-wise Hadamard + format-specific for FP4
-   - Code: CUTLASS 3.8 Example 79b, VincentKaufmann/fp4-cuda-kernel (SM120, 143 TFLOPS)
-   - vLLM PR #21309 adds NVFP4 W4A4 for SM120
+### NLRQ Compression Ratio Discrepancy
+- AGENTS.md claims 12.8x CR
+- Actual for V7 dims (4096×16384, rank=768): **8.47x**
+- 12.8x was for smaller dims (2048×8192, rank=256)
+- This is a documentation bug, not a code bug
 
-2. **QuEST (QAT, 1-bit to 4-bit, Pareto-optimal at 4-bit)**
-   - Hadamard normalization + MSE-optimal fitting + trust gradient estimator
-   - 4-bit W+A training is Pareto-optimal vs FP16 (better accuracy at lower size)
-   - Stable down to 1-bit weights AND activations
-   - Code: github.com/IST-DASLab/QuEST (updated May 2025)
-   - **This is the QAT successor to BitNet** — better gradients, works at 4-bit not just ternary
+### KV Cache (32K context, V7)
+- Full bf16: 4.0 GB (32 layers × 128 MB)
+- RotorQuant INT4 (default): 1.0 GB (4x)
 
-3. **FlatQuant (ICML 2025, W4A4KV4 SOTA)**
-   - Learnable affine transformations (Kronecker-decomposed) per layer
-   - <1% accuracy drop on W4A4 for LLaMA-3-70B (beats SpinQuant by 7.5%)
-   - 2.3x prefill speedup, 1.7x decode speedup
-   - Fused into single kernel, minimal overhead
-   - Code: github.com/ruikangliu/FlatQuant
+### Trainer Memory (V7-8B-B, BAdam)
+- Weights bf16: ~5.6-8.0 GB (GPU)
+- Active block optimizer: ~0.7-1.0 GB (GPU)
+- Inactive optimizer states: ~20-30 GB (CPU)
+- Total GPU: ~8.5-10.8 GB
 
-### Tier 2: Strong PTQ methods
+## Identified Gaps
 
-4. **SpinQuant** (learned rotations, W4A4 KV4)
-   - Narrows gap to FP to 2.9 points on LLaMA-2-7B
-   - Outperforms QuaRot (random rotations) by 45.1% on LLaMA-3-8B
-   - Already partially in ForgeAI (Hadamard in rotorquant)
+1. **int4 gradient compression**: CONFIGURED but NOT IMPLEMENTED
+   - `grad_compression="int4"` in hybrid_offload.py line 115
+   - Only stored as attribute, never used for actual compression
+   - Evolution promoted int4 (score 30.00/11.10) but feature is a no-op
 
-5. **ParoQuant** (pairwise Givens rotations, 2025)
-   - 2.4% accuracy improvement over AWQ on reasoning tasks
-   - <10% overhead, co-designed inference kernel
-   - Good for reasoning LLMs (long CoT chains)
+2. **NLRQ only on FFN**: Attention Q/K/V/O only compressed by BitNet
+   - NLRQ on attention would be WORSE than BitNet (5.33x vs 10.1x for square matrices)
+   - Not a viable direction — NLRQ compression ratio depends on matrix aspect ratio
 
-6. **HeRo-Q** (Hessian conditioning, 2026)
-   - Joint rotation-compression, reduces largest Hessian eigenvalue
-   - Beats GPTQ, AWQ, SpinQuant in W4A8 and W3A16
+3. **PEAGLE draft head**: 958 MB for 7 separate output heads
+   - 7 × Linear(1024, 65536) = 471M params
+   - Could tie to 1 shared head + LoRA adapters: 67.5M params (6.2x reduction)
 
-7. **FPTQuant** (function-preserving transforms, 2025)
-   - 4 mergeable transforms (pre-RoPE, value, MLP, dynamic scaling)
-   - 3.9x speedup, no custom kernels needed
-   - Static INT4 with minimal overhead
+4. **NLRQ INT4 factors**: Currently INT8, INT4 would 2x FFN compression
+   - Need Hadamard rotation to spread outliers before INT4 quantization
+   - FFN: 1.52 GB → 0.76 GB
 
-### Tier 3: Training-focused
+## R&D Round 15 Techniques (implementing)
 
-8. **StableQAT** (Microsoft, 2026)
-   - Fourier-analysis-based surrogate for rounding (generalizes STE)
-   - Stable 2-4 bit QAT, negligible overhead
-   - Code: github.com/microsoft/StableQAT
+### Technique 1: int4 Gradient Compression with EF21
+- File: research/training/optim/hybrid_offload.py
+- Novel twist: EF21 error feedback (residual buffer on GPU) to preserve convergence
+- Impact: 4x grad transfer bandwidth cut, enables full grad_offload on V7
 
-9. **SiLQ** (Simple LLM QAT, 2025)
-   - <0.1% training budget increase, STE + LSQ step refinement
-   - Beats best PTQ methods on CSR + OLLM benchmarks
-   - Dead simple to implement
+### Technique 2: HINT4-NLRQ (Hadamard-INT4 factors)
+- File: research/keys/compression/nlrq_ffn_key.py
+- Novel twist: block-diagonal Hadamard rotation on SVD factors before INT4 quantization
+- Impact: FFN 1.52 GB → 0.76 GB (2x), total V7 weights ~2.86 → ~2.1 GB
 
-10. **PE-QAT** (ACL 2026 SRW)
-    - LoRA adapters + fake quant on merged weights
-    - 0.11pp of FP baseline, trains only 1.26% of params
-    - Scales QAT to large models
+### Technique 3: Tied PEAGLE Heads with Position LoRA
+- File: research/decoding/peagle.py
+- Novel twist: shared output head + per-position low-rank adapters (rank=32)
+- Impact: 958 MB → 135 MB (6.2x), frees ~0.82 GB VRAM for longer context
 
-11. **Lattice VQ** (PMLR 2026)
-    - E8/D4 lattice vector quantization, stable below 2 bits
-    - Geometric structure reduces overload
+## Projected V7 Memory After R&D Round 15
 
-## Recommendations for ForgeAI (RTX 5070, 12GB, SM120)
-
-### Immediate (highest ROI):
-1. **NVFP4 inference path** — the RTX 5070 has hardware FP4 tensor cores.
-   CUTLASS 79b + VincentKaufmann's kernel prove 143 TFLOPS on SM120.
-   This would make the 8B model fit in ~4GB (vs 16GB bf16) and run 3x faster.
-   → New file: `research/quantization/nvfp4.py`
-
-2. **QuEST for training** — replace/augment BitNet with QuEST's trust gradient.
-   4-bit W+A training is Pareto-optimal. The Hadamard normalization is already
-   partially in ForgeAI (rotorquant). The trust gradient estimator is the novel piece.
-   → New file: `research/keys/compression/quest_key.py`
-
-3. **FlatQuant for PTQ** — learnable affine transforms for W4A4.
-   Best W4A4 accuracy published. Kronecker-decomposed = low overhead.
-   → New file: `research/quantization/flatquant.py`
-
-### Novel twists for ForgeAI:
-- **NVFP4 + FreeToken overlap**: run FP4 GEMM on GPU while CPU does
-  fp32 optimizer update (the 3-stage pipeline we just built). The 4x
-  smaller weights mean 4x less PCIe transfer for the grad/master sync.
-- **QuEST trust gradient + CPUAdamW**: the trust gradient estimator
-  could improve the STE in BitNet training, especially at 1-bit.
-- **FlatQuant + NVFP4**: FlatQuant's affine transforms + NVFP4 hardware
-  format = best accuracy at 4-bit with hardware acceleration.
+| Component | Current | After R&D 15 | Technique |
+|-----------|---------|-------------|-----------|
+| FFN weights | 1.52 GB | 0.76 GB | HINT4-NLRQ |
+| PEAGLE draft | 958 MB | 135 MB | Tied heads + LoRA |
+| Grad transfer | 2.34 GB | 0.59 GB | int4 + EF21 |
+| **Total inference** | ~4.5 GB | ~3.7 GB | - |
+| **Total training** | ~8.5 GB | ~7.8 GB | - |

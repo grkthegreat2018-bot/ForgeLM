@@ -252,6 +252,131 @@ def flash_attention(q, k, v, is_causal=True):
         return torch.matmul(attn, v)
 
 
+def varlen_attention(q, k, v, cu_seqlens, max_seqlen=None):
+    """Variable-length attention for packed sequences (R&D round 14).
+
+    Uses FlashAttention varlen API to attend WITHIN each packed example,
+    preventing cross-example attention contamination. This is the correct
+    way to handle packed sequences: instead of a global causal mask over
+    the entire packed sequence, each example gets its own causal mask.
+
+    Community: Unsloth 2.1x faster padding-free, 50% less VRAM.
+    Requires flash_attn package (flash_attn_varlen_func).
+
+    Args:
+        q, k, v: (B, n_heads, T, head_dim) — standard attention tensors.
+            For varlen, B should be 1 (all examples packed into one
+            sequence) or we process each batch element separately.
+        cu_seqlens: (B, n_examples+1) or (n_examples+1,) cumulative
+            sequence lengths. If 2D, each batch element has its own
+            set of examples. If 1D, all examples are in one sequence.
+        max_seqlen: max sequence length (for FA varlen API). Auto-computed
+            if None.
+
+    Returns:
+        (B, n_heads, T, head_dim) attention output.
+    """
+    # Try flash_attn varlen (fastest path, O(1) memory per example).
+    try:
+        from flash_attn import flash_attn_varlen_func
+        # flash_attn expects (total_seq, n_heads, head_dim) without batch dim.
+        # If B=1, squeeze the batch dim. If B>1, process per-batch.
+        B, n_heads, T, head_dim = q.shape
+
+        if B == 1:
+            # Single packed sequence: squeeze batch, use cu_seqlens directly.
+            q_vl = q.squeeze(0).transpose(0, 1)  # (T, n_heads, head_dim)
+            k_vl = k.squeeze(0).transpose(0, 1)
+            v_vl = v.squeeze(0).transpose(0, 1)
+            if cu_seqlens.dim() > 1:
+                cu = cu_seqlens[0]  # first batch element's cu_seqlens
+            else:
+                cu = cu_seqlens
+            cu = cu.to(q.device, dtype=torch.int32)
+            if max_seqlen is None:
+                max_seqlen = int((cu[1:] - cu[:-1]).max().item())
+            out = flash_attn_varlen_func(
+                q_vl, k_vl, v_vl, cu, cu, max_seqlen, max_seqlen,
+                softmax_scale=1.0 / math.sqrt(head_dim), causal=True,
+            )
+            # (T, n_heads, head_dim) → (1, n_heads, T, head_dim)
+            return out.transpose(0, 1).unsqueeze(0)
+        else:
+            # B > 1: process each batch element separately and concatenate.
+            outs = []
+            for b in range(B):
+                q_vl = q[b].transpose(0, 1)
+                k_vl = k[b].transpose(0, 1)
+                v_vl = v[b].transpose(0, 1)
+                if cu_seqlens.dim() > 1:
+                    cu = cu_seqlens[b]
+                else:
+                    # All batch elements share the same cu_seqlens (uncommon).
+                    cu = cu_seqlens
+                cu = cu.to(q.device, dtype=torch.int32)
+                if max_seqlen is None:
+                    max_seqlen = int((cu[1:] - cu[:-1]).max().item())
+                o = flash_attn_varlen_func(
+                    q_vl, k_vl, v_vl, cu, cu, max_seqlen, max_seqlen,
+                    softmax_scale=1.0 / math.sqrt(head_dim), causal=True,
+                )
+                outs.append(o.transpose(0, 1))
+            return torch.stack(outs, dim=0)
+    except ImportError:
+        pass
+
+    # Fallback: block-diagonal causal mask via SDPA.
+    # Build a mask where position (i, j) is valid only if i and j are in
+    # the same example AND i >= j (causal). This is correct but slower
+    # than flash_attn varlen (materializes the full T×T mask).
+    B, n_heads, T, head_dim = q.shape
+    if cu_seqlens.dim() > 1:
+        # Process per-batch with block-diagonal masks.
+        outs = []
+        for b in range(B):
+            cu = cu_seqlens[b].to(q.device, dtype=torch.long)
+            mask = _build_block_diag_causal_mask(cu, T, q.device, q.dtype)
+            # SDPA expects (B, n_heads, T, T) mask → (1, 1, T, T) broadcast.
+            out = F.scaled_dot_product_attention(
+                q[b:b+1], k[b:b+1], v[b:b+1], attn_mask=mask.unsqueeze(0).unsqueeze(0))
+            outs.append(out)
+        return torch.cat(outs, dim=0)
+    else:
+        cu = cu_seqlens.to(q.device, dtype=torch.long)
+        mask = _build_block_diag_causal_mask(cu, T, q.device, q.dtype)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask.unsqueeze(0).unsqueeze(0).expand(B, n_heads, T, T))
+
+
+def _build_block_diag_causal_mask(cu_seqlens, T, device, dtype):
+    """Build a block-diagonal causal mask for varlen attention fallback.
+
+    Each block (defined by consecutive cu_seqlens entries) gets its own
+    causal mask. Positions outside the block are masked to -inf.
+
+    Args:
+        cu_seqlens: (n_examples+1,) cumulative sequence lengths.
+        T: total sequence length.
+        device, dtype: for the mask tensor.
+
+    Returns:
+        (T, T) additive mask: 0 for valid positions, -inf for invalid.
+    """
+    mask = torch.full((T, T), float('-inf'), device=device, dtype=dtype)
+    n_examples = len(cu_seqlens) - 1
+    for i in range(n_examples):
+        start = int(cu_seqlens[i])
+        end = int(cu_seqlens[i + 1])
+        if end > start:
+            # Causal mask within this block
+            block_len = end - start
+            causal = torch.tril(torch.ones(block_len, block_len, device=device, dtype=dtype))
+            mask[start:end, start:end] = torch.where(
+                causal > 0, torch.tensor(0.0, device=device, dtype=dtype),
+                torch.tensor(float('-inf'), device=device, dtype=dtype))
+    return mask
+
+
 def _causal_mask(seq_len: int, total_len: int, past_len: int, device: torch.device,
                  dtype: torch.dtype = None) -> torch.Tensor:
     """Create a causal mask for a query of length `seq_len` attending to `total_len` keys."""
@@ -271,15 +396,23 @@ class RMSNorm(nn.Module):
     chain that launched 5+ kernels and allocated fp32 temporaries per call.
     With 113 norm calls per forward (57 ln + 56 qk_norm), this saves ~200
     kernel launches and ~50MB of temporary allocations per forward pass.
+
+    R&D round 14: when use_triton_kernels=True in config, uses a custom
+    Triton fused RMSNorm kernel (Liger-Kernel-style) tuned for SM120.
+    Falls back to F.rms_norm on CPU or when Triton is unavailable.
     """
 
-    def __init__(self, d_model, eps=1e-6):
+    def __init__(self, d_model, eps=1e-6, use_triton: bool = False):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(d_model))
         self.eps = eps
         self.normalized_shape = [d_model]
+        self._use_triton = use_triton
 
     def forward(self, x):
+        if self._use_triton:
+            from research.decoding.triton_train_kernels import triton_rms_norm
+            return triton_rms_norm(x, self.weight, self.eps)
         return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
 
@@ -430,7 +563,8 @@ class GroupedQueryAttention(nn.Module):
     def forward(self, x, past_key_value=None, use_cache=False,
                 preallocated_cache: Optional["PreAllocatedKVCache"] = None, layer_idx: int = 0,
                 attention_bias: torch.Tensor | None = None,
-                position_ids: torch.Tensor | None = None):
+                position_ids: torch.Tensor | None = None,
+                cu_seqlens: torch.Tensor | None = None):
         B, T, C = x.shape
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
@@ -499,6 +633,14 @@ class GroupedQueryAttention(nn.Module):
         # Repeat KV heads to match Q heads.
         k = self._repeat_kv(k)
         v = self._repeat_kv(v)
+
+        # Varlen attention path (R&D round 14): for packed sequences with
+        # cu_seqlens, use varlen attention to prevent cross-example
+        # contamination. Only during training (no KV cache, no attention_bias).
+        if cu_seqlens is not None and not use_cache and attention_bias is None:
+            out = varlen_attention(q, k, v, cu_seqlens)
+            out = out.transpose(1, 2).reshape(B, T, C)
+            return self.out_proj(out), new_kv
 
         # Single-token decode with cached KV: no causal mask needed (all keys are valid)
         total_len = k.shape[-2]
@@ -680,11 +822,16 @@ class SwiGLUFFN(nn.Module):
     With use_clamp=True, uses GPT-OSS clamped SwiGLU: gate clamped to
     [None, limit], up clamped to [-limit, limit], scaled sigmoid (α=1.702),
     and +1 residual on the linear path. Prevents outlier activations.
+
+    R&D round 14: when use_triton=True, uses a custom Triton fused SwiGLU
+    activation kernel (Liger-Kernel-style) that fuses silu(gate) * up into
+    a single kernel, saving one intermediate tensor read/write. The linear
+    projections (w_gate, w_up, w_down) stay as cuBLAS GEMMs (already optimal).
     """
 
     def __init__(self, d_model: int = 768, hidden_dim: int | None = None,
                  use_clamp: bool = False, clamp_alpha: float = 1.702,
-                 clamp_limit: float = 7.0):
+                 clamp_limit: float = 7.0, use_triton: bool = False):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = int(8 * d_model / 3)
@@ -694,6 +841,7 @@ class SwiGLUFFN(nn.Module):
         self.use_clamp = use_clamp
         self.clamp_alpha = clamp_alpha
         self.clamp_limit = clamp_limit
+        self._use_triton = use_triton
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = self.w_gate(x)
@@ -704,6 +852,10 @@ class SwiGLUFFN(nn.Module):
             up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
             glu = gate * torch.sigmoid(self.clamp_alpha * gate)
             return self.w_down((up + 1) * glu)
+        if self._use_triton:
+            from research.decoding.triton_train_kernels import triton_swiglu_act
+            act = triton_swiglu_act(gate, up)
+            return self.w_down(act)
         return self.w_down(F.silu(gate) * up)
 
 
@@ -714,7 +866,11 @@ class ModularBlock(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
-        self.ln1 = norm(config.d_model)
+        _use_triton = getattr(config, 'use_triton_kernels', False)
+        if norm is RMSNorm:
+            self.ln1 = RMSNorm(config.d_model, use_triton=_use_triton)
+        else:
+            self.ln1 = norm(config.d_model)
         # Determine layer type: conv or attention
         layer_types = getattr(config, 'layer_types', None)
         if layer_types is not None and layer_idx < len(layer_types):
@@ -727,7 +883,10 @@ class ModularBlock(nn.Module):
             self.attn = DoubleGatedConvLayer(config.d_model, kernel_size=ksize)
         else:
             self.attn = build_attention(config)
-        self.ln2 = norm(config.d_model)
+        if norm is RMSNorm:
+            self.ln2 = RMSNorm(config.d_model, use_triton=_use_triton)
+        else:
+            self.ln2 = norm(config.d_model)
         self.ffn = build_ffn(config)
         # Cache whether attn supports pre-allocated KV cache (avoids inspect.signature per forward).
         self._supports_prealloc_cache = isinstance(self.attn, GroupedQueryAttention) or \
@@ -797,6 +956,7 @@ class ModularBlock(nn.Module):
         # DiffusionBlocks: AdaLN modulation (shift_msa, scale_msa, gate_msa,
         # shift_mlp, scale_mlp, gate_mlp) — 6 * d_model values
         modulation: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, KVCache | None]:
         x0 = x  # pre-update residual (for TITAN read + MoD gating)
 
@@ -817,7 +977,7 @@ class ModularBlock(nn.Module):
             strategy = self._gradient_checkpointing_strategy
             if strategy == "all":
                 def custom_forward(x_inner):
-                    attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False)
+                    attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False, cu_seqlens=cu_seqlens)
                     x_inner = x_inner + attn_out
                     ffn_out = self.ffn(self.ln2(x_inner))
                     aux = None
@@ -836,11 +996,13 @@ class ModularBlock(nn.Module):
                         self.ln1(x), past_key_value=past_key_value, use_cache=False,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
                     )
                 else:
                     attn_out, present = self.attn(
                         self.ln1(x), past_key_value=past_key_value, use_cache=False,
                         attention_bias=attention_bias, position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
                     )
                 x = x + attn_out
                 ffn_out = torch.utils.checkpoint.checkpoint(
@@ -857,7 +1019,7 @@ class ModularBlock(nn.Module):
                         x_inner, past_key_value=past_key_value, use_cache=False,
                         preallocated_cache=preallocated_cache if self._supports_prealloc_cache else None,
                         layer_idx=layer_idx, attention_bias=attention_bias,
-                        position_ids=position_ids)
+                        position_ids=position_ids, cu_seqlens=cu_seqlens)
                 attn_out, present = torch.utils.checkpoint.checkpoint(
                     _attn_forward, self.ln1(x), use_reentrant=False)
                 x = x + attn_out
@@ -873,11 +1035,13 @@ class ModularBlock(nn.Module):
                         self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
                     )
                 else:
                     attn_out, present = self.attn(
                         self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
                         attention_bias=attention_bias, position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
                     )
                 x = x + attn_out
                 ffn_out = self.ffn(self.ln2(x))
@@ -905,11 +1069,13 @@ class ModularBlock(nn.Module):
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                     attention_bias=attention_bias, position_ids=position_ids,
+                    cu_seqlens=cu_seqlens,
                 )
             else:
                 attn_out, present = self.attn(
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     attention_bias=attention_bias, position_ids=position_ids,
+                    cu_seqlens=cu_seqlens,
                 )
             x = x + attn_out
             # SandwichNorm: post-attention norm (identity init = no-op).
@@ -1307,6 +1473,7 @@ def build_ffn(config: ModelConfig) -> nn.Module:
                 factor_bits=getattr(config, 'nlrq_factor_bits', 8),
                 use_residual=getattr(config, 'nlrq_use_residual', False),
                 residual_group_size=getattr(config, 'nlrq_residual_group_size', 128),
+                use_hadamard=getattr(config, 'nlrq_use_hadamard', False),
                 use_clamp=getattr(config, 'use_swiglu_clamp', False),
                 clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
                 clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
@@ -1325,7 +1492,8 @@ def build_ffn(config: ModelConfig) -> nn.Module:
                 hidden_dim=getattr(config, 'intermediate_size', None),
                 use_clamp=getattr(config, 'use_swiglu_clamp', False),
                 clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
-                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
+                clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0),
+                use_triton=getattr(config, 'use_triton_kernels', False))
         if getattr(config, 'use_bitnet', False):
             # BitNet b1.58 QAT: swap linear layers for ternary-STE versions
             # (learned per-layer scales; ternary only in training by default).
@@ -1381,7 +1549,11 @@ class ConfigurableResearchLLM(nn.Module):
             self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
-        self.ln_f = norm(config.d_model)
+        _use_triton_f = getattr(config, 'use_triton_kernels', False)
+        if norm is RMSNorm:
+            self.ln_f = RMSNorm(config.d_model, use_triton=_use_triton_f)
+        else:
+            self.ln_f = norm(config.d_model)
         # Weight tying: skip if PIT or factorized is enabled (they handle tying),
         # or if config explicitly disables it (e.g., Qwen2.5).
         if (not getattr(config, 'use_pit', False)
@@ -1590,6 +1762,8 @@ class ConfigurableResearchLLM(nn.Module):
         layer_indices: list[int] | None = None,
         noisy_embeds: torch.Tensor | None = None,
         modulation: torch.Tensor | None = None,
+        # Varlen attention (R&D round 14): cu_seqlens for packed sequences.
+        cu_seqlens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[KVCache | None]]:
         # FP8 training autocast: wrap forward in FP8 for 2x throughput on
         # Hopper/Blackwell. Falls back to BF16 on older GPUs.
@@ -1599,11 +1773,11 @@ class ConfigurableResearchLLM(nn.Module):
                 return self._forward_impl(
                     idx, targets, past_key_values, use_cache, return_hidden,
                     preallocated_cache, attention_mask, layer_indices,
-                    noisy_embeds, modulation)
+                    noisy_embeds, modulation, cu_seqlens)
         return self._forward_impl(
             idx, targets, past_key_values, use_cache, return_hidden,
             preallocated_cache, attention_mask, layer_indices,
-            noisy_embeds, modulation)
+            noisy_embeds, modulation, cu_seqlens)
 
     def _forward_impl(
         self,
@@ -1617,6 +1791,7 @@ class ConfigurableResearchLLM(nn.Module):
         layer_indices: list[int] | None = None,
         noisy_embeds: torch.Tensor | None = None,
         modulation: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ):
         position_ids = None
         attention_bias = None  # additive mask for SDPA: (B, 1, T, total_len)
@@ -1711,7 +1886,7 @@ class ConfigurableResearchLLM(nn.Module):
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
                                attention_bias=attention_bias, position_ids=position_ids,
-                               modulation=modulation)
+                               modulation=modulation, cu_seqlens=cu_seqlens)
             # Capture V_0 from layer 0 after its first forward (for training).
             if self._use_value_residual and i == 0 and self._v0 is None and not use_cache:
                 attn = block.attn
@@ -2045,10 +2220,18 @@ class ModelLoader:
                     factor_bits = getattr(config, 'nlrq_factor_bits', 8)
                     use_residual = getattr(config, 'nlrq_use_residual', False)
                     residual_gs = getattr(config, 'nlrq_residual_group_size', 128)
-                    nl = NLRQLinear.from_dense(weight, rank=rank,
-                                               factor_bits=factor_bits,
-                                               use_residual=use_residual,
-                                               residual_group_size=residual_gs)
+                    use_hadamard = getattr(config, 'nlrq_use_hadamard', False)
+                    if factor_bits == 4 and use_hadamard:
+                        nl = NLRQLinear.from_dense_hadamard_int4(
+                            weight, rank=rank,
+                            use_residual=use_residual,
+                            residual_group_size=residual_gs,
+                            bias=bias)
+                    else:
+                        nl = NLRQLinear.from_dense(weight, rank=rank,
+                                                   factor_bits=factor_bits,
+                                                   use_residual=use_residual,
+                                                   residual_group_size=residual_gs)
                     # INT8 buffers (real quantized storage)
                     new_state[f'blocks.{layer_idx}.ffn.w_{proj}.U_q'] = nl.U_q.to(torch.int8)
                     new_state[f'blocks.{layer_idx}.ffn.w_{proj}.V_q'] = nl.V_q.to(torch.int8)
@@ -2058,6 +2241,9 @@ class ModelLoader:
                     if use_residual and nl.residual_q is not None:
                         new_state[f'blocks.{layer_idx}.ffn.w_{proj}.residual_q'] = nl.residual_q.to(torch.int8)
                         new_state[f'blocks.{layer_idx}.ffn.w_{proj}.residual_scales'] = nl.residual_scales.to(torch.float16)
+                    if factor_bits == 4 and use_hadamard and nl.hadamard_U is not None:
+                        new_state[f'blocks.{layer_idx}.ffn.w_{proj}.hadamard_U'] = nl.hadamard_U.to(tensor.dtype)
+                        new_state[f'blocks.{layer_idx}.ffn.w_{proj}.hadamard_V'] = nl.hadamard_V.to(tensor.dtype)
             else:
                 new_state[key] = tensor
         return new_state
@@ -2230,23 +2416,14 @@ class ModelLoader:
             # Caches the meta-init architecture so subsequent boots with the
             # same config skip the ~3-7s build and just deepcopy (~0.1s).
             t_arch = time.time()
-            meta_sig = f"meta_{sig}"
-            if meta_sig in ModelLoader._model_cache:
-                model = copy.deepcopy(ModelLoader._model_cache[meta_sig])
-                ModelLoader._model_cache.move_to_end(meta_sig)
-                t_arch = time.time() - t_arch
-                print(f"  [FastBuild] Meta architecture cloned in {t_arch:.1f}s (cached)")
-            else:
-                cfg_meta = ModelConfig(**{**config.__dict__, "device": "meta"})
-                with torch.device("meta"):
-                    model = ConfigurableResearchLLM(cfg_meta)
-                # Cache the meta model (cheap — no real tensors, just shapes)
-                ModelLoader._model_cache[meta_sig] = copy.deepcopy(model)
-                ModelLoader._model_cache.move_to_end(meta_sig)
-                while len(ModelLoader._model_cache) > ModelLoader._MODEL_CACHE_MAXSIZE:
-                    ModelLoader._model_cache.popitem(last=False)
-                t_arch = time.time() - t_arch
-                print(f"  [FastBuild] Meta-init architecture in {t_arch:.1f}s")
+            # Meta init is cheap (no real tensors, just shapes), so we skip
+            # the deepcopy cache — deepcopy fails on modules with weight_norm
+            # or other non-leaf tensor hooks. Rebuilding from meta is ~0.1s.
+            cfg_meta = ModelConfig(**{**config.__dict__, "device": "meta"})
+            with torch.device("meta"):
+                model = ConfigurableResearchLLM(cfg_meta)
+            t_arch = time.time() - t_arch
+            print(f"  [FastBuild] Meta-init architecture in {t_arch:.1f}s")
 
             # Wait for background weight load to complete
             t_weights = time.time()
@@ -2355,6 +2532,23 @@ class ModelLoader:
                 model.head.weight = model.embed.weight
             # Re-initialize non-persistent buffers (RoPE cos/sin) left on meta.
             ModelLoader._reset_non_persistent_buffers(model, device)
+            # Move any parameters still on meta or wrong device (e.g. v_mix_gate
+            # added by GTA key transform on CPU) to the target device.
+            # Preserve values for params that have data (from key transforms);
+            # zero-init only for params that are still on meta (no data).
+            for name, param in model.named_parameters():
+                if param.is_meta:
+                    param.data = torch.zeros(param.shape, dtype=param.dtype, device=device)
+                elif param.device != device:
+                    param.data = param.data.to(device)
+            # Move any buffers still on meta or wrong device to target device
+            for module in model.modules():
+                for bname, buf in module._buffers.items():
+                    if buf is not None:
+                        if buf.is_meta:
+                            module._buffers[bname] = torch.zeros(buf.shape, dtype=buf.dtype, device=device)
+                        elif buf.device != device:
+                            module._buffers[bname] = buf.to(device)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             t_gpu = time.time() - t_gpu

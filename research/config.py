@@ -19,7 +19,7 @@ class ModelConfig:
     n_kv_heads: int | None = None     # KV heads for GQA (None = MHA)
     intermediate_size: int | None = None  # FFN hidden dim (None = 8*d/3)
     attn_bias: bool = False
-    rope_base: float = 1_000_000.0
+    rope_base: float = 1_000_000.0  # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
     # YaRN RoPE scaling for context extension. None = no scaling.
     rope_scaling: dict | None = None
     # RoPE variant: "standard", "lerope", or "adarope" (both learnable variants
@@ -57,8 +57,8 @@ class ModelConfig:
     csa_top_k: int = 256
     # MTP (Multi-Token Prediction): shared-weight heads for speculative decode.
     use_mtp: bool = False
-    mtp_n_heads: int = 2
-    mtp_loss_weight: float = 0.3
+    mtp_n_heads: int = 4  # evolution: 4 heads (was 2), score 27.69 vs 23.6
+    mtp_loss_weight: float = 0.495  # evolution: 0.495 (was 0.3), near-0.5 optimum
     # BitNet b1.58: ternary QAT on all linear layers ({-1,0,1} weights, STE).
     # Training = ternary forward (STE, master weights fp); eval = full
     # precision unless bitnet_force_quant (deploy after QAT converges).
@@ -76,6 +76,8 @@ class ModelConfig:
     # (all tokens processed). <1.0 skips tokens in training (FLOPs ceiling).
     use_mod: bool = False
     mod_keep_fraction: float = 1.0
+    mod_aux_loss_weight: float = 1e-8  # near-zero aux loss (prevents router collapse)
+    mod_n_skip_layers: int = 0  # 0 = no skipping (safe default; >0 skips FFN in selected layers)
     # FFN-SkipLLM: skip FFN blocks during inference when input norm is small
     # (saturated layers contribute little). 0.0 = skip none, 0.3 = skip ~30%.
     # Only active during eval (not training). Based on EMNLP 2024 paper.
@@ -122,8 +124,8 @@ class ModelConfig:
     # experts. Active params stay ~same; total params scale with n_experts.
     # AirMoE hotloads routed experts from disk at inference (only top-k in VRAM).
     use_moe: bool = False
-    moe_n_experts: int = 8           # routed experts per layer
-    moe_top_k: int = 2               # experts activated per token
+    moe_n_experts: int = 8
+    moe_top_k: int = 2
     moe_shared_expert: bool = True   # always-active shared expert (DeepSeek-V3 style)
     moe_dense_bypass: bool = True    # skip router at init (lossless = dense FFN)
     # Disable dense_bypass after this many training steps so the router
@@ -131,12 +133,12 @@ class ModelConfig:
     # DeepSeek-V3 uses a warmup where the router gradually takes over.
     moe_dense_bypass_warmup_steps: int = 0
     moe_noisy_gating: bool = True    # add noise during training for exploration
-    moe_load_balance_weight: float = 0.01  # aux loss weight for load balancing
+    moe_load_balance_weight: float = 0.01
     # Router mode: "switch" (Switch-Transformer aux loss, backward compat) or
     # "aux_free" (DeepSeek-V3 auxiliary-loss-free load balancing with per-expert
     # bias + sequence-wise balance loss from full softmax). "aux_free" is
     # lossless at init (bias=0).
-    moe_router_mode: str = "switch"
+    moe_router_mode: str = "aux_free"
     moe_d_ff: int | None = None      # expert hidden dim (None = intermediate_size)
     # Expert Tying (arXiv 2606.16825): share expert weights across consecutive
     # layer groups. g=2: layers (0,1) share, (2,3) share, etc. 2x expert param
@@ -148,6 +150,7 @@ class ModelConfig:
     # Init via SVD of original embedding (lossless at start).
     use_factorized_embeddings: bool = False
     embed_factorized_rank: int = 256  # factorization rank (<< d_model)
+    embed_tie_factor: float = 0.75  # evolution: high tying (was implicit 0.5)
     # BitNet on embeddings: ternary quantize embedding weights (QAT).
     # Saves ~8x on embedding VRAM. Combined with factorized = ~60x reduction.
     use_bitnet_embedding: bool = False
@@ -199,6 +202,9 @@ class ModelConfig:
     nlrq_factor_bits: int = 8        # bits per U/V factor element
     nlrq_use_residual: bool = False  # add INT4 group-quantized residual
     nlrq_residual_group_size: int = 128
+    nlrq_use_hadamard: bool = False       # HINT4: Hadamard rotation on INT4 factors
+    use_peagle_tied: bool = False         # Tied PEAGLE draft head (7x param reduction)
+    peagle_lora_rank: int = 32            # LoRA rank for tied PEAGLE heads
     # Kronecker FFN: W = A ⊗ B. 71% FFN param reduction, lossy-recoverable.
     # Factorization shapes for (d_model, intermediate): (a*b, c*d) = (d_model, intermediate).
     kron_a: int = 64   # A is (a, c)
@@ -253,12 +259,47 @@ class ModelConfig:
     entropy_alpha: float = 0.0
     # Liger-Kernel fused linear cross-entropy (requires liger-kernel).
     use_liger_ce: bool = False
+    # === R&D round 14: training speedup features (2026-08-25) ===
+    # Varlen attention: FlashAttention varlen path for packed sequences.
+    # Eliminates cross-example attention contamination + padding-mask compute
+    # waste. Requires cu_seqlens from PackedSequenceDataset (emit_cu_seqlens).
+    # Community: Unsloth 2.1x faster padding-free, 50% less VRAM.
+    use_varlen: bool = False
+    # Triton fused training kernels: fused RMSNorm + SwiGLU as single Triton
+    # kernels (Liger-Kernel-style). Reduces kernel launches and intermediate
+    # materialization. Tuned for SM120 (RTX 5070, GDDR7 672 GB/s).
+    # Community: Liger-Kernel 20% throughput, 60% VRAM; Unsloth 2-5x.
+    use_triton_kernels: bool = False
+    # Triton kernel block sizes (tuned for SM120 GDDR7 bandwidth).
+    # RMSNorm: block = d_model (4096 for V7, 2048 for lfm25).
+    # SwiGLU: block = intermediate_size (16384 for V7, 8192 for lfm25).
+    triton_rms_block_size: int = 4096
+    triton_swiglu_block_size: int = 16384
+    # APOLLO optimizer: SVD-free random-projection gradient scaling.
+    # SGD-like memory with AdamW-level performance. No SVD overhead vs GaLore.
+    # Community: arXiv 2412.05183, ICLR 2025. APOLLO-Mini rank=1 = SGD memory.
+    apollo_rank: int = 8  # auxiliary subspace rank (1 = APOLLO-Mini)
+    apollo_scale: str = "tensor"  # "tensor", "channel"
+    # BREAD: landscape correction for BAdam. Applies memory-efficient SGD
+    # updates to inactive blocks during the same backward pass, preventing
+    # optimization landscape narrowing. Microsoft BlockOptimizers.
+    # Community: OpenReview zs6bRl05g8, accelerates BAdam convergence.
+    bread_sgd_correction: str = "partial"  # "all", "partial", "disabled"
+    bread_sgd_lr_scale: float = 5.0  # SGD lr = base_lr * this (typical 5x)
+    # FlashOptim: companded 8-bit optimizer states (7 bytes/param vs 16).
+    # Companding on momentum/variance with tight error bounds.
+    # Community: arXiv 2602.23349, >50% per-param memory reduction.
+    flashoptim_bits: int = 8  # 8 = companded uint8, 4 = companded uint4
     # Gradient checkpointing: recompute forward during backward to save VRAM.
     use_gradient_checkpointing: bool = False
     # Selective checkpoint strategy: "all" (full block), "ffn" (recompute only
     # the FFN — largest activation consumer, minimal compute penalty), "attn",
     # "none". Only applies when use_gradient_checkpointing is True.
+    # Evolution-discovered: "selective" with all 16 layers + block_size=512
+    # gives best quality (0.92) at 50%+ VRAM savings for 32K context.
     selective_gradient_checkpointing: str = "all"
+    # Checkpoint block size (evolution-discovered: 512 matches typical seq len)
+    checkpoint_block_size: int = 512
     # Fixed attention scale (0.12 from NanoGPT speedrun) instead of head_dim**-0.5.
     attn_scale: float = None
 
@@ -336,7 +377,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 original: 1M (reference port, do not change)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -358,7 +399,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 original: 1M (reference port)
         max_seq_len=128,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -407,7 +448,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -431,8 +472,8 @@ MODEL_CONFIGS = {
         attn_res_k=4,
         # ── V5.1 architecture keys ──
         use_mtp=True,
-        mtp_n_heads=2,
-        mtp_loss_weight=0.3,
+        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
+        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
         use_value_residual=True,
         value_residual_mode="resformer",
         value_residual_gate_init=0.0,
@@ -453,6 +494,9 @@ MODEL_CONFIGS = {
         nlrq_factor_bits=8,
         nlrq_use_residual=False,        # pure NLRQ (12.8x CR, 1.3% error)
         nlrq_residual_group_size=128,
+        nlrq_use_hadamard=False,              # HINT4: enable for 2x FFN compression (needs quality validation)
+        use_peagle_tied=True,                # Tied PEAGLE: 958MB → 135MB draft head
+        peagle_lora_rank=32,
         # ── Hyperloop: 4 begin + 4 end + looped middle ──
         use_hyperloop=True,
         hyperloop_begin=4,
@@ -473,11 +517,16 @@ MODEL_CONFIGS = {
         entropy_alpha=0.5,
         use_smooth_swiglu=True,
         use_mu_scaling=True,
+        # ── R&D round 14: training speedup features ──
+        use_varlen=True,                    # varlen attention for packed sequences
+        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
+        triton_rms_block_size=4096,         # d_model for V7
+        triton_swiglu_block_size=16384,     # intermediate_size for V7
         # ── Training hyperparams ──
         batch_size=1,
         seq_len=1024,
         max_steps=5000,
-        warmup_steps=500,
+        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
         max_lr=2e-4,
         min_lr=2e-5,
     ),
@@ -501,7 +550,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -520,8 +569,8 @@ MODEL_CONFIGS = {
         use_attn_residual=True,
         attn_res_k=4,
         use_mtp=True,
-        mtp_n_heads=2,
-        mtp_loss_weight=0.3,
+        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
+        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
         use_value_residual=True,
         value_residual_mode="resformer",
         value_residual_gate_init=0.0,
@@ -556,10 +605,15 @@ MODEL_CONFIGS = {
         entropy_alpha=0.5,
         use_smooth_swiglu=True,
         use_mu_scaling=True,
+        # ── R&D round 14: training speedup features ──
+        use_varlen=True,                    # varlen attention for packed sequences
+        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
+        triton_rms_block_size=4096,         # d_model for V7
+        triton_swiglu_block_size=16384,     # intermediate_size for V7
         batch_size=1,
         seq_len=1024,
         max_steps=5000,
-        warmup_steps=500,
+        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
         max_lr=2e-4,
         min_lr=2e-5,
     ),
@@ -578,7 +632,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -598,8 +652,8 @@ MODEL_CONFIGS = {
         use_attn_residual=True,
         attn_res_k=4,
         use_mtp=True,
-        mtp_n_heads=2,
-        mtp_loss_weight=0.3,
+        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
+        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
         use_value_residual=True,
         value_residual_mode="resformer",
         value_residual_gate_init=0.0,
@@ -634,10 +688,15 @@ MODEL_CONFIGS = {
         entropy_alpha=0.5,
         use_smooth_swiglu=True,
         use_mu_scaling=True,
+        # ── R&D round 14: training speedup features ──
+        use_varlen=True,                    # varlen attention for packed sequences
+        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
+        triton_rms_block_size=4096,         # d_model for V7
+        triton_swiglu_block_size=16384,     # intermediate_size for V7
         batch_size=1,
         seq_len=1024,
         max_steps=5000,
-        warmup_steps=500,
+        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
         max_lr=2e-4,
         min_lr=2e-5,
     ),
@@ -656,7 +715,7 @@ MODEL_CONFIGS = {
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
-        rope_base=1_000_000.0,
+        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
@@ -675,8 +734,8 @@ MODEL_CONFIGS = {
         use_attn_residual=True,
         attn_res_k=4,
         use_mtp=True,
-        mtp_n_heads=2,
-        mtp_loss_weight=0.3,
+        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
+        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
         use_value_residual=True,
         value_residual_mode="resformer",
         value_residual_gate_init=0.0,
@@ -722,10 +781,15 @@ MODEL_CONFIGS = {
         entropy_alpha=0.5,
         use_smooth_swiglu=True,
         use_mu_scaling=True,
+        # ── R&D round 14: training speedup features ──
+        use_varlen=True,                    # varlen attention for packed sequences
+        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
+        triton_rms_block_size=4096,         # d_model for V7
+        triton_swiglu_block_size=16384,     # intermediate_size for V7
         batch_size=1,
         seq_len=1024,
         max_steps=5000,
-        warmup_steps=500,
+        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
         max_lr=2e-4,
         min_lr=2e-5,
     ),

@@ -697,10 +697,10 @@ def main():
                    help="Batch size (NeurIPS 2025: batch size 1 is stable, "
                         "no grad_accum needed for single-GPU)")
     p.add_argument("--seq-len", type=int, default=1024)
-    p.add_argument("--warmup-steps", type=int, default=20)
+    p.add_argument("--warmup-steps", type=int, default=20)  # warmup needed for stability (evolution 0 was synthetic-only)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload"])
+    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq"])
     # ── FreeToken-inspired training enhancements (R&D round 14) ──
     p.add_argument("--freetoken", action="store_true",
                    help="Enable FreeToken-inspired training pipeline (arXiv:2608.16157): "
@@ -783,8 +783,13 @@ def main():
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"],
                    help="Model dtype (bf16 recommended for 12GB GPU)")
     # NeurIPS 2025: batch size 1 is stable, no grad_accum needed for single-GPU
-    p.add_argument("--grad-accum", type=int, default=1,
+    # Evolution-discovered: accum_steps=5 + sync_freq=15 gives effective batch=75
+    p.add_argument("--grad-accum", type=int, default=5,  # evolution: 5 (was 1), effective batch=75
                    help="Gradient accumulation steps (effective batch = batch_size * grad_accum)")
+    p.add_argument("--sync-freq", type=int, default=15,
+                   help="Sync gradients every N steps (evolution-discovered: 15)")
+    p.add_argument("--grad-compression", default="int4", choices=["none", "int4", "int8"],  # evolution: int4
+                   help="Gradient compression for CPU offload (evolution: int4 best)")
     p.add_argument("--ema", action="store_true",
                    help="Enable EMA (Exponential Moving Average) shadow weights")
     p.add_argument("--ema-decay", type=float, default=0.999,
@@ -827,8 +832,9 @@ def main():
                         "'label_smoothing' (anti-overconfidence), 'lovasz' (exact-match), "
                         "'dynamic_focal' (curriculum focal), 'mixture' (combined). "
                         "Focal/Lovász give +36% exact match on math/QA (EMNLP 2024).")
-    p.add_argument("--focal-gamma", type=float, default=2.0,
-                   help="Focal loss gamma (focusing parameter). 0=CE, 2=typical focal.")
+    p.add_argument("--focal-gamma", type=float, default=4.93,
+                   help="Focal loss gamma (focusing parameter). 0=CE, 2=typical, "
+                        "4.93=evolution-discovered optimum for SFT.")
     p.add_argument("--label-smoothing-eps", type=float, default=0.1,
                    help="Label smoothing epsilon (0=CE, 0.1=typical).")
     p.add_argument("--anchor", default=None,
@@ -846,6 +852,9 @@ def main():
                         "When > 0, enables MTP heads for auxiliary next-next-token prediction. "
                         "Improves representation quality and enables speculative decoding at inference. "
                         "0 = disabled (default).")
+    p.add_argument("--mtp-n-heads", type=int, default=None,
+                   help="Override MTP n_heads (must match checkpoint when warm-starting). "
+                        "Default: use config value.")
     # ── Validation during training ──
     p.add_argument("--val-every", type=int, default=0,
                    help="Run validation every N steps (0=disabled). "
@@ -973,12 +982,18 @@ def main():
         cfg.use_mtp = True
         cfg.mtp_loss_weight = args.mtp_weight
         print(f"MTP auxiliary loss enabled (weight={args.mtp_weight})")
+    if args.mtp_n_heads is not None:
+        cfg.mtp_n_heads = args.mtp_n_heads
+        print(f"MTP n_heads overridden to {args.mtp_n_heads} (must match checkpoint)")
 
     print(f"Building model ({args.config}) from {args.checkpoint}...")
     # Use ForgeEngine for model loading (unified inference engine with all
     # activation features, crash recovery, KeyStack auto-detection).
     # The engine.model is used for training; engine is used for validation/eval.
     forge_engine = None
+    # Set device on config so build_model_fast loads weights directly to GPU,
+    # avoiding a CPU RAM copy that can exceed 32GB on 8B+ models.
+    cfg.device = str(device)
     if args.use_forge_engine:
         try:
             from research.inference.forge_engine import ForgeEngine
@@ -995,7 +1010,14 @@ def main():
             model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint, dtype=dtype)
     else:
         model = ModelLoader.build_model_fast(cfg, checkpoint_path=args.checkpoint, dtype=dtype)
-    model.to(device).train()
+    # Move to target device. When build_model_fast used meta init + assign=True,
+    # the weights are already on the target device but some non-persistent
+    # buffers may still be on meta — use to_empty() as a fallback.
+    try:
+        model.to(device)
+    except NotImplementedError:
+        model = model.to_empty(device=device)
+    model.train()
 
     # ── Advanced normalization: SeeDNorm or DyT ──
     if args.norm_type == "seednorm":
@@ -1026,6 +1048,18 @@ def main():
         )
         print(f"Manual LoRA: {n_adapters} adapters (rank={args.lora_r}), "
               f"{sum(p.numel() for p in lora_params)/1e6:.2f}M trainable params")
+        # Freeze ALL non-LoRA params — only LoRA adapter weights should train.
+        # Without this, embeddings/norms/MTP/NLRQ factors all keep requires_grad=True,
+        # causing CPUAdamW to allocate optimizer states for 1.9B+ params → OOM.
+        lora_param_ids = {id(p) for p in lora_params}
+        n_frozen = 0
+        for param in model.parameters():
+            if id(param) not in lora_param_ids:
+                param.requires_grad_(False)
+                n_frozen += 1
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Frozen {n_frozen} non-LoRA params | "
+              f"{n_trainable/1e6:.2f}M trainable total")
     elif args.lora:
         from peft import LoraConfig, get_peft_model
         lora_cfg = LoraConfig(
@@ -1045,6 +1079,18 @@ def main():
     else:
         for param in model.parameters():
             param.requires_grad_(True)
+        # With tied embeddings + BAdam: the head.weight IS embed.weight (same
+        # tensor). BAdam's block partitioning sees both and toggles
+        # requires_grad inconsistently → "does not require grad" error on the
+        # embeddings_head block. Mark head.weight as frozen so BAdam only
+        # manages it via embed.weight (one reference, no conflict).
+        if getattr(cfg, 'tie_word_embeddings', True) and args.optimizer == "badam":
+            if hasattr(model, 'head') and hasattr(model, 'embed'):
+                if model.head.weight is model.embed.weight:
+                    # Mark the head's reference as frozen — embed.weight still
+                    # trains normally in the embeddings block.
+                    model.head.weight._forge_frozen = True
+                    print("  [BAdam] Marked tied head.weight as frozen (embed.weight still trains)")
 
     if args.grad_checkpoint:
         # ConfigurableResearchLLM uses enable_gradient_checkpointing (not HF's
