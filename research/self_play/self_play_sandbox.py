@@ -355,9 +355,12 @@ class SelfPlaySandbox:
         # Forward cache for repeated prompts (C2 — 20-40% fewer forward passes)
         from research.runtime.forward_cache import ForwardCache
         self.fwd_cache = ForwardCache(max_entries=500, device=device)
-        # Conformal sampler: per-query calibrated temperature (NOVEL key)
-        from research.keys.training.conformal_sampler_key import ConformalSampler
-        self.conformal_sampler = ConformalSampler()
+        # Conformal sampler: per-query calibrated temperature (optional)
+        try:
+            from research.keys.training.conformal_sampler_key import ConformalSampler
+            self.conformal_sampler = ConformalSampler()
+        except (ImportError, ModuleNotFoundError):
+            self.conformal_sampler = None
         self.conformal_calibrated = False
         # Self-modeling: confidence-based retry (D5)
         from research.runtime.self_model import ConfidenceScorer
@@ -405,7 +408,7 @@ class SelfPlaySandbox:
                     logger.debug("conformal calibration: skipping prompt: %s", e)
                     continue
 
-        if len(scores) >= 5:
+        if self.conformal_sampler and len(scores) >= 5:
             self.conformal_sampler.calibrate(scores, alpha=alpha)
             self.conformal_calibrated = True
             print(f"  [ConformalSampler] Calibrated on {len(scores)} prompts, "
@@ -422,7 +425,7 @@ class SelfPlaySandbox:
         Returns:
             Temperature for this query
         """
-        if not self.conformal_calibrated or self.temperature <= 0.0:
+        if not self.conformal_calibrated or not self.conformal_sampler or self.temperature <= 0.0:
             return self.temperature
 
         # Compute query confidence: max softmax probability

@@ -221,40 +221,6 @@ class TestMHCKey:
         assert torch.isfinite(W).all()
 
 
-# --- MGLU Key Properties ---
-
-class TestMGLUKey:
-    """Property tests for MGLU."""
-
-    def test_mask_is_binary(self):
-        """MGLU mask should be binary (0 or 1)."""
-        mglu = _load_module("mglu_test", r"D:\windsurf\ForgeAI\research\keys\activation\mglu_key.py")
-        ffn = mglu.MGLUFFN(64, hidden_dim=128)
-        mask = ffn.get_mask()
-        unique_vals = set(mask.unique().tolist())
-        assert unique_vals.issubset({0.0, 1.0}), f"Mask should be binary, got: {unique_vals}"
-
-    def test_finiteness(self):
-        """MGLU output should be finite."""
-        mglu = _load_module("mglu_test2", r"D:\windsurf\ForgeAI\research\keys\activation\mglu_key.py")
-        ffn = mglu.MGLUFFN(64, hidden_dim=128)
-        x = torch.randn(2, 16, 64)
-        out = ffn(x)
-        assert torch.isfinite(out).all()
-        assert out.shape == x.shape
-
-    def test_param_savings_vs_swiglu(self):
-        """MGLU should have fewer params than SwiGLU (shared weight)."""
-        mglu = _load_module("mglu_test3", r"D:\windsurf\ForgeAI\research\keys\activation\mglu_key.py")
-        D, H = 64, 128
-        ffn = mglu.MGLUFFN(D, hidden_dim=H)
-        mglu_params = sum(p.numel() for p in ffn.parameters())
-        # SwiGLU: w_gate (D*H) + w_up (D*H) + w_down (H*D) = 2*D*H + H*D
-        swiglu_params = 2 * D * H + H * D
-        assert mglu_params < swiglu_params, \
-            f"MGLU ({mglu_params}) should be < SwiGLU ({swiglu_params})"
-
-
 # --- Safety Framework Properties ---
 
 class TestSafetyFramework:
@@ -339,39 +305,3 @@ class TestSafetyFramework:
         passed, issues = safety.verify_model_integrity(model, torch.randn(1, 4, 16))
         assert not passed
         assert len(issues) > 0
-
-
-# --- Jet-Long Key Properties ---
-
-class TestJetLongKey:
-    """Property tests for Jet-Long."""
-
-    def test_identity_for_short_context(self):
-        """Jet-Long should be identity for seq_len <= L_train."""
-        jl = _load_module("jetlong_test", r"D:\windsurf\ForgeAI\research\keys\position\jetlong_key.py")
-        key = jl.JetLongKey()
-
-        result = key.forward({"seq_len": 1024, "L_train": 1024})
-        assert result.success
-        assert not result.weights["extended"]
-
-        pos = result.weights["position_ids"]
-        expected = torch.arange(1024, dtype=torch.float32)
-        assert torch.equal(pos, expected), "Short context should be identity"
-
-    def test_compression_for_long_context(self):
-        """Jet-Long should compress positions for seq_len > L_train."""
-        jl = _load_module("jetlong_test2", r"D:\windsurf\ForgeAI\research\keys\position\jetlong_key.py")
-        key = jl.JetLongKey()
-
-        result = key.forward({"seq_len": 8192, "L_train": 1024})
-        assert result.success
-        assert result.weights["extended"]
-
-        pos = result.weights["position_ids"]
-        # Max effective position should be less than seq_len
-        assert pos.max().item() < 8192
-        # Local window (last L_train positions) should keep absolute positions
-        local = pos[-1024:]
-        expected_local = torch.arange(7168, 8192, dtype=torch.float32)
-        assert torch.equal(local, expected_local)

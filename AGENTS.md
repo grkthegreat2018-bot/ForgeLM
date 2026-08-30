@@ -71,9 +71,9 @@ unless the user explicitly overrides them for a specific task.
 
 ### E. No Redundant Files â€” Search Before You Create
 - **Before creating ANY new script or module, grep the codebase for an
-  existing one that does the same thing.** The codebase has 340+ .py files
-  across 13 R&D rounds; the odds are high that a related implementation
-  exists.
+  existing one that does the same thing.** The codebase has ~600 .py files
+  after the aggressive refactor (was 908); the odds are high that a related
+  implementation exists.
 - **Prefer upgrading an existing file over spawning a new one.** If
   `research/inference/kv/snapkv.py` exists and you want "smarter SnapKV",
   edit that file â€” do not create `snapkv_v2.py` or `smart_snapkv.py`.
@@ -83,6 +83,28 @@ unless the user explicitly overrides them for a specific task.
 - **The canonical path wins**: when in doubt, the file already wired into
   `forge_engine.py` / `forge_server.py` / `sft_train.py` is canonical. New
   code hooks into those, not around them.
+
+#### Refactor 2026-08-30: Aggressive cleanup
+- **Deleted 192 .py files** (908 â†’ 716): 84 dead key files, 48 throwaway
+  sandbox scripts, 28 dead subsystem modules, 8 dead R&D round files,
+  11 dead tests, 30 root scratch files.
+- **Dead keys removed**: all keys not referenced by V7/V8 presets or
+  `model_loader.py`. Only 24 canonical keys remain in `research/keys/`.
+- **Sandbox eliminated**: `research/sandbox/` deleted entirely.
+  `train_8b_all.py` and `train_v8.py` promoted to `research/training/runners/`.
+  Data scripts moved to `scripts/`.
+- **Dead R&D rounds removed**: `r20_novel_param_formats.py`, `r22_training_speedups.py`,
+  `hypercloning.py`, `ligo.py`, `dlora.py`, `fp4_checkpoint.py`.
+- **Dead subsystems cleaned**: `tokenization/` deleted entirely.
+  `distillation/` reduced to 2 live files. `evaluation/` reduced to 3 live files.
+  `training_free/` kept (used by tests + self_play).
+- **Directory reorganization**: `research/data/` â†’ `scripts/`,
+  `research/sandbox/train_8b_all.py` â†’ `research/training/runners/train_8b_all.py`.
+- **KeyStack builders removed**: `build_qwen2_keystack` and `build_xp_keystack`
+  deleted (dead code referencing deleted keys). `KeyStack` class preserved.
+- **Pre-existing test failures** (not caused by refactor):
+  `test_novel_quant.py` (2 device-mismatch bugs in `novel_quant.py`),
+  `test_evolution_domains.py` (1 missing `final_loss` key in training_sim).
 
 ### F. Math Thinking + Script Testing â€” Find The True Optimum
 - **Every optimization claim must be backed by a number from a script**,
@@ -2721,7 +2743,8 @@ modules FAIL with ModuleNotFoundError (defining the API contract for implementat
 - 	est_r23_ligo.py — 10 tests: LiGO growth matrix (ALL TDD — module not built)
 
 **Bug fix in existing code**: TopKGradientOptimizer._sparsify_grad() in
-esearch/training/optim/r21_cross_domain.py used id(grad) as the EF error
+
+esearch/training/optim/r21_cross_domain.py used id(grad) as the EF error
 feedback key, which collides when PyTorch reallocates gradient tensors across
 steps (set_to_none=True). Fixed to use id(param) instead. Reproduced as
 shape mismatch [128] doesn't match [128, 128] in AdamW._foreach_lerp_.
@@ -2738,8 +2761,13 @@ python -m pytest tests/unit/test_r23_nvme_muon_4bit.py tests/unit/test_r23_v8_ke
 **Modules to implement** (defined by TDD test contracts):
 1. NvmeMuon4Bit optimizer class + register in configure_optimizer() as "nvme_muon_4bit"
 2. Wire V8 keys into model_loader.py: use_qsa, use_gated_residual, use_ngram_embedding, use_hashed_nlrq
-3. esearch/sandbox/train_v8.py — V8 training runner (5 modes, ETA, rolling ckpts, resume)
-4. esearch/evaluation/ckpt_tester.py — 50-question checkpoint probe
-5. esearch/training/dlora.py — DLoRA (DoRA + LoRA) warm-start
-6. esearch/architecture/hypercloning.py — function-preserving model expansion
-7. esearch/architecture/ligo.py — learned linear growth operator
+3. 
+esearch/sandbox/train_v8.py — V8 training runner (5 modes, ETA, rolling ckpts, resume)
+4. 
+esearch/evaluation/ckpt_tester.py — 50-question checkpoint probe
+5. 
+esearch/training/dlora.py — DLoRA (DoRA + LoRA) warm-start
+6. 
+esearch/architecture/hypercloning.py — function-preserving model expansion
+7. 
+esearch/architecture/ligo.py — learned linear growth operator

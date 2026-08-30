@@ -395,15 +395,6 @@ def _h_aoh(eng, _flags):
     return "AoH: data-free head classification (retrieval vs streaming)"
 
 
-def _h_spec_attn(eng, _flags):
-    from research.keys.speculative.speculative_keys import (
-        SpeculativeAttentionKey,
-    )
-    eng._spec_attn_key = SpeculativeAttentionKey(draft_rank=32)
-    eng._spec_attn_key.apply(eng.model)
-    return "L1 Speculative Attention: active (lossless, 57% attn cut)"
-
-
 # ── Utility ──────────────────────────────────────────────────────────────────
 
 def torch_zeros(eng: "ForgeEngine", *shape: int):
@@ -467,5 +458,4 @@ _FEATURE_REGISTRY: list[FeatureSpec] = [
     FeatureSpec("use_mosaic_quant", _h_mosaic_quant),
     # Final attention
     FeatureSpec("use_aoh", _h_aoh),
-    FeatureSpec("use_spec_attn", _h_spec_attn),
 ]

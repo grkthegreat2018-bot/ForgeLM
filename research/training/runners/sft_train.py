@@ -1131,7 +1131,7 @@ def main():
     # ── From-scratch 8B init: NLRQ reset, BitNet QAT disable, kaiming init,
     #    logit scale normalization (mirrors train_8b_all.build_model) ──
     if _from_scratch:
-        from research.sandbox.train_8b_all import (
+        from research.training.runners.train_8b_all import (
             reset_nlrq_layers_, disable_bitnet_qat_, initialize_weights_,
             normalize_logit_scale_,
         )
@@ -1242,7 +1242,7 @@ def main():
     # that train via straight-through estimator around the INT8 quantizer.
     # Checkpoints stay pure-INT8 (masters are stripped on save via export).
     if getattr(cfg, 'ffn_compression', 'none') == "nlrq" and not use_manual_lora:
-        from research.sandbox.train_8b_all import enable_factor_training_all_
+        from research.training.runners.train_8b_all import enable_factor_training_all_
         n_nlrq = enable_factor_training_all_(model)
         if n_nlrq > 0:
             print(f"  [NLRQ-STE] {n_nlrq} layers with factor training (U_m/V_m masters)")
@@ -1273,7 +1273,7 @@ def main():
     # then freezes any param where p.grad is None (autograd's reachability
     # truth). This mirrors train_8b_all.freeze_dead_params_.
     if args.optimizer in ("badam", "fira_nlrq"):
-        from research.sandbox.train_8b_all import freeze_dead_params_
+        from research.training.runners.train_8b_all import freeze_dead_params_
         # FLCE (chunked fused linear-CE) is used when batch*seq >= 1024
         # (matches train_8b_all.py logic). The probe must match the real
         # training loss path for accurate dead-param detection.
@@ -1704,7 +1704,7 @@ def main():
                 if args.save_every > 0 and step > 0 and step % args.save_every == 0:
                     # NLRQ: export STE masters to INT8 before snapshotting
                     if getattr(cfg, 'ffn_compression', 'none') == "nlrq":
-                        from research.sandbox.train_8b_all import export_nlrq_
+                        from research.training.runners.train_8b_all import export_nlrq_
                         export_nlrq_(model)
                     ckpt = step_checkpoint_path(args.save, step)
                     save_training_checkpoint(model, ckpt, optimizer=optimizer,
@@ -1786,7 +1786,7 @@ def main():
             # saving so the checkpoint is pure-INT8 (loadable by ForgeEngine
             # without training-mode flags). Masters are stripped from state_dict.
             if getattr(cfg, 'ffn_compression', 'none') == "nlrq":
-                from research.sandbox.train_8b_all import export_nlrq_
+                from research.training.runners.train_8b_all import export_nlrq_
                 export_nlrq_(model)
                 print("Exported NLRQ STE masters to INT8 buffers for standalone save.")
             save_training_checkpoint(model, args.save, optimizer=optimizer,
