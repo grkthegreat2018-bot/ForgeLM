@@ -1,0 +1,20 @@
+{
+  "name": "rotor_quant_kv",
+  "category": "kv",
+  "description": "Rotate K,V then quantize. Search rotation type, n_rotations, quant_bits.",
+  "simulator": "rotor_quant_kv_simulate",
+  "params": [
+    {"name": "rot_type", "type": "choice", "values": ["hadamard", "dct", "random"]},
+    {"name": "n_rotations", "type": "int", "range": [1, 8]},
+    {"name": "quant_bits", "type": "choice", "values": [4, 8]}
+  ],
+  "behavioral_dims": [["compression", 8, 2.0, 4.0], ["quant_error", 10, 0.0, 0.5]],
+  "scoring": {
+    "components": [
+      {"metric": "compression", "weight": 10.0},
+      {"metric": "quant_error", "weight": -200.0},
+      {"metric": "compute", "weight": -0.5}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

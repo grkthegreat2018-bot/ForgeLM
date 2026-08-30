@@ -1,0 +1,22 @@
+{
+  "name": "batched_decode",
+  "category": "decoding",
+  "description": "Batched decoding: max_batch, padding, merge_window, max_seq_diff.",
+  "simulator": "batched_decode_simulate",
+  "params": [
+    {"name": "max_batch_size", "type": "int", "range": [1, 16]},
+    {"name": "padding_strategy", "type": "choice", "values": ["left", "right", "dynamic"]},
+    {"name": "merge_window_ms", "type": "int", "range": [10, 100]},
+    {"name": "max_seq_diff", "type": "int", "range": [0, 512]}
+  ],
+  "behavioral_dims": [["throughput", 10, 0.0, 1.0], ["padding_waste", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "throughput", "weight": 80.0},
+      {"metric": "padding_waste", "weight": -20.0},
+      {"metric": "merge_eff", "weight": 3.0},
+      {"metric": "latency_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

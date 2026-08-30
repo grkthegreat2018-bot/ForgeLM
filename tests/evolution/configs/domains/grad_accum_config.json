@@ -1,0 +1,22 @@
+{
+  "name": "grad_accum_config",
+  "category": "training",
+  "description": "Gradient accumulation steps, micro_batch, grad_clip, sync_freq. Metrics: throughput, noise, effective_batch, grad_clip.",
+  "simulator": "grad_accum_simulate",
+  "params": [
+    {"name": "accum_steps", "type": "int", "range": [1, 32]},
+    {"name": "micro_batch", "type": "int", "range": [1, 16]},
+    {"name": "grad_clip", "type": "float", "range": [0.0, 1.0]},
+    {"name": "sync_freq", "type": "int", "range": [1, 16]}
+  ],
+  "behavioral_dims": [["effective_batch", 10, 0, 1], ["noise", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "throughput", "weight": 10.0},
+      {"metric": "noise", "weight": -5.0},
+      {"metric": "grad_clip", "weight": 2.0, "transform": "clamp_pos"}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

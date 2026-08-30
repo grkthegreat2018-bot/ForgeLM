@@ -1,0 +1,21 @@
+{
+  "name": "hybrid_offload",
+  "category": "memory",
+  "description": "CPU/GPU weight offload: offload_ratio, prefetch_depth, pin_memory, overlap.",
+  "simulator": "hybrid_offload_simulate",
+  "params": [
+    {"name": "offload_ratio", "type": "float", "range": [0.0, 1.0]},
+    {"name": "prefetch_depth", "type": "int", "range": [1, 8]},
+    {"name": "pin_memory", "type": "choice", "values": [false, true]},
+    {"name": "overlap_compute", "type": "choice", "values": [false, true]}
+  ],
+  "behavioral_dims": [["vram_saved", 10, 0.0, 2.5], ["latency", 10, 0.0, 10.0]],
+  "scoring": {
+    "components": [
+      {"metric": "vram_saved", "weight": 3.0},
+      {"metric": "latency", "weight": -0.8},
+      {"metric": "prefetch_mem_cost", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

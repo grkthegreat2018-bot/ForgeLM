@@ -83,7 +83,7 @@ class ForgeEvolveConfig:
     # Filtering
     filter_ratio: int = 20        # N_generated / N_evaluated
     min_evaluate: int = 10        # minimum candidates to evaluate per gen
-    max_evaluate: int = 100       # maximum candidates to evaluate per gen
+    max_evaluate: int = 150       # maximum candidates to evaluate per gen (raised for throughput)
 
     # Training
     generator_lr: float = 1e-3
@@ -128,6 +128,18 @@ class ForgeEvolveConfig:
 
     # Parallelism
     parallel_eval: int = 1        # GPU eval parallelism
+
+    # ── Compute split: foreground gen models + background score checks ──
+    # When the domain uses an LLM gen model (gen_model_type="llm" in JSON spec),
+    # the engine batches gen-model inference on the GPU (foreground) and runs
+    # the SharedCheckerModel scoring asynchronously (background) to overlap
+    # compute.  Set enable_compute_split=True to activate.
+    enable_compute_split: bool = False
+    gen_model_manager: Any = None   # GenModelManager instance (optional)
+    checker_model: Any = None       # SharedCheckerModel instance (optional)
+    # Background checker uses a ThreadPoolExecutor so the LLM-as-judge calls
+    # overlap with the next generation's gen-model inference.
+    checker_n_workers: int = 2
 
     # Logging
     verbose: bool = True
@@ -247,6 +259,34 @@ class ForgeEvolve:
         self._warm_started = False
         self._pending_discoveries = []  # batched DB saves
 
+        # ── Compute split: gen model + checker wiring ──
+        self._gen_mgr = cfg.gen_model_manager
+        self._checker = cfg.checker_model
+        self._checker_pool = None
+        if cfg.enable_compute_split:
+            import concurrent.futures
+            self._checker_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=cfg.checker_n_workers,
+                thread_name_prefix="checker",
+            )
+            # Auto-create defaults if not provided
+            if self._gen_mgr is None:
+                from .gen_model_manager import GenModelManager
+                self._gen_mgr = GenModelManager(db=self.db)
+            if self._checker is None:
+                from .checker_model import get_checker
+                self._checker = get_checker()
+            # Wire gen model into domain if it supports set_gen_model
+            if hasattr(self.domain, "set_gen_model") and self._gen_mgr is not None:
+                gm = getattr(self._gen_mgr, "_model", None)
+                if gm is not None:
+                    self.domain.set_gen_model(gm)
+                    self._log(f"[ComputeSplit] gen model attached to domain "
+                              f"({gm.param_count()} params)")
+            self._log(f"[ComputeSplit] enabled — "
+                      f"checker={'yes' if self._checker else 'no'}, "
+                      f"gen_mgr={'yes' if self._gen_mgr else 'no'}")
+
         # ── Canonical load: ALWAYS load the best-ever generators + surrogate
         # for this domain, regardless of warm_start. This is the permanent
         # knowledge layer — findings from all past runs (any profile, any
@@ -292,19 +332,37 @@ class ForgeEvolve:
                         self._log(f"Cross-domain transfer from {n_xfer} source domain(s) "
                                   f"(output_dim={od})")
             # Also load past discoveries as archive seeds
+            # Cross-run cache: use stored scores from DB instead of re-evaluating
             past = self.db.query_best_configs(self.domain.name(), limit=20)
+            n_cached = 0
+            n_reevaled = 0
             for p in past:
                 key = self._config_key(p["config"])
                 if key in self._eval_cache:
                     continue  # already evaluated as a seed
-                result = self.domain.evaluate(p["config"])
-                self._eval_cache[key] = (result["score"],
-                                         result.get("behavioral", (0,)),
-                                         result.get("metadata", {}))
-                self.archive.add(p["config"], result["score"],
-                                 result.get("behavioral", (0,)), -1)
+                # Use stored score from DB (cross-run cache) — avoids
+                # re-evaluating configs that were already scored in past runs.
+                stored_score = p.get("score")
+                stored_behavioral = p.get("behavioral", (0,))
+                stored_metadata = p.get("metadata", {})
+                if stored_score is not None:
+                    self._eval_cache[key] = (stored_score,
+                                             stored_behavioral,
+                                             stored_metadata)
+                    self.archive.add(p["config"], stored_score,
+                                     stored_behavioral, -1)
+                    n_cached += 1
+                else:
+                    result = self.domain.evaluate(p["config"])
+                    self._eval_cache[key] = (result["score"],
+                                             result.get("behavioral", (0,)),
+                                             result.get("metadata", {}))
+                    self.archive.add(p["config"], result["score"],
+                                     result.get("behavioral", (0,)), -1)
+                    n_reevaled += 1
             if past:
-                self._log(f"Loaded {len(past)} past discoveries into archive")
+                self._log(f"Loaded {len(past)} past discoveries into archive "
+                          f"({n_cached} cached, {n_reevaled} re-evaluated)")
 
         # Seed from domain's known-good configs
         seed_configs = self.domain.seed_configs()
@@ -339,9 +397,12 @@ class ForgeEvolve:
             if seed_params:
                 param_tensor = torch.stack(seed_params).to(self.device)
                 score_tensor = torch.tensor(seed_scores, dtype=torch.float32)
-                self.surrogate.train(param_tensor, score_tensor, epochs=5)
-                self._log(f"Surrogate trained on {len(seed_params)} seeds "
-                          f"(best seed score={max(seed_scores):.4f})")
+                try:
+                    self.surrogate.train(param_tensor, score_tensor, epochs=5)
+                    self._log(f"Surrogate trained on {len(seed_params)} seeds "
+                              f"(best seed score={max(seed_scores):.4f})")
+                except Exception as e:
+                    self._log(f"Surrogate seed training skipped: {e}")
 
             # Update context with best seed
             if seed_scores:
@@ -480,6 +541,65 @@ class ForgeEvolve:
                         "metadata": {"oom": True}}
             raise
 
+    def _compute_split_eval(self, configs: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Compute-split evaluation for LLM gen-model domains.
+
+        Foreground: gen model generates answers (batched on GPU).
+        Background: SharedCheckerModel scores answers asynchronously.
+
+        The domain.evaluate() already calls the gen model internally (via
+        set_gen_model).  This method wraps the evaluation so that:
+        1. Gen-model inference (foreground) runs in a thread pool to overlap
+           CUDA kernel launches.
+        2. After each eval completes, if the checker is available and the
+           domain's spec has checker_type="llm_judge", the checker score is
+           submitted to the background pool and merged when ready.
+
+        Returns (results, configs) in the same order as input.
+        """
+        # Phase A: foreground gen-model inference (domain.evaluate calls gen model)
+        if self.device.type == "cuda" and len(configs) > 2:
+            raw_results = self._threaded_eval(configs)
+        else:
+            raw_results = [self._safe_eval(cfg) for cfg in configs]
+
+        # Phase B: background checker scoring (LLM-as-judge, optional)
+        if self._checker is None or self._checker_pool is None:
+            return raw_results, configs
+
+        # Submit checker calls to background pool
+        futures = []
+        for i, (cfg, res) in enumerate(zip(configs, raw_results)):
+            meta = res.get("metadata", {})
+            problem = meta.get("problem", "")
+            model_answer = meta.get("model_answer", "")
+            real_answer = meta.get("real_answer")
+            if not problem or not model_answer:
+                futures.append(None)
+                continue
+            req_text = (f"Problem: {problem}\n"
+                        f"Expected: {real_answer}\n"
+                        f"Answer: {model_answer}")
+            req = {
+                "prompt": req_text,
+                "requirements": str(real_answer) if real_answer is not None else "",
+                "expected": str(real_answer) if real_answer is not None else "",
+            }
+            fut = self._checker_pool.submit(self._checker.check, req)
+            futures.append(fut)
+
+        # Merge checker scores (non-blocking — if not ready, skip)
+        for i, fut in enumerate(futures):
+            if fut is None:
+                continue
+            try:
+                cscore = fut.result(timeout=0.1)
+                raw_results[i]["metadata"]["checker_score"] = cscore
+            except Exception:
+                pass  # checker not ready — skip, heuristic score stands
+
+        return raw_results, configs
+
     def _threaded_eval(self, configs: list[dict]) -> list[dict]:
         """Evaluate configs using threads with CUDA streams for kernel overlap.
 
@@ -566,6 +686,49 @@ class ForgeEvolve:
                   f"filter_ratio={self.cfg.filter_ratio}, "
                   f"domain={self.domain.name()}, device={self.device}"
                   + (f", CPU_pool={self.n_cpu_workers} workers" if self.cpu_pool else ""))
+
+        # ── Pre-loop: if unapplied discoveries exist in DB, train on them first ──
+        # This ensures that discoveries from previous runs are incorporated into
+        # the gen model's knowledge before starting a new search. After training,
+        # the discoveries are flagged as applied so they won't be re-trained on.
+        if self._gen_mgr is not None:
+            try:
+                n_unapplied = self.db.count_unapplied()
+                if n_unapplied > 0:
+                    self._log(f"[TrainFirst] {n_unapplied} unapplied discoveries in DB — "
+                              f"training gen model before search")
+                    unapplied = self.db.get_unapplied_discoveries(limit=200)
+                    solutions = []
+                    applied_ids = []
+                    for d in unapplied:
+                        meta = d.get("metadata", {}) or {}
+                        problem = meta.get("problem", "")
+                        answer = meta.get("model_answer", "")
+                        if problem and answer:
+                            solutions.append({
+                                "input": problem,
+                                "output": answer,
+                                "score": d.get("score", 0),
+                            })
+                        applied_ids.append(d["id"])
+                    if solutions:
+                        self._log(f"[TrainFirst] fine-tuning on {len(solutions)} solutions")
+                        try:
+                            stats = self._gen_mgr.fine_tune_on_solutions(solutions)
+                            self._log(f"[TrainFirst] done: "
+                                      f"{stats.get('n_examples', 0)} examples, "
+                                      f"final_loss={stats.get('loss_history', [0])[-1]:.4f}")
+                        except Exception as e:
+                            self._log(f"[TrainFirst] fine-tune failed: {e}")
+                    # Mark all unapplied discoveries as applied (even those
+                    # without problem/answer text — they don't need training)
+                    if applied_ids:
+                        self.db.mark_applied(applied_ids)
+                        self._log(f"[TrainFirst] marked {len(applied_ids)} discoveries as applied")
+                else:
+                    self._log("[TrainFirst] no unapplied discoveries — starting fresh search")
+            except Exception as e:
+                self._log(f"[TrainFirst] error checking unapplied: {e}")
 
         try:
             for gen in range(self.cfg.generations):
@@ -708,10 +871,28 @@ class ForgeEvolve:
                             config = self.domain.decode(self.domain.encode(tc))
                             config.update(tc)
                         except Exception:
-                            config = tc
+                            # Encode failed (tc has missing keys for this domain).
+                            # Decode a default config from mid-range params, then
+                            # overlay the template's keys on top. This ensures all
+                            # required keys are present.
+                            try:
+                                import torch as _t
+                                default_params = _t.full(
+                                    (self.domain.output_dim(),), 0.5,
+                                    device=self.domain.device)
+                                config = self.domain.decode(default_params)
+                                config.update(tc)
+                            except Exception:
+                                config = tc
                         decoded[ci] = config
 
-                if self.cpu_pool is not None and len(decoded) >= 8:
+                if self.cfg.enable_compute_split and hasattr(self.domain, "set_gen_model"):
+                    # ── Compute split path: foreground gen model + background checker ──
+                    # Gen model inference runs on GPU (foreground).  Checker
+                    # scoring (LLM-as-judge) is submitted to the background
+                    # thread pool so it overlaps with the next batch.
+                    results, configs = self._compute_split_eval(decoded)
+                elif self.cpu_pool is not None and len(decoded) >= 8:
                     # Split: GPU gets 40%, CPU workers get 60% (CPU has more cores)
                     n_cpu = int(len(decoded) * 0.6)
                     n_gpu = len(decoded) - n_cpu
@@ -811,7 +992,10 @@ class ForgeEvolve:
                     eval_scores = torch.tensor(
                         scores[:len(selected_neural)], dtype=torch.float32
                     )
-                    self.surrogate.train(eval_params, eval_scores)
+                    try:
+                        self.surrogate.train(eval_params, eval_scores)
+                    except Exception as e:
+                        self._log(f"Surrogate training skipped (gen {gen}): {e}")
                     self.surrogate.generation = gen
 
                 # Update generators (REINFORCE) — pass context
@@ -847,7 +1031,9 @@ class ForgeEvolve:
                     self.db.save_surrogate(self.run_id, self.domain.name(), self.surrogate)
 
                 # ── LOG ──
-                if gen % self.cfg.log_every == 0:
+                # Always log gen 0, final gen, and every log_every gens
+                is_last_gen = (gen == self.cfg.generations - 1)
+                if gen == 0 or gen % self.cfg.log_every == 0 or is_last_gen:
                     # Track phase timings for GPU utilization analysis
                     phase_info = (f"gen={t_gen:.3f}s filter={t_filter:.3f}s "
                                   f"score={t_score:.2f}s train={t_train:.3f}s")
@@ -893,6 +1079,47 @@ class ForgeEvolve:
                                 self.cfg.n_generators = new_n
                                 self._log(f"  [AdaptivePop] growing to {new_n} (plateau detected)")
                             self._pop_plateau_count = 0
+
+                # ── COMPUTE SPLIT: gen model lifecycle (grow/shrink/fine-tune) ──
+                if self.cfg.enable_compute_split and self._gen_mgr is not None:
+                    # Record this round's performance
+                    best_score = self.archive.best_score
+                    gm = getattr(self._gen_mgr, "_model", None)
+                    gm_size = None
+                    if gm is not None:
+                        if hasattr(gm, "get_size_config"):
+                            gm_size = gm.get_size_config()
+                        elif hasattr(gm, "param_count"):
+                            gm_size = {"params": gm.param_count()}
+                    self._gen_mgr.record_round(self.domain.name(), best_score, gm_size)
+
+                    # Grow if plateauing
+                    if self._gen_mgr.should_grow():
+                        self._log(f"  [GenModel] growing (plateau {self._gen_mgr._plateau_count} rounds)")
+                        self._gen_mgr.grow()
+                        if gm is not None and hasattr(self.domain, "set_gen_model"):
+                            self.domain.set_gen_model(self._gen_mgr._model)
+                    elif self._gen_mgr.should_shrink():
+                        self._log(f"  [GenModel] shrinking (overperforming)")
+                        self._gen_mgr.shrink()
+                        if hasattr(self.domain, "set_gen_model"):
+                            self.domain.set_gen_model(self._gen_mgr._model)
+
+                    # Fine-tune on successful solutions every 5 rounds
+                    if (gen + 1) % 5 == 0 and self._gen_mgr is not None:
+                        solutions = []
+                        for d in self.discoveries[-20:]:
+                            meta = d.get("metadata", {})
+                            problem = meta.get("problem", "")
+                            answer = meta.get("model_answer", "")
+                            if problem and answer:
+                                solutions.append({"prompt": problem, "output": answer})
+                        if solutions and self._gen_mgr is not None:
+                            self._log(f"  [GenModel] fine-tuning on {len(solutions)} solutions")
+                            try:
+                                self._gen_mgr.fine_tune_on_solutions(solutions)
+                            except Exception as e:
+                                self._log(f"  [GenModel] fine-tune failed: {e}")
 
             # Final summary
             elapsed = time.time() - self.start_time
@@ -988,6 +1215,10 @@ class ForgeEvolve:
                 self.cpu_pool.close()
                 self.cpu_pool.join()
                 self.cpu_pool = None
+            # Clean up checker thread pool
+            if self._checker_pool is not None:
+                self._checker_pool.shutdown(wait=False, cancel_futures=True)
+                self._checker_pool = None
 
         return results
 

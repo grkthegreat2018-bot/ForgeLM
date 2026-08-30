@@ -1,6 +1,6 @@
 # ForgeEvolve 'boot' Run: Top Optimization Ideas
-Generated: 2026-08-24 20:41:39
-Domains: 146
+Generated: 2026-08-26 01:44:14
+Domains: 154
 
 ## Tier 1: Top 50 Configurations
 
@@ -259,9 +259,17 @@ Domains: 146
 - **Config**: `{"n_codebooks": 4, "codebook_size": 401, "n_bits": 2}`
 - **Metadata**: `{"n_codebooks": 4, "compression": 4.0}`
 
+### aaac_quant_refine_d1 (score=9.96)
+- **Config**: `{"n_codebooks": 4, "codebook_size": 407, "n_bits": 2}`
+- **Metadata**: `{"n_codebooks": 4, "compression": 4.0}`
+
 ### activation_quant (score=9.63)
 - **Config**: `{"calib_method": "percentile", "percentile": 0.9000000428387552, "smooth_alpha": 0.999768078327179}`
 - **Metadata**: `{"method": "percentile", "err": 0.003701101072756236}`
+
+### apollo_config (score=31.99)
+- **Config**: `{"rank": 7, "scale": "channel", "lr_scale": 9.610086560249329}`
+- **Metadata**: `{"memory_savings": 0.99957275390625, "convergence_quality": 0.9998367676353661, "rank_penalty": 0.0, "scale_bonus": 2.0, "trivial_penalty": 0.0, "behavioral_0": 0.99957275390625, "behavioral_1": 0.9998367676353661, "raw_score": 31.98982275447866}`
 
 ### attn_residual (score=3.25)
 - **Config**: `{"k_layers": 1, "gate_init": 0.9947109222412109, "retrieval_dim": 64}`
@@ -292,8 +300,8 @@ Domains: 146
 - **Metadata**: `{"mode": "ternary", "err": 0.4337293367049065}`
 
 ### bitnet_config_refine_d1 (score=-27.40)
-- **Config**: `{"learned_scale": false, "quant_mode": "ternary", "init_scale": 1.5554749071598053}`
-- **Metadata**: `{"mode": "ternary", "err": 0.4340482568961554}`
+- **Config**: `{"learned_scale": false, "quant_mode": "ternary", "init_scale": 1.5281129777431488}`
+- **Metadata**: `{"err": 0.43402830304963735, "compression": 8.0, "behavioral_0": 0.43402830304963735, "behavioral_1": 8.0, "raw_score": -27.402830304963736}`
 
 ### checkpoint_recompute (score=8.94)
 - **Config**: `{"n_checkpoint_layers": 16, "recompute_strategy": "selective", "block_size": 512}`
@@ -347,13 +355,13 @@ Domains: 146
 - **Config**: `{"n_hot_experts": 4, "prefetch_ahead": 4, "cache_strategy": "lfu", "disk_cache_size": 4096}`
 - **Metadata**: `{"vram_used_gb": 1.025390625, "miss_rate": 0.0}`
 
-### expert_hotload_refine_d1 (score=8.27)
-- **Config**: `{"n_hot_experts": 3, "prefetch_ahead": 4, "cache_strategy": "priority", "disk_cache_size": 4096}`
-- **Metadata**: `{"vram_used_gb": 0.439453125, "miss_rate": 0.08500000089406967}`
+### expert_hotload_refine_d1 (score=8.83)
+- **Config**: `{"n_hot_experts": 4, "prefetch_ahead": 4, "cache_strategy": "priority", "disk_cache_size": 4096}`
+- **Metadata**: `{"vram_used": 0.5859375, "miss_rate": 0.0, "behavioral_0": 0.5859375, "behavioral_1": 0.0, "raw_score": 8.828125}`
 
-### factorized_embed (score=18.95)
-- **Config**: `{"rank": 72, "init_mode": "svd", "tie_factor": 0.02759479358792305, "vocab_size": 39902}`
-- **Metadata**: `{"rank": 72, "reduction": 0.963064225479153, "err": 0.0031585302153561076, "tie_factor": 0.02759479358792305}`
+### factorized_embed (score=19.22)
+- **Config**: `{"rank": 67, "init_mode": "svd", "tie_factor": 0.005971308331936598, "vocab_size": 45143}`
+- **Metadata**: `{"param_reduction": 0.9658054149574213, "recon_err": 0.00041300701682672975, "total_err": 0.0010101378500203895, "flag_adjustment": 4.130070168267298e-05, "behavioral_0": 0.9658054149574213, "behavioral_1": 0.0010101378500203895, "penalties": {"tie_factor_eval": -4.130070168267298e-05}, "raw_score": 19.215135814848068}`
 
 ### factorized_embed_refine_d1 (score=19.32)
 - **Config**: `{"rank": 64, "init_mode": "svd", "tie_factor": 1.0, "vocab_size": 65536}`
@@ -366,6 +374,14 @@ Domains: 146
 ### ffn_skip_refine_d1 (score=-6.20)
 - **Config**: `{"skip_threshold": 0.0, "n_eval_layers": 4, "skip_strategy": "cosine", "min_keep": 0.945724755525589}`
 - **Metadata**: `{"compute_saved": 0.0625, "deviation": 0.2483728633029396}`
+
+### flashoptim_config (score=27.50)
+- **Config**: `{"bits": 8, "companding": "sqrt"}`
+- **Metadata**: `{"bits": 8, "companding": "sqrt", "memory_savings": 0.75, "quant_err": 0.0044366965486578236, "companding_bonus": 5.0, "bit_penalty": 0.0}`
+
+### flashoptim_config_refine_d1 (score=21.25)
+- **Config**: `{"bits": 4, "companding": "sqrt"}`
+- **Metadata**: `{"bits": 4, "companding": "sqrt", "memory_savings": 0.875, "quant_err": 0.06843674439711411, "companding_bonus": 5.0, "bit_penalty": -10.0}`
 
 ### fp8_training_config (score=21.53)
 - **Config**: `{"autocast_mode": "e5m2", "smooth_swiglu": false, "mu_scaling": true, "loss_scale": 3992.9418869018555}`
@@ -395,9 +411,9 @@ Domains: 146
 - **Config**: `{"group_size": 16, "n_bits": 8, "scheme": "asymmetric"}`
 - **Metadata**: `{"group_size": 16, "bits": 8, "err": 0.008853267317228148}`
 
-### gta_attention (score=9.18)
-- **Config**: `{"v_k_mix": 0.0033624120987951756, "n_kv_heads": 4, "tie_strength": 0.533734142780304}`
-- **Metadata**: `{"mix": 0.0033624120987951756, "n_kv_heads": 4, "tie_strength": 0.533734142780304, "deviation": 0.0025244881816990283, "kv_reduction": 0.875}`
+### gta_attention (score=9.36)
+- **Config**: `{"v_k_mix": 0.00880716647952795, "n_kv_heads": 4, "tie_strength": 0.9376729726791382}`
+- **Metadata**: `{"kv_reduction": 0.875, "output_deviation": 0.011707371881273007, "tying_savings": 0.28130189180374143, "trivial_penalty": 0.0, "flag_adjustment": -3.4753459453582765, "behavioral_0": 0.875, "behavioral_1": 0.011707371881273007, "penalties": {"n_kv_heads_score": 1.6, "tie_strength_score": 1.8753459453582764}, "raw_score": 5.8844122924274895}`
 
 ### gta_attention_refine_d1 (score=9.32)
 - **Config**: `{"v_k_mix": 0.0, "n_kv_heads": 4, "tie_strength": 0.6292574405670166}`
@@ -483,9 +499,13 @@ Domains: 146
 - **Config**: `{"rank": 75, "gate_init": 1.0, "n_connections": 1}`
 - **Metadata**: `{"rank": 75, "n_connections": 1}`
 
-### mixed_precision (score=-16.37)
-- **Config**: `{"n_levels": 2, "assignment": "uniform", "bits_base": 6}`
-- **Metadata**: `{"n_levels": 2, "avg_bits": 7.0}`
+### mixed_precision (score=-15.07)
+- **Config**: `{"n_levels": 3, "assignment": "importance", "bits_base": 6}`
+- **Metadata**: `{"err": 0.030693553388118744, "bits": 6, "batched": true}`
+
+### mixed_precision_refine_d1 (score=-17.79)
+- **Config**: `{"n_levels": 3, "assignment": "importance", "bits_base": 6}`
+- **Metadata**: `{"err": 0.020417289808392525, "avg_bits": 7.875, "behavioral_0": 0.020417289808392525, "behavioral_1": 7.875, "raw_score": -17.791728980839252}`
 
 ### mod_config (score=9.98)
 - **Config**: `{"keep_fraction": 0.5000658252392896, "router_type": "mlp", "aux_loss_weight": 0.0003585296915844083, "n_skip_layers": 0}`
@@ -495,9 +515,9 @@ Domains: 146
 - **Config**: `{"keep_fraction": 0.5, "router_type": "mlp", "aux_loss_weight": 0.03231801092624664, "n_skip_layers": 2}`
 - **Metadata**: `{"keep_fraction": 0.5, "compute_saved": 0.5}`
 
-### moe_routing (score=26.79)
-- **Config**: `{"n_experts": 4, "top_k": 3, "router_mode": "switch", "load_balance_weight": 0.004044871404767037, "shared_expert": true}`
-- **Metadata**: `{"n_experts": 4, "balance": 0.9914948269733705, "util": 1.0, "diversity_penalty": 0.0}`
+### moe_routing (score=26.82)
+- **Config**: `{"n_experts": 4, "top_k": 4, "router_mode": "aux_free", "load_balance_weight": 0.008916006982326507, "shared_expert": true}`
+- **Metadata**: `{"load_balance": 1.0, "expert_util": 1.0, "load_balance_weight": 0.008916006982326507, "shared_bonus": 2.0, "behavioral_0": 1.0, "behavioral_1": 1.0, "raw_score": 26.82167986035347}`
 
 ### moe_routing_refine_d1 (score=26.87)
 - **Config**: `{"n_experts": 4, "top_k": 3, "router_mode": "aux_free", "load_balance_weight": 0.0, "shared_expert": true}`
@@ -527,9 +547,13 @@ Domains: 146
 - **Config**: `{"block_size": 16, "w4a8": true, "scale_mode": "per_channel"}`
 - **Metadata**: `{"block_size": 16, "err": 0.09676586664985923}`
 
-### offq_quant (score=-16.49)
-- **Config**: `{"offset_init": 0.05462278425693512, "n_iter": 40, "learn_offset": false}`
-- **Metadata**: `{"offset": -0.0032030893489718437, "err": 0.18585337325655701}`
+### offq_quant (score=-0.95)
+- **Config**: `{"offset_init": 0.28378549218177795, "n_iter": 14, "learn_offset": true}`
+- **Metadata**: `{"err": 0.009549938142299652, "bits": 8, "batched": true}`
+
+### offq_quant_refine_d1 (score=-16.91)
+- **Config**: `{"offset_init": 0.1916855424642563, "n_iter": 10, "learn_offset": true}`
+- **Metadata**: `{"err": 0.1691187616312553, "clipping": 3.0517578125e-05, "behavioral_0": 3.0517578125e-05, "behavioral_1": 0.1691187616312553, "raw_score": -16.91218133890678}`
 
 ### optimizer_config (score=24.52)
 - **Config**: `{"opt_type": "adamw", "lr": 0.00994758250117302, "beta1": 0.8029370873235167, "beta2": 0.9989974006414414, "weight_decay": 0.0002499049296602607}`
@@ -550,6 +574,10 @@ Domains: 146
 ### quant (score=-2.62)
 - **Config**: `{"block_size": 16, "scale_method": "absmax", "residual_ratio": 0.0, "global_scale_factor": 1.0, "scale_search_range": 0.3, "scale_search_steps": 5, "rounding_method": "rtn", "use_hadamard": false, "hadamard_dim": 16, "scale_clip_min": 0.01}`
 - **Metadata**: `{"frob_err": 0.09548715419543356, "fwd_err": 0.09629629359757037, "compression": 3.506849315068493, "dequant_ms": 0.073728, "q_bytes": 74752, "block_size": 16, "scale_method": "absmax", "rounding_method": "rtn", "use_hadamard": false, "hadamard_dim": 16, "scale_clip_min": 0.01, "scale_search_range": 0.3, "scale_search_steps": 5}`
+
+### quant_domain (score=0.00)
+- **Config**: `{"param0": 0.850135862827301, "param1": 0.6875659227371216, "param2": 0.23538480699062347, "param3": 0.6739538311958313, "param4": 0.828744649887085, "param5": 0.33438530564308167, "param6": 0.9607653021812439, "param7": 0.8559656739234924, "param8": 0.3829902708530426, "param9": 0.192924365401268}`
+- **Metadata**: `{"sqnr": 14.939898490905762, "compression": 4.0, "behavioral_0": 14.939898490905762, "behavioral_1": 4.0, "raw_score": 0.0}`
 
 ### rope_config (score=34.64)
 - **Config**: `{"theta": 8939256.656765938, "scaling_type": "linear", "scaling_factor": 0.546415823046118}`
@@ -579,9 +607,13 @@ Domains: 146
 - **Config**: `{"sched_type": "cosine", "warmup_steps": 15, "min_lr_ratio": 0.40436118841171265, "decay_steps": 930}`
 - **Metadata**: `{"sched_type": "cosine", "auc": 0.698702218391562, "stability_penalty": 0.0}`
 
-### sharq_quant (score=-18.13)
-- **Config**: `{"n_levels": 30, "adaptive": false, "warmup_steps": 113}`
-- **Metadata**: `{"n_levels": 30, "bits": 4.906890595608519}`
+### sharq_quant (score=-4.95)
+- **Config**: `{"n_levels": 4, "adaptive": true, "warmup_steps": 348}`
+- **Metadata**: `{"err": 0.009549938142299652, "bits": 8, "batched": true}`
+
+### sharq_quant_refine_d1 (score=-31.37)
+- **Config**: `{"n_levels": 7, "adaptive": true, "warmup_steps": 251}`
+- **Metadata**: `{"err": 0.25751566900525935, "bits": 2.807354922057604, "behavioral_0": 0.25751566900525935, "behavioral_1": 2.807354922057604, "raw_score": -31.366276744641144}`
 
 ### sliding_window (score=9.65)
 - **Config**: `{"window_size": 287, "stride": 78, "overlap_ratio": 0.8495826125144958}`
@@ -662,11 +694,12 @@ Domains: 146
 - `0.2704744040966034`: 1x, avg=0.6, domains=memory_budget_refine_d1
 - `0.27027013897895813`: 1x, avg=0.6, domains=memory_budget_refine_d1
 ### `adaptive`
-- `False`: 3x, avg=-18.2, domains=sharq_quant
+- `True`: 4x, avg=-24.8, domains=sharq_quant,sharq_quant_refine_d1
+- `False`: 2x, avg=-5.0, domains=sharq_quant
 ### `assignment`
-- `uniform`: 1x, avg=-16.4, domains=mixed_precision
-- `importance`: 1x, avg=-16.4, domains=mixed_precision
-- `random`: 1x, avg=-16.4, domains=mixed_precision
+- `importance`: 3x, avg=-17.0, domains=mixed_precision,mixed_precision_refine_d1
+- `uniform`: 2x, avg=-16.6, domains=mixed_precision,mixed_precision_refine_d1
+- `random`: 1x, avg=-15.5, domains=mixed_precision
 ### `async_copy`
 - `True`: 6x, avg=-0.5, domains=cpu_kv_offload,cpu_kv_offload_refine_d1
 ### `autocast_mode`
@@ -690,8 +723,13 @@ Domains: 146
 - `0.9989974006414414`: 1x, avg=24.5, domains=optimizer_config
 - `0.9989972078800201`: 1x, avg=24.4, domains=optimizer_config
 - `0.9989998072385788`: 1x, avg=24.4, domains=optimizer_config
+### `bits`
+- `4`: 2x, avg=21.2, domains=flashoptim_config,flashoptim_config_refine_d1
+- `8`: 1x, avg=27.5, domains=flashoptim_config
 ### `bits_base`
-- `6`: 3x, avg=-16.4, domains=mixed_precision
+- `6`: 4x, avg=-16.5, domains=mixed_precision,mixed_precision_refine_d1
+- `7`: 1x, avg=-15.5, domains=mixed_precision
+- `5`: 1x, avg=-18.0, domains=mixed_precision_refine_d1
 ### `block_size`
 - `16`: 5x, avg=3.3, domains=nvfp4_quant,quant
 - `8`: 4x, avg=-110.5, domains=csa_attention,kv_eviction_refine_d1
@@ -715,9 +753,9 @@ Domains: 146
 - `0.8457093834877014`: 1x, avg=-25.8, domains=sparse_attn
 - `0.8464348912239075`: 1x, avg=-26.5, domains=sparse_attn
 ### `cache_strategy`
+- `priority`: 3x, avg=8.5, domains=expert_hotload,expert_hotload_refine_d1
 - `lfu`: 2x, avg=8.5, domains=expert_hotload,expert_hotload_refine_d1
-- `priority`: 2x, avg=8.4, domains=expert_hotload,expert_hotload_refine_d1
-- `lru`: 2x, avg=8.3, domains=expert_hotload,expert_hotload_refine_d1
+- `lru`: 1x, avg=8.5, domains=expert_hotload
 ### `calib_method`
 - `percentile`: 3x, avg=9.6, domains=activation_quant
 ### `calib_samples`
@@ -742,7 +780,9 @@ Domains: 146
 - `401`: 1x, avg=10.0, domains=aaac_quant
 - `495`: 1x, avg=10.0, domains=aaac_quant
 - `415`: 1x, avg=10.0, domains=aaac_quant
-- `256`: 1x, avg=28.2, domains=kvzip_kv
+- `407`: 1x, avg=10.0, domains=aaac_quant_refine_d1
+### `companding`
+- `sqrt`: 3x, avg=23.3, domains=flashoptim_config,flashoptim_config_refine_d1
 ### `compression`
 - `int4`: 6x, avg=28.9, domains=cpu_adamw_config,cpu_adamw_config_refine_d1
 ### `compression_ratio`
@@ -767,7 +807,7 @@ Domains: 146
 - `3`: 2x, avg=3.8, domains=conv_config
 - `4`: 1x, avg=4.8, domains=conv_config
 ### `disk_cache_size`
-- `4096`: 6x, avg=8.4, domains=expert_hotload,expert_hotload_refine_d1
+- `4096`: 6x, avg=8.5, domains=expert_hotload,expert_hotload_refine_d1
 ### `diversity_penalty`
 - `0.6635481715202332`: 1x, avg=10.9, domains=beam_search
 - `0.7342454195022583`: 1x, avg=10.4, domains=beam_search
@@ -835,13 +875,13 @@ Domains: 146
 - `16`: 3x, avg=-4.0, domains=quant
 - `64`: 2x, avg=19.1, domains=hadamard_kv_refine_d1
 ### `init_mode`
-- `svd`: 6x, avg=18.8, domains=factorized_embed,factorized_embed_refine_d1
+- `svd`: 6x, avg=19.2, domains=factorized_embed,factorized_embed_refine_d1
 ### `init_scale`
 - `1.5358287990093231`: 1x, avg=-27.4, domains=bitnet_config
 - `1.5649056434631348`: 1x, avg=-27.4, domains=bitnet_config
 - `1.563204675912857`: 1x, avg=-27.4, domains=bitnet_config
-- `1.5554749071598053`: 1x, avg=-27.4, domains=bitnet_config_refine_d1
-- `1.5556987822055817`: 1x, avg=-27.4, domains=bitnet_config_refine_d1
+- `1.5281129777431488`: 1x, avg=-27.4, domains=bitnet_config_refine_d1
+- `1.5411604046821594`: 1x, avg=-27.4, domains=bitnet_config_refine_d1
 ### `k_layers`
 - `1`: 5x, avg=3.2, domains=attn_residual,attn_residual_refine_d1
 - `2`: 1x, avg=3.2, domains=attn_residual_refine_d1
@@ -880,8 +920,7 @@ Domains: 146
 - `366`: 1x, avg=-50.0, domains=gla_attention
 - `64`: 1x, avg=-89.3, domains=gla_attention
 ### `learn_offset`
-- `False`: 2x, avg=-16.6, domains=offq_quant
-- `True`: 1x, avg=-16.7, domains=offq_quant
+- `True`: 6x, avg=-9.0, domains=offq_quant,offq_quant_refine_d1
 ### `learned_scale`
 - `False`: 5x, avg=-27.4, domains=bitnet_config,bitnet_config_refine_d1
 - `True`: 1x, avg=-27.4, domains=bitnet_config
@@ -892,9 +931,9 @@ Domains: 146
 - `0.945908933877945`: 1x, avg=10.0, domains=beam_search
 ### `load_balance_weight`
 - `0.0`: 2x, avg=26.1, domains=moe_routing_refine_d1
+- `0.008916006982326507`: 1x, avg=26.8, domains=moe_routing
 - `0.004044871404767037`: 1x, avg=26.8, domains=moe_routing
 - `0.0035621780902147294`: 1x, avg=26.7, domains=moe_routing
-- `0.0020832810550928116`: 1x, avg=26.6, domains=moe_routing
 - `0.006238000094890595`: 1x, avg=26.7, domains=moe_routing_refine_d1
 ### `local_window`
 - `1754`: 1x, avg=14.0, domains=local_global
@@ -920,6 +959,10 @@ Domains: 146
 - `0.00994758250117302`: 1x, avg=24.5, domains=optimizer_config
 - `0.00999965344786644`: 1x, avg=24.4, domains=optimizer_config
 - `0.009891441650986672`: 1x, avg=24.4, domains=optimizer_config
+### `lr_scale`
+- `9.610086560249329`: 1x, avg=32.0, domains=apollo_config
+- `9.049584150314331`: 1x, avg=32.0, domains=apollo_config
+- `9.335252046585083`: 1x, avg=32.0, domains=apollo_config
 ### `max_batch_size`
 - `15`: 3x, avg=43.5, domains=batched_decode
 - `13`: 3x, avg=42.3, domains=batched_decode_refine_d1
@@ -971,13 +1014,13 @@ Domains: 146
 ### `mu_scaling`
 - `True`: 6x, avg=29.3, domains=fp8_training_config,fp8_training_config_refine_d1
 ### `n_bits`
+- `2`: 6x, avg=10.0, domains=aaac_quant,aaac_quant_refine_d1
 - `8`: 6x, avg=9.1, domains=group_quant,group_quant_refine_d1
-- `2`: 3x, avg=10.0, domains=aaac_quant
 ### `n_checkpoint_layers`
 - `16`: 5x, avg=8.4, domains=checkpoint_recompute,checkpoint_recompute_refine_d1
 - `14`: 1x, avg=7.8, domains=checkpoint_recompute_refine_d1
 ### `n_codebooks`
-- `4`: 3x, avg=10.0, domains=aaac_quant
+- `4`: 6x, avg=10.0, domains=aaac_quant,aaac_quant_refine_d1
 ### `n_connections`
 - `1`: 6x, avg=10.4, domains=mhc_config,mhc_config_refine_d1
 ### `n_conv_layers`
@@ -992,8 +1035,8 @@ Domains: 146
 - `3`: 1x, avg=-6.2, domains=ffn_skip
 - `4`: 1x, avg=-6.2, domains=ffn_skip_refine_d1
 ### `n_experts`
-- `4`: 4x, avg=26.8, domains=moe_routing,moe_routing_refine_d1
-- `5`: 2x, avg=26.0, domains=moe_routing,moe_routing_refine_d1
+- `4`: 5x, avg=26.8, domains=moe_routing,moe_routing_refine_d1
+- `5`: 1x, avg=25.4, domains=moe_routing_refine_d1
 ### `n_global_heads`
 - `15`: 3x, avg=14.1, domains=local_global,local_global_refine_d1
 - `13`: 2x, avg=13.9, domains=local_global
@@ -1005,21 +1048,23 @@ Domains: 146
 - `3`: 2x, avg=22.1, domains=mtp_config
 - `22`: 1x, avg=10.0, domains=diff_attn
 ### `n_hot_experts`
-- `4`: 2x, avg=8.7, domains=expert_hotload
-- `6`: 2x, avg=8.1, domains=expert_hotload_refine_d1
+- `4`: 3x, avg=8.7, domains=expert_hotload,expert_hotload_refine_d1
 - `5`: 1x, avg=8.5, domains=expert_hotload
 - `3`: 1x, avg=8.3, domains=expert_hotload_refine_d1
+- `6`: 1x, avg=8.2, domains=expert_hotload_refine_d1
 ### `n_iter`
-- `10`: 4x, avg=5.4, domains=kvzip_kv,kvzip_kv_refine_d1
-- `19`: 2x, avg=-2.5, domains=kvzip_kv,offq_quant
+- `10`: 5x, avg=0.9, domains=kvzip_kv,kvzip_kv_refine_d1,offq_quant_refine_d1
+- `19`: 2x, avg=-2.7, domains=kvzip_kv,offq_quant_refine_d1
 - `12`: 1x, avg=8.7, domains=kvzip_kv
-- `40`: 1x, avg=-16.5, domains=offq_quant
-- `54`: 1x, avg=-16.7, domains=offq_quant
+- `14`: 1x, avg=-1.0, domains=offq_quant
+- `98`: 1x, avg=-1.0, domains=offq_quant
 ### `n_kv_heads`
-- `4`: 6x, avg=9.2, domains=gta_attention,gta_attention_refine_d1
+- `4`: 6x, avg=9.3, domains=gta_attention,gta_attention_refine_d1
 ### `n_levels`
-- `2`: 3x, avg=-16.4, domains=mixed_precision
-- `30`: 3x, avg=-18.2, domains=sharq_quant
+- `3`: 4x, avg=-17.2, domains=mixed_precision,mixed_precision_refine_d1
+- `4`: 3x, avg=-5.0, domains=sharq_quant
+- `7`: 3x, avg=-31.4, domains=sharq_quant_refine_d1
+- `2`: 2x, avg=-15.4, domains=mixed_precision
 ### `n_memory_slots`
 - `1`: 6x, avg=4.2, domains=titan_memory,titan_memory_refine_d1
 ### `n_pages`
@@ -1086,9 +1131,11 @@ Domains: 146
 - `0.999956488609314`: 1x, avg=0.0, domains=cpu_kv_offload
 - `0.9993625283241272`: 1x, avg=0.0, domains=cpu_kv_offload
 ### `offset_init`
-- `0.05462278425693512`: 1x, avg=-16.5, domains=offq_quant
-- `0.07712052017450333`: 1x, avg=-16.7, domains=offq_quant
-- `0.18691237270832062`: 1x, avg=-16.7, domains=offq_quant
+- `0.28378549218177795`: 1x, avg=-1.0, domains=offq_quant
+- `0.0932888388633728`: 1x, avg=-1.0, domains=offq_quant
+- `0.22264206409454346`: 1x, avg=-1.0, domains=offq_quant
+- `0.1916855424642563`: 1x, avg=-16.9, domains=offq_quant_refine_d1
+- `0.22935916483402252`: 1x, avg=-17.0, domains=offq_quant_refine_d1
 ### `opt_type`
 - `adamw`: 3x, avg=24.5, domains=optimizer_config
 ### `overlap`
@@ -1126,9 +1173,9 @@ Domains: 146
 ### `pin_memory`
 - `True`: 6x, avg=4.0, domains=hybrid_offload,hybrid_offload_refine_d1
 ### `prefetch_ahead`
-- `4`: 3x, avg=8.5, domains=expert_hotload,expert_hotload_refine_d1
-- `1`: 2x, avg=8.1, domains=expert_hotload_refine_d1
+- `4`: 4x, avg=8.6, domains=expert_hotload,expert_hotload_refine_d1
 - `2`: 1x, avg=8.5, domains=expert_hotload
+- `1`: 1x, avg=8.2, domains=expert_hotload_refine_d1
 ### `prefetch_depth`
 - `2`: 3x, avg=27.8, domains=cpu_adamw_config_refine_d1
 - `5`: 3x, avg=3.8, domains=hybrid_offload
@@ -1146,10 +1193,10 @@ Domains: 146
 - `ternary`: 6x, avg=-27.4, domains=bitnet_config,bitnet_config_refine_d1
 ### `rank`
 - `64`: 5x, avg=15.8, domains=factorized_embed_refine_d1,mhc_config,mhc_config_refine_d1
-- `68`: 2x, avg=14.4, domains=factorized_embed,mhc_config_refine_d1
-- `72`: 1x, avg=18.9, domains=factorized_embed
-- `215`: 1x, avg=17.3, domains=factorized_embed
-- `65`: 1x, avg=10.4, domains=mhc_config
+- `7`: 1x, avg=32.0, domains=apollo_config
+- `8`: 1x, avg=32.0, domains=apollo_config
+- `9`: 1x, avg=32.0, domains=apollo_config
+- `67`: 1x, avg=19.2, domains=factorized_embed
 ### `recency_decay`
 - `1.0`: 1x, avg=4.5, domains=hqe_kv
 - `0.95`: 1x, avg=4.4, domains=hqe_kv
@@ -1190,11 +1237,13 @@ Domains: 146
 ### `rounding_method`
 - `rtn`: 3x, avg=-4.0, domains=quant
 ### `router_mode`
-- `switch`: 3x, avg=26.7, domains=moe_routing
-- `aux_free`: 3x, avg=26.3, domains=moe_routing_refine_d1
+- `aux_free`: 4x, avg=26.5, domains=moe_routing,moe_routing_refine_d1
+- `switch`: 2x, avg=26.7, domains=moe_routing
 ### `router_type`
 - `mlp`: 5x, avg=10.0, domains=mod_config,mod_config_refine_d1
 - `linear`: 1x, avg=10.1, domains=mod_config_refine_d1
+### `scale`
+- `channel`: 3x, avg=32.0, domains=apollo_config
 ### `scale_clip_min`
 - `0.01`: 2x, avg=-3.7, domains=quant
 - `0.001`: 1x, avg=-4.6, domains=quant
@@ -1303,15 +1352,15 @@ Domains: 146
 - `0.8437532186508179`: 1x, avg=52.0, domains=kv_recompute
 - `0.925775945186615`: 1x, avg=70.7, domains=kv_recompute_refine_d1
 ### `tie_factor`
-- `0.02759479358792305`: 1x, avg=18.9, domains=factorized_embed
-- `0.08808882534503937`: 1x, avg=18.4, domains=factorized_embed
-- `0.04103472828865051`: 1x, avg=17.3, domains=factorized_embed
+- `0.005971308331936598`: 1x, avg=19.2, domains=factorized_embed
+- `0.018557636067271233`: 1x, avg=19.1, domains=factorized_embed
+- `0.009276466444134712`: 1x, avg=19.0, domains=factorized_embed
 - `1.0`: 1x, avg=19.3, domains=factorized_embed_refine_d1
 - `0.9108207821846008`: 1x, avg=19.3, domains=factorized_embed_refine_d1
 ### `tie_strength`
+- `0.9376729726791382`: 1x, avg=9.4, domains=gta_attention
 - `0.533734142780304`: 1x, avg=9.2, domains=gta_attention
 - `0.9152335524559021`: 1x, avg=9.0, domains=gta_attention
-- `0.6125547885894775`: 1x, avg=8.9, domains=gta_attention
 - `0.6292574405670166`: 1x, avg=9.3, domains=gta_attention_refine_d1
 - `0.6255279779434204`: 1x, avg=9.3, domains=gta_attention_refine_d1
 ### `tile_dim`
@@ -1321,11 +1370,11 @@ Domains: 146
 - `102`: 1x, avg=4.2, domains=mosaic_quant_refine_d1
 - `64`: 1x, avg=4.2, domains=mosaic_quant_refine_d1
 ### `top_k`
-- `3`: 6x, avg=26.5, domains=moe_routing,moe_routing_refine_d1
+- `3`: 5x, avg=26.5, domains=moe_routing,moe_routing_refine_d1
 - `64`: 2x, avg=14.8, domains=csa_attention
 - `66`: 1x, avg=14.8, domains=csa_attention
+- `4`: 1x, avg=26.8, domains=moe_routing
 - `70`: 1x, avg=14.4, domains=sampling_config
-- `5`: 1x, avg=13.8, domains=sampling_config
 ### `top_p`
 - `1.0`: 3x, avg=10.6, domains=sampling_config_refine_d1
 - `0.5126710869371891`: 1x, avg=14.4, domains=sampling_config
@@ -1483,14 +1532,14 @@ Domains: 146
 - `1.0`: 1x, avg=65.0, domains=Generic_use_wavelength_pruning_refine_d1
 ### `v_k_mix`
 - `0.0`: 3x, avg=9.3, domains=gta_attention_refine_d1
+- `0.00880716647952795`: 1x, avg=9.4, domains=gta_attention
 - `0.0033624120987951756`: 1x, avg=9.2, domains=gta_attention
 - `0.020175281912088394`: 1x, avg=9.0, domains=gta_attention
-- `0.022901857271790504`: 1x, avg=8.9, domains=gta_attention
 ### `vocab_size`
 - `65536`: 2x, avg=19.3, domains=factorized_embed_refine_d1
-- `39902`: 1x, avg=18.9, domains=factorized_embed
-- `46569`: 1x, avg=18.4, domains=factorized_embed
-- `40110`: 1x, avg=17.3, domains=factorized_embed
+- `45143`: 1x, avg=19.2, domains=factorized_embed
+- `41496`: 1x, avg=19.1, domains=factorized_embed
+- `40998`: 1x, avg=19.0, domains=factorized_embed
 - `64911`: 1x, avg=19.3, domains=factorized_embed_refine_d1
 ### `w4a8`
 - `True`: 3x, avg=14.1, domains=nvfp4_quant

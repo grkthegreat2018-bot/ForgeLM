@@ -1,0 +1,21 @@
+{
+  "name": "expert_hotload",
+  "category": "memory",
+  "description": "MoE expert hotloading: n_hot, prefetch_ahead, cache_strategy, disk_cache.",
+  "simulator": "expert_hotload_simulate",
+  "params": [
+    {"name": "n_hot_experts", "type": "int", "range": [1, 8]},
+    {"name": "prefetch_ahead", "type": "int", "range": [1, 4]},
+    {"name": "cache_strategy", "type": "choice", "values": ["lru", "lfu", "priority"]},
+    {"name": "disk_cache_size", "type": "int", "range": [256, 4096]}
+  ],
+  "behavioral_dims": [["vram_used", 10, 0.0, 1.2], ["miss_rate", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "vram_used", "weight": -2.0},
+      {"metric": "miss_rate", "weight": -10.0}
+    ],
+    "bias": 10.0,
+    "hardening": ["no_nan"]
+  }
+}

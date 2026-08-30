@@ -21,6 +21,7 @@ import sqlite3
 import json
 import pickle
 import time
+import threading
 import torch
 import numpy as np
 from pathlib import Path
@@ -51,15 +52,32 @@ class FindingsDB:
 
     def __init__(self, db_path: str | Path = "forge_evolve.db"):
         self.db_path = str(db_path)
-        self.conn = sqlite3.connect(self.db_path)
-        # WAL mode: non-blocking reads, async writes (10-100x faster commits)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # WAL mode + tuned PRAGMAs: 10-100x faster commits, concurrent reads
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=-10000")  # 10MB cache
+        self.conn.execute("PRAGMA cache_size=-65536")    # 64MB cache (was 10MB)
+        self.conn.execute("PRAGMA temp_store=MEMORY")    # temp tables in RAM
+        self.conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+        self.conn.execute("PRAGMA busy_timeout=30000")   # wait 30s on lock contention
+        self._lock = threading.Lock()
         self._init_tables()
+
+    # Current schema version. Bump when adding columns/tables; migration
+    # logic below auto-upgrades existing DBs idempotently.
+    SCHEMA_VERSION = "2"
 
     def _init_tables(self):
         c = self.conn.cursor()
+
+        # ── schema_meta: versioning + scoring-hash registry ──────────────
+        # Created first so we can read the schema_version before migrating.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS runs (
@@ -169,81 +187,209 @@ class FindingsDB:
             )
         """)
 
+        # ── Gen model storage (LLM checkpoints for curriculum fine-tuning) ──
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS gen_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                config_json TEXT,
+                weights_blob BLOB,
+                param_count INTEGER,
+                performance_score REAL,
+                timestamp REAL DEFAULT (strftime('%s','now'))
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_gen_models_version
+            ON gen_models(version, timestamp DESC)
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS gen_model_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                round INTEGER,
+                score REAL,
+                param_count INTEGER,
+                timestamp REAL DEFAULT (strftime('%s','now'))
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_gen_model_perf_version
+            ON gen_model_performance(version, timestamp DESC)
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_gen_model_perf_domain
+            ON gen_model_performance(domain, timestamp DESC)
+        """)
+
+        self.conn.commit()
+
+        # ── Auto-migrate: add provenance columns to existing DBs ──────────
+        # Idempotent: checks PRAGMA table_info and only adds missing columns.
+        self._migrate_schema()
+
+    # ── Schema migration ────────────────────────────────────────────────
+
+    def _table_columns(self, table: str) -> set[str]:
+        """Return the set of column names currently on a table."""
+        c = self.conn.cursor()
+        c.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in c.fetchall()}
+
+    def _add_column_if_missing(self, table: str, col_def: str) -> None:
+        """Add a column (col_def = 'name TYPE ...') if it doesn't exist.
+
+        SQLite's ALTER TABLE ADD COLUMN is idempotent-safe when guarded by
+        a column-existence check, so this can be called on every init.
+        """
+        cols = self._table_columns(table)
+        col_name = col_def.split()[0]
+        if col_name not in cols:
+            c = self.conn.cursor()
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Idempotent migration: add provenance columns to discoveries and
+        record the schema_version in schema_meta. Safe to run repeatedly."""
+        c = self.conn.cursor()
+
+        # ── v2: provenance columns on discoveries ────────────────────────
+        provenance_cols = [
+            "script_text TEXT",
+            "input_text TEXT",
+            "output_text TEXT",
+            "expected_text TEXT",
+            "gen_model_size INTEGER",
+            "gen_model_version TEXT",
+            "scoring_hash TEXT",
+            "applied INTEGER DEFAULT 0",
+        ]
+        for col_def in provenance_cols:
+            self._add_column_if_missing("discoveries", col_def)
+
+        # Index for curriculum queries (score + provenance availability)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_discoveries_curriculum
+            ON discoveries(domain, score DESC)
+            WHERE input_text IS NOT NULL AND output_text IS NOT NULL
+        """)
+
+        # Record schema_version (idempotent upsert)
+        c.execute("""
+            INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (self.SCHEMA_VERSION,))
         self.conn.commit()
 
     def save_run(self, run_id: str, domain: str, config: dict,
                  results: dict, start_time: float):
         """Save or update a run record."""
-        c = self.conn.cursor()
-        c.execute("""
-            INSERT OR REPLACE INTO runs
-            (run_id, domain, config_json, start_time, end_time,
-             generations, total_evals, discoveries, best_score,
-             best_config_json, device)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            run_id, domain, _dumps(config),
-            start_time, time.time(),
-            results.get("generations", 0),
-            results.get("total_evaluations", 0),
-            results.get("discoveries", 0),
-            results.get("best_score", 0),
-            _dumps(results.get("best_config")),
-            results.get("device", "unknown"),
-        ))
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("""
+                INSERT OR REPLACE INTO runs
+                (run_id, domain, config_json, start_time, end_time,
+                 generations, total_evals, discoveries, best_score,
+                 best_config_json, device)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                run_id, domain, _dumps(config),
+                start_time, time.time(),
+                results.get("generations", 0),
+                results.get("total_evaluations", 0),
+                results.get("discoveries", 0),
+                results.get("best_score", 0),
+                _dumps(results.get("best_config")),
+                results.get("device", "unknown"),
+            ))
+            self.conn.commit()
 
     def save_discoveries(self, run_id: str, domain: str,
                          discoveries: list[dict]):
         """Save discoveries from a run. One row per unique (domain, config).
         If a config already exists, UPDATE its score if the new one is higher
-        (don't insert a duplicate). This keeps the DB strictly unique."""
-        c = self.conn.cursor()
-        n_saved = 0
-        n_updated = 0
-        n_skipped = 0
-        for d in discoveries:
-            config_json = _dumps(d.get("config"))
-            score = d.get("score", 0)
-            # Check if this exact config already exists for this domain
-            c.execute(
-                "SELECT id, score FROM discoveries WHERE domain=? AND config_json=? "
-                "ORDER BY score DESC LIMIT 1",
-                (domain, config_json))
-            row = c.fetchone()
-            if row is not None:
-                existing_id, existing_score = row[0], row[1]
-                if score > existing_score:
-                    # Update the existing row with the better score + metadata
-                    c.execute("""
-                        UPDATE discoveries
-                        SET run_id=?, generation=?, score=?,
-                            behavioral_json=?, metadata_json=?
-                        WHERE id=?
-                    """, (
-                        run_id, d.get("generation", 0), score,
-                        _dumps(d.get("behavioral")),
-                        _dumps(d.get("metadata", {})),
-                        existing_id,
-                    ))
-                    n_updated += 1
-                else:
-                    n_skipped += 1
-                continue
-            c.execute("""
-                INSERT INTO discoveries
-                (run_id, domain, generation, config_json, score,
-                 behavioral_json, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                run_id, domain, d.get("generation", 0),
-                config_json,
-                score,
-                _dumps(d.get("behavioral")),
-                _dumps(d.get("metadata", {})),
-            ))
-            n_saved += 1
-        self.conn.commit()
+        (don't insert a duplicate). This keeps the DB strictly unique.
+        Thread-safe: acquires write lock to prevent concurrent write conflicts.
+
+        Each discovery dict may optionally include provenance fields:
+            script_text, input_text, output_text, expected_text,
+            gen_model_size, gen_model_version, scoring_hash
+        These are stored in the new provenance columns. Existing callers
+        that omit them continue to work (NULL is stored).
+        """
+        with self._lock:
+            c = self.conn.cursor()
+            n_saved = 0
+            n_updated = 0
+            n_skipped = 0
+            for d in discoveries:
+                config_json = _dumps(d.get("config"))
+                score = d.get("score", 0)
+                # Provenance fields (optional — default to None)
+                script_text = d.get("script_text")
+                input_text = d.get("input_text")
+                output_text = d.get("output_text")
+                expected_text = d.get("expected_text")
+                gen_model_size = d.get("gen_model_size")
+                gen_model_version = d.get("gen_model_version")
+                scoring_hash = d.get("scoring_hash")
+                # Check if this exact config already exists for this domain
+                c.execute(
+                    "SELECT id, score FROM discoveries WHERE domain=? AND config_json=? "
+                    "ORDER BY score DESC LIMIT 1",
+                    (domain, config_json))
+                row = c.fetchone()
+                if row is not None:
+                    existing_id, existing_score = row[0], row[1]
+                    if score > existing_score:
+                        # Update the existing row with the better score + metadata
+                        # + provenance (only overwrite provenance if new values
+                        # are provided, to avoid clobbering existing data).
+                        c.execute("""
+                            UPDATE discoveries
+                            SET run_id=?, generation=?, score=?,
+                                behavioral_json=?, metadata_json=?,
+                                script_text=COALESCE(?, script_text),
+                                input_text=COALESCE(?, input_text),
+                                output_text=COALESCE(?, output_text),
+                                expected_text=COALESCE(?, expected_text),
+                                gen_model_size=COALESCE(?, gen_model_size),
+                                gen_model_version=COALESCE(?, gen_model_version),
+                                scoring_hash=COALESCE(?, scoring_hash)
+                            WHERE id=?
+                        """, (
+                            run_id, d.get("generation", 0), score,
+                            _dumps(d.get("behavioral")),
+                            _dumps(d.get("metadata", {})),
+                            script_text, input_text, output_text, expected_text,
+                            gen_model_size, gen_model_version, scoring_hash,
+                            existing_id,
+                        ))
+                        n_updated += 1
+                    else:
+                        n_skipped += 1
+                    continue
+                c.execute("""
+                    INSERT INTO discoveries
+                    (run_id, domain, generation, config_json, score,
+                     behavioral_json, metadata_json,
+                     script_text, input_text, output_text, expected_text,
+                     gen_model_size, gen_model_version, scoring_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    run_id, domain, d.get("generation", 0),
+                    config_json,
+                    score,
+                    _dumps(d.get("behavioral")),
+                    _dumps(d.get("metadata", {})),
+                    script_text, input_text, output_text, expected_text,
+                    gen_model_size, gen_model_version, scoring_hash,
+                ))
+                n_saved += 1
+            self.conn.commit()
         return n_saved, n_skipped + n_updated
 
     def save_evaluation(self, run_id: str, domain: str, generation: int,
@@ -471,10 +617,18 @@ class FindingsDB:
 
     def query_discoveries(self, domain: str, min_score: float = -1e9,
                           limit: int = 100) -> list[dict]:
-        """Query past discoveries for a domain, sorted by score."""
+        """Query past discoveries for a domain, sorted by score.
+
+        Includes provenance fields (script_text, input_text, output_text,
+        expected_text, gen_model_size, gen_model_version, scoring_hash)
+        when present.
+        """
         c = self.conn.cursor()
         c.execute("""
-            SELECT config_json, score, behavioral_json, metadata_json, run_id, generation
+            SELECT config_json, score, behavioral_json, metadata_json,
+                   run_id, generation,
+                   script_text, input_text, output_text, expected_text,
+                   gen_model_size, gen_model_version, scoring_hash
             FROM discoveries
             WHERE domain=? AND score >= ?
             ORDER BY score DESC
@@ -489,11 +643,125 @@ class FindingsDB:
             "metadata": json.loads(r[3]) if r[3] else {},
             "run_id": r[4],
             "generation": r[5],
+            "script_text": r[6],
+            "input_text": r[7],
+            "output_text": r[8],
+            "expected_text": r[9],
+            "gen_model_size": r[10],
+            "gen_model_version": r[11],
+            "scoring_hash": r[12],
         } for r in rows]
 
     def query_best_configs(self, domain: str, limit: int = 10) -> list[dict]:
         """Get the best configs ever found for a domain."""
         return self.query_discoveries(domain, min_score=-1e9, limit=limit)
+
+    # ── Applied-flag tracking (which discoveries have been promoted) ─────
+
+    def get_unapplied_discoveries(self, domain: str | None = None,
+                                  limit: int = 100) -> list[dict]:
+        """Return discoveries that haven't been applied yet (applied = 0 or
+        NULL), sorted by score DESC.
+
+        If ``domain`` is None, query across all domains. Each dict has keys:
+        id, domain, config (parsed), score, behavioral (parsed),
+        metadata (parsed).
+        """
+        c = self.conn.cursor()
+        if domain is not None:
+            c.execute("""
+                SELECT id, domain, config_json, score,
+                       behavioral_json, metadata_json
+                FROM discoveries
+                WHERE domain=? AND (applied = 0 OR applied IS NULL)
+                ORDER BY score DESC
+                LIMIT ?
+            """, (domain, limit))
+        else:
+            c.execute("""
+                SELECT id, domain, config_json, score,
+                       behavioral_json, metadata_json
+                FROM discoveries
+                WHERE applied = 0 OR applied IS NULL
+                ORDER BY score DESC
+                LIMIT ?
+            """, (limit,))
+        rows = c.fetchall()
+        results = []
+        for r in rows:
+            try:
+                config = json.loads(r[2])
+            except (json.JSONDecodeError, TypeError):
+                config = None
+            try:
+                behavioral = json.loads(r[4]) if r[4] else None
+            except (json.JSONDecodeError, TypeError):
+                behavioral = None
+            try:
+                metadata = json.loads(r[5]) if r[5] else {}
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            results.append({
+                "id": r[0],
+                "domain": r[1],
+                "config": config,
+                "score": r[3],
+                "behavioral": behavioral,
+                "metadata": metadata,
+            })
+        return results
+
+    def mark_applied(self, discovery_ids: list[int]) -> None:
+        """Mark the given discovery IDs as applied (applied = 1).
+
+        Uses a single UPDATE with WHERE id IN (...). No-op if the list is
+        empty.
+        """
+        if not discovery_ids:
+            return
+        with self._lock:
+            c = self.conn.cursor()
+            placeholders = ",".join("?" for _ in discovery_ids)
+            c.execute(
+                f"UPDATE discoveries SET applied = 1 WHERE id IN ({placeholders})",
+                tuple(discovery_ids),
+            )
+            self.conn.commit()
+
+    def mark_all_applied(self, domain: str | None = None) -> int:
+        """Mark all unapplied discoveries as applied, optionally filtered by
+        domain. Returns the count of updated rows."""
+        with self._lock:
+            c = self.conn.cursor()
+            if domain is not None:
+                c.execute("""
+                    UPDATE discoveries SET applied = 1
+                    WHERE domain=? AND (applied = 0 OR applied IS NULL)
+                """, (domain,))
+            else:
+                c.execute("""
+                    UPDATE discoveries SET applied = 1
+                    WHERE applied = 0 OR applied IS NULL
+                """)
+            n = c.rowcount
+            self.conn.commit()
+        return n
+
+    def count_unapplied(self, domain: str | None = None) -> int:
+        """Return the count of discoveries where applied = 0 or NULL."""
+        c = self.conn.cursor()
+        if domain is not None:
+            c.execute("""
+                SELECT COUNT(*) FROM discoveries
+                WHERE domain=? AND (applied = 0 OR applied IS NULL)
+            """, (domain,))
+        else:
+            c.execute("""
+                SELECT COUNT(*) FROM discoveries
+                WHERE applied = 0 OR applied IS NULL
+            """)
+        row = c.fetchone()
+        return row[0] if row else 0
 
     def seed_from_past(self, domain: str, batched_gen, surrogate,
                        n_seed: int = 5) -> int:
@@ -590,6 +858,191 @@ class FindingsDB:
                 continue
 
         return transferred
+
+    # ── Gen model storage (LLM checkpoints for curriculum fine-tuning) ───
+
+    def save_gen_model(self, version: str, config: dict, weights,
+                       param_count: int, performance_score: float) -> bool:
+        """Save a gen model checkpoint (LLM weights) to the DB.
+
+        ``weights`` may be:
+          - a state_dict (dict[str, Tensor]) — pickled directly
+          - an nn.Module — named_parameters() are extracted
+          - bytes/BLOB — stored as-is
+        Returns True on success.
+        """
+        c = self.conn.cursor()
+        if isinstance(weights, dict) and not all(
+            isinstance(v, (bytes, bytearray)) for v in weights.values()
+        ):
+            # state_dict of tensors → pickle
+            blob = pickle.dumps(weights)
+        elif hasattr(weights, "state_dict"):
+            blob = pickle.dumps(weights.state_dict())
+        elif hasattr(weights, "named_parameters"):
+            blob = pickle.dumps({
+                name: p.detach().cpu().numpy()
+                for name, p in weights.named_parameters()
+            })
+        elif isinstance(weights, (bytes, bytearray)):
+            blob = bytes(weights)
+        else:
+            blob = pickle.dumps(weights)
+
+        c.execute("""
+            INSERT INTO gen_models
+            (version, config_json, weights_blob, param_count,
+             performance_score)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            version, _dumps(config), blob,
+            int(param_count), float(performance_score),
+        ))
+        self.conn.commit()
+        return True
+
+    def load_gen_model(self, version: str) -> dict | None:
+        """Load the most recent gen model checkpoint for a version.
+
+        Returns {"version", "config", "weights", "param_count",
+                 "performance_score", "timestamp"} or None if not found.
+        ``weights`` is the pickled state_dict (caller loads into model).
+        """
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT version, config_json, weights_blob, param_count,
+                   performance_score, timestamp
+            FROM gen_models WHERE version=?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (version,))
+        row = c.fetchone()
+        if row is None:
+            return None
+        return {
+            "version": row[0],
+            "config": json.loads(row[1]) if row[1] else {},
+            "weights": pickle.loads(row[2]),
+            "param_count": row[3],
+            "performance_score": row[4],
+            "timestamp": row[5],
+        }
+
+    def get_latest_gen_model(self) -> dict | None:
+        """Get the most recently saved gen model checkpoint (any version)."""
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT version, config_json, weights_blob, param_count,
+                   performance_score, timestamp
+            FROM gen_models
+            ORDER BY timestamp DESC LIMIT 1
+        """)
+        row = c.fetchone()
+        if row is None:
+            return None
+        return {
+            "version": row[0],
+            "config": json.loads(row[1]) if row[1] else {},
+            "weights": pickle.loads(row[2]),
+            "param_count": row[3],
+            "performance_score": row[4],
+            "timestamp": row[5],
+        }
+
+    def record_gen_model_performance(self, version: str, domain: str,
+                                     round: int, score: float,
+                                     param_count: int) -> None:
+        """Record a gen model's performance on a domain at a given round."""
+        c = self.conn.cursor()
+        c.execute("""
+            INSERT INTO gen_model_performance
+            (version, domain, round, score, param_count)
+            VALUES (?, ?, ?, ?, ?)
+        """, (version, domain, int(round), float(score), int(param_count)))
+        self.conn.commit()
+
+    def get_gen_model_performance_history(self,
+                                          version: str | None = None
+                                          ) -> list[dict]:
+        """Get performance history for a gen model version (or all)."""
+        c = self.conn.cursor()
+        if version is not None:
+            c.execute("""
+                SELECT version, domain, round, score, param_count, timestamp
+                FROM gen_model_performance WHERE version=?
+                ORDER BY round ASC, timestamp ASC
+            """, (version,))
+        else:
+            c.execute("""
+                SELECT version, domain, round, score, param_count, timestamp
+                FROM gen_model_performance
+                ORDER BY timestamp ASC
+            """)
+        rows = c.fetchall()
+        return [{
+            "version": r[0], "domain": r[1], "round": r[2],
+            "score": r[3], "param_count": r[4], "timestamp": r[5],
+        } for r in rows]
+
+    def get_curriculum_data(self, min_score: float = 0.0,
+                            limit: int = 1000) -> list[dict]:
+        """Return successful discoveries with input_text + output_text for
+        fine-tuning. Sorted by score ASC (easiest first for curriculum).
+
+        Each dict has: domain, score, input_text, output_text, expected_text,
+        script_text, gen_model_version, run_id, generation.
+        """
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT domain, score, input_text, output_text, expected_text,
+                   script_text, gen_model_version, run_id, generation
+            FROM discoveries
+            WHERE score >= ? AND input_text IS NOT NULL
+                  AND output_text IS NOT NULL
+            ORDER BY score ASC
+            LIMIT ?
+        """, (min_score, limit))
+        rows = c.fetchall()
+        return [{
+            "domain": r[0], "score": r[1],
+            "input_text": r[2], "output_text": r[3],
+            "expected_text": r[4], "script_text": r[5],
+            "gen_model_version": r[6], "run_id": r[7],
+            "generation": r[8],
+        } for r in rows]
+
+    # ── Scoring hash regression guard ───────────────────────────────────
+
+    def save_scoring_hash(self, domain: str, hash: str) -> None:
+        """Store the scoring-spec hash for a domain in schema_meta."""
+        c = self.conn.cursor()
+        key = f"scoring_hash_{domain}"
+        c.execute("""
+            INSERT INTO schema_meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (key, hash))
+        self.conn.commit()
+
+    def get_scoring_hash(self, domain: str) -> str | None:
+        """Retrieve the stored scoring-spec hash for a domain."""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT value FROM schema_meta WHERE key=?",
+            (f"scoring_hash_{domain}",))
+        row = c.fetchone()
+        return row[0] if row else None
+
+    def check_scoring_compatibility(self, domain: str,
+                                    current_hash: str) -> bool:
+        """Return True if the stored scoring hash matches the current one.
+
+        Returns False if the hash changed (scoring spec was modified since
+        the last run → discoveries need rescoring) or if no hash is stored
+        yet (first run for this domain — caller should save it).
+        """
+        stored = self.get_scoring_hash(domain)
+        if stored is None:
+            return False
+        return stored == current_hash
 
     def list_runs(self, domain: str | None = None) -> list[dict]:
         """List all runs, optionally filtered by domain."""

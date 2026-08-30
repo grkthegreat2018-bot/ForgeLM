@@ -20,6 +20,7 @@ uncovered topics.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -49,9 +50,33 @@ class TopicScanner:
     def __init__(self, project_root: str):
         self.root = Path(project_root)
         self.topics: list[OptimizationTopic] = []
+        self._cache_path = self.root / ".devin" / "topic_scan_cache.json"
 
     def scan_all(self) -> list[OptimizationTopic]:
-        """Run all scanners and return the full topic catalog."""
+        """Run all scanners and return the full topic catalog.
+
+        Uses a disk cache to skip re-scanning when no scanned files have
+        changed since the last run. If any file's mtime differs from the
+        cached value, the entire scan is re-run.
+        """
+        scan_files = self._get_scan_files()
+        current_mtimes = {
+            str(p.relative_to(self.root)): p.stat().st_mtime
+            for p in scan_files if p.exists()
+        }
+
+        cache = self._load_cache()
+        if cache is not None:
+            cached_mtimes = cache.get("file_mtimes", {})
+            if cached_mtimes == current_mtimes:
+                # All files unchanged — restore topics from cache
+                self.topics = [
+                    OptimizationTopic(**t) for t in cache.get("topics", [])
+                ]
+                self._mark_covered_topics()
+                return self.topics
+
+        # Cache miss or files changed — full re-scan
         self.topics = []
         self._scan_feature_flags()
         self._scan_config_params()
@@ -62,7 +87,85 @@ class TopicScanner:
         self._scan_schedulers()
         self._scan_training_optimizers()
         self._mark_covered_topics()
+        self._save_cache(self.topics, current_mtimes)
         return self.topics
+
+    # ------------------------------------------------------------------
+    # Disk cache
+    # ------------------------------------------------------------------
+
+    def _load_cache(self) -> dict | None:
+        """Load the on-disk scan cache, or return None if missing/invalid."""
+        if not self._cache_path.exists():
+            return None
+        try:
+            return json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _save_cache(self, topics: list[OptimizationTopic], file_mtimes: dict) -> None:
+        """Persist scan results and file mtimes to the cache file."""
+        cache_dir = self._cache_path.parent
+        os.makedirs(cache_dir, exist_ok=True)
+        payload = {
+            "topics": [
+                {
+                    "name": t.name,
+                    "category": t.category,
+                    "source_file": t.source_file,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                    "has_domain": t.has_domain,
+                    "domain_name": t.domain_name,
+                }
+                for t in topics
+            ],
+            "file_mtimes": file_mtimes,
+        }
+        self._cache_path.write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+
+    def _get_scan_files(self) -> list[Path]:
+        """Return the list of all files that the _scan_* methods would read.
+
+        This mirrors the exact file-selection logic of each scanner so that
+        mtimes can be checked without reading file contents.
+        """
+        files: list[Path] = []
+
+        # _scan_feature_flags
+        files.append(self.root / "research" / "inference" / "activation.py")
+        # _scan_config_params
+        files.append(self.root / "research" / "config.py")
+        # _scan_arch_keys
+        keys_dir = self.root / "research" / "keys"
+        if keys_dir.exists():
+            files.extend(keys_dir.rglob("*_key.py"))
+        # _scan_kv_strategies
+        files.append(self.root / "research" / "inference" / "kv_backend.py")
+        # _scan_decoding_strategies
+        files.append(self.root / "research" / "inference" / "decoding.py")
+        # _scan_quant_modes
+        quant_dir = self.root / "research" / "inference" / "quant"
+        if quant_dir.exists():
+            files.extend(
+                f for f in quant_dir.glob("*.py") if not f.name.startswith("_")
+            )
+        # _scan_schedulers
+        sched_dir = self.root / "research" / "inference" / "scheduler"
+        if sched_dir.exists():
+            files.extend(
+                f for f in sched_dir.glob("*.py") if not f.name.startswith("_")
+            )
+        # _scan_training_optimizers
+        opt_dir = self.root / "research" / "training" / "optim"
+        if opt_dir.exists():
+            files.extend(
+                f for f in opt_dir.glob("*.py") if not f.name.startswith("_")
+            )
+
+        return files
 
     def _scan_feature_flags(self):
         """Scan activation.py for use_* feature flags."""

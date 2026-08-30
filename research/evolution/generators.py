@@ -246,15 +246,11 @@ class GeneratorPopulation:
         # break with dynamic batch sizes from adaptive population sizing.
         # Increase recompile limit since adaptive pop changes batch size.
         self._compiled = False
-        if compile and self.device.type == "cuda":
-            try:
-                import torch._dynamo as dynamo
-                dynamo.config.recompile_limit = 64  # default is 8
-                self.batched_gen = torch.compile(
-                    self.batched_gen, mode="default", fullgraph=False)
-                self._compiled = True
-            except Exception:
-                self._compiled = False
+        # torch.compile DISABLED: corrupts inductor cache when multiple threads
+        # compile simultaneously during concurrent domain execution.
+        # The JSONDecodeError "Extra data" is a corrupted inductor cache file.
+        # Raw forward pass is fast enough for our generator sizes.
+        compile = False
 
         total_params = self.batched_gen.n_params()
         mem_mb = total_params * 4 / 1e6

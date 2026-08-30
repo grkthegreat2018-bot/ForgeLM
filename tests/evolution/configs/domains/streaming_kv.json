@@ -1,0 +1,23 @@
+{
+  "name": "streaming_kv",
+  "category": "kv",
+  "description": "Streaming KV with sink tokens. Search chunk_size, n_sink, overlap.",
+  "simulator": "streaming_kv_simulate",
+  "params": [
+    {"name": "chunk_size", "type": "int", "range": [128, 2048]},
+    {"name": "n_sink", "type": "int", "range": [4, 32]},
+    {"name": "overlap", "type": "float", "range": [0.0, 0.5]}
+  ],
+  "behavioral_dims": [["coverage", 10, 0.0, 1.0], ["mem_ratio", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "coverage", "weight": 100.0},
+      {"metric": "mem_ratio", "weight": -80.0},
+      {"metric": "coverage_err", "weight": -50.0}
+    ],
+    "penalties": [
+      {"flag": "overlap_mem_cost"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

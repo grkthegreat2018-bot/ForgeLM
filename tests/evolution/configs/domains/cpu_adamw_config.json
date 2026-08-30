@@ -1,0 +1,21 @@
+{
+  "name": "cpu_adamw_config",
+  "category": "training",
+  "description": "CPU offload ratio, prefetch depth, compression, update_freq. Metrics: throughput, latency.",
+  "simulator": "cpu_adamw_simulate",
+  "params": [
+    {"name": "offload_ratio", "type": "float", "range": [0.0, 1.0]},
+    {"name": "prefetch_depth", "type": "int", "range": [1, 8]},
+    {"name": "compression", "type": "choice", "values": ["none", "int8", "int4"]},
+    {"name": "update_freq", "type": "int", "range": [1, 16]}
+  ],
+  "behavioral_dims": [["throughput_norm", 10, 0, 1], ["latency_ms", 10, 0, 100]],
+  "scoring": {
+    "components": [
+      {"metric": "throughput", "weight": 0.01},
+      {"metric": "latency", "weight": -0.1}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

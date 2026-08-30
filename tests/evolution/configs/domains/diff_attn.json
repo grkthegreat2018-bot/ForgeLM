@@ -1,0 +1,21 @@
+{
+  "name": "diff_attn",
+  "category": "attention",
+  "description": "Differential attention lambda, head count, softmax separation. Metrics: noise_cancellation, signal_retention, lambda.",
+  "simulator": "diff_attn_simulate",
+  "params": [
+    {"name": "lambda_init", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_heads", "type": "int", "range": [4, 32]},
+    {"name": "softmax_sep", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["noise_cancellation", 10, 0, 1], ["signal_retention", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "noise_cancellation", "weight": 10.0},
+      {"metric": "signal_retention", "weight": 10.0},
+      {"metric": "lambda", "weight": -2.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

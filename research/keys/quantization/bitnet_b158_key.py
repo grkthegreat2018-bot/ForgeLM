@@ -181,6 +181,59 @@ class _TernaryLinearFn(torch.autograd.Function):
         return grad_x, grad_w, grad_scale, None
 
 
+class _Int8TrainableFn(torch.autograd.Function):
+    """STE for int8 trainable storage (R&D round 15).
+
+    Forward: uses the int8 ternary weight buffer on GPU (no master weight
+    needed for forward — saves VRAM).
+    Backward: STE — gradient flows to the bf16 master weight on CPU.
+    The int8 buffer has no gradient (it's a buffer, not a parameter).
+
+    The master weight gradient is computed as:
+        grad_master = grad_y.T @ x   (same as standard Linear backward)
+    and placed on the master weight's device (CPU), so no GPU VRAM is
+    used for the gradient of the 8B weight matrix.
+
+    Args to forward:
+        x:       [*, in_features] activation on GPU
+        w_int8:  [out_features, in_features] int8 ternary weight on GPU
+        scale:   scalar or [out_features] scale on GPU
+        w_master: [out_features, in_features] bf16 master weight on CPU
+                  (only used for gradient computation target)
+    """
+    @staticmethod
+    def forward(ctx, x, w_int8, scale, w_master):
+        # Forward: int8 ternary GEMM (identical to prequantized path)
+        if x.is_cuda:
+            y = _int8_ternary_linear(x, w_int8, scale)
+        else:
+            w = w_int8.to(x.dtype) * scale
+            y = F.linear(x, w, None)
+        ctx.save_for_backward(x, w_int8, scale, w_master, y)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_y):
+        x, w_int8, scale, w_master, y = ctx.saved_tensors
+        gdt = grad_y.dtype
+        # grad_x = grad_y @ w_dequantized (on GPU, using int8 weight)
+        w_dq = (w_int8.to(gdt) * scale.to(gdt))
+        grad_x = grad_y @ w_dq
+        # grad_w_master = grad_y.T @ x (computed on the master's device = CPU)
+        # Move grad_y and x to CPU for the gradient computation.
+        # This is the key VRAM saver: the [out, in] gradient lives on CPU,
+        # not GPU. For 8B params, this saves ~16GB of GPU VRAM.
+        gx = grad_y.reshape(-1, grad_y.shape[-1]).to(torch.bfloat16).cpu()
+        xr = x.reshape(-1, x.shape[-1]).to(torch.bfloat16).cpu()
+        grad_w = gx.T @ xr  # CPU computation, result on CPU
+        # grad_scale: derivative of y = (x @ w_int8.T) * scale w.r.t. scale
+        # y/scale = x @ w_int8.T (the unscaled output), so d(scale)/dy = y/scale
+        safe_scale = scale.view(1, -1).to(gdt).clamp(min=1e-8)
+        grad_scale = (grad_y * (y.to(gdt) / safe_scale)).sum().to(scale.device)
+        # w_int8 has no gradient (it's a buffer)
+        return grad_x, None, grad_scale, grad_w
+
+
 def ternary_quantize(w: torch.Tensor, scale: float | None = None
                      ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize weights to {-1, 0, +1} * scale.
@@ -233,6 +286,7 @@ class BitNetLinear(nn.Module):
         self.learned_scale = learned_scale
         self.quantize_scale = quantize_scale
         self._prequantized = False  # set True by convert_to_int8_storage()
+        self._int8_trainable = False  # set True by enable_int8_training()
         # Kaiming init matching nn.Linear so pre-trained weights load fine.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -247,30 +301,6 @@ class BitNetLinear(nn.Module):
             with torch.no_grad():
                 scale = self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7
             self.qscale = nn.Parameter(scale)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pre-quantized int8 path: weights already ternary, stored as int8 buffer.
-        # 4x less VRAM than fp32 parameter; no runtime quantization needed.
-        if self._prequantized:
-            w_int8 = self.weight_int8  # int8 buffer, values {-1, 0, +1}
-            scale = self.qscale_buf.to(x.dtype) if hasattr(self, 'qscale_buf') else 1.0
-            if x.is_cuda and self.bias is None:
-                # Use int8 tensor-core GEMM directly (weights already int8).
-                return _int8_ternary_linear(x, w_int8, scale)
-            # CPU fallback: dequantize int8 → fp, standard GEMM.
-            w = w_int8.to(x.dtype) * scale
-            return F.linear(x, w, self.bias)
-        # Normal QAT / eval path.
-        w = self.weight
-        if self.quantize and (self.training or self.force_quant):
-            scale = self.qscale if self.qscale is not None else self.quantize_scale
-            if x.is_cuda and self.bias is None:
-                import os
-                kernel = os.environ.get("FORGE_BITNET_KERNEL", "int8")
-                return _TernaryLinearFn.apply(x, w, scale, kernel)
-            q, _ = ternary_quantize(w, scale)
-            w = w + (q - w).detach()
-        return F.linear(x, w, self.bias)
 
     def convert_to_int8_storage(self):
         """Convert fp32 weight parameter to int8 buffer (pre-quantized inference).
@@ -357,6 +387,129 @@ class BitNetLinear(nn.Module):
             del self.qscale
             self.qscale = None
         self._prequantized = True
+
+    # ── R&D round 15: int8 trainable storage ───────────────────────────────
+    # Split storage: int8 ternary weights on GPU (forward), bf16 master on CPU
+    # (gradient target). Enables 8B param training on 12GB VRAM.
+    #   GPU: weight_int8 buffer (1 byte/param) = 8GB for 8B
+    #   CPU: weight_master bf16 parameter (2 bytes/param) = 16GB in RAM
+    # Forward: int8 ternary GEMM (same as prequantized inference path)
+    # Backward: STE — grad flows to CPU master via a custom autograd Function
+    # Optimizer (BAdam): updates CPU master for active block, then calls
+    #   requantize_from_master() to refresh the int8 buffer on GPU.
+
+    def enable_int8_training(self):
+        """Convert from fp32 parameter to int8 trainable storage.
+
+        Moves the weight to CPU as bf16 master, ternary-quantizes to int8
+        buffer on GPU. The qscale becomes a CPU parameter (learnable).
+        Call after loading weights, before training starts.
+        """
+        if self._prequantized or getattr(self, '_int8_trainable', False):
+            return
+        with torch.no_grad():
+            w = self.weight.data
+            device = w.device
+            # Master weight → CPU bf16
+            master = w.detach().cpu().to(torch.bfloat16).clone()
+            # Ternary quantize → int8 on GPU
+            scale = self.qscale if self.qscale is not None else self.quantize_scale
+            q, s = ternary_quantize(w.float(), scale)
+            w_int8 = q.to(torch.int8).to(device)
+            # Replace parameter: weight becomes CPU bf16 master
+            del self.weight
+            self.weight = nn.Parameter(master, requires_grad=True)
+            # Register int8 buffer on GPU
+            self.register_buffer("weight_int8", w_int8)
+            # qscale stays as parameter but on CPU (it's a scalar, negligible)
+            if isinstance(s, torch.Tensor):
+                self.register_buffer("qscale_buf", s.to(device).to(torch.bfloat16))
+            else:
+                self.register_buffer("qscale_buf",
+                                     torch.tensor(s, device=device, dtype=torch.bfloat16))
+            self._int8_trainable = True
+
+    def requantize_from_master(self):
+        """Re-quantize the CPU master weight → int8 buffer on GPU.
+
+        Called by the optimizer after updating the active block's master weight.
+        This is the STE re-projection step: the updated fp master is projected
+        back to ternary int8 for the next forward pass.
+        """
+        if not getattr(self, '_int8_trainable', False):
+            return
+        with torch.no_grad():
+            w_master = self.weight.data.float()  # CPU
+            scale = self.qscale if self.qscale is not None else self.quantize_scale
+            if isinstance(scale, nn.Parameter):
+                scale_val = scale.data.float().cpu()  # ensure CPU for ternary_quantize
+            else:
+                scale_val = scale
+            q, s = ternary_quantize(w_master, scale_val)
+            # Update int8 buffer on GPU (non-blocking async copy)
+            self.weight_int8.copy_(q.to(torch.int8).to(self.weight_int8.device,
+                                                       non_blocking=True))
+            # Update scale buffer
+            if isinstance(s, torch.Tensor):
+                self.qscale_buf.copy_(s.to(self.qscale_buf.device,
+                                           non_blocking=True).to(torch.bfloat16))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # ── int8 trainable storage path (R&D round 15) ──
+        if getattr(self, '_int8_trainable', False):
+            w_int8 = self.weight_int8  # int8 on GPU
+            scale = self.qscale_buf.to(x.dtype)
+            # Forward: int8 ternary GEMM (same as prequantized)
+            if x.is_cuda and self.bias is None:
+                y = _Int8TrainableFn.apply(x, w_int8, scale, self.weight)
+            else:
+                w = w_int8.to(x.dtype) * scale
+                y = _Int8TrainableFn.apply(x, w_int8, scale, self.weight)
+            if self.bias is not None:
+                y = y + self.bias
+            return y
+        # Pre-quantized int8 path: weights already ternary, stored as int8 buffer.
+        # 4x less VRAM than fp32 parameter; no runtime quantization needed.
+        if self._prequantized:
+            w_int8 = self.weight_int8  # int8 buffer, values {-1, 0, +1}
+            scale = self.qscale_buf.to(x.dtype) if hasattr(self, 'qscale_buf') else 1.0
+            if x.is_cuda and self.bias is None:
+                # Use int8 tensor-core GEMM directly (weights already int8).
+                return _int8_ternary_linear(x, w_int8, scale)
+            # CPU fallback: dequantize int8 → fp, standard GEMM.
+            w = w_int8.to(x.dtype) * scale
+            return F.linear(x, w, self.bias)
+        # Normal QAT / eval path.
+        w = self.weight
+        if self.quantize and (self.training or self.force_quant):
+            scale = self.qscale if self.qscale is not None else self.quantize_scale
+            if x.is_cuda and self.bias is None:
+                import os
+                kernel = os.environ.get("FORGE_BITNET_KERNEL", "int8")
+                return _TernaryLinearFn.apply(x, w, scale, kernel)
+            q, _ = ternary_quantize(w, scale)
+            w = w + (q - w).detach()
+        return F.linear(x, w, self.bias)
+
+
+def enable_int8_training(model: nn.Module) -> int:
+    """Enable int8 trainable storage on all BitNetLinear modules in a model.
+
+    Converts each BitNetLinear's fp32 weight parameter to:
+      - int8 ternary buffer on GPU (forward pass)
+      - bf16 master weight on CPU (gradient target + optimizer update)
+
+    This is the R&D round 15 innovation that enables 8B param training on
+    12GB VRAM. Call after model loading, before training starts.
+
+    Returns the number of modules converted.
+    """
+    count = 0
+    for module in model.modules():
+        if isinstance(module, BitNetLinear) and not module._int8_trainable:
+            module.enable_int8_training()
+            count += 1
+    return count
 
 
 def apply_bitnet_b158(state: dict[str, torch.Tensor], scale: float | None = None
@@ -495,6 +648,70 @@ def build_bitnet_embedding(config, num_embeddings: int, embedding_dim: int
     """Build a BitNetEmbedding honoring the model config."""
     return BitNetEmbedding(
         num_embeddings, embedding_dim,
+        quantize=bool(getattr(config, "use_bitnet", False)),
+        force_quant=bool(getattr(config, "bitnet_force_quant", False)),
+        learned_scale=bool(getattr(config, "bitnet_learned_scale", True)))
+
+
+class BitNetConv1d(nn.Module):
+    """Conv1d with BitNet b1.58 ternary QAT.
+
+    Same STE semantics as BitNetLinear but for depthwise/grouped 1D conv.
+    Used to ternarize the short conv layers in DoubleGatedConvLayer.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 groups=1, bias=False, quantize=True, force_quant=False,
+                 learned_scale=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.groups = groups
+        self.quantize = quantize
+        self.force_quant = force_quant
+        in_per_group = in_channels // groups
+        self.weight = nn.Parameter(
+            torch.empty(out_channels, in_per_group, kernel_size))
+        nn.init.kaiming_uniform_(self.weight.view(out_channels, -1), a=math.sqrt(5))
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_channels))
+        else:
+            self.register_parameter('bias', None)
+        if learned_scale:
+            with torch.no_grad():
+                scale = self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7
+            self.qscale = nn.Parameter(scale)
+        else:
+            self.qscale = None
+
+    def forward(self, x):
+        # x: (B, C, T)
+        if self.quantize and (self.training or self.force_quant):
+            scale = self.qscale if self.qscale is not None else None
+            q, s = ternary_quantize(self.weight, scale)
+            w = self.weight + (q - self.weight).detach()  # STE
+            y = F.conv1d(x, w, self.bias, padding=0, groups=self.groups)
+            return y * s.to(y.dtype)
+        else:
+            return F.conv1d(x, self.weight, self.bias, padding=0, groups=self.groups)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
+                              strict, missing_keys, unexpected_keys, error_msgs):
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+        if self.qscale is not None and not self.weight.is_meta:
+            with torch.no_grad():
+                self.qscale.copy_(
+                    self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
+
+
+def build_bitnet_conv1d(config, in_channels, out_channels, kernel_size,
+                        groups=1, bias=False):
+    """Build a BitNetConv1d honoring the model config."""
+    return BitNetConv1d(
+        in_channels, out_channels, kernel_size,
+        groups=groups, bias=bias,
         quantize=bool(getattr(config, "use_bitnet", False)),
         force_quant=bool(getattr(config, "bitnet_force_quant", False)),
         learned_scale=bool(getattr(config, "bitnet_learned_scale", True)))

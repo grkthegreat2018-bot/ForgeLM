@@ -76,6 +76,30 @@ _inspect_template.py
 _refactor_helper.py
 help.txt
 
+# Root-level one-off scratch scripts (belong in scripts/ or sandbox/, not repo root)
+apply_v8_keys.py
+benchmark_v8_vs_lfm.py
+distill_to_lossless.py
+full_rebuild.py
+inspect_v8_12b.py
+run_growth.py
+test_v8_questions.py
+verify_lfm25.py
+
+# Root-level scratch output files
+*_out2.txt
+*_out3.txt
+*_final.txt
+grow_output.txt
+rebuild_err.txt
+report.txt
+test_fwd.txt
+test_q_*.txt
+bench_out.txt
+inspect_out.txt
+port_out.txt
+cloud_smoke*.log
+
 # Tool / agent runtime dirs
 .mimosa/
 

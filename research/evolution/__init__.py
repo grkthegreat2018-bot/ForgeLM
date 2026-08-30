@@ -16,10 +16,17 @@ from .surrogate import SurrogateModel
 from .archive import MapElitesArchive
 from .trainer import GeneratorTrainer
 from .database import FindingsDB
+from .checker_model import SharedCheckerModel, HeuristicChecker, get_checker, reset_checker
+from .curriculum_finetuner import CurriculumFineTuner
+from .llm_gen_model import LLMGenModel
+from .gen_model_manager import GenModelManager
 
 __all__ = [
     "ForgeEvolve", "ForgeEvolveConfig",
     "BatchedGenerator", "TemplateGenerator", "GeneratorPopulation",
     "SurrogateModel", "MapElitesArchive", "GeneratorTrainer",
     "FindingsDB",
+    "SharedCheckerModel", "HeuristicChecker", "get_checker", "reset_checker",
+    "CurriculumFineTuner",
+    "LLMGenModel", "GenModelManager",
 ]

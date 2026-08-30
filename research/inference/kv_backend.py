@@ -377,6 +377,9 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     if strategy == "cpu_offload":
         from research.inference.kv.cpu_kv_offload import CPUKVCache
         return CPUKVCache()
+    if strategy == "disk_offload":
+        from research.inference.kv.cpu_kv_offload import DiskKVCache
+        return DiskKVCache()
     if strategy == "s4r":
         from research.inference.kv.s4r_kv import S4RKVCache
         return S4RKVCache()

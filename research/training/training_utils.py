@@ -433,6 +433,19 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
             print(f"MONA unavailable ({e}); falling back to fused AdamW.")
             return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
+    if optimizer_name == "nvme_muon_4bit":
+        # NvmeMuon4Bit: NVMe-streamed 4-bit Muon (V8 optimizer).
+        # Combines per-block NVMe-mapped optimizer states with 4-bit Muon
+        # momentum + Newton-Schulz orthogonalization. Only 1 layer's 4-bit
+        # momentum in RAM; rest streamed from NVMe.
+        import tempfile
+        from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+        nvme_dir = tempfile.mkdtemp(prefix="nvme_muon4bit_")
+        print(f"Using NvmeMuon4Bit (NVMe-streamed 4-bit Muon, V8 optimizer).")
+        return NvmeMuon4Bit(model, lr=max_lr, momentum=0.95, n_steps=5,
+                            weight_decay=weight_decay, nvme_path=nvme_dir,
+                            blocks_per_layer=1, switch_every=5, verbose=False)
+
     # Unknown optimizer name — safe default.
     print(f"Unknown optimizer '{optimizer_name}'; using fused AdamW.")
     return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())

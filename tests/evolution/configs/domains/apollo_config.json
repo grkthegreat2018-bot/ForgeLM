@@ -1,0 +1,23 @@
+{
+  "name": "apollo_config",
+  "category": "training",
+  "description": "APOLLO optimizer hyperparameters: rank, scale_mode, lr_scale. Metrics: memory_savings, convergence_quality, rank_penalty, scale_bonus, trivial_penalty.",
+  "simulator": "apollo_simulate",
+  "params": [
+    {"name": "rank", "type": "int", "range": [1, 64]},
+    {"name": "scale", "type": "choice", "values": ["tensor", "channel"]},
+    {"name": "lr_scale", "type": "float", "range": [0.5, 10.0]}
+  ],
+  "behavioral_dims": [["memory_savings", 10, 0, 1], ["convergence_quality", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "memory_savings", "weight": 20.0},
+      {"metric": "convergence_quality", "weight": 10.0},
+      {"metric": "scale_bonus", "weight": 1.0},
+      {"metric": "rank_penalty", "weight": -1.0},
+      {"metric": "trivial_penalty", "weight": -1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

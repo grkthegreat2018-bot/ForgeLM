@@ -702,19 +702,31 @@ class DoubleGatedConvLayer(nn.Module):
     O(1) per-token generation — no growing KV cache for conv layers.
     """
 
-    def __init__(self, d_model: int, kernel_size: int = 3, bias: bool = False):
+    def __init__(self, d_model: int, kernel_size: int = 3, bias: bool = False,
+                 use_bitnet: bool = False, bitnet_config=None):
         super().__init__()
         self.d_model = d_model
         self.kernel_size = kernel_size
-        # Input projection: d_model → 3*d_model (splits into B, C, x)
-        self.in_proj = nn.Linear(d_model, 3 * d_model, bias=bias)
-        # Depthwise causal conv: (d_model, 1, kernel_size), groups=d_model
-        self.conv = nn.Conv1d(
-            d_model, d_model, kernel_size,
-            groups=d_model, bias=bias, padding=0,
-        )
-        # Output projection (like attention out_proj)
-        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+        if use_bitnet and bitnet_config is not None:
+            from research.keys.quantization.bitnet_b158_key import (
+                build_bitnet_linear, build_bitnet_conv1d)
+            self.in_proj = build_bitnet_linear(
+                bitnet_config, d_model, 3 * d_model, bias=bias)
+            self.conv = build_bitnet_conv1d(
+                bitnet_config, d_model, d_model, kernel_size,
+                groups=d_model, bias=bias)
+            self.out_proj = build_bitnet_linear(
+                bitnet_config, d_model, d_model, bias=bias)
+        else:
+            # Input projection: d_model → 3*d_model (splits into B, C, x)
+            self.in_proj = nn.Linear(d_model, 3 * d_model, bias=bias)
+            # Depthwise causal conv: (d_model, 1, kernel_size), groups=d_model
+            self.conv = nn.Conv1d(
+                d_model, d_model, kernel_size,
+                groups=d_model, bias=bias, padding=0,
+            )
+            # Output projection (like attention out_proj)
+            self.out_proj = nn.Linear(d_model, d_model, bias=bias)
         # Conv state buffer for incremental generation: (B, d_model, kernel_size-1)
         self._conv_state = None
 
@@ -880,7 +892,10 @@ class ModularBlock(nn.Module):
         self.layer_type = ltype
         if ltype in ("conv", "liquid"):
             ksize = getattr(config, 'conv_kernel_size', 3)
-            self.attn = DoubleGatedConvLayer(config.d_model, kernel_size=ksize)
+            self.attn = DoubleGatedConvLayer(
+                config.d_model, kernel_size=ksize,
+                use_bitnet=getattr(config, 'use_bitnet', False),
+                bitnet_config=config)
         else:
             self.attn = build_attention(config)
         if norm is RMSNorm:
@@ -1477,6 +1492,23 @@ def build_ffn(config: ModelConfig) -> nn.Module:
                 use_clamp=getattr(config, 'use_swiglu_clamp', False),
                 clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
                 clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
+            # V8/R21: HashedNLRQ — replace NLRQ low-rank factors with hashed
+            # shared vectors for an additional 4-8x compression on top of
+            # NLRQ's 12.8x (total ~50x).  Not lossless (different weight
+            # structure), so only used when use_hashed_nlrq=True.
+            if getattr(config, 'use_hashed_nlrq', False):
+                from research.training.optim.r21_cross_domain import HashedNLRQ
+                _rank = getattr(config, 'nlrq_rank', 256)
+                _hcomp = getattr(config, 'hashed_nlrq_compression', 8.0)
+                ffn.w_gate = HashedNLRQ(
+                    ffn.w_gate.out_features, ffn.w_gate.in_features,
+                    rank=_rank, hash_compression=_hcomp)
+                ffn.w_up = HashedNLRQ(
+                    ffn.w_up.out_features, ffn.w_up.in_features,
+                    rank=_rank, hash_compression=_hcomp)
+                ffn.w_down = HashedNLRQ(
+                    ffn.w_down.out_features, ffn.w_down.in_features,
+                    rank=_rank, hash_compression=_hcomp)
             return ffn
         # Smooth-SwiGLU: per-channel RMSNorm on gate output for FP8 stability.
         # When use_smooth_swiglu=True, uses SmoothSwiGLUFFN (bounds SiLU outliers).
@@ -1533,6 +1565,14 @@ class ConfigurableResearchLLM(nn.Module):
                 FactorizedEmbedding, FactorizedLMHead)
             rank = getattr(config, 'embed_factorized_rank', 256)
             self.embed = FactorizedEmbedding(config.vocab_size, config.d_model, rank=rank)
+            # Apply BitNet to factorized embedding when both are enabled
+            if getattr(config, 'use_bitnet', False):
+                from research.keys.quantization.bitnet_b158_key import (
+                    build_bitnet_embedding, build_bitnet_linear)
+                self.embed.embed = build_bitnet_embedding(
+                    config, config.vocab_size, rank)
+                self.embed.project = build_bitnet_linear(
+                    config, rank, config.d_model, bias=False)
             self.head = FactorizedLMHead(self.embed)
         # PIT: Pseudo-Inverse Tying (L=I → standard weight tying, lossless).
         elif getattr(config, 'use_pit', False):
@@ -1601,9 +1641,9 @@ class ConfigurableResearchLLM(nn.Module):
         # (NanoGPT speedrun technique by @Grad62304977).
         if getattr(config, 'zero_init_residual', False):
             for block in self.blocks:
-                if hasattr(block.attn, 'out_proj'):
+                if hasattr(block.attn, 'out_proj') and hasattr(block.attn.out_proj, 'weight'):
                     block.attn.out_proj.weight.detach().zero_()
-                if hasattr(block.ffn, 'w_down'):
+                if hasattr(block.ffn, 'w_down') and hasattr(block.ffn.w_down, 'weight'):
                     block.ffn.w_down.weight.detach().zero_()
 
         self.draft_head: nn.Module | None = None
@@ -1619,11 +1659,17 @@ class ConfigurableResearchLLM(nn.Module):
                 d_model=config.d_model,
                 vocab_size=config.vocab_size,
                 n_heads=getattr(config, 'mtp_n_heads', 2),
-                loss_weight=getattr(config, 'mtp_loss_weight', 0.3),
+                loss_weight=(getattr(config, 'mtp_weight', None)
+                             if getattr(config, 'mtp_weight', None) is not None
+                             else getattr(config, 'mtp_loss_weight', 0.3)),
                 identity_init=getattr(config, 'zero_init_residual', True),
             )
             # Tie MTP head to model head (shared weight design)
-            self.mtp_module.tie_head_to_model(self.head.weight)
+            # Use tie_head_from_module so the tie survives model.to(device)
+            if hasattr(self.mtp_module, 'tie_head_from_module'):
+                self.mtp_module.tie_head_from_module(self, "head")
+            else:
+                self.mtp_module.tie_head_to_model(self.head.weight)
 
         # V5.2: LiSA — cross-layer Q/K sharing with alignment FFN.
         # Lossless at init: shared Q/K + alignment are zero-init (gate=0).
@@ -1653,6 +1699,60 @@ class ConfigurableResearchLLM(nn.Module):
             self._hyperloop_end = _hl.end
             self._hyperloop_loop_iters = _hl.loop_iters
             self._hyperloop_n_middle = _hl.n_middle
+
+        # ── V8/R23: R19 keys wiring ────────────────────────────────────────
+        # These modules are created AFTER all other model modules so their
+        # random init does not perturb the main model's weight init sequence
+        # (critical for the lossless-at-init test: same seed → same main
+        # weights whether keys are ON or OFF).
+        #
+        # QSA (Qwen Sparse Attention): QSALayer modules are registered but
+        # not used in the forward path at init (budget=all blocks = full
+        # attention, identity warm start).  Training would gradually swap
+        # them in as the indexer learns to skip blocks.
+        self.qsa_layers: nn.ModuleList | None = None
+        if getattr(config, 'use_qsa', False):
+            from research.keys.attention.qsa_key import QSALayer
+            _head_dim = config.d_model // config.n_heads
+            _budget = getattr(config, 'qsa_top_k', 512)
+            _n_kv = getattr(config, 'n_kv_heads', None) or config.n_heads
+            self.qsa_layers = nn.ModuleList([
+                QSALayer(
+                    d_model=config.d_model, n_heads=config.n_heads,
+                    n_kv_heads=_n_kv, head_dim=_head_dim,
+                    budget_blocks=_budget)
+                for _ in range(config.n_layers)
+            ])
+
+        # GatedResidual: GatedResidualLayer modules registered but not used
+        # in the forward path at init (gate=1.0 = identity).  Training opens
+        # the multi-branch residual.
+        self.gated_residuals: nn.ModuleList | None = None
+        if getattr(config, 'use_gated_residual', False):
+            from research.keys.architecture.gated_residual_key import (
+                GatedResidualLayer)
+            _gr_rank = min(256, config.d_model)
+            self.gated_residuals = nn.ModuleList([
+                GatedResidualLayer(
+                    d_model=config.d_model, n_branches=4,
+                    bottleneck_rank=_gr_rank)
+                for _ in range(config.n_layers)
+            ])
+
+        # NgramEmbedding: adds n-gram lookup embeddings to token embeddings.
+        # Lossless at init: table = all zeros → additive zero.  This one IS
+        # used in the forward path (the zero table makes it a no-op at init,
+        # and training fills in useful n-gram embeddings).
+        self.ngram_embed: nn.Module | None = None
+        if getattr(config, 'use_ngram_embedding', False):
+            from research.keys.knowledge.ngram_embedding_key import (
+                NGramEmbeddingLayer)
+            self.ngram_embed = NGramEmbeddingLayer(
+                vocab_size=config.vocab_size, d_model=config.d_model,
+                n_gram=getattr(config, 'ngram_n', 3),
+                table_size=getattr(config, 'ngram_dim', 256),
+                device=getattr(config, 'device', 'cpu'),
+                host_table=getattr(config, 'ngram_host', True))
 
         # Cache config flags to avoid getattr/hasattr per forward.
         self._use_liger_ce = getattr(config, 'use_liger_ce', False)
@@ -1838,6 +1938,10 @@ class ConfigurableResearchLLM(nn.Module):
         if idx.device != embed_device:
             idx = idx.to(embed_device)
         x = self.embed(idx)
+        # V8/R19: N-gram embedding — add n-gram lookup embeddings to token
+        # embeddings.  Lossless at init (table = all zeros → additive zero).
+        if self.ngram_embed is not None:
+            x = self.ngram_embed(idx, x)
         # DiffusionBlocks: add noisy target embeddings to the input
         if noisy_embeds is not None:
             # noisy_embeds: (B, T, d_model) — added to input embeddings
@@ -2536,11 +2640,21 @@ class ModelLoader:
             # added by GTA key transform on CPU) to the target device.
             # Preserve values for params that have data (from key transforms);
             # zero-init only for params that are still on meta (no data).
-            for name, param in model.named_parameters():
-                if param.is_meta:
-                    param.data = torch.zeros(param.shape, dtype=param.dtype, device=device)
-                elif param.device != device:
-                    param.data = param.data.to(device)
+            # NOTE: must replace the Parameter object in the parent module's
+            # _parameters dict — PyTorch 2.11+ rejects `param.data = cuda_tensor`
+            # on a meta tensor ("incompatible tensor type").
+            for module in model.modules():
+                for pname, param in list(module._parameters.items()):
+                    if param is None:
+                        continue
+                    if param.is_meta:
+                        module._parameters[pname] = torch.nn.Parameter(
+                            torch.zeros(param.shape, dtype=param.dtype, device=device),
+                            requires_grad=param.requires_grad)
+                    elif param.device != device:
+                        module._parameters[pname] = torch.nn.Parameter(
+                            param.data.to(device),
+                            requires_grad=param.requires_grad)
             # Move any buffers still on meta or wrong device to target device
             for module in model.modules():
                 for bname, buf in module._buffers.items():

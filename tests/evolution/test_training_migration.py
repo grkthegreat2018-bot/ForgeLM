@@ -1,0 +1,112 @@
+"""Bit-exact match test: old Python domains vs new JSON spec + simulator.
+
+For each of the 13 training domains, evaluate the same config with both
+the original Python domain class and the new JSONSpecDomain, then assert
+the scores match within 1e-4.
+"""
+import sys
+import torch
+import numpy as np
+
+sys.path.insert(0, "D:\\windsurf\\ForgeAI")
+
+from research.evolution.domains.training_domains import (
+    OptimizerConfig, SchedulerConfig, LossConfig, MuonConfig,
+    CpuAdamwConfig, GradAccumConfig, Fp8TrainingConfig, ModConfig,
+    ApolloConfig, BreadConfig, FlashOptimConfig, TritonKernelConfig,
+    VarlenConfig,
+)
+from research.evolution.domain_spec import JSONSpecDomain
+
+# (old_class, spec_name, config_dict, description)
+TESTS = [
+    (OptimizerConfig, "optimizer_config",
+     {"opt_type": "adamw", "lr": 1e-3, "beta1": 0.9, "beta2": 0.999, "weight_decay": 0.01},
+     "optimizer adamw"),
+    (SchedulerConfig, "scheduler_config",
+     {"sched_type": "cosine", "warmup_steps": 100, "min_lr_ratio": 0.1, "decay_steps": 1000},
+     "scheduler cosine w/ warmup"),
+    (LossConfig, "loss_config",
+     {"loss_type": "ce", "label_smoothing": 0.1, "focal_gamma": 2.0, "temperature": 1.0},
+     "loss ce"),
+    (MuonConfig, "muon_config",
+     {"momentum": 0.95, "nesterov": True, "weight_decay": 0.001, "ns_steps": 3},
+     "muon"),
+    (CpuAdamwConfig, "cpu_adamw_config",
+     {"offload_ratio": 0.5, "prefetch_depth": 4, "compression": "int8", "update_freq": 4},
+     "cpu_adamw int8"),
+    (GradAccumConfig, "grad_accum_config",
+     {"accum_steps": 8, "micro_batch": 4, "grad_clip": 1.0, "sync_freq": 4},
+     "grad_accum"),
+    (Fp8TrainingConfig, "fp8_training_config",
+     {"autocast_mode": "e4m3", "smooth_swiglu": True, "mu_scaling": True, "loss_scale": 1024},
+     "fp8 e4m3"),
+    (ModConfig, "mod_config",
+     {"keep_fraction": 0.8, "router_type": "mlp", "aux_loss_weight": 0.001, "n_skip_layers": 4},
+     "mod mlp"),
+    (ApolloConfig, "apollo_config",
+     {"rank": 8, "scale": "channel", "lr_scale": 2.0},
+     "apollo channel"),
+    (BreadConfig, "bread_config",
+     {"correction_mode": "partial", "sgd_lr_scale": 5.0},
+     "bread partial"),
+    (FlashOptimConfig, "flashoptim_config",
+     {"bits": 8, "companding": "sqrt"},
+     "flashoptim 8bit sqrt"),
+    (TritonKernelConfig, "triton_kernel_config",
+     {"rms_block_size": 4096, "swiglu_block_size": 16384},
+     "triton kernel matched"),
+    (VarlenConfig, "varlen_config",
+     {"use_varlen": True},
+     "varlen true"),
+]
+
+# Config key remapping for domains where flag handlers expect different keys
+KEY_REMAPS = {}
+
+def remap_config(spec_name, config):
+    """Remap config keys for JSONSpecDomain if needed."""
+    remap = KEY_REMAPS.get(spec_name, {})
+    new_config = {}
+    for k, v in config.items():
+        # If the old key has a remap, use the new key name
+        new_key = k
+        for new_k, old_k in remap.items():
+            if k == old_k:
+                new_key = new_k
+                break
+        new_config[new_key] = v
+    return new_config
+
+passed = 0
+failed = 0
+
+for old_cls, spec_name, config, desc in TESTS:
+    try:
+        torch.manual_seed(42)
+        np.random.seed(42)
+        old = old_cls()
+        ro = old.evaluate(config)
+
+        torch.manual_seed(42)
+        np.random.seed(42)
+        new_config = remap_config(spec_name, config)
+        new = JSONSpecDomain(spec_name)
+        rn = new.evaluate(new_config)
+
+        diff = abs(ro["score"] - rn["score"])
+        if diff < 1e-4:
+            print(f"PASS: {desc} (old={ro['score']:.6f} new={rn['score']:.6f} diff={diff:.2e})")
+            passed += 1
+        else:
+            print(f"FAIL: {desc} (old={ro['score']:.6f} new={rn['score']:.6f} diff={diff:.2e})")
+            failed += 1
+    except Exception as e:
+        print(f"ERROR: {desc}: {e}")
+        import traceback
+        traceback.print_exc()
+        failed += 1
+
+print(f"\n{passed}/{passed + failed} passed")
+if failed > 0:
+    sys.exit(1)

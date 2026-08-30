@@ -1,0 +1,21 @@
+{
+  "name": "paged_evict_kv",
+  "category": "kv",
+  "description": "Paged KV with eviction. Search page_size, n_pages, eviction_policy.",
+  "simulator": "paged_evict_kv_simulate",
+  "params": [
+    {"name": "page_size", "type": "int", "range": [16, 256]},
+    {"name": "n_pages", "type": "int", "range": [64, 512]},
+    {"name": "eviction_policy", "type": "choice", "values": ["lru", "lfu", "importance"]}
+  ],
+  "behavioral_dims": [["hit_rate", 10, 0.0, 1.0], ["mem_eff", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "hit_rate", "weight": 100.0},
+      {"metric": "mem_eff", "weight": 30.0},
+      {"metric": "overhead", "weight": -10.0},
+      {"metric": "page_size", "weight": -0.01953125}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

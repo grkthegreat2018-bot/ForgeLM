@@ -1,13 +1,25 @@
 """Port V4_Base (d_model=2048, 16 layers) into V7-8B-B (d_model=4096, 32 layers).
 
 Clean 2x scale-up:
-  - Width: d_model 2048→4096, heads 32→64, kv_heads 8→16, intermediate 8192→16384
-  - Depth: 16→32 layers (duplicate each layer)
-  - FFN: dense → NLRQ factored (rank=1024)
-  - Embedding: plain → factorized (rank=512)
+  - Width: d_model 2048->4096, heads 32->64, kv_heads 8->16, intermediate 8192->16384
+  - Depth: 16->32 layers (duplicate each layer)
+  - FFN: dense -> NLRQ factored (rank=1024)
+  - Embedding: plain -> factorized (rank=512)
 
 All upscaling is lossless or near-lossless (repeat/interpolate).
 The result is a warm-start checkpoint for V7-8B-B training.
+
+Identity-init invariants (verified against module definitions):
+  - attn.rope.freq_scale = ONES   (lerope_key.py: inv_freq * 1.0 = standard
+    RoPE; zeros would collapse all rotation angles and remove position info)
+  - middle_gates = ONES           (hyperloop_key.py: middle layers fully
+    active; zeros would silence the middle 24 of 32 layers)
+  - loop_gates = ZEROS            (hyperloop_key.py: loop block contributes
+    nothing at start = lossless)
+  - v_mix_gate / sinks / lisa gates+align / v0 gates = ZEROS (lossless gates)
+
+Before writing the file, the result is verified against the target model's
+state_dict template (keys + shapes) so orientation/shape bugs cannot ship.
 """
 import sys, os, time, re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -16,7 +28,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from research.config import get_config
+from research.config import get_config, ModelConfig
 from research.model_loader import ConfigurableResearchLLM, ModelLoader
 
 
@@ -24,7 +36,7 @@ def upscale_weight(w: torch.Tensor, target_shape: tuple) -> torch.Tensor:
     """Upscale a 2D weight tensor to target shape by repeating along each dim."""
     if w.shape == target_shape:
         return w
-    assert w.ndim == 2 and len(target_shape) == 2, f"Only 2D: {w.shape} → {target_shape}"
+    assert w.ndim == 2 and len(target_shape) == 2, f"Only 2D: {w.shape} -> {target_shape}"
     out_features, in_features = target_shape
     cur_out, cur_in = w.shape
     # Repeat along output dim
@@ -99,7 +111,7 @@ def svd_factorize_embedding(embed_weight: torch.Tensor, rank: int, device: str =
     U_r = U[:, :rank]  # [vocab, rank]
     S_r = S[:rank]     # [rank]
     Vh_r = Vh[:rank, :]  # [rank, d_model]
-    # embed = U * sqrt(S), project = sqrt(S) @ Vh → embed @ project.T = U*S*Vh
+    # embed = U * sqrt(S), project = sqrt(S) @ Vh -> embed @ project.T = U*S*Vh
     # nn.Linear(rank, d_model) weight is [d_model, rank], so project = (sqrt_S * Vh).T
     sqrt_S = torch.sqrt(S_r.clamp(min=1e-8))
     embed_embed = (U_r * sqrt_S.unsqueeze(0)).to(torch.bfloat16).cpu()  # [vocab, rank]
@@ -110,17 +122,50 @@ def svd_factorize_embedding(embed_weight: torch.Tensor, rank: int, device: str =
     return embed_embed, project
 
 
+# Template keys that are intentionally absent from the saved checkpoint:
+# rope.inv_freq is recomputed at build time; the MTP head is trained
+# separately (research/decoding/mtp.py); head.embed_ref.* is the same module
+# object as embed.* (factorized_embed_key.py ties them), so loading embed.*
+# writes through to the head.
+INTENTIONALLY_ABSENT = ("rope.inv_freq", "mtp_module.", "head.embed_ref.")
+
+
+def _verify_against_template(save_dict: dict, template: dict) -> list:
+    """Diff a to-be-saved state dict against the target model's template.
+
+    Returns a list of human-readable problems (empty = valid). Catches the
+    transpose / wrong-shape class of bug before it ships.
+    """
+    problems = []
+    for k, v in save_dict.items():
+        t = template.get(k)
+        if t is None:
+            problems.append(f"unexpected key {k}")
+        elif tuple(v.shape) != tuple(t.shape):
+            problems.append(f"{k}: saved {tuple(v.shape)} vs model {tuple(t.shape)}")
+    for k in template:
+        if k not in save_dict and not any(s in k for s in INTENTIONALLY_ABSENT):
+            problems.append(f"missing key {k} (template shape {tuple(template[k].shape)})")
+    return problems
+
+
 def port_v4_to_v7_8b(input_path: str, output_path: str,
-                     src_config_name: str = "lfm25_1.2b",
-                     dst_config_name: str = "forgelm_v7_8b_b",
+                     src_config="lfm25_1.2b",
+                     dst_config="forgelm_v7_8b_b",
                      device: str = "cuda"):
     t0 = time.time()
 
-    # Source config (V4_Base was saved with lfm25_1.2b arch + V4 keys)
-    src_cfg = get_config(src_config_name)
-    dst_cfg = get_config(dst_config_name)
+    # Source config (V4_Base was saved with lfm25_1.2b arch + V4 keys).
+    # Accepts preset names or ModelConfig objects (unit tests pass tiny
+    # CPU-buildable configs).
+    src_cfg = get_config(src_config) if isinstance(src_config, str) else src_config
+    dst_cfg = get_config(dst_config) if isinstance(dst_config, str) else dst_config
+    # Display names (for logging): use the preset name if a string was passed,
+    # otherwise fall back to the config's name attribute or class repr.
+    src_name = src_config if isinstance(src_config, str) else getattr(src_cfg, "name", repr(src_cfg))
+    dst_name = dst_config if isinstance(dst_config, str) else getattr(dst_cfg, "name", repr(dst_cfg))
 
-    print(f"Porting {src_config_name} → {dst_config_name}")
+    print(f"Porting {src_name} -> {dst_name}")
     print(f"  Source: d_model={src_cfg.d_model}, layers={src_cfg.n_layers}, "
           f"heads={src_cfg.n_heads}, kv_heads={src_cfg.n_kv_heads}")
     print(f"  Target: d_model={dst_cfg.d_model}, layers={dst_cfg.n_layers}, "
@@ -132,7 +177,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
     print(f"  {len(src_state)} tensors, {sum(v.numel() for v in src_state.values())/1e6:.1f}M params")
 
     # Build blank target model (to get target tensor names/shapes)
-    print(f"\n[2] Building blank {dst_config_name} model...")
+    print(f"\n[2] Building blank {dst_name} model...")
     dst_cfg.device = "cpu"  # build on CPU to save VRAM
     model = ConfigurableResearchLLM(dst_cfg)
     dst_state_template = model.state_dict()
@@ -160,9 +205,9 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
             layer_map[i] = src_conv_layers[conv_idx % len(src_conv_layers)]
             conv_idx += 1
 
-    print(f"  Layer mapping (dst → src):")
+    print(f"  Layer mapping (dst -> src):")
     for i in range(n_dst_layers):
-        print(f"    {i} ({dst_layer_types[i]}) → {layer_map[i]} ({src_layer_types[layer_map[i]]})")
+        print(f"    {i} ({dst_layer_types[i]}) -> {layer_map[i]} ({src_layer_types[layer_map[i]]})")
 
     d_old = src_cfg.d_model   # 2048
     d_new = dst_cfg.d_model   # 4096
@@ -179,7 +224,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
 
     # ── Embeddings: SVD factorize ──
     if 'embed.weight' in src_state:
-        print("  Embedding: SVD factorizing [65536, 2048] → factorized [65536, 512] + [4096, 512]")
+        print("  Embedding: SVD factorizing [65536, 2048] -> factorized [65536, 512] + [4096, 512]")
         # First upscale embedding to target d_model
         embed_full = src_state['embed.weight']  # [65536, 2048]
         embed_upscaled = upscale_weight(embed_full, (embed_full.shape[0], d_new))  # [65536, 4096]
@@ -223,7 +268,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
                     src_w = src_state[src_key]
                     dst_shape = dst_state_template[dst_key].shape
                     if src_w.ndim == 3:
-                        # conv.weight: [d, 1, k] → [2d, 1, k]
+                        # conv.weight: [d, 1, k] -> [2d, 1, k]
                         reps = [dst_shape[i] // src_w.shape[i] if dst_shape[i] > src_w.shape[i] else 1
                                 for i in range(3)]
                         dst_state[dst_key] = src_w.repeat(*reps).contiguous()
@@ -287,7 +332,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
 
         # FFN: V4 has dense weights, V7 needs NLRQ factored
         # We'll handle this after loading all other weights — build the model,
-        # load what we have, then convert dense FFN → NLRQ.
+        # load what we have, then convert dense FFN -> NLRQ.
         # For now, skip FFN (will be handled by NLRQ conversion in build_model_fast)
 
         # MoD router
@@ -394,7 +439,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
                 elif 'attn' in key and ('k_proj' in key or 'v_proj' in key):
                     dst_state[key] = upscale_heads(src_w, kv_old, kv_new, hd, d_old, d_new)
                 elif src_w.ndim == 3:
-                    # 3D conv weight: [d, 1, k] → [2d, 1, k]
+                    # 3D conv weight: [d, 1, k] -> [2d, 1, k]
                     reps = [dst_shape[i] // src_w.shape[i] if dst_shape[i] > src_w.shape[i] else 1
                             for i in range(3)]
                     dst_state[key] = src_w.repeat(*reps).contiguous()
@@ -403,8 +448,8 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
 
     # ── MTP (skip — will be initialized by model) ──
 
-    # ── Now handle FFN: convert dense V4 FFN → NLRQ factored V7 ──
-    print("\n  FFN: Converting dense V4 → NLRQ factored V7...")
+    # ── Now handle FFN: convert dense V4 FFN -> NLRQ factored V7 ──
+    print("\n  FFN: Converting dense V4 -> NLRQ factored V7...")
     from research.keys.compression.nlrq_ffn_key import NLRQSwiGLUFFN, NLRQLinear
 
     for dst_layer in range(n_dst_layers):
@@ -438,7 +483,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
                     param = getattr(nlrq, fname)
                     dst_state[fkey] = param.data.clone().cpu().to(dst_state_template[fkey].dtype)
 
-            print(f"    layer {dst_layer} {ffn_name}: {src_w.shape} → NLRQ rank={rank}")
+            print(f"    layer {dst_layer} {ffn_name}: {src_w.shape} -> NLRQ rank={rank}")
             del nlrq, target_dense
             if 'cuda' in device:
                 torch.cuda.empty_cache()
@@ -547,7 +592,7 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
                 if first_k is not None:
                     save_dict[k] = first_k.clone().to(fill_dtype)
                     print(f"  INIT: {k} from blocks.2.attn.k_proj.weight")
-            # LiSA align layers: zero-init (gate=0 → lossless)
+            # LiSA align layers: zero-init (gate=0 -> lossless)
             elif 'lisa.align' in k:
                 save_dict[k] = torch.zeros(v_template.shape, dtype=fill_dtype)
             # v_mix_gate: 0.0 = V=K (lossless)
@@ -559,6 +604,18 @@ def port_v4_to_v7_8b(input_path: str, output_path: str,
             # Everything else: zeros (gates, routers, etc. — zero = lossless)
             else:
                 save_dict[k] = torch.zeros(v_template.shape, dtype=fill_dtype)
+
+    # Verify the final save_dict against the target template before writing.
+    # Catches transpose / wrong-shape / missing-key bugs before they ship.
+    problems = _verify_against_template(save_dict, dst_state_template)
+    if problems:
+        print(f"\n  TEMPLATE VERIFY FAILED ({len(problems)} problems):")
+        for p in problems[:50]:
+            print(f"    {p}")
+        if len(problems) > 50:
+            print(f"    ... and {len(problems) - 50} more")
+        raise ValueError(f"Checkpoint template verification failed: {len(problems)} problems")
+    print(f"  Template verify: OK ({len(save_dict)} tensors match)")
 
     save_file(save_dict, output_path)
     fsize = os.path.getsize(output_path) / 1e9

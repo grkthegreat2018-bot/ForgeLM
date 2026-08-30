@@ -1,0 +1,24 @@
+{
+  "name": "nvfp4_quant",
+  "category": "quantization",
+  "description": "NVFP4 block quantization. Metrics: err (relative), compression. Trivial solution: compression < 2.",
+  "simulator": "nvfp4_simulate",
+  "params": [
+    {"name": "block_size", "type": "choice", "values": [16, 32, 64]},
+    {"name": "w4a8", "type": "bool"},
+    {"name": "scale_mode", "type": "choice", "values": ["per_block", "per_channel"]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["compression", 10, 2, 8]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "compression", "weight": 3.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan", "no_trivial"],
+    "trivial_metric": "compression",
+    "trivial_op": "<",
+    "trivial_value": 2.0,
+    "trivial_penalty": -50.0
+  }
+}

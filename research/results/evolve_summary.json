@@ -1,55 +1,31 @@
 {
   "profile": "boot",
-  "loop": 1,
-  "total_loops": 1,
-  "total_domains": 28,
-  "total_time_s": 56.96823692321777,
-  "total_time_m": 0.9494706153869629,
-  "valid_runs": 8,
-  "failed_runs": 0,
+  "loop": 15,
+  "total_loops": 15,
+  "total_domains": 30,
+  "total_time_s": 144.82886004447937,
+  "total_time_m": 2.4138143340746563,
+  "valid_runs": 20,
+  "failed_runs": 20,
   "results": [
     {
-      "domain": "AaacQuant",
-      "best_score": 9.91510446735146,
-      "discoveries": 9,
-      "archive_coverage": 0.05,
-      "time_s": 9.9285409450531,
-      "best_config": {
-        "n_codebooks": 4,
-        "codebook_size": 368,
-        "n_bits": 2
-      }
-    },
-    {
       "domain": "BitnetConfig",
-      "best_score": -27.501668844695445,
-      "discoveries": 4,
-      "archive_coverage": 0.05,
-      "time_s": 23.0478093624115,
+      "best_score": -27.372933670490646,
+      "discoveries": 3,
+      "archive_coverage": 0.04,
+      "time_s": 26.366899013519287,
       "best_config": {
         "learned_scale": false,
         "quant_mode": "ternary",
-        "init_scale": 1.54568350315094
-      }
-    },
-    {
-      "domain": "CheckpointRecompute",
-      "best_score": 8.937418103218079,
-      "discoveries": 61,
-      "archive_coverage": 0.41,
-      "time_s": 16.781007051467896,
-      "best_config": {
-        "n_checkpoint_layers": 16,
-        "recompute_strategy": "selective",
-        "block_size": 512
+        "init_scale": 1.5358287990093231
       }
     },
     {
       "domain": "CpuKvOffload",
       "best_score": 0.041941531002521515,
-      "discoveries": 20,
-      "archive_coverage": 0.1,
-      "time_s": 17.67509150505066,
+      "discoveries": 10,
+      "archive_coverage": 0.07,
+      "time_s": 24.446221590042114,
       "best_config": {
         "offload_layers": 1,
         "offload_threshold": 0.9999639987945557,
@@ -58,52 +34,238 @@
       }
     },
     {
-      "domain": "aaac_quant_refine_d1",
-      "best_score": 9.96171395000699,
-      "discoveries": 8,
-      "archive_coverage": 0.01,
-      "time_s": 12.369406700134277,
+      "domain": "CrossLayerKV",
+      "best_score": -255.53729684798384,
+      "discoveries": 7,
+      "archive_coverage": 0.1,
+      "time_s": 19.907652139663696,
       "best_config": {
-        "n_codebooks": 4,
-        "codebook_size": 407,
-        "n_bits": 2
+        "share_ratio": 1.0,
+        "n_share_groups": 8,
+        "share_mode": "avg"
+      }
+    },
+    {
+      "domain": "FfnSkip",
+      "best_score": -6.196910224396601,
+      "discoveries": 1,
+      "archive_coverage": 0.03,
+      "time_s": 9.330081701278687,
+      "best_config": {
+        "skip_threshold": 0.008037981577217579,
+        "n_eval_layers": 13,
+        "skip_strategy": "cosine",
+        "min_keep": 0.5421887002885342
+      }
+    },
+    {
+      "domain": "GlaAttention",
+      "best_score": -50.0,
+      "discoveries": 9,
+      "archive_coverage": 0.1,
+      "time_s": 14.837393522262573,
+      "best_config": {
+        "latent_dim": 463,
+        "n_heads": 28,
+        "compression_ratio": 2.9543026983737946
+      }
+    },
+    {
+      "domain": "MemoryBudget",
+      "best_score": 0.6059531569480896,
+      "discoveries": 8,
+      "archive_coverage": 0.09,
+      "time_s": 19.56946873664856,
+      "best_config": {
+        "kv_budget": 0.42972683906555176,
+        "weight_budget": 0.19435393810272217,
+        "activation_budget": 0.2896943688392639,
+        "reserve": 0.06700361520051956
+      }
+    },
+    {
+      "domain": "MixedPrecision",
+      "best_score": -15.069355338811874,
+      "discoveries": 6,
+      "archive_coverage": 0.07,
+      "time_s": 17.463634490966797,
+      "best_config": {
+        "n_levels": 3,
+        "assignment": "importance",
+        "bits_base": 6
+      }
+    },
+    {
+      "domain": "OffqQuant",
+      "best_score": -0.9549938142299652,
+      "discoveries": 0,
+      "archive_coverage": 0.02,
+      "time_s": 9.891816854476929,
+      "best_config": {
+        "offset_init": 0.28378549218177795,
+        "n_iter": 14,
+        "learn_offset": true
+      }
+    },
+    {
+      "domain": "QuantDomain",
+      "best_score": 0.0,
+      "discoveries": 0,
+      "archive_coverage": 0.01,
+      "time_s": 18.321632146835327,
+      "best_config": {
+        "param0": 0.850135862827301,
+        "param1": 0.6875659227371216,
+        "param2": 0.23538480699062347,
+        "param3": 0.6739538311958313,
+        "param4": 0.828744649887085,
+        "param5": 0.33438530564308167,
+        "param6": 0.9607653021812439,
+        "param7": 0.8559656739234924,
+        "param8": 0.3829902708530426,
+        "param9": 0.192924365401268
+      }
+    },
+    {
+      "domain": "SharqQuant",
+      "best_score": -4.954993814229965,
+      "discoveries": 4,
+      "archive_coverage": 0.06,
+      "time_s": 22.494060516357422,
+      "best_config": {
+        "n_levels": 4,
+        "adaptive": true,
+        "warmup_steps": 348
       }
     },
     {
       "domain": "bitnet_config_refine_d1",
-      "best_score": -27.414920553105077,
-      "discoveries": 4,
+      "best_score": -27.402830304963736,
+      "discoveries": 1,
       "archive_coverage": 0.02,
-      "time_s": 6.260406017303467,
+      "time_s": 5.94979453086853,
       "best_config": {
         "learned_scale": false,
         "quant_mode": "ternary",
-        "init_scale": 1.543915569782257
-      }
-    },
-    {
-      "domain": "checkpoint_recompute_refine_d1",
-      "best_score": 8.937418103218079,
-      "discoveries": 22,
-      "archive_coverage": 0.23,
-      "time_s": 4.327396631240845,
-      "best_config": {
-        "n_checkpoint_layers": 16,
-        "recompute_strategy": "selective",
-        "block_size": 512
+        "init_scale": 1.5281129777431488
       }
     },
     {
       "domain": "cpu_kv_offload_refine_d1",
-      "best_score": 0.04194303974509239,
-      "discoveries": 6,
-      "archive_coverage": 0.1,
-      "time_s": 4.34441876411438,
+      "best_score": 0.04194303881376982,
+      "discoveries": 0,
+      "archive_coverage": 0.07,
+      "time_s": 5.338559627532959,
       "best_config": {
         "offload_layers": 1,
         "offload_threshold": 1.0,
-        "prefetch_size": 2048,
+        "prefetch_size": 2031,
         "async_copy": true
+      }
+    },
+    {
+      "domain": "cross_layer_kv_refine_d1",
+      "best_score": -255.53729684798384,
+      "discoveries": 0,
+      "archive_coverage": 0.08,
+      "time_s": 6.266269683837891,
+      "best_config": {
+        "share_ratio": 1.0,
+        "n_share_groups": 8,
+        "share_mode": "avg"
+      }
+    },
+    {
+      "domain": "ffn_skip_refine_d1",
+      "best_score": -6.201185899088188,
+      "discoveries": 20,
+      "archive_coverage": 0.1,
+      "time_s": 5.918593883514404,
+      "best_config": {
+        "skip_threshold": 0.0,
+        "n_eval_layers": 4,
+        "skip_strategy": "cosine",
+        "min_keep": 0.945724755525589
+      }
+    },
+    {
+      "domain": "gla_attention_refine_d1",
+      "best_score": -50.0,
+      "discoveries": 0,
+      "archive_coverage": 0.01,
+      "time_s": 8.494173765182495,
+      "best_config": {
+        "latent_dim": 463,
+        "n_heads": 28,
+        "compression_ratio": 2.9543026983737946
+      }
+    },
+    {
+      "domain": "memory_budget_refine_d1",
+      "best_score": 0.6250218749046326,
+      "discoveries": 0,
+      "archive_coverage": 0.02,
+      "time_s": 5.4950902462005615,
+      "best_config": {
+        "kv_budget": 0.47436875104904175,
+        "weight_budget": 0.19535543024539948,
+        "activation_budget": 0.2704744040966034,
+        "reserve": 0.05370505154132843
+      }
+    },
+    {
+      "domain": "mixed_precision_refine_d1",
+      "best_score": -17.791728980839252,
+      "discoveries": 0,
+      "archive_coverage": 0.02,
+      "time_s": 6.343021392822266,
+      "best_config": {
+        "n_levels": 3,
+        "assignment": "importance",
+        "bits_base": 6
+      }
+    },
+    {
+      "domain": "offq_quant_refine_d1",
+      "best_score": -16.91218133890678,
+      "discoveries": 0,
+      "archive_coverage": 0.02,
+      "time_s": 6.019586801528931,
+      "best_config": {
+        "offset_init": 0.1916855424642563,
+        "n_iter": 10,
+        "learn_offset": true
+      }
+    },
+    {
+      "domain": "quant_domain_refine_d1",
+      "best_score": 0.0,
+      "discoveries": 0,
+      "archive_coverage": 0.01,
+      "time_s": 8.605993747711182,
+      "best_config": {
+        "param0": 0.850135862827301,
+        "param1": 0.6875659227371216,
+        "param2": 0.23538480699062347,
+        "param3": 0.6739538311958313,
+        "param4": 0.828744649887085,
+        "param5": 0.33438530564308167,
+        "param6": 0.9607653021812439,
+        "param7": 0.8559656739234924,
+        "param8": 0.3829902708530426,
+        "param9": 0.192924365401268
+      }
+    },
+    {
+      "domain": "sharq_quant_refine_d1",
+      "best_score": -31.366276744641144,
+      "discoveries": 2,
+      "archive_coverage": 0.04,
+      "time_s": 6.937477350234985,
+      "best_config": {
+        "n_levels": 7,
+        "adaptive": true,
+        "warmup_steps": 251
       }
     }
   ]

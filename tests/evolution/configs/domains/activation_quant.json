@@ -1,0 +1,20 @@
+{
+  "name": "activation_quant",
+  "category": "quantization",
+  "description": "Activation quantization: calib_method, percentile, smooth_alpha. Score = -err*100 + outlier_handled*10.",
+  "simulator": "activation_quant_simulate",
+  "params": [
+    {"name": "calib_method", "type": "choice", "values": ["minmax", "percentile", "entropy"]},
+    {"name": "percentile", "type": "float", "range": [0.9, 0.999]},
+    {"name": "smooth_alpha", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["outlier_handled", 10, 0, 1], ["err", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "outlier_handled", "weight": 10.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

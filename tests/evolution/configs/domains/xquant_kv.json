@@ -1,0 +1,21 @@
+{
+  "name": "xquant_kv",
+  "category": "kv",
+  "description": "XQuant rematerialization. Search recomputation_ratio, quant_bits, checkpoint_interval.",
+  "simulator": "xquant_kv_simulate",
+  "params": [
+    {"name": "recomputation_ratio", "type": "float", "range": [0.0, 1.0]},
+    {"name": "quant_bits", "type": "choice", "values": [4, 8]},
+    {"name": "checkpoint_interval", "type": "int", "range": [2, 16]}
+  ],
+  "behavioral_dims": [["memory_saved", 10, 0.0, 1.0], ["recompute_cost", 10, 0.0, 8.0]],
+  "scoring": {
+    "components": [
+      {"metric": "memory_saved", "weight": 100.0},
+      {"metric": "recompute_cost", "weight": -5.0},
+      {"metric": "quant_err", "weight": -200.0},
+      {"metric": "inference_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

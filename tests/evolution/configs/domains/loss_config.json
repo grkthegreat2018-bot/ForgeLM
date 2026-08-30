@@ -1,0 +1,26 @@
+{
+  "name": "loss_config",
+  "category": "training",
+  "description": "Loss type, label_smoothing, focal_gamma, temperature. Metrics: gradient_magnitude, smoothness, focus_ratio. Scoring fixes: smoothing_penalty, gamma_penalty, temp_penalty, focus_ratio benefit.",
+  "simulator": "loss_simulate",
+  "params": [
+    {"name": "loss_type", "type": "choice", "values": ["ce", "focal", "label_smooth", "kl"]},
+    {"name": "label_smoothing", "type": "float", "range": [0.0, 0.3]},
+    {"name": "focal_gamma", "type": "float", "range": [0.0, 5.0]},
+    {"name": "temperature", "type": "float", "range": [0.5, 2.0]}
+  ],
+  "behavioral_dims": [["gradient_magnitude", 10, 0, 1], ["smoothness", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "gradient_magnitude", "weight": 15.0},
+      {"metric": "smoothness", "weight": 8.0}
+    ],
+    "penalties": [
+      {"flag": "focus_ratio"},
+      {"flag": "smoothing_penalty"},
+      {"flag": "gamma_penalty"},
+      {"flag": "temp_penalty"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

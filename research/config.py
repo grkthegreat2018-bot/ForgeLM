@@ -59,6 +59,11 @@ class ModelConfig:
     use_mtp: bool = False
     mtp_n_heads: int = 4  # evolution: 4 heads (was 2), score 27.69 vs 23.6
     mtp_loss_weight: float = 0.495  # evolution: 0.495 (was 0.3), near-0.5 optimum
+    # mtp_weight: CLI/train-runner alias for mtp_loss_weight. When set (not
+    # None), it overrides mtp_loss_weight at MTPModule construction time.
+    # mtp_weight=0.0 disables the MTP loss contribution (params become dead,
+    # frozen by freeze_dead_params_ before BAdam partitioning).
+    mtp_weight: float | None = None
     # BitNet b1.58: ternary QAT on all linear layers ({-1,0,1} weights, STE).
     # Training = ternary forward (STE, master weights fp); eval = full
     # precision unless bitnet_force_quant (deploy after QAT converges).
@@ -97,6 +102,11 @@ class ModelConfig:
     # Fused QKV + Gate-Up GEMM: single GEMM for Q/K/V and for gate/up projections.
     # Halves kernel launches. Lossless (same math, just fused).
     use_fused_gemm: bool = False
+    # BitNet int8 trainable storage (R&D round 15): stores ternary weights as
+    # int8 on GPU (1 byte/param) with bf16 master weights on CPU. STE gradients
+    # flow GPU→CPU, BAdam updates CPU master, re-quantizes active block to int8.
+    # Enables 8B param training on 12GB VRAM (8GB weights + 2.5GB optim + 1GB act).
+    bitnet_int8_training: bool = False
     # W8A8 INT8 quantization: weight + activation INT8 with tensor-core GEMM.
     # 2-3x decode speedup at batch=1. Applied at inference (not training).
     use_w8a8: bool = False
@@ -290,6 +300,42 @@ class ModelConfig:
     # Companding on momentum/variance with tight error bounds.
     # Community: arXiv 2602.23349, >50% per-param memory reduction.
     flashoptim_bits: int = 8  # 8 = companded uint8, 4 = companded uint4
+
+    # === R&D Round 19: Qwen3.8-Flash-Next keys (2026-08-29) ===
+    # QSA (Qwen Sparse Attention): top-k sparse position selection with
+    # averaged attention scores. Reduces attention from O(n²) to O(n*k).
+    # Lossless at init (k = seq_len = full attention).
+    use_qsa: bool = False
+    qsa_top_k: int = 256  # number of positions to keep (0 = full attention)
+    # Gated Residual: per-layer learnable gate on the residual stream.
+    # Gate init=1.0 = lossless (passes residual through unchanged).
+    use_gated_residual: bool = False
+    gated_residual_init: float = 1.0  # 1.0 = identity (lossless)
+    # N-gram Embedding: host-side n-gram lookup table for knowledge
+    # augmentation. 15.3 GB host RAM for 3-gram table (vocab=65536).
+    use_ngram_embedding: bool = False
+    ngram_n: int = 3  # n-gram order (2=bigram, 3=trigram)
+    ngram_dim: int = 256  # embedding dimension per n-gram
+    ngram_host: bool = True  # store on host RAM (True) or GPU (False)
+
+    # === R&D Round 20-21: Memory-efficient training + cross-domain formats ===
+    # Optimizer selection: "adamw_8bit", "adamw_4bit", "nvme_badam",
+    # "muon_bitnet_4bit", "ternary", "nvme_muon_4bit" (best combo)
+    optimizer_type: str = "adamw_8bit"
+    # NVMe streaming: optimizer states on NVMe, 1 layer active in RAM
+    nvme_streaming: bool = False
+    nvme_path: str = ""  # path for NVMe optimizer state files
+    # FP8 activation storage: quantize activations to FP8 during forward
+    # (2x activation memory reduction). GEMMs still run in bf16.
+    use_fp8_activation: bool = False
+    # GradTopK: top-K% gradient sparsification with EF21 error feedback.
+    # 10x fewer gradient transfers per step.
+    grad_topk_ratio: float = 1.0  # 1.0 = disabled, 0.1 = top 10%
+    grad_topk_ef: bool = True  # error feedback (prevents staleness)
+    # HashedNLRQ: hash the NLRQ low-rank factors for additional compression.
+    # NLRQ (12.8x) × hash (4-16x) = 50-100x total FFN compression.
+    use_hashed_nlrq: bool = False
+    hashed_nlrq_compression: float = 8.0  # hash compression factor
     # Gradient checkpointing: recompute forward during backward to save VRAM.
     use_gradient_checkpointing: bool = False
     # Selective checkpoint strategy: "all" (full block), "ffn" (recompute only
@@ -408,6 +454,106 @@ MODEL_CONFIGS = {
         seq_len=64,
         max_steps=20,
         warmup_steps=5,
+    ),
+
+    # Ultra-compact ForgeLM V7 gen model for ForgeEvolve.
+    # Uses V7 architecture keys (BitNet b1.58, GTA attention, NLRQ FFN
+    # compression, RoPE) at a tiny size for use as an LLM-based gen model
+    # in evolutionary search. Built from scratch (random init) — no checkpoint.
+    # Reuses LFM2.5 tokenizer (vocab=65536). Configurable size for grow/shrink.
+    "gen_model_tiny": ModelConfig(
+        vocab_size=65536,
+        d_model=256,
+        n_layers=4,
+        n_heads=8,
+        n_kv_heads=2,                   # GQA 4x (8/2)
+        intermediate_size=512,
+        attn_type="gta",                # Grouped-Tied Attention (V7)
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,          # LFM2.5 base: 1M
+        max_seq_len=512,
+        use_qk_norm=True,
+        # ── V7 keys (minimal set for tiny gen model) ──
+        use_bitnet=True,                # BitNet b1.58 ternary QAT
+        bitnet_learned_scale=True,
+        ffn_compression="nlrq",         # NLRQ FFN compression
+        nlrq_rank=64,                   # small rank for tiny intermediate=512
+        nlrq_factor_bits=8,
+        nlrq_use_residual=False,
+        # ── Training hyperparams (for fine-tuning) ──
+        batch_size=1,
+        seq_len=512,
+        max_steps=100,
+        warmup_steps=10,
+        max_lr=1e-3,
+        min_lr=1e-4,
+    ),
+
+    # Tiny ForgeLM V7 for end-to-end testing of the 8B cloud training path.
+    # Has ALL 8B features (MTP, BitNet, NLRQ, GTA, TITAN, MoD, MHC, AttnRes,
+    # value_residual, factorized embeddings, PIT) at a tiny size that fits
+    # in <1GB VRAM. Uses the real LFM2.5 tokenizer (vocab=65536) so sft_train.py
+    # can run end-to-end with real tokenization. For testing dead-param freeze,
+    # NLRQ STE factor training, from-scratch init, BAdam, and checkpoint save/load.
+    "forgelm_v7_tiny": ModelConfig(
+        vocab_size=65536,
+        d_model=128,
+        n_layers=4,
+        n_heads=4,
+        n_kv_heads=2,
+        intermediate_size=256,
+        attn_type="gta",
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=128,
+        use_qk_norm=True,
+        # ── V7 keys (all 8B features) ──
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        ffn_compression="nlrq",
+        nlrq_rank=32,
+        nlrq_factor_bits=8,
+        nlrq_use_residual=False,
+        use_mtp=True,
+        mtp_n_heads=2,
+        use_titan_memory=True,
+        titan_memory_rank=16,
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        ffn_skip_threshold=0.15,
+        use_mhc=True,
+        mhc_rank=0,
+        use_attn_residual=True,
+        attn_res_k=4,
+        use_value_residual=True,
+        value_residual_mode="resformer",
+        value_residual_gate_init=0.0,
+        use_factorized_embeddings=True,
+        embed_factorized_rank=64,
+        use_pit=True,
+        zero_init_residual=True,
+        use_sandwich_norm=True,
+        use_learned_sink=True,
+        learned_sink_init=0.0,
+        learned_sink_init_method="zero",
+        # ── Disabled (need GPU or many layers) ──
+        use_triton_kernels=False,
+        use_varlen=False,
+        bitnet_int8_training=False,
+        use_gradient_checkpointing=False,
+        use_hyperloop=False,            # needs n_layers >= begin+end+1
+        use_lisa=False,
+        # ── Training ──
+        batch_size=2,
+        seq_len=64,
+        max_steps=20,
+        warmup_steps=5,
+        max_lr=1e-3,
+        min_lr=1e-4,
     ),
 
     # ══════════════════════════════════════════════════════════════════════
@@ -536,9 +682,9 @@ MODEL_CONFIGS = {
     # Both fit 12GB RTX 5070 with BAdam (block-wise training).
     # ════════════════════════════════════════════════════════════════════
 
-    # V7-8B-B: Same architecture as V7, higher NLRQ rank (768→1024).
-    # Less FFN compression = more effective capacity. 6.68 GB storage.
-    # BAdam training: 8.50 GB. Safest 8B variant.
+    # V7-8B-B: Dense 8B params for coding/reasoning. No NLRQ — full FFN capacity.
+    # BitNet b1.58 int8 trainable storage: 8GB weights on GPU, 16GB bf16 master on CPU.
+    # BAdam block-wise training: ~11GB GPU total. 8.02B real params.
     "forgelm_v7_8b_b": ModelConfig(
         vocab_size=65536,
         d_model=4096,
@@ -584,8 +730,8 @@ MODEL_CONFIGS = {
         rope_variant="lerope",
         use_pit=True,
         zero_init_residual=True,
-        ffn_compression="nlrq",
-        nlrq_rank=1024,                # INCREASED: 768→1024 (less compression, more capacity)
+        ffn_compression="none",         # DENSE FFN: 8B real params (was "nlrq")
+        nlrq_rank=0,                    # disabled (was 1024)
         nlrq_factor_bits=8,
         nlrq_use_residual=False,
         nlrq_residual_group_size=128,
@@ -610,6 +756,8 @@ MODEL_CONFIGS = {
         use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
         triton_rms_block_size=4096,         # d_model for V7
         triton_swiglu_block_size=16384,     # intermediate_size for V7
+        # ── R&D round 15: int8 trainable storage for 8B on 12GB ──
+        bitnet_int8_training=True,          # int8 weights on GPU, bf16 master on CPU
         batch_size=1,
         seq_len=1024,
         max_steps=5000,
@@ -792,6 +940,126 @@ MODEL_CONFIGS = {
         warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
         max_lr=2e-4,
         min_lr=2e-5,
+    ),
+
+    # ════════════════════════════════════════════════════════════════════
+    # V8: ForgeLM V8-8B — best mix of R19+R20+R21 innovations.
+    # Derived from V7-8B-B (dense 8B) with:
+    #   R19: QSA sparse attention, Gated Residual, N-gram host embedding
+    #   R20: NVMe-streamed 4-bit Muon optimizer (16.3 GB RAM, fits 32GB)
+    #   R21: FP8 activation training (2x act memory), GradTopK (10x faster NVMe)
+    #        HashedNLRQ (FFN 50.7x compression → 3.84B true params)
+    # All R19 keys are lossless at init. R20/R21 are training-time only.
+    # Training: 7.50 GB GPU + 7.88 GB RAM (with HashedNLRQ) = fits 12GB + 32GB.
+    # Inference: 8.89 GB GPU + 15.3 GB RAM = fits 12GB + 32GB.
+    # ════════════════════════════════════════════════════════════════════
+    "forgelm_v8_8b": ModelConfig(
+        vocab_size=65536,
+        d_model=4096,
+        n_layers=32,
+        n_heads=64,
+        n_kv_heads=16,
+        intermediate_size=16384,
+        attn_type="gta",                # Grouped-Tied Attention (V4)
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        rope_base=1_000_000.0,
+        max_seq_len=32768,
+        conv_kernel_size=3,
+        use_qk_norm=True,
+        # ── BitNet: ternary weights, int8 trainable storage ──
+        use_bitnet=True,
+        bitnet_learned_scale=True,
+        use_bitnet_embedding=True,
+        bitnet_int8_training=True,      # R15: int8 GPU + bf16 CPU master
+        use_fused_gemm=True,
+        # ── 32-layer hybrid: conv/attention interleaved ──
+        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
+        # ── V4-V7 keys (all carried forward) ──
+        use_titan_memory=True,
+        titan_memory_rank=128,
+        use_mod=True,
+        mod_keep_fraction=1.0,
+        ffn_skip_threshold=0.15,
+        use_mhc=True,
+        mhc_rank=0,
+        use_attn_residual=True,
+        attn_res_k=4,
+        use_mtp=True,
+        mtp_n_heads=4,
+        mtp_loss_weight=0.495,
+        use_value_residual=True,
+        value_residual_mode="resformer",
+        value_residual_gate_init=0.0,
+        use_sandwich_norm=True,
+        use_learned_sink=True,
+        learned_sink_init=0.0,
+        learned_sink_init_method="zero",
+        use_swiglu_clamp=True,
+        swiglu_clamp_alpha=1.702,
+        swiglu_clamp_limit=7.0,
+        rope_variant="lerope",
+        use_pit=True,
+        zero_init_residual=True,
+        # ── V7: NLRQ FFN compression ──
+        ffn_compression="nlrq",
+        nlrq_rank=1024,                 # V8: rank=1024 (like 8b_b, more capacity)
+        nlrq_factor_bits=8,
+        nlrq_use_residual=False,
+        nlrq_residual_group_size=128,
+        # ── V8 NEW: HashedNLRQ (R21) — hash the NLRQ factors ──
+        use_hashed_nlrq=True,           # 8x hash on top of NLRQ 6.4x = 50.7x total
+        hashed_nlrq_compression=8.0,
+        use_peagle_tied=True,
+        peagle_lora_rank=32,
+        # ── Hyperloop ──
+        use_hyperloop=True,
+        hyperloop_begin=4,
+        hyperloop_end=4,
+        hyperloop_loop_iters=3,
+        # ── LiSA ──
+        use_lisa=True,
+        lisa_compress=6,
+        lisa_align_dim=0,
+        # ── Factorized embedding ──
+        use_factorized_embeddings=True,
+        embed_factorized_rank=512,
+        # ── V8 NEW: R19 keys ──
+        use_qsa=True,                   # Qwen Sparse Attention
+        qsa_top_k=256,                  # top-256 positions (lossless at init)
+        use_gated_residual=True,        # Gated Residual (gate=1.0 = lossless)
+        gated_residual_init=1.0,
+        use_ngram_embedding=True,       # N-gram host embedding (15.3 GB RAM)
+        ngram_n=3,
+        ngram_dim=256,
+        ngram_host=True,
+        # ── V8 NEW: R20+R21 training optimizations ──
+        optimizer_type="nvme_muon_4bit",  # NVMe-streamed 4-bit Muon
+        nvme_streaming=True,
+        nvme_path="research/checkpoints/v8_optimizer_states",
+        use_fp8_activation=True,        # R21: FP8 activation storage (2x memory)
+        grad_topk_ratio=0.1,            # R21: top-10% gradients (10x faster NVMe)
+        grad_topk_ef=True,
+        # ── Training optimizations (carried from V7) ──
+        use_gradient_checkpointing=True,
+        selective_gradient_checkpointing="ffn",
+        use_chunked_ce=True,
+        ce_chunk_size=256,
+        entropy_alpha=0.5,
+        use_smooth_swiglu=True,
+        use_mu_scaling=True,
+        use_varlen=True,
+        use_triton_kernels=True,
+        triton_rms_block_size=4096,
+        triton_swiglu_block_size=16384,
+        # ── Training hyperparams (full scratch training) ──
+        batch_size=1,
+        seq_len=2048,                   # V8: 2K context (was 1K for V7)
+        max_steps=50000,                # V8: 50K steps for full pretraining
+        warmup_steps=2000,              # 4% warmup (Chinchilla scaling)
+        max_lr=3e-4,                    # slightly higher for scratch training
+        min_lr=3e-5,
     ),
 }
 

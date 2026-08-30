@@ -47,6 +47,22 @@ def find_jsonl_sources():
         files = sorted(glob.glob(str(DATA / "pretrain" / "annealing" / d / "*.jsonl")))
         if files:
             sources[f"pretrain/{d}"] = files
+    # Pretrain: Wikipedia EN filtered to STEM/coding (R&D round 15)
+    # Use wikipedia_filtered if available, fall back to raw wikipedia
+    wiki_dir = DATA / "pretrain" / "wikipedia_filtered"
+    if not wiki_dir.exists() or not list(wiki_dir.glob("*.jsonl")):
+        wiki_dir = DATA / "pretrain" / "wikipedia"
+    files = sorted(glob.glob(str(wiki_dir / "*.jsonl")))
+    if files:
+        sources["pretrain/wikipedia"] = files
+    # Pretrain: OpenWebMath (R&D round 15)
+    files = sorted(glob.glob(str(DATA / "pretrain" / "openwebmath" / "*.jsonl")))
+    if files:
+        sources["pretrain/openwebmath"] = files
+    # Pretrain: FineWeb-Edu additional (R&D round 15)
+    files = sorted(glob.glob(str(DATA / "pretrain" / "fineweb_edu_additional" / "*.jsonl")))
+    if files:
+        sources["pretrain/fineweb_edu"] = files
     # Pretrain fineweb-math
     files = sorted(glob.glob(str(DATA / "pretrain" / "fineweb-math" / "data" / "*.parquet")))
     if files:
@@ -73,8 +89,8 @@ def find_jsonl_sources():
             files = sorted(glob.glob(str(DATA / "sft" / "reasoning" / d / "*.json")))
         if files:
             sources[f"sft/reasoning/{d}"] = files
-    # SFT tool_use
-    for d in ["glaive-fc-v2", "hermes-reasoning-tool", "nemotron-agentic-v2", "toolace"]:
+    # SFT tool_use — EXCLUDE nemotron-agentic-v2 (customer service, not coding)
+    for d in ["glaive-fc-v2", "hermes-reasoning-tool", "toolace"]:
         files = sorted(glob.glob(str(DATA / "sft" / "tool_use" / d / "data" / "*.parquet")))
         if not files:
             files = sorted(glob.glob(str(DATA / "sft" / "tool_use" / d / "*.json")))

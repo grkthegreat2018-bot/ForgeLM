@@ -1,0 +1,26 @@
+{
+  "name": "synthetic",
+  "category": "test",
+  "description": "Synthetic Rastrigin landscape for testing ForgeEvolve. 8 continuous params, global optimum at fixed point.",
+  "simulator": "synthetic_simulate",
+  "transferable": false,
+  "array_output": "x",
+  "params": [
+    {"name": "x_0", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_1", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_2", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_3", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_4", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_5", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_6", "type": "float", "range": [0.0, 1.0]},
+    {"name": "x_7", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["param_mean", 10, 0.0, 1.0], ["param_std", 10, 0.0, 0.5]],
+  "scoring": {
+    "components": [
+      {"metric": "raw_score", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

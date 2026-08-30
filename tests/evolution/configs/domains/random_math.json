@@ -1,0 +1,26 @@
+{
+  "name": "random_math",
+  "category": "random_task",
+  "description": "Random math problems (arithmetic, precedence, parentheses, powers) with optional distraction injection. The gen model must extract the math from noise and compute the real answer.",
+  "simulator": "random_math_simulate",
+  "gen_model_type": "llm",
+  "transferable": false,
+  "params": [
+    {"name": "temperature", "type": "float", "range": [0.0, 1.5]},
+    {"name": "max_tokens", "type": "int", "range": [10, 200]},
+    {"name": "top_p", "type": "float", "range": [0.1, 1.0]},
+    {"name": "top_k", "type": "int", "range": [1, 100]}
+  ],
+  "behavioral_dims": [["correctness", 2, 0, 1], ["difficulty", 5, 1, 5]],
+  "scoring": {
+    "components": [
+      {"metric": "correct", "weight": 50.0},
+      {"metric": "focus_score", "weight": 20.0},
+      {"metric": "speed_score", "weight": 10.0}
+    ],
+    "penalties": [
+      {"flag": "linear_range", "metric": "abs_error", "low": 0, "high": 0.01, "scale": 100.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

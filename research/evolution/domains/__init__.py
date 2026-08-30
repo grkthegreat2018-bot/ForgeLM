@@ -102,6 +102,7 @@ def _discover_domains() -> dict[str, type[BaseDomain]]:
         "synthetic", "quant", "kv_eviction", "sparse_attn", "hqe_kv", "kara",
         "attention_domains", "kv_domains", "quant_domains",
         "training_domains", "memory_domains", "decoding_domains", "arch_domains",
+        "random_task_domain",
     ]
     registry = {}
     for mod_name in modules:
@@ -115,7 +116,38 @@ def _discover_domains() -> dict[str, type[BaseDomain]]:
             pass
     return registry
 
+
+def _discover_json_domains() -> dict[str, type[BaseDomain]]:
+    """Auto-discover JSON-specified domains from configs/domains/*.json.
+
+    Each JSON spec becomes a JSONSpecDomain subclass entry in the registry,
+    keyed by a CamelCase class name (e.g. "w8a8_quant" -> "W8a8Quant").
+    This allows JSON domains to be used everywhere a Python domain class is
+    expected (run_evolve.py, rescore_db.py, etc.) without any code changes.
+    """
+    from ..domain_spec import list_specs, JSONSpecDomain
+    registry = {}
+    for spec_name in list_specs():
+        try:
+            cls_name = "".join(w.capitalize() for w in spec_name.split("_"))
+            # Build a dynamic subclass whose __init__ binds the spec_name
+            def _make_init(sn):
+                def _init(self, *args, **kwargs):
+                    kwargs.pop("seq_len", None)
+                    kwargs.pop("seed", None)
+                    kwargs.pop("device", None)
+                    JSONSpecDomain.__init__(self, spec_name=sn, **kwargs)
+                return _init
+            cls = type(cls_name, (JSONSpecDomain,), {"__init__": _make_init(spec_name)})
+            registry[cls_name] = cls
+        except Exception:
+            continue
+    return registry
+
 DOMAINS: dict[str, type[BaseDomain]] = _discover_domains()
+# Merge in JSON-specified domains (they override Python classes with the same
+# CamelCase name — JSON is the canonical source of truth when both exist)
+DOMAINS.update(_discover_json_domains())
 
 def get_domain(name: str, **kwargs) -> BaseDomain:
     """Instantiate a domain by class name."""

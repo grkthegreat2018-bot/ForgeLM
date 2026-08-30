@@ -1,0 +1,21 @@
+{
+  "name": "w8a8_quant",
+  "category": "quantization",
+  "description": "W8A8 quantization: smoothquant alpha + INT8/FP8 mode. Metrics: sqnr (dB), compression.",
+  "simulator": "w8a8_simulate",
+  "params": [
+    {"name": "mode", "type": "choice", "values": ["int8", "fp8"]},
+    {"name": "calib_samples", "type": "int", "range": [64, 1024]},
+    {"name": "per_channel", "type": "bool"},
+    {"name": "smoothquant_alpha", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["sqnr", 10, 0, 60], ["compression", 10, 1, 4]],
+  "scoring": {
+    "components": [
+      {"metric": "sqnr", "weight": 2.0},
+      {"metric": "compression", "weight": 3.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

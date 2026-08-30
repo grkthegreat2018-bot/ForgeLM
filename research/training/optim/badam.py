@@ -379,6 +379,17 @@ class BAdam(Optimizer):
         next_idx = (self._block_idx + 1) % self._n_blocks
         self._activate_block(next_idx)
 
+    def _build_param_to_module_map(self):
+        """Build a mapping from parameter id → (module, param_name) for
+        BitNetLinear modules with int8 trainable storage. Used to call
+        requantize_from_master() after the optimizer updates the CPU master.
+        """
+        self._param_to_module = {}
+        for name, module in self.model.named_modules():
+            if hasattr(module, '_int8_trainable') and module._int8_trainable:
+                for pname, p in module.named_parameters(recurse=False):
+                    self._param_to_module[id(p)] = module
+
     @torch.no_grad()
     def step(self, closure=None):
         """Perform one Adam step on the active block only."""
@@ -390,6 +401,10 @@ class BAdam(Optimizer):
         self._step_count += 1
         self._steps_in_block += 1
 
+        # Build param→module map lazily (first step)
+        if not hasattr(self, '_param_to_module'):
+            self._build_param_to_module_map()
+
         # Get active block params
         active_block = self._blocks[self._block_idx]
         group = self.param_groups[0]
@@ -399,6 +414,7 @@ class BAdam(Optimizer):
         wd = group["weight_decay"]
         no_decay = active_block.get("no_decay", set())
 
+        updated_modules = set()  # track which int8 modules need requantize
         for p in active_block["params"]:
             if p.grad is None:
                 continue
@@ -439,6 +455,21 @@ class BAdam(Optimizer):
 
             update = exp_avg.float() / denom * -step_size
             p.add_(update.to(p.dtype))
+
+            # R&D round 15: if this param is a BitNet int8 trainable master,
+            # mark its module for requantization after the update.
+            mod = self._param_to_module.get(id(p))
+            if mod is not None:
+                updated_modules.add(id(mod))
+
+        # R&D round 15: re-quantize updated int8 trainable modules.
+        # After the CPU master weight is updated by Adam, the int8 ternary
+        # buffer on GPU must be refreshed (STE re-projection).
+        if updated_modules:
+            for mod_id, mod in [(mid, m) for mid, m in
+                                ((k, v) for k, v in self._param_to_module.items())
+                                if k in updated_modules]:
+                mod.requantize_from_master()
 
         # Switch to next block if we've done enough steps
         if self._steps_in_block >= self.switch_every:

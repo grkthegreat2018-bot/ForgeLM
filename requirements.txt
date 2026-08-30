@@ -40,6 +40,13 @@ loguru>=0.7.3
 # Quantization: int4 weight-only for 58% VRAM reduction
 torchao>=0.17
 
+# Cloud compute backend (optional — only needed for research/cloud/vast_connector.py)
+# Offloads compute-heavy training (full fine-tune of V7 7B/8B/MoE) to rented
+# Vast.ai GPU instances. Install with: pip install vastai paramiko
+# Pinned below latest to avoid brand-new, unvetted releases.
+vastai>=1.4.0,<1.5.5
+paramiko>=3.4,<5.0
+
 # Serving (optional — only needed for chat_ui.py)
 # gradio>=4.0  # Uncomment if using research/serving/chat_ui.py
 

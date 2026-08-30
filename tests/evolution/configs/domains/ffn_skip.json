@@ -1,0 +1,22 @@
+{
+  "name": "ffn_skip",
+  "category": "architecture",
+  "description": "FFN skip: threshold, n_eval_layers, strategy, min_keep. Metrics: compute_saved, output_dev, trivial_penalty.",
+  "simulator": "ffn_skip_simulate",
+  "params": [
+    {"name": "skip_threshold", "type": "float", "range": [0.0, 0.5]},
+    {"name": "n_eval_layers", "type": "int", "range": [1, 16]},
+    {"name": "skip_strategy", "type": "choice", "values": ["cosine", "norm", "hybrid"]},
+    {"name": "min_keep", "type": "float", "range": [0.5, 1.0]}
+  ],
+  "behavioral_dims": [["compute_saved", 10, 0, 1], ["output_dev", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "compute_saved", "weight": 20.0},
+      {"metric": "output_dev", "weight": -30.0},
+      {"metric": "trivial_penalty", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

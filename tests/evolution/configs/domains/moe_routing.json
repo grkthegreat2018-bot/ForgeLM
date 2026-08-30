@@ -1,0 +1,26 @@
+{
+  "name": "moe_routing",
+  "category": "architecture",
+  "description": "MoE: n_experts, top_k, router_mode, load_balance_weight, shared_expert. Metrics: load_balance, expert_util, load_balance_weight, shared_bonus.",
+  "simulator": "moe_routing_simulate",
+  "params": [
+    {"name": "n_experts", "type": "int", "range": [4, 16]},
+    {"name": "top_k", "type": "int", "range": [1, 4]},
+    {"name": "router_mode", "type": "choice", "values": ["switch", "aux_free"]},
+    {"name": "load_balance_weight", "type": "float", "range": [0.0, 0.1]},
+    {"name": "shared_expert", "type": "bool"}
+  ],
+  "behavioral_dims": [["load_balance", 10, 0, 1], ["expert_util", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "load_balance", "weight": 15.0},
+      {"metric": "expert_util", "weight": 10.0},
+      {"metric": "load_balance_weight", "weight": -20.0},
+      {"metric": "shared_bonus", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "diversity_penalty", "top_k_metric": "top_k", "penalty": -15.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

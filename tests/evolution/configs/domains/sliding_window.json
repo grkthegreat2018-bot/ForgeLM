@@ -1,0 +1,21 @@
+{
+  "name": "sliding_window",
+  "category": "attention",
+  "description": "Sliding window size, stride, overlap ratio. Metrics: coverage, memory_ratio, trivial_penalty.",
+  "simulator": "sliding_window_simulate",
+  "params": [
+    {"name": "window_size", "type": "int", "range": [256, 4096]},
+    {"name": "stride", "type": "int", "range": [1, 2048]},
+    {"name": "overlap_ratio", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["coverage", 10, 0, 1], ["memory_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "coverage", "weight": 10.0},
+      {"metric": "memory_ratio", "weight": -5.0},
+      {"metric": "trivial_penalty", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

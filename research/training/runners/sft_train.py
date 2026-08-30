@@ -39,6 +39,7 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -353,6 +354,19 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
 _tokenize_cache: OrderedDict[str, list[int]] = OrderedDict()
 _CACHE_MAX = 10000  # max 10K entries in memory (~50MB typical)
 _disk_tok_cache: DiskTokenCache | None = None
+
+# ── Parallel tokenization globals (set in main(), used by _parallel_tok_worker) ──
+_parallel_tokenizer = None
+_parallel_seq_len = 1024
+
+
+def _parallel_tok_worker(ex: dict) -> list[dict]:
+    """Module-level worker for multiprocessing.Pool (must be picklable).
+
+    Uses fork-inherited globals (_parallel_tokenizer, _parallel_seq_len)
+    set by the parent process before creating the Pool.
+    """
+    return tokenize_example(ex, _parallel_tokenizer, _parallel_seq_len)
 
 
 def _get_disk_tok_cache() -> DiskTokenCache:
@@ -676,6 +690,10 @@ def main():
     p.add_argument("--disk-cache", action=argparse.BooleanOptionalAction, default=True,
                    help="Use disk-backed tokenization cache (persists across runs, "
                         "eliminates re-tokenization on restart). Default: True.")
+    p.add_argument("--tokenize-workers", type=int, default=0,
+                   help="Number of parallel workers for tokenization (0=auto, "
+                        "uses min(cpu_count, 32). On Vast.ai with 128 cores, "
+                        "this gives ~30x speedup for 150K+ examples).")
     p.add_argument("--pack-sequences", action=argparse.BooleanOptionalAction, default=True,
                    help="Pack variable-length examples into fixed-length sequences "
                         "(Llama-3 style, eliminates 30-50% padding waste). Default: True.")
@@ -864,7 +882,65 @@ def main():
                    help="Fraction of dataset to hold out for validation (default 0.05 = 5%%). "
                         "Only used when --val-every > 0.")
     add_safeguard_args(p)
+
+    # ── Remote Vast.ai cloud backend (offload full fine-tune to rented GPU) ──
+    p.add_argument("--remote-vast", action="store_true", default=False,
+                   help="Offload training to a rented Vast.ai GPU instance.")
+    p.add_argument("--gpu-filter", default="",
+                   help="Vast.ai offer query string.")
+    p.add_argument("--max-price", type=float, default=0.0)
+    p.add_argument("--min-vram-gb", type=float, default=24.0)
+    p.add_argument("--min-reliability", type=float, default=0.9)
+    p.add_argument("--vast-budget", type=float, default=10.0)
+    p.add_argument("--vast-est-sec-per-step", type=float, default=5.0)
+    p.add_argument("--vast-disk-gb", type=int, default=100)
+    p.add_argument("--vast-image", default=None)
+    p.add_argument("--vast-on-demand", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vast-ssh-key", default="")
+    p.add_argument("--vast-auto-destroy", action=argparse.BooleanOptionalAction, default=False,
+                   help="Destroy instance after run (default False = stop+preserve disk for reuse).")
+    p.add_argument("--vast-reuse-instance", action=argparse.BooleanOptionalAction, default=True,
+                   help="Find+reuse a stopped instance by label (default True).")
+    p.add_argument("--vast-use-volume", action=argparse.BooleanOptionalAction, default=False,
+                   help="Attach a persistent Vast.ai volume (default False).")
+    p.add_argument("--vast-volume-size-gb", type=int, default=200)
+    p.add_argument("--vast-stream-logs", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vast-download-output", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vast-poll-interval", type=float, default=10.0)
+    p.add_argument("--vast-startup-timeout", type=float, default=600.0)
+    p.add_argument("--vast-maximize-throughput", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vast-log-filter", default=None,
+                   help="Grep filter for live log stream (e.g. 'loss' or 'error').")
+    p.add_argument("--from-scratch", action="store_true", default=False,
+                   help="Train from random init (no checkpoint). Requires "
+                        "--optimizer badam for BitNet int8 configs (auto-set).")
+
     args = p.parse_args()
+
+    # ── Remote Vast.ai short-circuit: don't train locally ──
+    if args.remote_vast:
+        from research.cloud.vast_connector import (
+            VastConnector, build_spec_from_args, DEFAULT_IMAGE,
+        )
+        vast_control_dests = {
+            "remote_vast", "gpu_filter", "max_price", "min_vram_gb",
+            "min_reliability", "vast_budget", "vast_est_sec_per_step",
+            "vast_disk_gb", "vast_image", "vast_on_demand",
+            "vast_ssh_key", "vast_auto_destroy", "vast_reuse_instance",
+            "vast_use_volume", "vast_volume_size_gb",
+            "vast_stream_logs", "vast_download_output",
+            "vast_poll_interval", "vast_startup_timeout",
+            "vast_maximize_throughput", "vast_log_filter", "from_scratch",
+        }
+        all_dests = {a.dest for a in p._actions}
+        train_arg_dests = all_dests - vast_control_dests
+        spec = build_spec_from_args(args, train_arg_dests)
+        spec.maximize_throughput = getattr(args, "vast_maximize_throughput", True)
+        spec.from_scratch = getattr(args, "from_scratch", False)
+        conn = VastConnector(ssh_key=args.vast_ssh_key)
+        rc = conn.run_remote_training(spec)
+        print(f"\nRemote training finished with exit code {rc}.")
+        return rc
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -923,15 +999,36 @@ def main():
             print("No usable examples. Exiting.")
             return
         print(f"Total examples: {len(examples)}")
-        print("Tokenizing (with disk cache)...")
+        n_workers = args.tokenize_workers
+        if n_workers <= 0:
+            n_workers = min(os.cpu_count() or 1, 32)
+        print(f"Tokenizing (with disk cache, {n_workers} workers)...")
         dataset = []
         n_dropped = 0
-        for ex in examples:
-            toks = tokenize_example(ex, tokenizer, args.seq_len)
-            if not toks:
-                n_dropped += 1
-                continue
-            dataset.extend(toks)
+        if n_workers > 1 and len(examples) > 1000:
+            # ── Parallel tokenization (multiprocessing.Pool) ──
+            # 30x speedup on 128-core Vast.ai instances for 150K+ examples.
+            # Linux uses fork() so the tokenizer + disk cache are inherited.
+            from multiprocessing import Pool, get_context
+            global _parallel_tokenizer, _parallel_seq_len
+            _parallel_tokenizer = tokenizer
+            _parallel_seq_len = args.seq_len
+            ctx = get_context("fork")
+            with ctx.Pool(n_workers) as pool:
+                results = pool.map(_parallel_tok_worker, examples, chunksize=256)
+            for toks in results:
+                if not toks:
+                    n_dropped += 1
+                    continue
+                dataset.extend(toks)
+        else:
+            # ── Single-threaded (small datasets or 1 worker) ──
+            for ex in examples:
+                toks = tokenize_example(ex, tokenizer, args.seq_len)
+                if not toks:
+                    n_dropped += 1
+                    continue
+                dataset.extend(toks)
         print(f"Tokenized: {len(dataset)} usable examples "
               f"(from {len(examples)} conversations, {n_dropped} dropped)")
         if args.disk_cache:
@@ -987,6 +1084,18 @@ def main():
         print(f"MTP n_heads overridden to {args.mtp_n_heads} (must match checkpoint)")
 
     print(f"Building model ({args.config}) from {args.checkpoint}...")
+    _from_scratch = args.checkpoint in ("scratch", "none", "") or args.from_scratch
+    # ── From-scratch training: "scratch"/"none" = random init, no checkpoint ──
+    if _from_scratch:
+        print(f"  Random initialization (from-scratch training, no checkpoint)")
+        args.checkpoint = None
+        # BitNet int8 training requires BAdam optimizer (Muon's Newton-Schulz
+        # conflicts with BitNet weight normalization). Warn if mismatched.
+        if cfg.use_bitnet and getattr(cfg, 'bitnet_int8_training', False) \
+                and args.optimizer not in ("badam", "fira_nlrq"):
+            print(f"  WARNING: BitNet int8 training with --optimizer {args.optimizer} "
+                  f"is not supported. Switching to --optimizer badam.")
+            args.optimizer = "badam"
     # Use ForgeEngine for model loading (unified inference engine with all
     # activation features, crash recovery, KeyStack auto-detection).
     # The engine.model is used for training; engine is used for validation/eval.
@@ -994,7 +1103,7 @@ def main():
     # Set device on config so build_model_fast loads weights directly to GPU,
     # avoiding a CPU RAM copy that can exceed 32GB on 8B+ models.
     cfg.device = str(device)
-    if args.use_forge_engine:
+    if args.checkpoint is not None and args.use_forge_engine:
         try:
             from research.inference.forge_engine import ForgeEngine
             print("  Loading via ForgeEngine (auto_activate=False for training)...")
@@ -1018,6 +1127,24 @@ def main():
     except NotImplementedError:
         model = model.to_empty(device=device)
     model.train()
+
+    # ── From-scratch 8B init: NLRQ reset, BitNet QAT disable, kaiming init,
+    #    logit scale normalization (mirrors train_8b_all.build_model) ──
+    if _from_scratch:
+        from research.sandbox.train_8b_all import (
+            reset_nlrq_layers_, disable_bitnet_qat_, initialize_weights_,
+            normalize_logit_scale_,
+        )
+        from types import SimpleNamespace
+        reset_nlrq_layers_(model)
+        disable_bitnet_qat_(model)
+        initialize_weights_(model, cfg.n_layers)
+        scale = normalize_logit_scale_(
+            model, torch.device(device),
+            SimpleNamespace(vocab_size=cfg.vocab_size))
+        if scale != 1.0:
+            print(f"  [FromScratch] Logit scale normalized by {scale:.3f} "
+                  f"(init CE ≈ ln(vocab) = {math.log(cfg.vocab_size):.2f})")
 
     # ── Advanced normalization: SeeDNorm or DyT ──
     if args.norm_type == "seednorm":
@@ -1091,6 +1218,71 @@ def main():
                     # trains normally in the embeddings block.
                     model.head.weight._forge_frozen = True
                     print("  [BAdam] Marked tied head.weight as frozen (embed.weight still trains)")
+
+    # ── R&D round 15: BitNet int8 trainable storage ──
+    # For 8B dense models on 12GB VRAM: int8 ternary weights on GPU (8GB),
+    # bf16 master weights on CPU (16GB RAM). BAdam updates CPU master,
+    # then re-quantizes active block to int8 on GPU.
+    if getattr(cfg, 'bitnet_int8_training', False) and args.optimizer == "badam":
+        from research.keys.quantization.bitnet_b158_key import enable_int8_training
+        n_converted = enable_int8_training(model)
+        if n_converted > 0:
+            gpu_w = sum(m.weight_int8.numel() for m in model.modules()
+                        if hasattr(m, '_int8_trainable') and m._int8_trainable)
+            cpu_w = sum(m.weight.numel() for m in model.modules()
+                        if hasattr(m, '_int8_trainable') and m._int8_trainable)
+            print(f"  [Int8Train] {n_converted} BitNetLinear layers converted to int8 trainable storage")
+            print(f"    GPU int8 weights: {gpu_w/1e9:.2f}B params ({gpu_w/1e9:.2f} GB)")
+            print(f"    CPU bf16 master:  {cpu_w/1e9:.2f}B params ({cpu_w*2/1e9:.2f} GB RAM)")
+
+    # ── NLRQ factor training (STE masters) for NLRQ-compressed configs ──
+    # 8B-D uses NLRQ FFN compression. Without STE factor training, only the
+    # singular values S train — U/V factors stay frozen at their init.
+    # enable_factor_training_all_ creates float master factors (U_m, V_m)
+    # that train via straight-through estimator around the INT8 quantizer.
+    # Checkpoints stay pure-INT8 (masters are stripped on save via export).
+    if getattr(cfg, 'ffn_compression', 'none') == "nlrq" and not use_manual_lora:
+        from research.sandbox.train_8b_all import enable_factor_training_all_
+        n_nlrq = enable_factor_training_all_(model)
+        if n_nlrq > 0:
+            print(f"  [NLRQ-STE] {n_nlrq} layers with factor training (U_m/V_m masters)")
+
+    # ── MTP freezing when MTP loss is not active ──
+    # When use_mtp=True but mtp_weight=0 (default), the MTP draft head gets
+    # no gradients (the CE loss pathway doesn't pass targets to MTP). These
+    # are dead params that BAdam would partition into their own block →
+    # crash when that block activates ("element 0 does not require grad").
+    # Freeze explicitly before the dead-param probe to skip the probe for MTP.
+    if getattr(cfg, 'use_mtp', False) and args.mtp_weight <= 0.0:
+        mtp = getattr(model, 'mtp_module', None)
+        if mtp is not None:
+            n_mtp_params = 0
+            for p in mtp.parameters():
+                p.requires_grad_(False)
+                p._forge_frozen = True  # BAdam excludes _forge_frozen params
+                n_mtp_params += 1
+            print(f"  [MTP] Frozen {n_mtp_params} MTP params (mtp_weight=0, no CE pathway)")
+
+    # ── Dead-param freeze probe (critical for BAdam + 8B) ──
+    # Models carry architecture-conditional modules that never receive
+    # gradients: MTP draft head (when mtp_weight=0), loop_block (hyperloop),
+    # gated-off AttnRes/MHC paths, unused heads. BAdam partitions ALL params
+    # into blocks; when a block contains ONLY dead params, backward() crashes
+    # with "element 0 of tensors does not require grad".
+    # The probe does one tiny forward+backward with all params trainable,
+    # then freezes any param where p.grad is None (autograd's reachability
+    # truth). This mirrors train_8b_all.freeze_dead_params_.
+    if args.optimizer in ("badam", "fira_nlrq"):
+        from research.sandbox.train_8b_all import freeze_dead_params_
+        # FLCE (chunked fused linear-CE) is used when batch*seq >= 1024
+        # (matches train_8b_all.py logic). The probe must match the real
+        # training loss path for accurate dead-param detection.
+        use_flce = args.batch_size * args.seq_len >= 1024
+        n_dead = freeze_dead_params_(model, torch.device(device), use_flce=use_flce)
+        if n_dead > 0:
+            print(f"  [DeadParams] Froze {n_dead} dead param tensors "
+                  f"(no grad path — MTP/loop_block/gated modules); "
+                  f"BAdam blocks now contain only live params")
 
     if args.grad_checkpoint:
         # ConfigurableResearchLLM uses enable_gradient_checkpointing (not HF's
@@ -1510,6 +1702,10 @@ def main():
 
                 # Periodic save.
                 if args.save_every > 0 and step > 0 and step % args.save_every == 0:
+                    # NLRQ: export STE masters to INT8 before snapshotting
+                    if getattr(cfg, 'ffn_compression', 'none') == "nlrq":
+                        from research.sandbox.train_8b_all import export_nlrq_
+                        export_nlrq_(model)
                     ckpt = step_checkpoint_path(args.save, step)
                     save_training_checkpoint(model, ckpt, optimizer=optimizer,
                                              ema_state=ema_state, step=step)
@@ -1586,6 +1782,13 @@ def main():
             elif args.lora and hasattr(model, "merge_and_unload"):
                 model = model.merge_and_unload()
                 print("Merged LoRA adapters into base model for standalone save.")
+            # NLRQ factor training: export STE masters to INT8 buffers before
+            # saving so the checkpoint is pure-INT8 (loadable by ForgeEngine
+            # without training-mode flags). Masters are stripped from state_dict.
+            if getattr(cfg, 'ffn_compression', 'none') == "nlrq":
+                from research.sandbox.train_8b_all import export_nlrq_
+                export_nlrq_(model)
+                print("Exported NLRQ STE masters to INT8 buffers for standalone save.")
             save_training_checkpoint(model, args.save, optimizer=optimizer,
                                      ema_state=ema_state, step=step,
                                      meta={"config": cfg.__dict__, "sft": True,

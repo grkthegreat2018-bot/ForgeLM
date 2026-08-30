@@ -1,19 +1,20 @@
 """ForgeEvolve DB rescore tool — re-evaluate discoveries with updated scoring.
 
-When a domain's `evaluate()` function is fixed (e.g. to penalize a synthetic-
-metric artifact), existing discoveries in the DB still have their old (wrong)
-scores. This tool:
+V2 (2026-08-25): Now uses domain JSON specs instead of the FIXED_DOMAINS dict.
+Any domain with a JSON spec in configs/domains/ can be rescored automatically.
+No need to maintain a separate dict of fixed domains — the JSON spec IS the
+source of truth for scoring.
 
-1. Re-evaluates every discovery in the specified domains with the current
-   scoring function (deterministic via fixed seed).
-2. Updates the score, behavioral, and metadata fields in-place.
-3. Optionally deletes "bad ideas" — discoveries whose score dropped sharply
-   (the old fake winners) or that fall below the domain's 25th percentile.
-4. Updates the runs table best_score / best_config_json to match.
-5. Prints a before/after summary.
+When a domain's scoring is fixed (e.g. to penalize a synthetic-metric artifact):
+1. Update the domain's JSON spec (add penalty entries, change weights, etc.)
+2. Run: python rescore_db.py --db forge_evolve.db --prune
+
+The tool re-evaluates every discovery with the current JSON spec + RewardGuard,
+updates scores in-place, and optionally prunes fake winners (discoveries whose
+score dropped sharply under the fixed scoring).
 
 Usage:
-    # Dry-run: see what would change for the 7 fixed domains
+    # Dry-run: see what would change for all JSON-specified domains
     python rescore_db.py --db forge_evolve.db --dry-run
 
     # Apply rescore + remove bad ideas
@@ -25,9 +26,8 @@ Usage:
     # Custom prune threshold (default: drop >50% = artifact)
     python rescore_db.py --db forge_evolve.db --prune --drop-threshold 0.4
 
-The 7 domains fixed on 2026-08-24 (scoring artifacts):
-  moe_routing, rope_config, scheduler_config, fp8_training_config,
-  loss_config, mod_config, factorized_embed
+    # Rescore ALL domains (including non-JSON ones via Python classes)
+    python rescore_db.py --db forge_evolve.db --all
 """
 from __future__ import annotations
 import sys
@@ -44,42 +44,6 @@ from collections import defaultdict
 
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
 
-# Domains whose scoring was fixed (class name → domain name()).
-# When adding new scoring fixes, just add the domain name here.
-FIXED_DOMAINS = {
-    # Round 1 (2026-08-24): synthetic-metric artifacts
-    "moe_routing": "MoeRouting",
-    "rope_config": "RopeConfig",
-    "rope_config_refine_d1": "RopeConfig",
-    "scheduler_config": "SchedulerConfig",
-    "scheduler_config_refine_d1": "SchedulerConfig",
-    "fp8_training_config": "Fp8TrainingConfig",
-    "loss_config": "LossConfig",
-    "mod_config": "ModConfig",
-    "factorized_embed": "FactorizedEmbed",
-    # Round 2 (2026-08-24): decoded-but-not-scored + trivial solutions + missing tradeoffs
-    "speculative_decode": "SpeculativeDecode",
-    "mtp_config": "MtpConfig",
-    "batched_decode": "BatchedDecode",
-    "sampling_config": "SamplingConfig",
-    "beam_search": "BeamSearch",
-    "titan_memory": "TitanMemory",
-    "gla_attention": "GlaAttention",
-    "gta_attention": "GtaAttention",
-    "cross_layer_kv": "CrossLayerKV",
-    "xquant_kv": "XQuantKV",
-    "xquant_kv_refine_d1": "XQuantKV",
-    "kv_recompute": "KvRecompute",
-    "hybrid_offload": "HybridOffload",
-    "streaming_kv": "StreamingKV",
-    # Round 3 (2026-08-25): R&D round 14 training speedup domains
-    "apollo_config": "ApolloConfig",
-    "bread_config": "BreadConfig",
-    "flashoptim_config": "FlashOptimConfig",
-    "triton_kernel_config": "TritonKernelConfig",
-    "varlen_config": "VarlenConfig",
-}
-
 
 def get_db_path(db_arg: str) -> str:
     p = Path(db_arg)
@@ -89,19 +53,53 @@ def get_db_path(db_arg: str) -> str:
 
 
 def load_domain(domain_name: str):
-    """Instantiate the domain class for a given domain name (from DB)."""
+    """Instantiate the domain for a given domain name.
+
+    Tries JSON spec first (canonical source of truth), falls back to Python
+    class lookup for domains without JSON specs.
+    """
     from research.evolution.domains import DOMAINS
-    # Map domain name (from DB, e.g. "moe_routing") to class name.
-    # Strip _refine_dN suffix for the class lookup.
-    base_name = domain_name.replace("_refine_d1", "").replace("_refine_d2", "")
-    class_name = FIXED_DOMAINS.get(domain_name) or FIXED_DOMAINS.get(base_name)
-    if class_name is None:
-        # Try direct class name match (capitalize)
-        class_name = "".join(w.capitalize() for w in base_name.split("_"))
-    if class_name not in DOMAINS:
-        raise KeyError(f"No domain class '{class_name}' for DB domain '{domain_name}'. "
-                       f"Available: {list(DOMAINS.keys())}")
-    return DOMAINS[class_name]()
+    from research.evolution.domain_spec import list_specs, load_spec, JSONSpecDomain
+
+    # Check if a JSON spec exists for this domain name
+    # Domain names in DB may have _refine_dN suffix — strip it
+    base_name = domain_name
+    for suffix in ["_refine_d1", "_refine_d2", "_refine_d3", "_refine_d4", "_refine_d5"]:
+        if base_name.endswith(suffix):
+            base_name = base_name[:-len(suffix)]
+            break
+
+    # Try JSON spec match by domain name
+    for spec_name in list_specs():
+        try:
+            spec = load_spec(spec_name)
+            if spec.name == domain_name or spec.name == base_name:
+                return JSONSpecDomain(spec=spec)
+        except Exception:
+            continue
+
+    # Fall back to Python class lookup
+    # Try CamelCase class name from domain name
+    class_name = "".join(w.capitalize() for w in base_name.split("_"))
+    if class_name in DOMAINS:
+        try:
+            return DOMAINS[class_name]()
+        except Exception:
+            pass
+
+    # Try direct match
+    if domain_name in DOMAINS:
+        return DOMAINS[domain_name]()
+
+    raise KeyError(f"No domain found for DB domain '{domain_name}'. "
+                   f"Checked JSON specs and Python classes.")
+
+
+def get_all_db_domains(conn) -> list[str]:
+    """Get all distinct domain names from the discoveries table."""
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT domain FROM discoveries")
+    return [r[0] for r in c.fetchall()]
 
 
 def rescore_domain(conn, domain_name: str, seed: int = 42,
@@ -120,34 +118,39 @@ def rescore_domain(conn, domain_name: str, seed: int = 42,
         return {"domain": domain_name, "n": 0, "rescored": 0, "pruned": 0,
                 "old_best": None, "new_best": None}
 
-    domain = load_domain(domain_name)
+    try:
+        domain = load_domain(domain_name)
+    except Exception as e:
+        print(f"  Cannot load domain for '{domain_name}': {e}")
+        return {"domain": domain_name, "n": len(rows), "rescored": 0, "pruned": 0,
+                "old_best": max(r[2] for r in rows), "new_best": None,
+                "error": str(e)}
+
     old_scores = [r[2] for r in rows]
     old_best = max(old_scores)
 
-    updates = []      # (id, new_score, new_metadata, new_behavioral)
-    prune_ids = []    # ids to delete
+    updates = []
+    prune_ids = []
     new_scores = []
 
     for row in rows:
         did, config_json, old_score, meta_json, behav_json = row
         config = json.loads(config_json)
 
-        # Deterministic re-evaluation: set seed per-discovery for reproducibility
+        # Deterministic re-evaluation
         torch.manual_seed(seed)
         np.random.seed(seed)
         try:
             result = domain.evaluate(config)
             new_score = float(result["score"])
-            # Guard against NaN/inf scores — mark for pruning
             if not np.isfinite(new_score):
                 new_score = -1e9
                 new_meta = json.dumps({"rescore_error": f"non-finite score: {result['score']}"})
                 new_behav = json.dumps(())
             else:
-                new_meta = json.dumps(result.get("metadata", {}))
-                new_behav = json.dumps(result.get("behavioral", ()))
+                new_meta = json.dumps(result.get("metadata", {}), default=str)
+                new_behav = json.dumps(result.get("behavioral", ()), default=str)
         except Exception as e:
-            # If evaluation fails (e.g. NaN), mark for pruning
             new_score = -1e9
             new_meta = json.dumps({"rescore_error": str(e)})
             new_behav = json.dumps(())
@@ -156,7 +159,6 @@ def rescore_domain(conn, domain_name: str, seed: int = 42,
         updates.append((did, new_score, new_meta, new_behav))
 
         # Prune fake winners: discoveries that dropped >drop_threshold (relative)
-        # were synthetic-metric artifacts → remove them.
         if prune and old_score > 0:
             relative_drop = (old_score - new_score) / abs(old_score)
             if relative_drop > drop_threshold:
@@ -172,22 +174,17 @@ def rescore_domain(conn, domain_name: str, seed: int = 42,
                 prune_ids.append(did)
 
     if not dry_run:
-        # Update scores in-place
         c.executemany(
             "UPDATE discoveries SET score = ?, metadata_json = ?, behavioral_json = ? "
             "WHERE id = ?",
             [(ns, nm, nb, did) for (did, ns, nm, nb) in updates],
         )
-        # Delete pruned discoveries
         if prune_ids:
             placeholders = ",".join("?" * len(prune_ids))
             c.execute(f"DELETE FROM discoveries WHERE id IN ({placeholders})",
                       prune_ids)
         # Update runs table best_score / best_config_json
-        c.execute(
-            "SELECT run_id FROM runs WHERE domain = ?",
-            (domain_name,),
-        )
+        c.execute("SELECT run_id FROM runs WHERE domain = ?", (domain_name,))
         for (run_id,) in c.fetchall():
             c.execute(
                 "SELECT config_json, score FROM discoveries "
@@ -213,7 +210,7 @@ def rescore_domain(conn, domain_name: str, seed: int = 42,
         "old_best": old_best,
         "new_best": new_best,
         "old_mean": float(np.mean(old_scores)),
-        "new_mean": float(np.mean(new_scores)),
+        "new_mean": float(np.mean(new_scores)) if new_scores else 0,
     }
 
 
@@ -222,7 +219,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default="forge_evolve.db", help="DB filename in research/results/")
     ap.add_argument("--domains", default=None,
-                    help="Comma-separated domain names to rescore (default: all FIXED_DOMAINS)")
+                    help="Comma-separated domain names to rescore (default: all JSON-specified)")
+    ap.add_argument("--all", action="store_true",
+                    help="Rescore ALL domains in the DB (including non-JSON ones)")
     ap.add_argument("--dry-run", action="store_true", help="Show changes without writing to DB")
     ap.add_argument("--prune", action="store_true",
                     help="Delete fake winners: discoveries whose score dropped >threshold (artifacts)")
@@ -238,10 +237,23 @@ def main():
         print(f"ERROR: DB not found: {db_path}")
         sys.exit(1)
 
+    # Determine which domains to rescore
     if args.domains:
         domains = [d.strip() for d in args.domains.split(",")]
+    elif args.all:
+        conn_tmp = sqlite3.connect(db_path)
+        domains = get_all_db_domains(conn_tmp)
+        conn_tmp.close()
     else:
-        domains = list(FIXED_DOMAINS.keys())
+        # Default: all domains that have JSON specs
+        from research.evolution.domain_spec import list_specs, load_spec
+        domains = []
+        for spec_name in list_specs():
+            try:
+                spec = load_spec(spec_name)
+                domains.append(spec.name)
+            except Exception:
+                continue
 
     print(f"DB: {db_path}")
     print(f"Mode: {'DRY-RUN' if args.dry_run else 'APPLY'}"
@@ -254,7 +266,6 @@ def main():
     conn = sqlite3.connect(db_path)
     summaries = []
     for domain_name in domains:
-        # Check if domain exists in DB
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM discoveries WHERE domain = ?", (domain_name,))
         count = c.fetchone()[0]
@@ -268,11 +279,14 @@ def main():
                                drop_threshold=args.drop_threshold,
                                dry_run=args.dry_run)
             summaries.append(s)
-            delta_best = (s["new_best"] - s["old_best"]) if s["old_best"] else 0
-            delta_mean = s["new_mean"] - s["old_mean"]
-            prune_str = f", pruned={s['pruned']}" if args.prune else ""
-            print(f"old_best={s['old_best']:.2f} -> new_best={s['new_best']:.2f}"
-                  f" (d={delta_best:+.2f}), mean d={delta_mean:+.2f}{prune_str}")
+            if "error" in s:
+                print(f"ERROR: {s['error']}")
+            else:
+                delta_best = (s["new_best"] - s["old_best"]) if s["old_best"] else 0
+                delta_mean = s["new_mean"] - s["old_mean"]
+                prune_str = f", pruned={s['pruned']}" if args.prune else ""
+                print(f"old_best={s['old_best']:.2f} -> new_best={s['new_best']:.2f}"
+                      f" (d={delta_best:+.2f}), mean d={delta_mean:+.2f}{prune_str}")
         except Exception as e:
             print(f"ERROR: {e}")
 
@@ -286,6 +300,8 @@ def main():
         print("-" * 90)
         total_pruned = 0
         for s in summaries:
+            if "error" in s:
+                continue
             delta = (s["new_best"] - s["old_best"]) if s["old_best"] else 0
             total_pruned += s["pruned"]
             print(f"{s['domain']:40s} {s['n']:>6d} {s['old_best']:>10.2f}"

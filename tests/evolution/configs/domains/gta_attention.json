@@ -1,0 +1,27 @@
+{
+  "name": "gta_attention",
+  "category": "attention",
+  "description": "GTA V=K mixing ratio, KV heads, tie strength. Metrics: kv_reduction, output_deviation, tying_savings, trivial_penalty.",
+  "simulator": "gta_attn_simulate",
+  "params": [
+    {"name": "v_k_mix", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_kv_heads", "type": "int", "range": [4, 16]},
+    {"name": "tie_strength", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["kv_reduction", 10, 0, 1], ["output_deviation", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "kv_reduction", "weight": 10.0},
+      {"metric": "output_deviation", "weight": -20.0},
+      {"metric": "tying_savings", "weight": 3.0},
+      {"metric": "trivial_penalty", "weight": 1.0},
+      {"metric": "flag_adjustment", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "n_kv_heads_score"},
+      {"flag": "tie_strength_score"},
+      {"flag": "tying_savings"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

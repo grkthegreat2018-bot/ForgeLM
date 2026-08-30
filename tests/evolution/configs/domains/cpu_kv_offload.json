@@ -1,0 +1,20 @@
+{
+  "name": "cpu_kv_offload",
+  "category": "memory",
+  "description": "KV cache offload to CPU: offload_layers, threshold, prefetch_size, async_copy.",
+  "simulator": "cpu_kv_offload_simulate",
+  "params": [
+    {"name": "offload_layers", "type": "int", "range": [0, 16]},
+    {"name": "offload_threshold", "type": "float", "range": [0.0, 1.0]},
+    {"name": "prefetch_size", "type": "int", "range": [64, 2048]},
+    {"name": "async_copy", "type": "choice", "values": [false, true]}
+  ],
+  "behavioral_dims": [["kv_freed", 10, 0.0, 1.5], ["latency", 10, 0.0, 8.0]],
+  "scoring": {
+    "components": [
+      {"metric": "kv_freed", "weight": 500.0},
+      {"metric": "latency", "weight": -0.5}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

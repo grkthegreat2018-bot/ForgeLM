@@ -152,6 +152,16 @@ class SurrogateModel:
             cands = candidates.to(self.device)
             scs = scores.to(self.device)
 
+            # Skip training if all scores are identical — MSE loss has no
+            # gradient (loss tensor won't require grad), and training is
+            # pointless since there's nothing to discriminate.
+            if scs.numel() > 1 and torch.allclose(scs, scs[0]):
+                self.n_trained += len(scs)
+                if self.x_history is None:
+                    self.x_history = []
+                self.x_history.append(cands.clone())
+                return
+
             # Sort scores for ranking loss computation
             sorted_idx = scs.argsort()
             ranks = torch.zeros_like(scs)
@@ -173,6 +183,11 @@ class SurrogateModel:
 
                     # Combined: 80% MSE + 20% ranking
                     loss = 0.8 * mse_loss + 0.2 * rank_loss
+                    # Guard: if loss doesn't require grad (e.g. degenerate
+                    # input), skip backward to avoid "element 0 of tensors
+                    # does not require grad" error.
+                    if not loss.requires_grad:
+                        continue
                     opt.zero_grad()
                     loss.backward()
                     opt.step()

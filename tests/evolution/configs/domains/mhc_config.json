@@ -1,0 +1,20 @@
+{
+  "name": "mhc_config",
+  "category": "attention",
+  "description": "MHC rank, gate init, n connections. Metrics: expressivity, param_ratio.",
+  "simulator": "mhc_simulate",
+  "params": [
+    {"name": "rank", "type": "int", "range": [64, 512]},
+    {"name": "gate_init", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_connections", "type": "int", "range": [1, 8]}
+  ],
+  "behavioral_dims": [["expressivity", 10, 0, 1], ["param_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "expressivity", "weight": 10.0},
+      {"metric": "param_ratio", "weight": -5.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

@@ -381,8 +381,13 @@ def print_model_stats(model: torch.nn.Module, cfg) -> None:
 # ────────────────────────── training primitives ──────────────────────────
 
 def autocast_ctx(device: torch.device):
-    return torch.autocast(device_type="cuda", dtype=torch.bfloat16,
-                          enabled=device.type == "cuda")
+    dev_type = device.type if isinstance(device, torch.device) else str(device).split(":")[0]
+    if dev_type != "cuda" or torch.cuda.device_count() == 0:
+        # CPU/meta/no-GPU: no autocast needed (fp32 training). Use nullcontext
+        # to avoid a torch bug where autocast(cpu) still probes CUDA on some builds.
+        from contextlib import nullcontext
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
 
 
 def forward_model(model, input_ids: torch.Tensor) -> torch.Tensor:

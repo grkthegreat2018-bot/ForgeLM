@@ -1,0 +1,20 @@
+{
+  "name": "hqe_kv",
+  "category": "misc",
+  "description": "HQE KV cache compression. Delegated simulator.",
+  "simulator": "hqe_kv_simulate",
+  "params": [
+    {"name": "param0", "type": "float", "range": [0.0, 1.0]},
+    {"name": "param1", "type": "float", "range": [0.0, 1.0]},
+    {"name": "param2", "type": "float", "range": [0.0, 1.0]},
+    {"name": "param3", "type": "float", "range": [0.0, 1.0]},
+    {"name": "param4", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["behavioral_0", 10, 0.0, 1.0], ["behavioral_1", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "base_score", "weight": 1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

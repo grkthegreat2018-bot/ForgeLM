@@ -1,0 +1,21 @@
+{
+  "name": "speculative_decode",
+  "category": "decoding",
+  "description": "Speculative decoding: n_draft_tokens, draft_model_ratio, acceptance_threshold, temperature.",
+  "simulator": "spec_decode_simulate",
+  "params": [
+    {"name": "n_draft_tokens", "type": "int", "range": [1, 8]},
+    {"name": "draft_model_ratio", "type": "float", "range": [0.1, 0.5]},
+    {"name": "acceptance_threshold", "type": "float", "range": [0.5, 0.95]},
+    {"name": "temperature", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["acceptance", 10, 0.0, 1.0], ["speedup", 10, 0.0, 4.0]],
+  "scoring": {
+    "components": [
+      {"metric": "speedup", "weight": 10.0},
+      {"metric": "acceptance", "weight": 5.0},
+      {"metric": "temp_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

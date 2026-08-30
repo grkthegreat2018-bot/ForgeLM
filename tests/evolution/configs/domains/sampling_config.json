@@ -1,0 +1,24 @@
+{
+  "name": "sampling_config",
+  "category": "decoding",
+  "description": "Sampling: temperature, top_p, top_k, repetition_penalty, frequency_penalty.",
+  "simulator": "sampling_simulate",
+  "params": [
+    {"name": "temperature", "type": "float", "range": [0.1, 2.0]},
+    {"name": "top_p", "type": "float", "range": [0.5, 1.0]},
+    {"name": "top_k", "type": "int", "range": [0, 100]},
+    {"name": "repetition_penalty", "type": "float", "range": [1.0, 1.5]},
+    {"name": "frequency_penalty", "type": "float", "range": [0.0, 2.0]}
+  ],
+  "behavioral_dims": [["diversity", 10, 0.0, 1.0], ["coherence", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "diversity", "weight": 10.0},
+      {"metric": "coherence", "weight": 10.0},
+      {"metric": "rp_benefit", "weight": 1.0},
+      {"metric": "fp_benefit", "weight": 1.0},
+      {"metric": "temp_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

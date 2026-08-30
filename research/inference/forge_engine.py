@@ -96,9 +96,11 @@ from research.inference.innovations import (
 from research.inference.kv_backend import KVCacheStrategy, build_kv_cache
 from research.inference.prefix_cache import (
     LRUPrefixCache,
+    ChunkedPrefixCache,
     cache_prompt_prefix as _cache_prompt_prefix,
     generate_from_prefix_cache as _generate_from_prefix_cache,
 )
+from research.inference.kv.cacheblend import CacheBlend
 from research.inference.crash_recovery import CrashRecoveryManager
 from research.inference.errors import (
     ActivationError,
@@ -153,6 +155,7 @@ class ForgeEngine:
         self.generation_count = 0
         self.total_tokens_generated = 0
         self._prefix_cache = None
+        self._cache_blend: CacheBlend | None = None  # R&D14: CacheBlend
         self._graph_runner = None
         self._stop_tokens = None
         self._awake = True
@@ -936,13 +939,29 @@ class ForgeEngine:
             except Exception as e:
                 self._log(f"Triton conv: failed ({e})", level="warn")
 
-        # Prefix caching — use bounded LRU cache instead of unbounded dict
+        # Prefix caching — bounded LRU by default; ChunkedPrefixCache
+        # (LMCache-style rolling-hash, R&D14) when use_chunked_prefix_cache.
         if feature_flags["use_prefix_cache"]:
-            if not isinstance(self._prefix_cache, LRUPrefixCache):
-                self._prefix_cache = LRUPrefixCache(max_entries=64)
-            self._log("Prefix caching: active (LRU, max 64 entries)")
+            use_chunked = feature_flags.get("use_chunked_prefix_cache", False)
+            if use_chunked:
+                if not isinstance(self._prefix_cache, ChunkedPrefixCache):
+                    self._prefix_cache = ChunkedPrefixCache(max_entries=64)
+                self._log("Prefix caching: active (ChunkedPrefixCache, "
+                          "256-token rolling hash)")
+            else:
+                if not isinstance(self._prefix_cache, LRUPrefixCache):
+                    self._prefix_cache = LRUPrefixCache(max_entries=64)
+                self._log("Prefix caching: active (LRU, max 64 entries)")
         else:
             self._prefix_cache = None
+
+        # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
+        if feature_flags.get("use_cache_blend", False):
+            if not isinstance(self._cache_blend, CacheBlend):
+                self._cache_blend = CacheBlend()
+            self._log("CacheBlend: active (non-prefix KV reuse)")
+        else:
+            self._cache_blend = None
 
         # Chunked prefill
         self._chunked_prefill = None
@@ -1129,10 +1148,34 @@ class ForgeEngine:
             truncation=True, max_length=ctx_limit
         ).input_ids.to(self.device)
 
+        # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
+        # Attempted before prefix caching; on a productive blend it
+        # assembles a KV buffer from pre-computed chunks and decodes the
+        # suffix, skipping most of the prefill.  Falls through to the
+        # prefix-cache / standard path on a miss (zero overhead).
+        output_ids = None
+        if self._cache_blend is not None:
+            blend_result = self._cache_blend.blend_prefill(self, ids)
+            if blend_result is not None:
+                blend_kv, covered_len = blend_result
+                suffix = ids[:, covered_len:]
+                if suffix.shape[1] > 0 and blend_kv is not None:
+                    with torch.inference_mode():
+                        out = self.model(
+                            suffix, past_key_values=blend_kv, use_cache=True)
+                        logits, past_kv = unpack_output_with_kv(out)
+                    output_ids = self._decode_with_kv(
+                        ids, logits, past_kv, max_new_tokens, temperature,
+                        top_p, top_k=top_k,
+                        repetition_penalty=repetition_penalty)
+                    print(f"  [CacheBlend] HIT (reused {covered_len} tokens, "
+                          f"suffix {suffix.shape[1]} to prefill)")
+
         # Prefix caching: check if we've seen this prompt prefix before
-        output_ids = _generate_from_prefix_cache(
-            self, ids, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty)
+        if output_ids is None:
+            output_ids = _generate_from_prefix_cache(
+                self, ids, max_new_tokens, temperature, top_p, top_k,
+                repetition_penalty)
         if output_ids is None and self.acceleration == "airllm_streaming":
             output_ids = AirLLMStreamer.generate(
                 self, ids, max_new_tokens, temperature)
@@ -1164,6 +1207,27 @@ class ForgeEngine:
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms, temperature)
         return result
+
+    # ── CacheBlend public API (R&D14) ────────────────────────────────
+
+    def enable_cache_blend(self, chunk_size: int = 256,
+                           max_chunks: int = 512) -> CacheBlend:
+        """Enable CacheBlend non-prefix KV reuse at runtime.
+
+        Returns the ``CacheBlend`` instance so the caller can register
+        chunks via ``register_chunk`` / ``register_text``.
+        """
+        if not isinstance(self._cache_blend, CacheBlend):
+            self._cache_blend = CacheBlend(
+                chunk_size=chunk_size, max_chunks=max_chunks)
+        self._log("CacheBlend: enabled (non-prefix KV reuse)")
+        return self._cache_blend
+
+    def register_blend_chunk(self, text: str) -> int:
+        """Pre-compute and store a chunk's KV for CacheBlend reuse."""
+        if self._cache_blend is None:
+            self.enable_cache_blend()
+        return self._cache_blend.register_text(self, text)
 
     @torch.no_grad()
     def generate_adaptive(

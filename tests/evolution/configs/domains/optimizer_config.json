@@ -1,0 +1,22 @@
+{
+  "name": "optimizer_config",
+  "category": "training",
+  "description": "Optimizer type, lr, betas, weight_decay. Metrics: convergence_speed, stability.",
+  "simulator": "optimizer_simulate",
+  "params": [
+    {"name": "opt_type", "type": "choice", "values": ["adamw", "muon", "sgd", "lion"]},
+    {"name": "lr", "type": "float", "range": [0.00001, 0.01]},
+    {"name": "beta1", "type": "float", "range": [0.8, 0.95]},
+    {"name": "beta2", "type": "float", "range": [0.95, 0.999]},
+    {"name": "weight_decay", "type": "float", "range": [0.0, 0.1]}
+  ],
+  "behavioral_dims": [["convergence_speed", 10, 0, 1], ["stability", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "convergence_speed", "weight": 20.0},
+      {"metric": "stability", "weight": 10.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

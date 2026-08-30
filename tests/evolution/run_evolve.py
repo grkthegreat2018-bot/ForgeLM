@@ -32,7 +32,7 @@ import threading
 import torch
 import numpy as np
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from research.evolution import ForgeEvolve, ForgeEvolveConfig
 from research.evolution.domains import DOMAINS, list_domains
@@ -41,6 +41,10 @@ from research.evolution.domain_factory import DomainFactory
 from research.evolution.topic_scanner import TopicScanner
 from research.evolution.revisit_scheduler import DomainRevisitScheduler
 from research.evolution.llm_domain_gen import LLMDomainGenerator, GenericDomain
+
+# Pre-load simulators before any threading to avoid race conditions
+from research.evolution.simulators import _ensure_loaded
+_ensure_loaded()
 
 CONFIG_DIR = Path(__file__).parent / "configs"
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
@@ -244,6 +248,7 @@ def build_config(profile: str, overrides: dict, domain_name: str, db_path: str,
         "log_every": p["log_every"],
         "time_budget_s": overrides.get("time_budget_s", p.get("time_budget_s", 0)),
         "convergence_patience": p.get("convergence_patience", 0),
+        "enable_compute_split": overrides.get("enable_compute_split", False),
     }
     return ForgeEvolveConfig(**cfg_kwargs)
 
@@ -425,6 +430,9 @@ def main():
                         help="Maximize GPU utilization: removes time budgets, increases eval batch sizes, "
                              "sets high gen-pop. Equivalent to --gpu-target 0.95 --gen-pop 1000 "
                              "--no-time-budget --max-eval 200")
+    parser.add_argument("--compute-split", action="store_true", default=False,
+                        help="Enable compute split: foreground gen model + background checker. "
+                             "Also enables train-first on unapplied DB discoveries.")
     args = parser.parse_args()
 
     # --set-focus: save persistent default and exit
@@ -493,6 +501,11 @@ def main():
         print(f"  [MaxGPU] Overrides: gen_pop={overrides['gen_pop']}, "
               f"max_eval=200, time_budget=0, gpu_target={args.gpu_target*100:.0f}%")
 
+    # --compute-split: enable gen model + checker compute split
+    if args.compute_split:
+        overrides["enable_compute_split"] = True
+        print(f"  [ComputeSplit] Enabled — gen model + checker + train-first on unapplied DB entries")
+
     # ── Auto-discovery: scan codebase for new optimization topics ──
     project_root = str(Path(__file__).resolve().parents[2])
     revisit_scheduler = DomainRevisitScheduler(project_root=project_root)
@@ -504,10 +517,16 @@ def main():
         print(f"  [AutoDiscover] Found {summary['total_topics']} topics "
               f"({summary['covered']} covered, {summary['uncovered']} uncovered)")
         uncovered = scanner.get_uncovered_topics()
-        if uncovered:
-            print(f"  [AutoDiscover] {len(uncovered)} uncovered topics — generating domains...")
+        # Skip domain generation if we already have enough domains registered
+        # (avoids slow LLM generation on repeat boots). Only generate if we
+        # have fewer than max_new_domains Generic_* domains already registered.
+        existing_generic = sum(1 for d in DOMAINS if d.startswith("Generic_"))
+        if uncovered and existing_generic < args.max_new_domains:
+            remaining = args.max_new_domains - existing_generic
+            print(f"  [AutoDiscover] {len(uncovered)} uncovered topics — "
+                  f"generating {remaining} domains (skip {existing_generic} existing)...")
             # Generate domains for uncovered topics (GenericDomain fallback)
-            gen = LLMDomainGenerator(max_domains_per_run=args.max_new_domains)
+            gen = LLMDomainGenerator(max_domains_per_run=remaining)
             generated = gen.generate_for_uncovered_topics(uncovered)
             registered = gen.register_domains(generated)
             if registered:
@@ -551,6 +570,7 @@ def main():
 
             def _run_domain(idx_name):
                 idx, name = idx_name
+                t0 = time.time()
                 results, t, err = run_one_domain(name, args.profile, overrides, db_path)
                 return idx, name, results, t, err
 
@@ -570,6 +590,7 @@ def main():
             pending = list(enumerate(names))
             done = {}
             wave_num = 0
+            domain_start_times = {}  # idx -> start_time for heartbeat
 
             with ThreadPoolExecutor(max_workers=current_parallel) as pool:
                 active = {}
@@ -578,24 +599,38 @@ def main():
                     idx, name = pending.pop(0)
                     future = pool.submit(_run_domain, (idx, name))
                     active[future] = (idx, name)
+                    domain_start_times[idx] = time.time()
+                    print(f"[{idx+1:3d}/{len(names)}] {name}... STARTED", flush=True)
 
                 while active:
-                    # Wait for at least one to complete
-                    completed = as_completed(active, timeout=None)
-                    for future in completed:
+                    # Wait for at least one to complete (with timeout for heartbeat)
+                    done_futures, _ = wait(active, timeout=15, return_when=FIRST_COMPLETED)
+                    if not done_futures:
+                        # Heartbeat: no domain finished in 15s, show progress
+                        now = time.time()
+                        active_names = []
+                        for idx, st in domain_start_times.items():
+                            elapsed = now - st
+                            active_names.append(f"{names[idx]}({elapsed:.0f}s)")
+                        print(f"  [Heartbeat] {len(active)} running: "
+                              f"{', '.join(active_names[:4])}"
+                              f"{'...' if len(active_names) > 4 else ''}", flush=True)
+                        continue
+                    for future in done_futures:
                         idx, name = active.pop(future)
                         _, _, results, t, err = future.result()
                         done[idx] = (name, results, t, err)
+                        domain_start_times.pop(idx, None)
                         if err or results is None:
                             err_msg = err if err else "results is None"
-                            print(f"[{idx+1:3d}/{len(names)}] {name}... ERROR ({t:.1f}s): {err_msg[:60]}")
+                            print(f"[{idx+1:3d}/{len(names)}] {name}... ERROR ({t:.1f}s): {err_msg[:60]}", flush=True)
                         else:
                             best = results["best_score"]
                             disc = results["discoveries"]
                             cov = results["archive_coverage"]
                             flag = " <<< FREEZE" if t > 30 else (" << slow" if t > 15 else "")
                             print(f"[{idx+1:3d}/{len(names)}] {name}... "
-                                  f"best={best:10.4f}, {disc:4d} disc, archive={cov*100:.0f}%, {t:.1f}s{flag}")
+                                  f"best={best:10.4f}, {disc:4d} disc, archive={cov*100:.0f}%, {t:.1f}s{flag}", flush=True)
 
                         # Submit next pending domain if any
                         if pending:
@@ -611,11 +646,13 @@ def main():
                                     current_parallel = new_p
                                     pool._max_workers = current_parallel
                                     print(f"  [AdaptiveParallel] GPU={util:.0f}%, VRAM={vram*100:.0f}% "
-                                          f"→ parallelism {current_parallel}")
+                                          f"→ parallelism {current_parallel}", flush=True)
                             idx_next, name_next = pending.pop(0)
                             future_next = pool.submit(_run_domain, (idx_next, name_next))
                             active[future_next] = (idx_next, name_next)
-                    break  # as_completed returns one batch; loop re-enters
+                            domain_start_times[idx_next] = time.time()
+                            print(f"[{idx_next+1:3d}/{len(names)}] {name_next}... STARTED", flush=True)
+                    # Process all completed futures in this batch before re-entering while
 
             if gpu_mon:
                 avg_util = gpu_mon.get_avg_util()
@@ -747,9 +784,12 @@ def main():
         print(f"  {'Loop':>4s} {'Time':>8s} {'Valid':>6s} {'Top Score':>12s} {'Domain':>20s}")
         print(f"  {'-'*4} {'-'*8} {'-'*6} {'-'*12} {'-'*20}")
         for ls in loop_summaries:
-            top_domain = max(ls["best_scores"], key=ls["best_scores"].get)
-            top_score = ls["best_scores"][top_domain]
-            print(f"  {ls['loop']:4d} {ls['time_s']:7.1f}s {ls['valid']:6d} {top_score:12.4f} {top_domain:>20s}")
+            if ls["best_scores"]:
+                top_domain = max(ls["best_scores"], key=ls["best_scores"].get)
+                top_score = ls["best_scores"][top_domain]
+                print(f"  {ls['loop']:4d} {ls['time_s']:7.1f}s {ls['valid']:6d} {top_score:12.4f} {top_domain:>20s}")
+            else:
+                print(f"  {ls['loop']:4d} {ls['time_s']:7.1f}s {ls['valid']:6d} {'N/A':>12s} {'(no valid)':>20s}")
 
         # Show score progression per domain across loops
         print(f"\n  Score progression (top 10 domains):")

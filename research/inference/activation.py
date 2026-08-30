@@ -48,6 +48,8 @@ class ActivationConfig:
     use_compile: bool = False
     use_triton_conv: bool = False
     use_prefix_cache: bool = False
+    use_chunked_prefix_cache: bool = False  # R&D14: LMCache rolling-hash
+    use_cache_blend: bool = False           # R&D14: LMCache CacheBlend
     use_spec_attn: bool = False
     kv_cache_tokens: int | None = None
     use_chunked_prefill: bool = False

@@ -1,0 +1,20 @@
+{
+  "name": "qk_norm",
+  "category": "attention",
+  "description": "QK-norm type, epsilon, scale init. Metrics: attention_change, stability.",
+  "simulator": "qk_norm_simulate",
+  "params": [
+    {"name": "norm_type", "type": "choice", "values": ["rmsnorm", "layernorm"]},
+    {"name": "epsilon", "type": "float", "range": [0.000001, 0.001]},
+    {"name": "scale_init", "type": "float", "range": [0.5, 2.0]}
+  ],
+  "behavioral_dims": [["attention_change", 10, 0, 1], ["stability", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "stability", "weight": 10.0},
+      {"metric": "attention_change", "weight": -5.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

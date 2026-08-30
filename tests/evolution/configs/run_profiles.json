@@ -19,8 +19,8 @@
       "filter_ratio": 10,
       "exploration": 0.3,
       "warm_start": true,
-      "log_every": 5,
-      "time_budget_s": 2.0,
+      "log_every": 2,
+      "time_budget_s": 0,
       "convergence_patience": 5,
       "db_suffix": ""
     },
@@ -50,7 +50,7 @@
   },
   "defaults": {
     "parallel_eval": 1,
-    "verbose": false
+    "verbose": true
   },
   "paths": {
     "db_dir": "research/results",

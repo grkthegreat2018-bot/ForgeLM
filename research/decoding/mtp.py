@@ -357,6 +357,7 @@ class MTPModule(nn.Module):
             head.weight.data.zero_()
 
         self._tied_head_weight: nn.Parameter | None = None
+        self._tied_source: tuple[nn.Module, str] | None = None
 
     def tie_head_to_model(self, model_head_weight: nn.Parameter):
         """Tie the first MTP head to the model's LM head (shared weights).
@@ -365,8 +366,16 @@ class MTPModule(nn.Module):
         predicts (lossless at init). Subsequent heads remain independent.
         """
         self._tied_head_weight = model_head_weight
-        # Don't directly assign .weight (would break parameter registration);
-        # instead, forward() uses the tied weight when set.
+        self._tied_source = None  # set by parent via tie_head_from_module
+
+    def tie_head_from_module(self, parent: nn.Module, attr: str = "head"):
+        """Tie using a live reference to the parent module's head weight.
+
+        This survives parent.to(device) because we resolve the weight
+        dynamically at forward time.
+        """
+        self._tied_source = (parent, attr)
+        self._tied_head_weight = getattr(getattr(parent, attr), "weight", None)
         self.heads[0] = None  # type: ignore[assignment]
 
     def forward(self, hidden: torch.Tensor, token_embeds: torch.Tensor,
@@ -405,7 +414,18 @@ class MTPModule(nn.Module):
             target_k = targets[:, offset:]  # (B, T-offset)
 
             if self._tied_head_weight is not None and k == 0:
-                logits_k = F.linear(pred_input, self._tied_head_weight)
+                # Resolve tied weight: prefer live source (survives .to()),
+                # fall back to stored reference with device fix.
+                if self._tied_source is not None:
+                    parent, attr = self._tied_source
+                    w = getattr(getattr(parent, attr), "weight", None)
+                    if w is None:
+                        w = self._tied_head_weight
+                else:
+                    w = self._tied_head_weight
+                if w.device != pred_input.device:
+                    w = nn.Parameter(w.to(pred_input.device), requires_grad=w.requires_grad)
+                logits_k = F.linear(pred_input, w)
             else:
                 logits_k = self.heads[k](pred_input)
 
