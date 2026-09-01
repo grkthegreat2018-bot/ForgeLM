@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import torch
 
-from research.training_free.decoder import generate_with_cache
-from research.training_free.reflexion import ReflexionBuffer
+from research.training_free import generate_with_cache, ReflexionBuffer, build_prompt
 from research.training_free.steering import ActivationSteerer
-from research.training_free.urial import build_prompt
 
 
 class TrainingFreeSolver:

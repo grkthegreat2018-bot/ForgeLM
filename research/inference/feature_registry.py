@@ -143,7 +143,7 @@ def _h_compile_autotune(eng, _flags):
 
 
 def _h_hybrid_prefill(eng, _flags):
-    from research.inference.prefill.hybrid_prefill import HybridChunkedPrefiller
+    from research.inference.prefill import HybridChunkedPrefiller
     eng._chunked_prefill = HybridChunkedPrefiller(
         eng.model, chunk_size=512, device=str(eng.device))
     return "Hybrid chunked prefill: active (adaptive chunking)"
@@ -259,14 +259,14 @@ def _h_jet_long(eng, _flags):
 
 
 def _h_rope_id(eng, _flags):
-    from research.inference.position.rope_id import RoPEID
+    from research.inference.position import RoPEID
     head_dim = _cfg(eng, "head_dim", 64)
     eng._rope_id = RoPEID(head_dim, rotation_fraction=0.25)
     return f"RoPE-ID: {eng._rope_id.stats()}"
 
 
 def _h_lerope(eng, _flags):
-    from research.inference.position.lerope import integrate_lerope_into_model
+    from research.inference.position import integrate_lerope_into_model
     n_replaced = integrate_lerope_into_model(eng.model)
     return f"LeRoPE: replaced RoPE in {n_replaced} layers"
 

@@ -1,10 +1,17 @@
-"""Semantic embedding-based router replacing keyword-matching ExpertRouter.
+"""MoE routing: keyword-matching and semantic embedding-based routers.
 
-Uses the model's hidden states (or logits as fallback) to compute mean-pooled
-embeddings of topic descriptions and queries, then routes by cosine similarity.
+Merged from keyword_router.py (2.9KB) + semantic_router.py (6.4KB).
+
+KeywordRouter: keyword-matching topic router — scores topics by keyword
+substring hits, returns the highest-scoring topic.
+
+SemanticRouter: embedding-based router — uses the model's hidden states
+(or logits as fallback) to compute mean-pooled embeddings of topic
+descriptions and queries, then routes by cosine similarity.
 """
-
 from __future__ import annotations
+
+from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +21,72 @@ try:
 except ImportError:
     import logging
     _log = logging.getLogger(__name__)
+
+
+# ── KeywordRouter ──────────────────────────────────────────────────────
+
+class KeywordRouter:
+    """Base class for keyword-matching topic routers.
+
+    Args:
+        keywords: mapping of topic name -> list of keyword strings.
+        fallback: topic name returned when nothing scores above threshold.
+        min_score: confidence threshold — minimum keyword hits required for
+            a topic to be considered a match (default 1, i.e. any hit).
+    """
+
+    def __init__(self, keywords: dict[str, list[str]] | None = None,
+                 fallback: str = "general", min_score: int = 1):
+        self.keywords: dict[str, list[str]] = dict(keywords) if keywords else {}
+        self.fallback = fallback
+        self.min_score = max(1, min_score)
+
+    def _iter_keywords(self) -> Iterable[tuple[str, list[str]]]:
+        """Yield (topic, keywords) pairs. Subclasses may override to source
+        keywords dynamically (e.g. from a mutable manifest or index)."""
+        return self.keywords.items()
+
+    def _topic_names(self) -> Iterable[str]:
+        """Topic names for list_topics(). Subclasses may override."""
+        return self.keywords.keys()
+
+    def _score(self, query_lower: str) -> dict[str, int]:
+        """Score all topics against an already-lowercased query.
+
+        Only topics meeting the confidence threshold are included.
+        """
+        scores = {}
+        for topic, kws in self._iter_keywords():
+            score = sum(1 for kw in kws if kw in query_lower)
+            if score >= self.min_score:
+                scores[topic] = score
+        return scores
+
+    def classify(self, query: str) -> str:
+        """Classify a query into the best-matching topic.
+
+        Returns the topic with the highest keyword match score, or the
+        fallback topic if nothing meets the confidence threshold.
+        """
+        scores = self._score(query.lower())
+        if scores:
+            return max(scores, key=scores.get)
+        return self.fallback
+
+    def classify_multi(self, query: str, top_n: int = 2) -> list[str]:
+        """Classify a query into up to top_n topics, sorted by match score."""
+        scores = self._score(query.lower())
+        if not scores:
+            return [self.fallback]
+        sorted_topics = sorted(scores, key=scores.get, reverse=True)
+        return sorted_topics[:top_n]
+
+    def list_topics(self) -> list[str]:
+        """List all known topic names (sorted)."""
+        return sorted(self._topic_names())
+
+
+# ── SemanticRouter ─────────────────────────────────────────────────────
 
 DEFAULT_TOPIC_DESCRIPTIONS = {
     "python_algorithms": "Python programming algorithms: sorting, searching, recursion, dynamic programming, data structures, fibonacci, factorial, prime numbers, graph traversal",

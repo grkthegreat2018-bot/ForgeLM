@@ -47,6 +47,7 @@ def optimizer_simulate(config: dict, domain=None) -> dict:
     conv_speed = 1.0 / (1.0 + float(losses[-1].item()))
     stability = 1.0 / (1.0 + float(losses[-10:].std().item()))
     return {"convergence_speed": conv_speed, "stability": stability,
+            "final_loss": float(losses[-1].item()),
             "behavioral_0": conv_speed, "behavioral_1": stability}
 
 

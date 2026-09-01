@@ -240,7 +240,7 @@ def unpack_output_with_kv(out) -> Tuple[torch.Tensor, Optional[KVCache]]:
     return out, None
 
 
-def flash_attention(q, k, v, is_causal=True):
+def flash_attention(q, k, v, is_causal=True) -> torch.Tensor:
     """Use FlashAttention-2 via PyTorch's SDPA when available.
 
     PyTorch 2.x automatically dispatches to FlashAttention-2 (FA2) on CUDA
@@ -264,7 +264,7 @@ def flash_attention(q, k, v, is_causal=True):
         return torch.matmul(attn, v)
 
 
-def varlen_attention(q, k, v, cu_seqlens, max_seqlen=None):
+def varlen_attention(q, k, v, cu_seqlens, max_seqlen=None) -> torch.Tensor:
     """Variable-length attention for packed sequences (R&D round 14).
 
     Uses FlashAttention varlen API to attend WITHIN each packed example,
@@ -2523,7 +2523,7 @@ class ModelLoader:
     def build_model_fast(config: ModelConfig, checkpoint_path: str | None = None,
                          compile: bool = False, moe_top_k: int | None = None,
                          dtype: torch.dtype | None = None,
-                         fast_load: bool = True):
+                         fast_load: bool = True) -> "ConfigurableResearchLLM":
         """Fast model build — caches architecture, only loads weights.
 
         First call builds the architecture (~3s). Subsequent calls with the
@@ -3184,7 +3184,7 @@ class ModelLoader:
         return model
 
     @staticmethod
-    def build_model(config: ModelConfig, checkpoint_path: str | None = None, compile: bool = False):
+    def build_model(config: ModelConfig, checkpoint_path: str | None = None, compile: bool = False) -> "ConfigurableResearchLLM":
         print(
             f"Building {config.d_model}d x {config.n_layers}L {config.attn_type.upper()} model "
             f"(FFN: {config.ffn_type.upper()}, draft: {config.enable_draft_head})..."
@@ -3293,7 +3293,7 @@ def load_default_model(
     moe_top_k: int = 0,
     compile_mode: str | None = None,
     fast_load: bool = True,
-):
+) -> tuple["ConfigurableResearchLLM", "Any"]:
     """Load a model + tokenizer in one call.
 
     Centralizes the common pattern used across 10+ files:

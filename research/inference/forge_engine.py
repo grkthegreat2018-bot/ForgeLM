@@ -60,6 +60,7 @@ import time
 import json
 import threading
 from pathlib import Path
+from collections.abc import Iterator
 
 import torch
 import torch.nn.functional as F
@@ -231,6 +232,14 @@ class ForgeEngine:
             torch.cuda.empty_cache()
             torch.cuda.synchronize(self.device)
 
+    @staticmethod
+    def _clear_cuda_cache_static(device):
+        """Static version for use in classmethods (before an instance exists)."""
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(device)
+
     def _release_acceleration_resources(self):
         """Release CUDA graph / megakernel / flex-decoding / chunked-prefill
         resources that hold GPU memory independent of ``self.model``.
@@ -281,11 +290,11 @@ class ForgeEngine:
             description=description, triggers=triggers,
             priority=priority, source="model")
 
-    def library_set_enabled(self, enabled: bool):
+    def library_set_enabled(self, enabled: bool) -> None:
         """Enable/disable library lorebook injection globally."""
         self._library_enabled = enabled
 
-    def library_set_budget(self, tokens: int):
+    def library_set_budget(self, tokens: int) -> None:
         """Set the injection token budget (max tokens injected per request)."""
         self._library_injection_budget = tokens
 
@@ -341,7 +350,7 @@ class ForgeEngine:
             return None
         return ActivationConfig.from_kwargs(**params)
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         """Reset generation counters and diagnostics history.
 
         Useful for benchmarking: call before a measurement run to get
@@ -381,7 +390,7 @@ class ForgeEngine:
                         tokenizer_path: str | None = None,
                         device: str = "cuda",
                         auto_activate: bool = True,
-                        **kwargs):
+                        **kwargs) -> "ForgeEngine":
         """Build engine from a KeyStack checkpoint.
 
         Auto-checks VRAM capacity and picks the best loading strategy:
@@ -405,7 +414,14 @@ class ForgeEngine:
 
         ckpt_size = _checkpoint_size_cache.get(checkpoint)
         if ckpt_size is None:
-            ckpt_size = Path(checkpoint).stat().st_size
+            try:
+                ckpt_size = Path(checkpoint).stat().st_size
+            except OSError as e:
+                raise CheckpointError(
+                    f"Cannot access checkpoint '{checkpoint}': {e}",
+                    context={"checkpoint": checkpoint},
+                    suggestion="Verify the path exists and is a valid "
+                               "safetensors file or directory of shards.")
             with _ckpt_cache_lock:
                 _checkpoint_size_cache[checkpoint] = ckpt_size
                 while len(_checkpoint_size_cache) > _CKPT_CACHE_MAX:
@@ -418,15 +434,26 @@ class ForgeEngine:
         metadata = cls._read_checkpoint_metadata(checkpoint)
         is_prequant = metadata.get("_bitnet_prequant") == "1"
 
-        if is_prequant:
-            engine = cls._load_prequant(
-                cfg, checkpoint, tokenizer, device, metadata, **kwargs)
-        elif fits:
-            engine = cls._load_standard(
-                cfg, checkpoint, tokenizer, device, **kwargs)
-        else:
-            # Check if hybrid offload can bridge the gap
-            engine = cls._load_with_fallback(
+        engine = None
+        try:
+            if is_prequant:
+                engine = cls._load_prequant(
+                    cfg, checkpoint, tokenizer, device, metadata, **kwargs)
+            elif fits:
+                engine = cls._load_standard(
+                    cfg, checkpoint, tokenizer, device, **kwargs)
+            else:
+                # Check if hybrid offload can bridge the gap
+                engine = cls._load_with_fallback(
+                    cfg, checkpoint, tokenizer, device,
+                    ckpt_size, vram_free, **kwargs)
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            # If the primary load path fails (OOM, corrupt weights, etc.),
+            # fall through to the streaming path as a last resort.
+            print(f"  [ForgeEngine] Load path failed ({e}), "
+                  f"falling back to AirLLM streaming...")
+            cls._clear_cuda_cache_static(dev)
+            engine = cls._load_streaming(
                 cfg, checkpoint, tokenizer, device,
                 ckpt_size, vram_free, **kwargs)
 
@@ -809,15 +836,20 @@ class ForgeEngine:
                       f"{n_attn} attn + {n_conv} conv layers")
                 print("  [HybridOffload] Trying hybrid: attention on GPU, "
                       "conv on CPU...")
-                model = ModelLoader.build_model_fast(
-                    cfg, checkpoint_path=checkpoint, dtype=torch.bfloat16)
-                model = ModelLoader.hybrid_offload(
-                    model, gpu_layers=-1, device=device)
-                engine = cls(model, tokenizer, device=device,
-                             checkpoint_path=checkpoint, **kwargs)
-                engine._log("Hybrid offload active: conv layers on CPU, "
-                            "attention on GPU")
-                return engine
+                try:
+                    model = ModelLoader.build_model_fast(
+                        cfg, checkpoint_path=checkpoint, dtype=torch.bfloat16)
+                    model = ModelLoader.hybrid_offload(
+                        model, gpu_layers=-1, device=device)
+                    engine = cls(model, tokenizer, device=device,
+                                 checkpoint_path=checkpoint, **kwargs)
+                    engine._log("Hybrid offload active: conv layers on CPU, "
+                                "attention on GPU")
+                    return engine
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    print(f"  [HybridOffload] Failed ({e}), "
+                          f"falling back to AirLLM streaming...")
+                    cls._clear_cuda_cache_static(torch.device(device))
 
         # Fall back to full streaming
         return cls._load_streaming(
@@ -841,23 +873,40 @@ class ForgeEngine:
         return engine
 
     def _detect_keystack_features(self):
-        """Detect which KeyStack transforms are in the checkpoint."""
-        from safetensors import safe_open
+        """Detect which KeyStack transforms are in the checkpoint.
+
+        Degrades gracefully on I/O errors (missing/corrupt checkpoint):
+        returns empty features + metadata instead of crashing.
+        """
         features = []
-        ckpt = Path(self.checkpoint_path)
+        ckpt = Path(self.checkpoint_path) if self.checkpoint_path else None
         metadata = {}
-        if ckpt.is_dir():
-            shards = sorted(ckpt.glob("model-*.safetensors"))
-            if shards:
-                with safe_open(str(shards[0]), framework="pt") as f:
+        keys = set()
+        if ckpt is None or not ckpt.exists():
+            self._log("KeyStack feature detection skipped (no checkpoint)",
+                      level="warn")
+            self.keystack_features = features
+            self._checkpoint_metadata = metadata
+            return
+        try:
+            from safetensors import safe_open
+            if ckpt.is_dir():
+                shards = sorted(ckpt.glob("model-*.safetensors"))
+                if shards:
+                    with safe_open(str(shards[0]), framework="pt") as f:
+                        keys = set(f.keys())
+                        metadata = f.metadata() or {}
+            else:
+                with safe_open(str(ckpt), framework="pt") as f:
                     keys = set(f.keys())
                     metadata = f.metadata() or {}
-            else:
-                keys = set()
-        else:
-            with safe_open(self.checkpoint_path, framework="pt") as f:
-                keys = set(f.keys())
-                metadata = f.metadata() or {}
+        except (OSError, RuntimeError, ValueError, ImportError) as e:
+            self._log(
+                f"KeyStack feature detection failed: {e} — "
+                f"continuing with empty features", level="warn")
+            self.keystack_features = features
+            self._checkpoint_metadata = metadata
+            return
 
         if "value_residual_v0" in keys:
             features.append("value_residual")
@@ -882,7 +931,7 @@ class ForgeEngine:
 
     # ── Activation ────────────────────────────────────────────────────────
 
-    def activate_optimal(self, **overrides):
+    def activate_optimal(self, **overrides) -> None:
         """Activate with optimal settings for max VRAM efficiency + speed.
 
         Picks the best combination of strategies for the current hardware:
@@ -902,7 +951,7 @@ class ForgeEngine:
         config = ActivationConfig.optimal(**overrides)
         return self.activate_config(config)
 
-    def activate(self, **kwargs):
+    def activate(self, **kwargs) -> None:
         """Activate runtime strategies.
 
         All keyword arguments map directly to ``ActivationConfig`` fields.
@@ -928,7 +977,7 @@ class ForgeEngine:
         config = ActivationConfig.from_kwargs(**kwargs)
         self.activate_config(config)
 
-    def activate_config(self, config: ActivationConfig):
+    def activate_config(self, config: ActivationConfig) -> None:
         """Activate runtime strategies from an ``ActivationConfig``.
 
         This is the primary activation path — ``activate()`` and
@@ -983,6 +1032,24 @@ class ForgeEngine:
             self.progressive_kv = ProgressiveKV(anchor_bits=8, residual_bits=8)
             self._log(f"ProgressiveKV active: {self.progressive_kv.info()}")
 
+    # Fallback order for KV cache init failures (OOM, unsupported backend, etc.)
+    _KV_FALLBACK_CHAIN = {
+        "rotorquant": ["s4r", "hadamard_int4", "standard", "cpu_offload"],
+        "hadamard_int4": ["s4r", "standard", "cpu_offload"],
+        "paged": ["s4r", "standard", "cpu_offload"],
+        "compressed": ["s4r", "standard", "cpu_offload"],
+        "snapkv": ["s4r", "standard", "cpu_offload"],
+        "snapkv_4bit": ["s4r", "standard", "cpu_offload"],
+        "paged_eviction": ["s4r", "standard", "cpu_offload"],
+        "xquant": ["s4r", "standard", "cpu_offload"],
+        "hqe_kv": ["s4r", "standard", "cpu_offload"],
+        "spectral": ["s4r", "standard", "cpu_offload"],
+        "s4r": ["standard", "cpu_offload"],
+        "standard": ["cpu_offload"],
+        "cpu_offload": [],
+        "streaming": [],
+    }
+
     def _activate_kv_cache(self, kv_cache, kv_cache_tokens):
         cfg = getattr(self.model, "config", None)
         n_heads = getattr(cfg, "n_heads", 12)
@@ -1014,13 +1081,36 @@ class ForgeEngine:
             except Exception as e:
                 self._log(f"VRAM-aware KV sizing skipped: {e}", level="warn")
 
-        self.kv_cache = build_kv_cache(kv_cache)
-        self.kv_cache.init(n_heads, head_dim, n_kv, max_seq,
-                           str(self.device), self.dtype)
-        # Track active KV bits for OOM-recovery fallback (s4r 4-bit, etc.)
-        self._active_kv_bits = getattr(self.kv_cache, "bits", 8)
-        self._active_kv_cache_name = kv_cache
-        self._log(f"KV cache: {self.kv_cache.info()}")
+        # Try the requested KV cache, then fall back through progressively
+        # simpler caches on OOM or unsupported-backend errors.
+        chain = [kv_cache] + self._KV_FALLBACK_CHAIN.get(kv_cache, ["standard"])
+        last_error = None
+        for try_cache in chain:
+            try:
+                self.kv_cache = build_kv_cache(try_cache)
+                self.kv_cache.init(n_heads, head_dim, n_kv, max_seq,
+                                   str(self.device), self.dtype)
+                # Track active KV bits for OOM-recovery fallback (s4r 4-bit, etc.)
+                self._active_kv_bits = getattr(self.kv_cache, "bits", 8)
+                self._active_kv_cache_name = try_cache
+                if try_cache != kv_cache:
+                    self._log(
+                        f"KV cache fallback: '{kv_cache}' failed, "
+                        f"using '{try_cache}' instead", level="warn")
+                self._log(f"KV cache: {self.kv_cache.info()}")
+                return
+            except (torch.cuda.OutOfMemoryError, RuntimeError, ImportError,
+                    ValueError) as e:
+                last_error = e
+                self._log(
+                    f"KV cache '{try_cache}' init failed: {e}",
+                    level="warn")
+                self._clear_cuda_cache()
+        # All fallbacks failed — this should be extremely rare
+        raise ActivationError(
+            f"All KV cache strategies failed (last: {last_error})",
+            context={"requested": kv_cache, "tried": chain},
+            suggestion="Try kv_cache='cpu_offload' or reduce max_seq_len.")
 
     def _activate_decoding(self, decoding):
         decode_kwargs = {}
@@ -1128,7 +1218,7 @@ class ForgeEngine:
         self._chunked_prefill = None
         if (feature_flags["use_chunked_prefill"]
                 and not feature_flags["use_hybrid_prefill"]):
-            from research.inference.prefill.chunked_prefill import ChunkedPrefiller
+            from research.inference.prefill import ChunkedPrefiller
             self._chunked_prefill = ChunkedPrefiller(
                 self.model, chunk_size=512, device=str(self.device))
             self._log("Chunked prefill: active (chunk_size=512)")
@@ -1193,8 +1283,56 @@ class ForgeEngine:
         except Exception as e:
             self._log(f"Warmup: skipped ({e})", level="warn")
 
+    # Fallback order: if a quantization mode fails, try the next lower one.
+    _QUANT_FALLBACK_CHAIN = {
+        "nvfp4": ["w8a8", "fp8", "int8", "int4", None],
+        "w8a8": ["fp8", "int8", "int4", None],
+        "fp8": ["int8", "int4", None],
+        "int8": ["int4", None],
+        "int4": [None],
+        None: [],
+    }
+
     def _apply_quantization(self, mode: str):
-        """Apply weight-only quantization."""
+        """Apply weight-only quantization with automatic fallback.
+
+        If the requested mode fails (unsupported hardware, OOM, ImportError),
+        falls back through progressively lower-bit modes, finally to
+        unquantized bf16. Never leaves the model in a broken state.
+        """
+        chain = [mode] + self._QUANT_FALLBACK_CHAIN.get(mode, [None])
+        last_error = None
+        for try_mode in chain:
+            if try_mode is None:
+                self._log(
+                    f"Quantization '{mode}' failed; falling back to "
+                    f"unquantized bf16 (no compression)",
+                    level="warn")
+                if last_error:
+                    self._log(f"  Last error: {last_error}", level="warn")
+                return  # leave model unquantized
+            try:
+                self._apply_quantization_single(try_mode)
+                if try_mode != mode:
+                    self._log(
+                        f"Quantization fallback: '{mode}' failed, "
+                        f"using '{try_mode}' instead", level="warn")
+                return
+            except (ImportError, RuntimeError, ValueError,
+                    torch.cuda.OutOfMemoryError) as e:
+                last_error = e
+                self._log(
+                    f"Quantization '{try_mode}' failed: {e}",
+                    level="warn")
+                self._clear_cuda_cache()
+        # Should not reach here (chain always ends with None), but just in case:
+        raise ConfigurationError(
+            f"All quantization modes failed for '{mode}'",
+            context={"mode": mode, "last_error": str(last_error)},
+            suggestion="Try quantize=None to run unquantized.")
+
+    def _apply_quantization_single(self, mode: str):
+        """Apply a single quantization mode (no fallback). Raises on failure."""
         if mode == "int8":
             from research.quantization.inference_quant import quantize_model_int8
             fast = torch.cuda.is_available()
@@ -1290,6 +1428,15 @@ class ForgeEngine:
                 output. Set to False for tool-call parsing (preserves
                 <|tool_call_start|>/<|tool_call_end|> markers).
         """
+        return self._generate_with_oom_recovery(
+            self._generate_impl, prompt, max_new_tokens, temperature,
+            top_p, top_k, repetition_penalty, finish_sentence,
+            context_limit, skip_special_tokens)
+
+    def _generate_impl(self, prompt, max_new_tokens, temperature, top_p,
+                       top_k, repetition_penalty, finish_sentence,
+                       context_limit, skip_special_tokens) -> str:
+        """Internal generate implementation (no OOM wrapper)."""
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
@@ -1899,7 +2046,7 @@ class ForgeEngine:
         skip_special_tokens: bool = True,
         logits_processor=None,
         eos_token_ids: list[int] | None = None,
-    ):
+    ) -> Iterator[str]:
         """Token-by-token streaming generator.
 
         Yields decoded text chunks (one per generated token) as they are
@@ -2394,7 +2541,7 @@ class ForgeEngine:
 
     # ── Sleep / wake ──────────────────────────────────────────────────────
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1) -> None:
         """Release GPU memory by offloading model weights.
 
         Level 1 (default): Move weights to CPU RAM. Fast wake (~2-3s).
@@ -2439,7 +2586,7 @@ class ForgeEngine:
         else:
             self._log("Sleep level 2: weights discarded")
 
-    def wake(self):
+    def wake(self) -> None:
         """Restore model to GPU and resume inference.
 
         Level 1 wake: CPU→GPU copy (~2-3s). Preserves all strategies.
@@ -2527,13 +2674,13 @@ class ForgeEngine:
         """
         return self._recovery.recover()
 
-    def clear_recovery(self):
+    def clear_recovery(self) -> None:
         """Remove all crash recovery files from disk."""
         self._recovery.clear()
 
     # ── Session-aware generation ────────────────────────────────────────
 
-    def begin_session(self, session_id: str, ttl: float | None = None):
+    def begin_session(self, session_id: str, ttl: float | None = None) -> None:
         """Start a new generation session with persistent KV cache.
 
         Sessions maintain KV cache state across multiple ``continue_session``
@@ -2608,7 +2755,7 @@ class ForgeEngine:
         self._record_generation(len(generated_ids))
         return result
 
-    def pin_session(self, session_id: str, ttl: float | None = None):
+    def pin_session(self, session_id: str, ttl: float | None = None) -> None:
         """Pin a session's KV cache to prevent eviction during tool calls.
 
         Args:
@@ -2618,11 +2765,11 @@ class ForgeEngine:
         """
         self._session_cache.pin_session(session_id, ttl)
 
-    def unpin_session(self, session_id: str):
+    def unpin_session(self, session_id: str) -> None:
         """Unpin a session (allow eviction again)."""
         self._session_cache.unpin_session(session_id)
 
-    def end_session(self, session_id: str):
+    def end_session(self, session_id: str) -> None:
         """End a session and release its KV cache."""
         self._session_cache.end_session(session_id)
 

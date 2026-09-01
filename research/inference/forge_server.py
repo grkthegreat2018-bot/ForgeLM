@@ -369,7 +369,7 @@ class ForgeServer:
 
     def __init__(self, registry: ModelRegistry | None = None,
                  batch_window_ms: int = 50, max_batch_size: int = 8,
-                 max_sessions: int = 64):
+                 max_sessions: int = 64) -> None:
         # ── GPU device selection + contention guard ───────────────────────
         self._gpu_lock_file = None
         self._setup_gpu()
@@ -479,14 +479,14 @@ class ForgeServer:
 
     def register(self, model_id: str, checkpoint: str, config_name: str,
                  tokenizer_path: str | None = None,
-                 vram_budget_gb: float = 0, **kwargs):
+                 vram_budget_gb: float = 0, **kwargs) -> None:
         """Register a model with the registry."""
         tok_path = tokenizer_path or str(LFM25_HF_DIR)
         self.registry.register(
             model_id, checkpoint, config_name,
             tokenizer_path=tok_path, vram_budget_gb=vram_budget_gb, **kwargs)
 
-    def serve(self, host: str = "0.0.0.0", port: int = 8000):
+    def serve(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         """Start the HTTP server (blocking)."""
         self.batch_queue.start()
         print(f"\n  {'='*60}")

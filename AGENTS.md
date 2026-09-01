@@ -106,6 +106,35 @@ unless the user explicitly overrides them for a specific task.
 - **Pre-existing test failures** (not caused by refactor):
   `test_novel_quant.py` (2 device-mismatch bugs in `novel_quant.py`),
   `test_evolution_domains.py` (1 missing `final_loss` key in training_sim).
+  **FIXED 2026-09-01**: all 3 now pass. `novel_quant.py` test generators
+  now use `device=W.device` for sign tensors. `training_sim.py`
+  `optimizer_simulate` now returns `final_loss` in metrics dict.
+
+#### Refactor 2026-09-01: Engine fallbacks + file merges + API cleanup
+- **Engine fallback chains added** (`forge_engine.py`):
+  - `_apply_quantization`: fallback chain (nvfp4→w8a8→fp8→int8→int4→bf16)
+  - `_activate_kv_cache`: fallback chain (rotorquant→s4r→standard→cpu_offload)
+  - `generate()`: now wrapped with `_generate_with_oom_recovery` (was only
+    on `generate_raw`)
+  - `_detect_keystack_features`: degrades to empty features on I/O errors
+  - `from_checkpoint`: wraps `Path.stat()` with `CheckpointError`, falls
+    through load paths (standard→hybrid→streaming) on OOM/RuntimeError
+  - `_load_with_fallback`: hybrid offload failure now falls through to
+    AirLLM streaming instead of crashing
+  - `_clear_cuda_cache_static`: static version for classmethods
+- **File merges** (10 files → 4):
+  - `inference/position/lerope.py` + `rope_id.py` → `position/__init__.py`
+  - `inference/prefill/chunked_prefill.py` + `hybrid_prefill.py` → `prefill/__init__.py`
+  - `training_free/urial.py` + `decoder.py` + `reflexion.py` + `rain.py` → `training_free/__init__.py`
+  - `moe/keyword_router.py` + `semantic_router.py` → `moe/routers.py`
+- **API type annotations added**:
+  - `ForgeEngine.from_checkpoint -> ForgeEngine`, `activate* -> None`,
+    `generate_stream -> Iterator[str]`, lifecycle methods `-> None`
+  - `ForgeServer.__init__/register/serve -> None`
+  - `ModelLoader.build_model_fast/build_model -> ConfigurableResearchLLM`,
+    `load_default_model -> tuple[ConfigurableResearchLLM, Any]`,
+    `flash_attention/varlen_attention -> torch.Tensor`
+- **Test results**: 1077 passed, 3 skipped, 0 failed (was 1074+3 failed)
 
 ### F. Math Thinking + Script Testing â€” Find The True Optimum
 - **Every optimization claim must be backed by a number from a script**,

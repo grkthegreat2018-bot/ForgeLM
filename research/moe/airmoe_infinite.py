@@ -52,7 +52,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from research.moe.keyword_router import KeywordRouter
+from research.moe.routers import KeywordRouter
 
 try:
     from loguru import logger as _log
@@ -151,7 +151,7 @@ class InfiniteAirMoE:
         # Initialize before try so it's always defined for n_layers below.
         manifest_data: dict = {}
         try:
-            from research.moe.semantic_router import SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS
+            from research.moe.routers import SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS
             # Build topic descriptions from manifest topics (use cached manifest)
             manifest_data = ExpertRouter._manifest_cache.get(str(manifest_path))
             if manifest_data is None:

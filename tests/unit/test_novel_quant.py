@@ -548,8 +548,8 @@ def test_r15_hadamard_invariance():
     # Per-block kurtosis before and after rotation
     from research.inference.quant.novel_quant import _hadamard_matrix
     Q = _hadamard_matrix(1024, W.device, W.dtype)
-    g = torch.Generator().manual_seed(42)
-    signs = torch.where(torch.rand(1024, generator=g) > 0.5, 1.0, -1.0)
+    g = torch.Generator(device=W.device).manual_seed(42)
+    signs = torch.where(torch.rand(1024, generator=g, device=W.device) > 0.5, 1.0, -1.0)
     Q = Q * signs.unsqueeze(0)
     W_rot = W @ Q
 
@@ -586,8 +586,8 @@ def test_r15_combined():
     # Apply rotation, then HW-FP4 with mean-subtraction on rotated weights
     from research.inference.quant.novel_quant import _hadamard_matrix
     Q = _hadamard_matrix(1024, W.device, W.dtype)
-    g = torch.Generator().manual_seed(42)
-    signs = torch.where(torch.rand(1024, generator=g) > 0.5, 1.0, -1.0)
+    g = torch.Generator(device=W.device).manual_seed(42)
+    signs = torch.where(torch.rand(1024, generator=g, device=W.device) > 0.5, 1.0, -1.0)
     Q = Q * signs.unsqueeze(0)
     W_rot = W @ Q
     # SAAS on rotated

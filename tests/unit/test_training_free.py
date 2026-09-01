@@ -14,7 +14,7 @@ from research.training_free import (
     TrainingFreeSolver,
     build_prompt,
 )
-from research.training_free.reflexion import make_template_reflection
+from research.training_free import make_template_reflection
 
 
 @pytest.fixture(scope="module")

@@ -11,7 +11,7 @@ import pytest
 
 from research.moe.airmoe_hotswap import TopicRouter
 from research.moe.airmoe_infinite import ExpertRouter
-from research.moe.keyword_router import KeywordRouter
+from research.moe.routers import KeywordRouter
 
 # ── KeywordRouter base ───────────────────────────────────────────────────────
 

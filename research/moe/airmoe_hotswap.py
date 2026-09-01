@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from research.moe.keyword_router import KeywordRouter
+from research.moe.routers import KeywordRouter
 
 try:
     from loguru import logger as _log
