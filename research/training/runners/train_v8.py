@@ -1,8 +1,8 @@
-"""V8 training runner — a fork of train_8b_all.py for the ForgeLM V8-8B model.
+"""V10 training runner — a fork of train_8b_all.py for the ForgeLM V10 model.
 
 Adds 5 warm-start modes (scratch, lora-seed, dlora-warmstart, hypercloning,
 ligo), ETA projection, rolling checkpoint retention, resume bundles, VRAM
-preflight, and NaN guards on top of the V7-8B training path.
+preflight, and NaN guards on top of the V10 training path.
 
 The shared primitives (freeze_dead_params_, snapshot_state, compute_loss,
 autocast_ctx, forward_model, lr_at, build_model, etc.) are imported from
@@ -100,7 +100,7 @@ def _format_eta(seconds: float) -> str:
 # ─────────────────────────── rolling checkpoint writer ────────────────────
 
 class CheckpointWriter:
-    """Rolling checkpoint retention for V8 step checkpoints.
+    """Rolling checkpoint retention for V10 step checkpoints.
 
     Keeps only the newest `keep` files matching ``{prefix}_step*.safetensors``
     (or ``{prefix}_step*.pt``) in `ckpt_dir`. Older checkpoints are deleted.
@@ -262,7 +262,7 @@ def nan_guard_step(opt, loss, step) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="V8-8B training runner (fork of train_8b_all.py)")
+        description="V10 training runner (fork of train_8b_all.py)")
     parser.add_argument("--mode", choices=list(WARMSTART_MODES), default="scratch",
                         help="warm-start mode (scratch = from random init)")
     parser.add_argument("--steps", type=int, default=1000)
@@ -279,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--val-every", type=int, default=0)
     parser.add_argument("--val-batches", type=int, default=25)
-    parser.add_argument("--config", type=str, default="forgelm_v8_8b")
+    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b")
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--datasets", type=str, default="all")
@@ -299,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-flce", action="store_true")
     parser.add_argument("--allow-spill", action="store_true")
     parser.add_argument("--keep-checkpoints", type=int, default=3)
-    parser.add_argument("--ckpt-prefix", type=str, default="ForgeLM_V8")
+    parser.add_argument("--ckpt-prefix", type=str, default="ForgeLM_V10")
     parser.add_argument("--ckpt-dir", type=str, default=str(CKPT_DIR))
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--eval-only", action="store_true")
@@ -311,7 +311,7 @@ def parse_args() -> argparse.Namespace:
 def run(args: argparse.Namespace) -> None:
     """Main training loop entry point.
 
-    This wires the V8 warm-start modes onto the V7-8B training path. The
+    This wires the V10 warm-start modes onto the V10 training path. The
     heavy lifting (data loading, BAdam scheduling, checkpointing) is shared
     with train_8b_all.run; here we add mode-specific init and the ETA /
     NaN-guard / rolling-ckpt / resume-bundle features.

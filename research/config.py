@@ -19,6 +19,9 @@ class ModelConfig:
     n_kv_heads: int | None = None     # KV heads for GQA (None = MHA)
     intermediate_size: int | None = None  # FFN hidden dim (None = 8*d/3)
     attn_bias: bool = False
+    norm_eps: float = 1e-6  # RMSNorm epsilon (LFM2.5 uses 1e-5)
+    use_embed_norm: bool = False  # Norm after embedding (LFM2.5 has this, standard models don't)
+    use_final_norm: bool = True  # Final norm before head (LFM2.5 doesn't have this)
     rope_base: float = 1_000_000.0  # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
     # YaRN RoPE scaling for context extension. None = no scaling.
     rope_scaling: dict | None = None
@@ -281,8 +284,8 @@ class ModelConfig:
     # Community: Liger-Kernel 20% throughput, 60% VRAM; Unsloth 2-5x.
     use_triton_kernels: bool = False
     # Triton kernel block sizes (tuned for SM120 GDDR7 bandwidth).
-    # RMSNorm: block = d_model (4096 for V7, 2048 for lfm25).
-    # SwiGLU: block = intermediate_size (16384 for V7, 8192 for lfm25).
+    # RMSNorm: block = d_model (2048 for V10).
+    # SwiGLU: block = intermediate_size (8192 for V10).
     triton_rms_block_size: int = 4096
     triton_swiglu_block_size: int = 16384
     # APOLLO optimizer: SVD-free random-projection gradient scaling.
@@ -336,6 +339,31 @@ class ModelConfig:
     # NLRQ (12.8x) × hash (4-16x) = 50-100x total FFN compression.
     use_hashed_nlrq: bool = False
     hashed_nlrq_compression: float = 8.0  # hash compression factor
+
+    # === R&D Round 24: SpectralKV + BitNetResidual (2026-08-30) ===
+    # SpectralKV: Fourier-basis KV cache with O(1) memory per token.
+    # Validated on real LFM2.5 weights: 63× compression at 0.095 error.
+    # Selected via ActivationConfig.kv_cache="spectral" at inference time.
+    use_spectral_kv: bool = False  # config flag (also selectable at inference)
+    spectral_kv_max_freq: int = 64  # Fourier frequencies (more = lower error)
+    spectral_kv_sink_size: int = 4  # full-precision sink tokens
+    # BitNetResidual: ternary weights + element-level dense residual.
+    # Validated on real LFM2.5 weights: 0.33 error at 1.8× compression.
+    # Replaces pure BitNet (0.80 error) and NLRQ rank-1024 (1.4 error).
+    use_bitnet_residual: bool = False
+    bitnet_residual_frac: float = 0.10  # fraction of elements kept dense
+    bitnet_residual_type: str = "element"  # "element" (validated best)
+
+    # === R&D Round 26: IRI-FP4 Lossless Weight Quantization (2026-08-31) ===
+    # IRI-FP4: Iterative Residual FP4. Per-block MSE-optimal scale + iterative
+    # residual refinement. Validated on real LFM2.5 + Qwen 2.5 weights:
+    #   - x1 (4.5 bits/w, 20.7 dB SQNR): +50.8% PPL — too lossy
+    #   - x2 (9.0 bits/w, 41.6 dB SQNR): -0.4% PPL — LOSSLESS, 3.5x vs fp32
+    #   - x3 (13.6 bits/w, 62.6 dB SQNR): +0.1% PPL — overkill
+    # V10 uses x2: 3.5x compression, near-lossless, no QAT needed.
+    use_iri_fp4: bool = False
+    iri_fp4_rounds: int = 2        # 2 rounds = 9.0 bits/w, 41.6 dB SQNR, lossless
+    iri_fp4_block_size: int = 32   # block size for per-block scale
     # Gradient checkpointing: recompute forward during backward to save VRAM.
     use_gradient_checkpointing: bool = False
     # Selective checkpoint strategy: "all" (full block), "ffn" (recompute only
@@ -403,36 +431,6 @@ class ModelConfig:
 
 # Pre-defined architecture targets.
 MODEL_CONFIGS = {
-    # LFM2.5-1.2B-Instruct port: exact architectural match to LiquidAI's model.
-    #   - 16 layers: 10 double-gated conv + 6 GQA attention (layers 2,5,8,10,12,14)
-    #   - d_model=2048, 32 heads, 8 KV heads (GQA 4x), head_dim=64
-    #   - SwiGLU FFN (intermediate=8192), RMSNorm, QK-layernorm on attention
-    #   - RoPE theta=1M, 128K context (32K for VRAM budget)
-    #   - Vocab=65536, tied embeddings
-    # Weights ported directly from LFM2.5-1.2B-Instruct safetensors — 100%
-    # weight preservation, no SVD resize, no dimension mismatch.
-    # Our keys (mHC, MTP, Safety, PIT) plug in with zero/identity init.
-    "lfm25_1.2b": ModelConfig(
-        vocab_size=65536,
-        d_model=2048,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        intermediate_size=8192,
-        attn_type="gqa",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,          # LFM2.5 original: 1M (reference port, do not change)
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
-                     "conv", "conv", "attention", "conv", "attention", "conv",
-                     "attention", "conv", "attention", "conv"],
-        batch_size=2,
-        seq_len=1024,
-    ),
     # Tiny LFM2.5 for fast testing
     "lfm25_tiny": ModelConfig(
         vocab_size=256,
@@ -491,576 +489,70 @@ MODEL_CONFIGS = {
         min_lr=1e-4,
     ),
 
-    # Tiny ForgeLM V7 for end-to-end testing of the 8B cloud training path.
-    # Has ALL 8B features (MTP, BitNet, NLRQ, GTA, TITAN, MoD, MHC, AttnRes,
-    # value_residual, factorized embeddings, PIT) at a tiny size that fits
-    # in <1GB VRAM. Uses the real LFM2.5 tokenizer (vocab=65536) so sft_train.py
-    # can run end-to-end with real tokenization. For testing dead-param freeze,
-    # NLRQ STE factor training, from-scratch init, BAdam, and checkpoint save/load.
-    "forgelm_v7_tiny": ModelConfig(
+
+    # ForgeLM V10-1.2B: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quant.
+    # Same dimensions as V9 (d_model=2048, 16 layers) for 1:1 architecture compat.
+    # V10 replaces V9's BitNetResidual (ternary, catastrophic post-training PPL)
+    # with IRI-FP4 x2 (9.0 bits/w, 41.6 dB SQNR, -0.4% PPL — near-lossless).
+    #
+    # V10 advantages over V9:
+    #   - 3.5x weight compression vs fp32 (IRI-FP4 x2 at 9.0 bits/w)
+    #   - NEAR-LOSSLESS: 41.6 dB SQNR, -0.4% PPL delta (V9 ternary = catastrophic)
+    #   - No QAT/fine-tuning needed (V9 BitNetResidual needs QAT to recover)
+    #   - Same SpectralKV 63x KV cache compression (carried from V9)
+    #
+    # Memory: 1.2B params * 9.0 bits/w / 8 = ~1.35 GB weights (vs 2.61 GB bf16)
+    # Full model with KV cache: ~1.8 GB total (fits any GPU)
+    # ──────────────────────────────────────────────────────────────────────
+    "forgelm_v10_1.2b": ModelConfig(
         vocab_size=65536,
-        d_model=128,
-        n_layers=4,
-        n_heads=4,
-        n_kv_heads=2,
-        intermediate_size=256,
-        attn_type="gta",
+        d_model=2048,
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        intermediate_size=8192,
+        attn_type="gqa",
         attn_bias=False,
         ffn_type="swiglu",
         norm_type="rmsnorm",
+        norm_eps=1e-5,
+        use_embed_norm=False,
+        use_final_norm=True,
         rope_base=1_000_000.0,
-        max_seq_len=128,
-        use_qk_norm=True,
-        # ── V7 keys (all 8B features) ──
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        ffn_compression="nlrq",
-        nlrq_rank=32,
-        nlrq_factor_bits=8,
-        nlrq_use_residual=False,
-        use_mtp=True,
-        mtp_n_heads=2,
-        use_titan_memory=True,
-        titan_memory_rank=16,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_factorized_embeddings=True,
-        embed_factorized_rank=64,
-        use_pit=True,
-        zero_init_residual=True,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        # ── Disabled (need GPU or many layers) ──
-        use_triton_kernels=False,
-        use_varlen=False,
-        bitnet_int8_training=False,
-        use_gradient_checkpointing=False,
-        use_hyperloop=False,            # needs n_layers >= begin+end+1
-        use_lisa=False,
-        # ── Training ──
-        batch_size=2,
-        seq_len=64,
-        max_steps=20,
-        warmup_steps=5,
-        max_lr=1e-3,
-        min_lr=1e-4,
-    ),
-
-    # ══════════════════════════════════════════════════════════════════════
-    # V7: NLRQ-compressed 6-8B model (2026-08 R&D)
-    # ══════════════════════════════════════════════════════════════════════
-    # Scales V6 architecture to d_model=3072, 32 layers → ~7B dense params.
-    # NLRQ FFN compression (R&D winner: 12.8x CR, 1.3% error) cuts FFN params
-    # by 92%, bringing effective VRAM to ~2-3 GB for weights.
-    # All V6 keys preserved (GTA, BitNet, TITAN, MoD, mHC, AttnRes, MTP,
-    # Hyperloop, LiSA, factorized embedding, PIT, etc).
-    #
-    # Param budget (before NLRQ):
-    #   - Embedding: 65536 × 3072 = 201M (factorized: 65536×256 + 256×3072 = 17.5M)
-    #   - Attention: 32 layers × (4 × 3072² / 4 GQA) = 32 × 9.4M = 301M
-    #   - FFN: 32 layers × (2 × 3072 × 12288 + 12288 × 3072) = 32 × 226M = 7.2B
-    #   - Total dense: ~7.7B
-    #
-    # With NLRQ (rank=512, 8-bit factors):
-    #   - FFN: 32 × 3 × 512 × (12288 + 3072) × 8b = 32 × 3 × 24.6M bits = 296M bytes
-    #   - FFN compressed: ~0.3 GB (vs 14.4 GB dense)
-    #   - Total VRAM: ~2-3 GB (weights) + KV cache
-    #
-    # V7-Dense (forgelm_v7): 32-layer dense, NLRQ FFN, ~7B params → ~2.5 GB VRAM
-    # V7-MoE (forgelm_v7_moe): 32-layer MoE, NLRQ on shared expert, ~8B total
-    # ══════════════════════════════════════════════════════════════════════
-
-    # V7-Dense: 32-layer NLRQ-compressed model for high-capacity self-play.
-    # d_model=4096, 32 layers → ~7B dense params with NLRQ rank=1024.
-    # NLRQ FFN (rank=1024, 8-bit) → ~4-5 GB VRAM for weights.
-    "forgelm_v7": ModelConfig(
-        vocab_size=65536,
-        d_model=4096,                    # SCALED: 2048→4096 (2x wider)
-        n_layers=32,                    # SCALED: 24→32 (33% deeper)
-        n_heads=64,                     # 4096/64 = 64 heads
-        n_kv_heads=16,                  # GQA 4x (64/16)
-        intermediate_size=16384,        # 4x d_model (SwiGLU ratio)
-        attn_type="gta",                # Grouped-Tied Attention
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
         max_seq_len=32768,
         conv_kernel_size=3,
         use_qk_norm=True,
-        # ── BitNet: ternary weights ──
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_bitnet_embedding=True,
-        # ── Hardware efficiency ──
-        use_fused_gemm=True,
-        # ── 32-layer hybrid: conv/attention interleaved ──
-        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
-        # ── Memory & routing keys (all lossless at init) ──
-        use_titan_memory=True,
-        titan_memory_rank=128,           # scaled with d_model
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,                     # auto = d_model // 4 = 1024
-        use_attn_residual=True,
-        attn_res_k=4,
-        # ── V5.1 architecture keys ──
-        use_mtp=True,
-        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
-        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        use_swiglu_clamp=True,
-        swiglu_clamp_alpha=1.702,
-        swiglu_clamp_limit=7.0,
-        rope_variant="lerope",
-        # ── V6 keys ──
-        use_pit=True,
+        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
+                     "conv", "conv", "attention", "conv", "attention",
+                     "conv", "attention", "conv", "attention", "conv"],
+        # ── V10 NEW: IRI-FP4 lossless weight quantization (R26) ──
+        use_iri_fp4=True,
+        iri_fp4_rounds=2,              # 2 rounds = 9.0 bits/w, 41.6 dB SQNR, lossless
+        iri_fp4_block_size=32,
+        # ── V9 carried: SpectralKV (inference-time, no checkpoint change) ──
+        use_spectral_kv=True,
+        spectral_kv_max_freq=64,
+        spectral_kv_sink_size=4,
+        # ── No BitNet/BitNetResidual (replaced by IRI-FP4) ──
+        use_bitnet_residual=False,
+        use_bitnet=False,
+        use_bitnet_embedding=False,
+        ffn_compression="none",
+        nlrq_rank=0,
+        use_hashed_nlrq=False,
+        use_factorized_embeddings=False,
+        embed_factorized_rank=0,
+        use_pit=False,
         zero_init_residual=True,
-        # ── V7 NEW: NLRQ FFN compression (R&D winner) ──
-        ffn_compression="nlrq",
-        nlrq_rank=768,                 # balanced: 8B dense equiv, fits 12GB
-        nlrq_factor_bits=8,
-        nlrq_use_residual=False,        # pure NLRQ (12.8x CR, 1.3% error)
-        nlrq_residual_group_size=128,
-        nlrq_use_hadamard=False,              # HINT4: enable for 2x FFN compression (needs quality validation)
-        use_peagle_tied=True,                # Tied PEAGLE: 958MB → 135MB draft head
-        peagle_lora_rank=32,
-        # ── Hyperloop: 4 begin + 4 end + looped middle ──
-        use_hyperloop=True,
-        hyperloop_begin=4,
-        hyperloop_end=4,
-        hyperloop_loop_iters=3,
-        # ── LiSA ──
-        use_lisa=True,
-        lisa_compress=6,
-        lisa_align_dim=0,               # auto = d_model // 4 = 1024
-        # ── Factorized embedding ──
-        use_factorized_embeddings=True,
-        embed_factorized_rank=512,      # scaled with d_model
-        # ── Training optimizations ──
-        use_gradient_checkpointing=True,
-        selective_gradient_checkpointing="ffn",
-        use_chunked_ce=True,
-        ce_chunk_size=256,
-        entropy_alpha=0.5,
-        use_smooth_swiglu=True,
-        use_mu_scaling=True,
-        # ── R&D round 14: training speedup features ──
-        use_varlen=True,                    # varlen attention for packed sequences
-        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
-        triton_rms_block_size=4096,         # d_model for V7
-        triton_swiglu_block_size=16384,     # intermediate_size for V7
         # ── Training hyperparams ──
         batch_size=1,
-        seq_len=1024,
-        max_steps=5000,
-        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
-        max_lr=2e-4,
-        min_lr=2e-5,
-    ),
-
-    # ════════════════════════════════════════════════════════════════════
-    # V7-8B variants: increased capacity for self-play fine-tuning.
-    # Both fit 12GB RTX 5070 with BAdam (block-wise training).
-    # ════════════════════════════════════════════════════════════════════
-
-    # V7-8B-B: Dense 8B params for coding/reasoning. No NLRQ — full FFN capacity.
-    # BitNet b1.58 int8 trainable storage: 8GB weights on GPU, 16GB bf16 master on CPU.
-    # BAdam block-wise training: ~11GB GPU total. 8.02B real params.
-    "forgelm_v7_8b_b": ModelConfig(
-        vocab_size=65536,
-        d_model=4096,
-        n_layers=32,
-        n_heads=64,
-        n_kv_heads=16,
-        intermediate_size=16384,
-        attn_type="gta",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_bitnet_embedding=True,
-        use_fused_gemm=True,
-        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
-        use_titan_memory=True,
-        titan_memory_rank=128,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        use_mtp=True,
-        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
-        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        use_swiglu_clamp=True,
-        swiglu_clamp_alpha=1.702,
-        swiglu_clamp_limit=7.0,
-        rope_variant="lerope",
-        use_pit=True,
-        zero_init_residual=True,
-        ffn_compression="none",         # DENSE FFN: 8B real params (was "nlrq")
-        nlrq_rank=0,                    # disabled (was 1024)
-        nlrq_factor_bits=8,
-        nlrq_use_residual=False,
-        nlrq_residual_group_size=128,
-        use_hyperloop=True,
-        hyperloop_begin=4,
-        hyperloop_end=4,
-        hyperloop_loop_iters=3,
-        use_lisa=True,
-        lisa_compress=6,
-        lisa_align_dim=0,
-        use_factorized_embeddings=True,
-        embed_factorized_rank=512,
-        use_gradient_checkpointing=True,
-        selective_gradient_checkpointing="ffn",
-        use_chunked_ce=True,
-        ce_chunk_size=256,
-        entropy_alpha=0.5,
-        use_smooth_swiglu=True,
-        use_mu_scaling=True,
-        # ── R&D round 14: training speedup features ──
-        use_varlen=True,                    # varlen attention for packed sequences
-        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
-        triton_rms_block_size=4096,         # d_model for V7
-        triton_swiglu_block_size=16384,     # intermediate_size for V7
-        # ── R&D round 15: int8 trainable storage for 8B on 12GB ──
-        bitnet_int8_training=True,          # int8 weights on GPU, bf16 master on CPU
-        batch_size=1,
-        seq_len=1024,
-        max_steps=5000,
-        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
-        max_lr=2e-4,
-        min_lr=2e-5,
-    ),
-
-    # V7-8B-D: More depth (32→48 layers), same NLRQ rank=768.
-    # More layers = better reasoning for self-play. 9.23 GB storage.
-    # BAdam training: 10.83 GB. Tight but fits 12GB.
-    "forgelm_v7_8b_d": ModelConfig(
-        vocab_size=65536,
-        d_model=4096,
-        n_layers=48,                    # INCREASED: 32→48 (50% deeper)
-        n_heads=64,
-        n_kv_heads=16,
-        intermediate_size=16384,
-        attn_type="gta",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_bitnet_embedding=True,
-        use_fused_gemm=True,
-        # 48 layers: 16 conv/attention cycles + 0 extra attention
-        layer_types=["conv", "conv", "attention"] * 16,
-        use_titan_memory=True,
-        titan_memory_rank=128,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        use_mtp=True,
-        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
-        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        use_swiglu_clamp=True,
-        swiglu_clamp_alpha=1.702,
-        swiglu_clamp_limit=7.0,
-        rope_variant="lerope",
-        use_pit=True,
-        zero_init_residual=True,
-        ffn_compression="nlrq",
-        nlrq_rank=768,                 # Same as V7 base
-        nlrq_factor_bits=8,
-        nlrq_use_residual=False,
-        nlrq_residual_group_size=128,
-        use_hyperloop=True,
-        hyperloop_begin=4,             # 4 begin + 4 end + looped middle (48-8=40, /3≈13 iters)
-        hyperloop_end=4,
-        hyperloop_loop_iters=13,
-        use_lisa=True,
-        lisa_compress=6,
-        lisa_align_dim=0,
-        use_factorized_embeddings=True,
-        embed_factorized_rank=512,
-        use_gradient_checkpointing=True,
-        selective_gradient_checkpointing="ffn",
-        use_chunked_ce=True,
-        ce_chunk_size=256,
-        entropy_alpha=0.5,
-        use_smooth_swiglu=True,
-        use_mu_scaling=True,
-        # ── R&D round 14: training speedup features ──
-        use_varlen=True,                    # varlen attention for packed sequences
-        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
-        triton_rms_block_size=4096,         # d_model for V7
-        triton_swiglu_block_size=16384,     # intermediate_size for V7
-        batch_size=1,
-        seq_len=1024,
-        max_steps=5000,
-        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
-        max_lr=2e-4,
-        min_lr=2e-5,
-    ),
-
-    # V7-MoE: 32-layer MoE with NLRQ on shared expert.
-    # ~8B total params (8 experts top-2 + shared), ~2B active.
-    # NLRQ compresses the shared expert; routed experts use AirMoE disk offload.
-    "forgelm_v7_moe": ModelConfig(
-        vocab_size=65536,
-        d_model=4096,
-        n_layers=32,
-        n_heads=64,
-        n_kv_heads=16,
-        intermediate_size=16384,
-        attn_type="gta",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,          # LFM2.5 base: 1M (evolution 10M was synthetic-only, reverted)
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_bitnet_embedding=True,
-        use_fused_gemm=True,
-        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
-        use_titan_memory=True,
-        titan_memory_rank=96,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        use_mtp=True,
-        mtp_n_heads=4,                  # evolution: 4 heads (was 2)
-        mtp_loss_weight=0.495,          # evolution: 0.495 (was 0.3)
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        use_swiglu_clamp=True,
-        swiglu_clamp_alpha=1.702,
-        swiglu_clamp_limit=7.0,
-        rope_variant="lerope",
-        use_pit=True,
-        zero_init_residual=True,
-        # NLRQ on shared expert only (routed experts offloaded to disk)
-        ffn_compression="none",         # MoE replaces FFN
-        use_hyperloop=True,
-        hyperloop_begin=4,
-        hyperloop_end=4,
-        hyperloop_loop_iters=3,
-        use_lisa=True,
-        lisa_compress=6,
-        lisa_align_dim=0,
-        use_factorized_embeddings=True,
-        embed_factorized_rank=384,
-        # ── MoE: 8 experts top-2 + shared expert ──
-        use_moe=True,
-        moe_n_experts=8,
-        moe_top_k=2,
-        moe_shared_expert=True,
-        moe_dense_bypass=True,
-        moe_dense_bypass_warmup_steps=500,
-        moe_noisy_gating=True,
-        moe_load_balance_weight=0.01,
-        moe_router_mode="aux_free",
-        moe_d_ff=12288,
-        moe_expert_tying=True,
-        moe_tie_group_size=2,
-        # ── Training optimizations ──
-        use_gradient_checkpointing=True,
-        selective_gradient_checkpointing="ffn",
-        use_chunked_ce=True,
-        ce_chunk_size=256,
-        entropy_alpha=0.5,
-        use_smooth_swiglu=True,
-        use_mu_scaling=True,
-        # ── R&D round 14: training speedup features ──
-        use_varlen=True,                    # varlen attention for packed sequences
-        use_triton_kernels=True,            # fused RMSNorm + SwiGLU Triton kernels
-        triton_rms_block_size=4096,         # d_model for V7
-        triton_swiglu_block_size=16384,     # intermediate_size for V7
-        batch_size=1,
-        seq_len=1024,
-        max_steps=5000,
-        warmup_steps=500,              # warmup needed for training stability (evolution warmup=0 was synthetic-only)
-        max_lr=2e-4,
-        min_lr=2e-5,
-    ),
-
-    # ════════════════════════════════════════════════════════════════════
-    # V8: ForgeLM V8-8B — best mix of R19+R20+R21 innovations.
-    # Derived from V7-8B-B (dense 8B) with:
-    #   R19: QSA sparse attention, Gated Residual, N-gram host embedding
-    #   R20: NVMe-streamed 4-bit Muon optimizer (16.3 GB RAM, fits 32GB)
-    #   R21: FP8 activation training (2x act memory), GradTopK (10x faster NVMe)
-    #        HashedNLRQ (FFN 50.7x compression → 3.84B true params)
-    # All R19 keys are lossless at init. R20/R21 are training-time only.
-    # Training: 7.50 GB GPU + 7.88 GB RAM (with HashedNLRQ) = fits 12GB + 32GB.
-    # Inference: 8.89 GB GPU + 15.3 GB RAM = fits 12GB + 32GB.
-    # ════════════════════════════════════════════════════════════════════
-    "forgelm_v8_8b": ModelConfig(
-        vocab_size=65536,
-        d_model=4096,
-        n_layers=32,
-        n_heads=64,
-        n_kv_heads=16,
-        intermediate_size=16384,
-        attn_type="gta",                # Grouped-Tied Attention (V4)
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        rope_base=1_000_000.0,
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        # ── BitNet: ternary weights, int8 trainable storage ──
-        use_bitnet=True,
-        bitnet_learned_scale=True,
-        use_bitnet_embedding=True,
-        bitnet_int8_training=True,      # R15: int8 GPU + bf16 CPU master
-        use_fused_gemm=True,
-        # ── 32-layer hybrid: conv/attention interleaved ──
-        layer_types=["conv", "conv", "attention"] * 10 + ["attention", "attention"],
-        # ── V4-V7 keys (all carried forward) ──
-        use_titan_memory=True,
-        titan_memory_rank=128,
-        use_mod=True,
-        mod_keep_fraction=1.0,
-        ffn_skip_threshold=0.15,
-        use_mhc=True,
-        mhc_rank=0,
-        use_attn_residual=True,
-        attn_res_k=4,
-        use_mtp=True,
-        mtp_n_heads=4,
-        mtp_loss_weight=0.495,
-        use_value_residual=True,
-        value_residual_mode="resformer",
-        value_residual_gate_init=0.0,
-        use_sandwich_norm=True,
-        use_learned_sink=True,
-        learned_sink_init=0.0,
-        learned_sink_init_method="zero",
-        use_swiglu_clamp=True,
-        swiglu_clamp_alpha=1.702,
-        swiglu_clamp_limit=7.0,
-        rope_variant="lerope",
-        use_pit=True,
-        zero_init_residual=True,
-        # ── V7: NLRQ FFN compression ──
-        ffn_compression="nlrq",
-        nlrq_rank=1024,                 # V8: rank=1024 (like 8b_b, more capacity)
-        nlrq_factor_bits=8,
-        nlrq_use_residual=False,
-        nlrq_residual_group_size=128,
-        # ── V8 NEW: HashedNLRQ (R21) — hash the NLRQ factors ──
-        use_hashed_nlrq=True,           # 8x hash on top of NLRQ 6.4x = 50.7x total
-        hashed_nlrq_compression=8.0,
-        use_peagle_tied=True,
-        peagle_lora_rank=32,
-        # ── Hyperloop ──
-        use_hyperloop=True,
-        hyperloop_begin=4,
-        hyperloop_end=4,
-        hyperloop_loop_iters=3,
-        # ── LiSA ──
-        use_lisa=True,
-        lisa_compress=6,
-        lisa_align_dim=0,
-        # ── Factorized embedding ──
-        use_factorized_embeddings=True,
-        embed_factorized_rank=512,
-        # ── V8 NEW: R19 keys ──
-        use_qsa=True,                   # Qwen Sparse Attention
-        qsa_top_k=256,                  # top-256 positions (lossless at init)
-        use_gated_residual=True,        # Gated Residual (gate=1.0 = lossless)
-        gated_residual_init=1.0,
-        use_ngram_embedding=True,       # N-gram host embedding (15.3 GB RAM)
-        ngram_n=3,
-        ngram_dim=256,
-        ngram_host=True,
-        # ── V8 NEW: R20+R21 training optimizations ──
-        optimizer_type="nvme_muon_4bit",  # NVMe-streamed 4-bit Muon
-        nvme_streaming=True,
-        nvme_path="research/checkpoints/v8_optimizer_states",
-        use_fp8_activation=True,        # R21: FP8 activation storage (2x memory)
-        grad_topk_ratio=0.1,            # R21: top-10% gradients (10x faster NVMe)
-        grad_topk_ef=True,
-        # ── Training optimizations (carried from V7) ──
-        use_gradient_checkpointing=True,
-        selective_gradient_checkpointing="ffn",
-        use_chunked_ce=True,
-        ce_chunk_size=256,
-        entropy_alpha=0.5,
-        use_smooth_swiglu=True,
-        use_mu_scaling=True,
-        use_varlen=True,
-        use_triton_kernels=True,
-        triton_rms_block_size=4096,
-        triton_swiglu_block_size=16384,
-        # ── Training hyperparams (full scratch training) ──
-        batch_size=1,
-        seq_len=2048,                   # V8: 2K context (was 1K for V7)
-        max_steps=50000,                # V8: 50K steps for full pretraining
-        warmup_steps=2000,              # 4% warmup (Chinchilla scaling)
-        max_lr=3e-4,                    # slightly higher for scratch training
+        seq_len=2048,
+        max_steps=50000,
+        warmup_steps=2000,
+        max_lr=3e-4,
         min_lr=3e-5,
     ),
+
 }
 
 

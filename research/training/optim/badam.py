@@ -273,8 +273,28 @@ class BAdam(Optimizer):
             return torch.bfloat16
         return torch.float32
 
+    # R&D round 25: _activate_block optimization.
+    # The original implementation called gc.collect() + cuda.synchronize() +
+    # cuda.empty_cache() on EVERY block switch. With switch_every=1 (the
+    # default from configure_optimizer), this means 3 expensive operations
+    # per training step — the #1 source of GPU starvation on this hardware.
+    #
+    # Optimization: only do the expensive cleanup every N switches (default
+    # 16). Between cleanups, the old block's states are offloaded to CPU
+    # (non-blocking) and the new block's states are loaded — the GPU memory
+    # allocator handles the temporary overlap via expandable_segments. The
+    # periodic cleanup prevents unbounded fragmentation growth.
+    _cleanup_every = 16  # do gc.collect + empty_cache every N block switches
+    _cleanup_counter = 0
+
     def _activate_block(self, idx: int):
-        """Activate block idx. Freeze ALL inactive blocks (requires_grad=False)."""
+        """Activate block idx. Freeze ALL inactive blocks (requires_grad=False).
+
+        R&D round 25 optimization: expensive cleanup (gc.collect + cuda sync +
+        empty_cache) is batched to every _cleanup_every switches instead of
+        every switch. This eliminates the primary CPU bottleneck that was
+        starving the GPU on switch_every=1 configs.
+        """
         # BREAD: apply SGD landscape correction to inactive blocks before
         # switching. This prevents the optimization landscape from narrowing
         # when only one block is updated at a time. The correction uses the
@@ -287,6 +307,11 @@ class BAdam(Optimizer):
         # Offload previous block's optimizer states to CPU (bf16 — halves CPU
         # RAM vs fp32; full-cycle fp32 states for all blocks would be ~22 GB).
         # States are re-widened to fp32 when their block becomes active again.
+        #
+        # R&D round 25: use non_blocking transfer to overlap with the
+        # requires_grad toggle below. Only do the expensive gc.collect +
+        # cuda.synchronize + empty_cache every _cleanup_every switches.
+        do_cleanup = False
         if self._block_idx is not None and self._block_idx != idx:
             old_block = self._blocks[self._block_idx]
             for p in old_block["params"]:
@@ -295,21 +320,46 @@ class BAdam(Optimizer):
                     continue
                 for k in ("exp_avg", "exp_avg_sq"):
                     if k in state and state[k].is_cuda:
-                        state[k] = state[k].to("cpu", dtype=torch.bfloat16)
-            # Force GC + sync + cache clear between offload and load.
-            # Without this, the old block's GPU tensors may not be freed
-            # before the new block's states are allocated, causing peak
-            # memory to grow ~0.26 GB per switch → shared memory spill.
+                        # Non-blocking offload: the tensor is copied to CPU
+                        # asynchronously. The GPU original is freed when the
+                        # copy completes. This overlaps with the requires_grad
+                        # toggle and new block state load below.
+                        state[k] = state[k].to("cpu", dtype=torch.bfloat16,
+                                               non_blocking=True)
+            self._cleanup_counter += 1
+            if self._cleanup_counter >= self._cleanup_every:
+                do_cleanup = True
+                self._cleanup_counter = 0
+
+        if do_cleanup:
+            # Periodic full cleanup: gc + sync + empty_cache.
+            # This prevents unbounded fragmentation from the non-blocking
+            # offload path. Done every _cleanup_every switches, not every
+            # switch — eliminates 15/16 of the cleanup overhead.
             import gc
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
 
-        # Freeze ALL blocks except the active one
-        for i, block in enumerate(self._blocks):
-            for p in block["params"]:
-                p.requires_grad = (i == idx)
+        # Freeze ALL blocks except the active one.
+        # R&D round 25: skip blocks that are already in the correct state.
+        # With switch_every=1, only 2 blocks change state per switch (old
+        # unfreezes, new freezes) — but the original loop iterated ALL blocks
+        # and ALL params every time. Now we only touch the 2 changed blocks.
+        if self._block_idx is not None and self._block_idx != idx:
+            # Only toggle the 2 blocks that actually changed
+            old_block = self._blocks[self._block_idx]
+            new_block = self._blocks[idx]
+            for p in old_block["params"]:
+                p.requires_grad = False
+            for p in new_block["params"]:
+                p.requires_grad = True
+        else:
+            # First activation or same block — set all
+            for i, block in enumerate(self._blocks):
+                for p in block["params"]:
+                    p.requires_grad = (i == idx)
 
         # Bring new block's optimizer states to GPU (restore wide dtype:
         # bf16 for large params when enabled, fp32 otherwise)

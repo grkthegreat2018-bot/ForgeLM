@@ -29,12 +29,13 @@ from research.training.optim.badam import BAdam
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _tiny_v7_8b_config(config_name="forgelm_v7_8b_b", **extra_overrides):
-    """Create a tiny V7-8B config that builds on CPU in <1s.
+def _tiny_v7_8b_config(config_name="forgelm_v10_1.2b", **extra_overrides):
+    """Create a tiny V7-8B-like config that builds on CPU in <1s.
 
-    Preserves all 8B-specific features: MTP, BitNet, GTA, TITAN, MoD, MHC,
-    AttnRes, value-residual, sandwich-norm, learned-sink, PIT, factorized
-    embeddings. Disables features that require GPU (triton, varlen, int8
+    V10 is a plain GQA port — V7-8B features (MTP, BitNet, GTA, TITAN, MoD,
+    MHC, AttnRes, value-residual, sandwich-norm, learned-sink, PIT, factorized
+    embeddings, NLRQ) must be explicitly enabled via overrides.
+    Disables features that require GPU (triton, varlen, int8
     training) or need many layers (hyperloop, lisa).
     """
     from research.config import get_config
@@ -45,6 +46,15 @@ def _tiny_v7_8b_config(config_name="forgelm_v7_8b_b", **extra_overrides):
         use_triton_kernels=False, use_varlen=False,
         bitnet_int8_training=False, use_gradient_checkpointing=False,
         use_hyperloop=False, use_lisa=False,
+        # Explicitly enable V7-8B features (not on by default in V10)
+        use_mtp=True, use_bitnet=True, attn_type="gta",
+        use_titan_memory=True, use_mod=True, use_mhc=True,
+        use_attn_residual=True, use_value_residual=True,
+        use_sandwich_norm=True, use_learned_sink=True,
+        use_pit=True, use_factorized_embeddings=True,
+        ffn_compression="nlrq", nlrq_rank=32,
+        # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V7-8B feature tests)
+        use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
     )
     overrides.update(extra_overrides)
     cfg = get_config(config_name, **overrides)
@@ -53,7 +63,7 @@ def _tiny_v7_8b_config(config_name="forgelm_v7_8b_b", **extra_overrides):
     return cfg
 
 
-def _build_tiny_model(config_name="forgelm_v7_8b_b", **extra_overrides):
+def _build_tiny_model(config_name="forgelm_v10_1.2b", **extra_overrides):
     from research.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v7_8b_config(config_name, **extra_overrides)
     model = ConfigurableResearchLLM(cfg)
@@ -152,7 +162,7 @@ def test_freeze_dead_params_prevents_badam_crash():
 
 def test_tiny_v7_8b_b_builds_and_forwards():
     """8B-B config (dense, BitNet, no NLRQ) builds and forwards on CPU."""
-    model, cfg = _build_tiny_model("forgelm_v7_8b_b")
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", ffn_compression="none")
     assert cfg.use_mtp, "8B-B should have MTP"
     assert cfg.use_bitnet, "8B-B should have BitNet"
     assert cfg.ffn_compression == "none", "8B-B should be dense FFN"
@@ -166,7 +176,7 @@ def test_tiny_v7_8b_b_builds_and_forwards():
 
 def test_tiny_v7_8b_d_builds_and_forwards():
     """8B-D config (NLRQ compressed, deeper) builds and forwards on CPU."""
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     assert cfg.ffn_compression == "nlrq", "8B-D should use NLRQ"
     assert cfg.nlrq_rank == 16
 
@@ -183,7 +193,7 @@ def test_tiny_v7_8b_d_builds_and_forwards():
 
 def test_tiny_v7_8b_b_backward_and_badam_step():
     """8B-B: forward + backward + BAdam step works on CPU."""
-    model, cfg = _build_tiny_model("forgelm_v7_8b_b")
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b")
     from research.training.runners.train_8b_all import freeze_dead_params_
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
@@ -203,7 +213,7 @@ def test_tiny_v7_8b_b_backward_and_badam_step():
 
 def test_tiny_v7_8b_d_backward_and_badam_step():
     """8B-D (NLRQ): forward + backward + BAdam step works on CPU."""
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     from research.training.runners.train_8b_all import freeze_dead_params_
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
@@ -225,7 +235,7 @@ def test_nlrq_factor_training_enables_on_8b_d():
     from research.training.runners.train_8b_all import enable_factor_training_all_
     from research.keys.compression.nlrq_ffn_key import NLRQLinear
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     n = enable_factor_training_all_(model)
     assert n > 0, "Should enable factor training on NLRQ layers"
 
@@ -240,7 +250,7 @@ def test_nlrq_factor_training_grads_reach_masters():
     """STE: gradients flow through quantizer to U_m/V_m masters."""
     from research.training.runners.train_8b_all import enable_factor_training_all_
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     enable_factor_training_all_(model)
 
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
@@ -263,7 +273,7 @@ def test_snapshot_state_strips_nlrq_masters():
     """snapshot_state exports INT8 buffers and strips STE masters."""
     from research.training.runners.train_8b_all import snapshot_state, enable_factor_training_all_
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     enable_factor_training_all_(model)
 
     state = snapshot_state(model, step=42)
@@ -278,7 +288,7 @@ def test_checkpoint_roundtrip_preserves_forward_output():
     from research.training.runners.train_8b_all import snapshot_state, enable_factor_training_all_
     from research.model_loader import ConfigurableResearchLLM
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     enable_factor_training_all_(model)
 
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
@@ -314,7 +324,7 @@ def test_sft_train_freezes_dead_params_for_8b():
     """
     from research.training.runners.train_8b_all import freeze_dead_params_
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_b")
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b")
     mtp = getattr(model, "mtp_module", None)
     assert mtp is not None, "8B-B should have MTP module"
 
@@ -346,7 +356,7 @@ def test_sft_train_nlrq_factor_training_for_8b_d():
     from research.training.runners.train_8b_all import enable_factor_training_all_
     from research.keys.compression.nlrq_ffn_key import NLRQLinear
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
     assert cfg.ffn_compression == "nlrq"
 
     # Before: no STE masters
@@ -379,7 +389,7 @@ def test_from_scratch_init_normalizes_logit_scale():
     )
     from types import SimpleNamespace
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_b")
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b")
     # Blow up the head to simulate the confidently-wrong init
     with torch.no_grad():
         if hasattr(model, "head") and hasattr(model.head, "weight"):
@@ -407,7 +417,7 @@ def test_from_scratch_init_disables_bitnet_qat():
     from research.training.runners.train_8b_all import disable_bitnet_qat_
     from research.keys.quantization.bitnet_b158_key import BitNetLinear
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_b")
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b")
     bitnet_layers = [m for m in model.modules() if isinstance(m, BitNetLinear)]
     assert len(bitnet_layers) > 0, "8B-B should have BitNet layers"
 
@@ -434,7 +444,7 @@ def test_full_8b_training_cycle_on_cpu():
         freeze_dead_params_, enable_factor_training_all_, snapshot_state,
     )
 
-    model, cfg = _build_tiny_model("forgelm_v7_8b_d", nlrq_rank=16)
+    model, cfg = _build_tiny_model("forgelm_v10_1.2b", nlrq_rank=16)
 
     # 1. Freeze dead params (prevents BAdam crash)
     n_dead = freeze_dead_params_(model, torch.device("cpu"), use_flce=False)

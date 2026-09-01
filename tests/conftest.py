@@ -46,11 +46,11 @@ def tiny_config_gpu():
 
 
 @pytest.fixture
-def v7_config():
-    """Full V7 config on GPU (bf16). For integration tests."""
+def v10_config():
+    """Full V10 config on GPU (bf16). For integration tests."""
     if not CUDA_AVAILABLE:
-        pytest.skip("CUDA not available — V7 requires GPU")
-    return _gpu_config("forgelm_v7", vocab=65536)
+        pytest.skip("CUDA not available — V10 requires GPU")
+    return _gpu_config("forgelm_v10_1.2b", vocab=65536)
 
 
 @pytest.fixture

@@ -429,15 +429,18 @@ class TestMod:
 
 class TestMainModel:
     def test_main_config_builds_with_new_keys(self):
-        """Test V7 config fields + tiny model build on GPU with ForgeEngine features."""
-        cfg = get_config("forgelm_v7")
-        assert cfg.use_titan_memory is True
-        assert cfg.use_mod is True and cfg.mod_keep_fraction == 1.0
-        assert cfg.attn_type == "gta"      # Grouped-Tied Attention (V7)
-        assert cfg.use_bitnet is True      # QAT (ternary only in training)
-        assert cfg.ffn_compression == "nlrq"  # NLRQ FFN compression
-        assert cfg.nlrq_rank == 768
-        assert cfg.d_model == 4096 and cfg.n_layers == 32
+        """Test V10 config fields + tiny model build on GPU with ForgeEngine features."""
+        cfg = get_config("forgelm_v10_1.2b")
+        # V10 is a lossless LFM2.5 port — plain GQA, no BitNet/NLRQ/TITAN/MoD
+        assert cfg.attn_type == "gqa"
+        assert cfg.use_bitnet is False
+        assert cfg.ffn_compression == "none"
+        assert cfg.use_titan_memory is False
+        assert cfg.use_mod is False
+        # V10 has IRI-FP4 + SpectralKV
+        assert cfg.use_iri_fp4 is True
+        assert cfg.use_spectral_kv is True
+        assert cfg.d_model == 2048 and cfg.n_layers == 16
         # Build tiny model on GPU to verify TITAN/MoD forward works with bf16
         tiny = get_config("lfm25_tiny")
         tiny.use_titan_memory = True

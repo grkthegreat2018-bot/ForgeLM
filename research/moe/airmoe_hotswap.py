@@ -293,10 +293,10 @@ def main():
     print("=" * 70)
 
     # Load model
-    print("\n[1] Loading ForgeLM V2...")
-    cfg = get_config("forgelm_v2", device="cuda")
+    print("\n[1] Loading ForgeLM V10...")
+    cfg = get_config("forgelm_v10_1.2b", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/forgelm_v2.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V10_1.2B.safetensors")
     model.to("cuda").eval()
     tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 

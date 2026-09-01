@@ -97,7 +97,7 @@ def auto_tune_compile(
     Args:
         model: the model to compile
         input_ids: sample input for benchmarking (1, T)
-        model_id: unique identifier for caching (e.g., "forgelm_v7")
+        model_id: unique identifier for caching (e.g., "forgelm_v10_1.2b")
         modes: list of modes to try (default: all 4)
         force_rebenchmark: ignore cache and re-benchmark
 

@@ -82,7 +82,7 @@ def count_conversation_tokens(messages: list[dict], tokenizer=None) -> int:
 class ContextBudget:
     """Tracks token budget for a conversation.
 
-    max_seq_len: model's max context (32768 for LFM2.5)
+    max_seq_len: model's max context (32768 for V10)
     reserved_for_generation: tokens kept free for the model's response
     prompt_budget: max_seq_len - reserved_for_generation
     """

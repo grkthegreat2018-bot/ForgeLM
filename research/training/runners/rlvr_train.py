@@ -1,6 +1,6 @@
 """RLVR (Reinforcement Learning with Verifiable Rewards) runner.
 
-Implements the RLVR stage of the LFM2.5-1.2B-Thinking recipe:
+Implements the RLVR stage of the ForgeLM V10-Thinking recipe:
   - GRPO-style RL on verifiable tasks (math, code, reasoning)
   - Binary reward: 1.0 if verified correct, 0.0 otherwise (the binding gate)
   - N-gram repetition penalty early in training (doom-loop mitigation)
@@ -8,7 +8,7 @@ Implements the RLVR stage of the LFM2.5-1.2B-Thinking recipe:
   - SPPO/PS-PPO for long CoT (configurable via --rl-algorithm)
 
 Uses the existing GRPOTrainer with:
-  - use_repetition_penalty=True (LFM2.5-Thinking recipe)
+  - use_repetition_penalty=True (ForgeLM V10-Thinking recipe)
   - Binary verified rewards from task executors
   - Reference model = DPO checkpoint
 
@@ -22,9 +22,9 @@ Uses the existing GRPOTrainer with:
 
   python -m research.training.runners.rlvr_train \\
       --tasks research/distillation/hf_datasets/gsm8k.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v7_DPO.safetensors \\
-      --save research/checkpoints/forgelm_v7_RLVR.safetensors \\
-      --config forgelm_v7 \\
+      --checkpoint research/checkpoints/forgelm_v10_1.2b_DPO.safetensors \\
+      --save research/checkpoints/forgelm_v10_1.2b_RLVR.safetensors \\
+      --config forgelm_v10_1.2b \\
       --max-steps 500 \\
       --group-size 4 \\
       --rl-algorithm grpo \\
@@ -245,7 +245,7 @@ def main():
                         help="DPO checkpoint to start RLVR from")
     parser.add_argument("--save", required=True,
                         help="Output checkpoint path")
-    parser.add_argument("--config", default="forgelm_v7")
+    parser.add_argument("--config", default="forgelm_v10_1.2b")
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--group-size", type=int, default=4,
                         help="GRPO group size (G completions per prompt)")
@@ -262,7 +262,7 @@ def main():
                         choices=["grpo", "sppo", "psppo", "evpo", "grpo_or"],
                         help="RL algorithm (grpo=default, sppo=long CoT, psppo=compute-efficient)")
     parser.add_argument("--use-repetition-penalty", action="store_true", default=True,
-                        help="Enable n-gram repetition penalty (LFM2.5-Thinking recipe)")
+                        help="Enable n-gram repetition penalty (ForgeLM V10-Thinking recipe)")
     parser.add_argument("--repetition-penalty", type=float, default=-0.5)
     parser.add_argument("--repetition-warmup-steps", type=int, default=50)
     parser.add_argument("--optimizer", default="cpu_offload",

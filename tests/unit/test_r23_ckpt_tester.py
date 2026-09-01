@@ -32,7 +32,7 @@ def _tiny_v8_config(**extra):
         use_hyperloop=False, use_lisa=False, ngram_host=False,
     )
     overrides.update(extra)
-    cfg = get_config("forgelm_v8_8b", **overrides)
+    cfg = get_config("forgelm_v10_1.2b", **overrides)
     cfg.device = "cpu"
     cfg.dtype = "float32"
     return cfg

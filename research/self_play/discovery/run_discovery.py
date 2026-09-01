@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cpu", action="store_true", help="force CPU inference")
     p.add_argument("--db", type=str, default=None, help="override DB path")
     p.add_argument("--checkpoint", type=str, default=None,
-                   help="override checkpoint path (default: best epoch or ForgeLM V2 base)")
+                   help="override checkpoint path (default: best epoch or ForgeLM V10 base)")
     p.add_argument("--no-auto-advance", action="store_true",
                    help="disable automatic fine-tune/distill after each session")
     args = p.parse_args(argv)
@@ -54,13 +54,13 @@ def main(argv: list[str] | None = None) -> int:
         # Explicit override — load the given checkpoint directly.
         from research.model_loader import load_default_model
         print(f"[discovery] loading explicit checkpoint: {args.checkpoint}")
-        model, tok = load_default_model("forgelm_v7",
+        model, tok = load_default_model("forgelm_v10_1.2b",
                                         checkpoint_path=args.checkpoint)
         loop = DiscoveryLoop(model, tok, db, max_gen_tokens=args.max_gen,
                             temperature=args.temp, idle_limit=args.idle,
                             device=device, auto_advance=not args.no_auto_advance)
     else:
-        # Auto-resolve: best epoch > ForgeLM V2 base > random.
+        # Auto-resolve: best epoch > ForgeLM V10 base > random.
         loop = DiscoveryLoop.from_default_model(
             db_path=db_path, max_gen_tokens=args.max_gen,
             temperature=args.temp, idle_limit=args.idle, device=device,

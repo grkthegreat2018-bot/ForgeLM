@@ -1,6 +1,6 @@
 """Qwen-format tool-call adapter for the discovery self-play loop.
 
-The discovery loop was built for LFM2.5's native Pythonic tool-call format
+The discovery loop was built for ForgeLM V10's native Pythonic tool-call format
 (<|tool_call_start|>[func(arg='val')]<|tool_call_end|>). Our SFT model uses
 Qwen chat format with JSON tool calls wrapped in the native special tokens
 (ids 10/11):
@@ -25,7 +25,7 @@ IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 EOS_ID = 7  # <|im_end|> token id in the LFM2.5 tokenizer
 
-# Tool call markers — LFM2.5's native special tokens (single-token ids 10/11).
+# Tool call markers — ForgeLM V10's native special tokens (single-token ids 10/11).
 # Built from hex to avoid IDE tool-call parsing confusion.
 TOOL_CALL_START = bytes.fromhex("3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
 TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
@@ -36,7 +36,7 @@ TOOL_CALL_END_FIRST_ID = 11     # special token id for the end marker
 def qwen_render_tool_defs(tools: list[dict]) -> str:
     """Render tool definitions as a text block for the system/user message.
 
-    Unlike LFM2.5's special-token-wrapped format, Qwen format puts tool
+    Unlike ForgeLM V10's special-token-wrapped format, Qwen format puts tool
     definitions as plain text in the system message.
     """
     lines = []
@@ -160,7 +160,7 @@ def qwen_parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
 
     Primary format (training): {start}\n{json}\n{end}
     Fallback: bare {"name": ...} JSON objects
-    Fallback: LFM2.5 Pythonic format
+    Fallback: ForgeLM V10 Pythonic format
     """
     calls = []
     consumed_spans = []  # (start, end) ranges of parsed content
@@ -234,7 +234,7 @@ def qwen_parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
         musing = " ".join(musing_parts).strip()
         return calls, musing
 
-    # Fallback: try LFM2.5 Pythonic format
+    # Fallback: try ForgeLM V10 Pythonic format
     from research.self_play.discovery.chat_template import parse_tool_calls as _lfm_parse
     return _lfm_parse(text)
 
@@ -248,7 +248,7 @@ def qwen_generate(model, tokenizer, prompt: str, max_new_tokens: int = 256,
     Returns only the generated tokens (not the prompt), preserving special
     tokens so tool-call JSON is visible to the parser.
 
-    Uses LFM2.5-recommended generation defaults:
+    Uses ForgeLM V10-recommended generation defaults:
       - temperature: 0.2 (low randomness for reliable tool calls)
       - top_k: 80 (limits sampling to top-k logits)
       - repetition_penalty: 1.05 (discourages token repetition)

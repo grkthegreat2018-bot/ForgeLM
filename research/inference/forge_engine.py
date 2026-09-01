@@ -29,8 +29,8 @@ Usage:
 
     # Auto-activates optimal strategies (S4R KV, torch.compile, prefix cache, etc.)
     engine = ForgeEngine.from_checkpoint(
-        checkpoint="research/checkpoints/ForgeLM_V2_BSP.safetensors",
-        config_name="forgelm_v7",
+        checkpoint="research/checkpoints/ForgeLM_V10_1.2B.safetensors",
+        config_name="forgelm_v10_1.2b",
         tokenizer_path="research/checkpoints/lfm25_tokenizer",
     )
     # Strategies auto-activated — just generate:
@@ -62,6 +62,7 @@ import threading
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
 _DEFAULT_EOS_TOKEN_IDS = frozenset({7, 151643, 151645})
@@ -133,6 +134,9 @@ class ForgeEngine:
         self.tokenizer = tokenizer
         self.device = torch.device(device)
         self.checkpoint_path = checkpoint_path
+
+        # LoRA hot-loading state
+        self._lora_config: dict | None = None
 
         # Strategy slots
         self.kv_cache: KVCacheStrategy | None = None
@@ -373,7 +377,7 @@ class ForgeEngine:
     # ── Checkpoint loading ────────────────────────────────────────────────
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: str, config_name: str = "forgelm_v7",
+    def from_checkpoint(cls, checkpoint: str, config_name: str = "forgelm_v10_1.2b",
                         tokenizer_path: str | None = None,
                         device: str = "cuda",
                         auto_activate: bool = True,
@@ -586,18 +590,175 @@ class ForgeEngine:
     @classmethod
     def _load_prequant(cls, cfg, checkpoint, tokenizer, device,
                        metadata, **kwargs):
-        """Load a pre-quantized BitNet checkpoint (int8 → bf16 → int8 storage)."""
-        from research.keys.quantization.bitnet_b158_key import convert_model_to_int8
+        """Load a pre-quantized BitNet checkpoint directly into int8 storage.
+
+        Avoids the wasteful int8→bf16→int8 round-trip of the old path.
+        Instead, loads int8 tensors from the safetensors file and calls
+        BitNetLinear.load_prequantized() to store them directly as int8
+        buffers. Non-BitNet tensors (embeddings, norms, etc.) are loaded
+        normally as bf16. Peak CPU RAM is ~6 GB (int8 state dict) instead
+        of ~17 GB (int8 + bf16 intermediate).
+        """
+        from research.keys.quantization.bitnet_b158_key import (
+            BitNetLinear, BitNetConv1d, BitNetEmbedding,
+        )
         from research.model_loader import ModelLoader
+        from research.config import ModelConfig
+        from safetensors import safe_open
+        import time, gc
 
+        t0 = time.time()
         print("  [ForgeEngine] Pre-quantized BitNet checkpoint: "
-              "int8 weights will be cast to fp32 for loading, "
-              "then converted to int8 storage (4x VRAM cut)")
-        print("  [ForgeEngine] Loading pre-quantized BitNet via build_model_fast...")
+              "direct int8 loading (no bf16 intermediate)")
 
-        model = ModelLoader.build_model_fast(
-            cfg, checkpoint_path=checkpoint, dtype=torch.bfloat16)
-        convert_model_to_int8(model)
+        # 1. Build model on meta device (fast, no real tensors)
+        cfg_meta = ModelConfig(**{**cfg.__dict__, "device": "meta"})
+        with torch.device("meta"):
+            from research.model_loader import ConfigurableResearchLLM
+            model = ConfigurableResearchLLM(cfg_meta)
+        print(f"  [FastBuild] Meta-init architecture in {time.time()-t0:.1f}s")
+
+        # 2. Load safetensors to CPU (int8 tensors stay int8 — no cast!)
+        t_weights = time.time()
+        state = {}
+        with safe_open(checkpoint, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                state[key] = f.get_tensor(key)
+        n_int8 = sum(1 for t in state.values() if t.dtype == torch.int8)
+        n_bf16 = sum(1 for t in state.values() if t.dtype != torch.int8)
+        int8_params = sum(t.numel() for t in state.values() if t.dtype == torch.int8)
+        other_params = sum(t.numel() for t in state.values() if t.dtype != torch.int8)
+        print(f"  [FastBuild] Loaded {len(state)} tensors "
+              f"({n_int8} int8={int8_params/1e9:.2f}B, "
+              f"{n_bf16} other={other_params/1e9:.2f}B) "
+              f"in {time.time()-t_weights:.1f}s")
+
+        # 3. Build a map from parameter name → module for all BitNet types
+        #    (BitNetLinear, BitNetConv1d, BitNetEmbedding) so we can call
+        #    load_prequantized for int8 weights.
+        bitnet_modules = {}
+        for name, module in model.named_modules():
+            if isinstance(module, (BitNetLinear, BitNetConv1d, BitNetEmbedding)):
+                bitnet_modules[name + ".weight"] = module
+        # Also handle head (nn.Linear) — store int8 as a buffer manually
+        head_module = getattr(model, 'head', None)
+
+        # 4. Assign tensors: int8 → load_prequantized, others → assign
+        t_gpu = time.time()
+        int8_loaded = 0
+        other_keys = {}
+        # Collect qscale tensors to pair with their int8 weights
+        qscale_map = {}
+        for key, tensor in state.items():
+            if key.endswith(".qscale") and tensor.dtype != torch.int8:
+                qscale_map[key[:-len(".qscale")] + ".weight"] = tensor
+        for key, tensor in state.items():
+            if key in bitnet_modules and tensor.dtype == torch.int8:
+                # Direct int8 loading — no bf16 intermediate!
+                module = bitnet_modules[key]
+                # Use checkpoint's qscale if available, else compute from absmean
+                # (use bf16 not fp32 to minimize memory for the fallback)
+                if key in qscale_map:
+                    qscale = qscale_map[key]
+                else:
+                    absmean = tensor.to(torch.bfloat16).abs().float().mean().clamp(min=1e-8)
+                    qscale = absmean / 0.7
+                # Move to target device as int8
+                module.load_prequantized(
+                    tensor.to(device).to(torch.int8), qscale.to(device))
+                int8_loaded += 1
+            elif key == "head.weight" and tensor.dtype == torch.int8 and head_module is not None:
+                # Head is nn.Linear — convert to int8 buffer storage manually
+                dev = torch.device(device)
+                w_int8 = tensor.to(dev).to(torch.int8)
+                qscale = qscale_map.get(key)
+                if qscale is None:
+                    absmean = tensor.to(torch.bfloat16).abs().float().mean().clamp(min=1e-8)
+                    qscale = absmean / 0.7
+                qscale = qscale.to(dev)
+                del head_module.weight
+                head_module.register_buffer("weight_int8", w_int8)
+                head_module.register_buffer("qscale_buf", qscale)
+                head_module._prequantized = True
+                # Monkey-patch forward to use int8 buffer
+                _orig_forward = head_module.forward
+                def _int8_forward(x, _w=w_int8, _s=qscale, _b=head_module.bias):
+                    return F.linear(x, _w.to(x.dtype), _b) * _s.to(x.dtype)
+                head_module.forward = _int8_forward
+                int8_loaded += 1
+            elif key.endswith(".qscale") and (
+                key[:-len(".qscale")] + ".weight" in bitnet_modules
+                or key[:-len(".qscale")] + ".weight" == "head.weight"):
+                # qscale for a BitNet/head layer already handled — skip
+                continue
+            else:
+                other_keys[key] = tensor
+
+        # 5. Load remaining (non-int8) tensors via assign=True
+        if other_keys:
+            missing, unexpected = model.load_state_dict(
+                other_keys, strict=False, assign=True)
+            if missing:
+                real_missing = [k for k in missing if k != "head.weight"]
+                if real_missing:
+                    print("  Missing keys:", real_missing[:5],
+                          "..." if len(real_missing) > 5 else "")
+            if unexpected:
+                print("  Unexpected keys:", unexpected[:5],
+                      "..." if len(unexpected) > 5 else "")
+
+        # 6. Re-tie weights if needed (assign breaks sharing)
+        if getattr(cfg, 'tie_word_embeddings', True) \
+                and not getattr(cfg, 'use_pit', False):
+            model.head.weight = model.embed.weight
+
+        # 7. Move non-int8 params/buffers to target device
+        dev = torch.device(device)
+        for module in model.modules():
+            for pname, param in list(module._parameters.items()):
+                if param is None:
+                    continue
+                if param.is_meta:
+                    module._parameters[pname] = torch.nn.Parameter(
+                        torch.zeros(param.shape, dtype=param.dtype, device=dev),
+                        requires_grad=param.requires_grad)
+                elif param.device != dev:
+                    module._parameters[pname] = torch.nn.Parameter(
+                        param.data.to(dev),
+                        requires_grad=param.requires_grad)
+            for bname, buf in list(module._buffers.items()):
+                if buf is not None:
+                    if buf.is_meta:
+                        module._buffers[bname] = torch.zeros(
+                            buf.shape, dtype=buf.dtype, device=dev)
+                    elif buf.device != dev:
+                        module._buffers[bname] = buf.to(dev)
+
+        # 8. Reset non-persistent buffers (RoPE cos/sin)
+        ModelLoader._reset_non_persistent_buffers(model, dev)
+
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
+
+        # 9. Free the state dict immediately
+        del state, other_keys, bitnet_modules
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # 10. Post-load QK-norm identity scan
+        for block in model.blocks:
+            attn = block.attn
+            if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
+                q_id = (attn.q_norm.weight == 1.0).all()
+                k_id = (attn.k_norm.weight == 1.0).all()
+                attn._qk_norm_identity = bool(q_id and k_id)
+
+        t_total = time.time() - t0
+        param_count = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"  [FastBuild] Direct int8 load: {int8_loaded} BitNet layers | "
+              f"assign: {time.time()-t_gpu:.1f}s | Total: {t_total:.1f}s "
+              f"({param_count:.1f}M params)")
         model.eval()
 
         engine = cls(model, tokenizer, device=device,
@@ -1110,7 +1271,8 @@ class ForgeEngine:
                  temperature: float = 0.0, top_p: float = 1.0,
                  top_k: int = 80, repetition_penalty: float = 1.05,
                  finish_sentence: bool = True,
-                 context_limit: int | None = None) -> str:
+                 context_limit: int | None = None,
+                 skip_special_tokens: bool = True) -> str:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -1124,6 +1286,9 @@ class ForgeEngine:
             context_limit: Override max context tokens for this request only.
                 If None, uses the hotswap current setting. Set to a large
                 number (e.g. 1_000_000) for infinite context with eviction.
+            skip_special_tokens: If True (default), strips special tokens from
+                output. Set to False for tool-call parsing (preserves
+                <|tool_call_start|>/<|tool_call_end|> markers).
         """
         self._require_awake()
         self._validate_generation_params(
@@ -1145,7 +1310,8 @@ class ForgeEngine:
         _t0 = time.perf_counter()
         ids = self.tokenizer(
             prompt, return_tensors="pt",
-            truncation=True, max_length=ctx_limit
+            truncation=True, max_length=ctx_limit,
+            add_special_tokens=False,
         ).input_ids.to(self.device)
 
         # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
@@ -1202,7 +1368,7 @@ class ForgeEngine:
         self._record_generation(n_gen)
         prompt_len = ids.shape[1]
         generated_ids = output_ids[0, prompt_len:]
-        result = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        result = self.tokenizer.decode(generated_ids, skip_special_tokens=skip_special_tokens)
 
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms, temperature)
@@ -2112,6 +2278,119 @@ class ForgeEngine:
                         source="engine",
                         warnings=len(report.get("warnings", [])))
         return report
+
+    # ── LoRA hot-loading ───────────────────────────────────────────────────
+
+    def load_lora(self, lora_path: str, rank: int = 32, alpha: int | None = None,
+                  target_modules: list[str] | None = None) -> int:
+        """Hot-load a LoRA adapter onto the model.
+
+        Attaches LoRA adapters to the specified modules and loads weights from
+        a safetensors checkpoint. The base model weights are frozen — only the
+        LoRA adapters are trainable. This enables dynamic skill injection at
+        runtime (e.g. loading a tool-calling LoRA for self-play, then swapping
+        it for a code-generation LoRA).
+
+        Args:
+            lora_path: Path to LoRA adapter safetensors file.
+            rank: LoRA rank (must match the checkpoint).
+            alpha: LoRA alpha (scale = alpha / rank). If None, uses rank * 2.
+            target_modules: Module name substrings to attach LoRA to.
+                If None, defaults to FFN+attention modules:
+                ["w_gate", "w_up", "w_down", "q_proj", "v_proj",
+                 "out_proj", "in_proj"]
+                Pass ["w_gate", "w_up", "w_down"] for FFN-only.
+
+        Returns:
+            Number of LoRA parameters loaded.
+
+        Raises:
+            FileNotFoundError: If lora_path doesn't exist.
+            ValueError: If LoRA checkpoint doesn't match model structure.
+        """
+        from pathlib import Path
+        from safetensors.torch import load_file as _load
+        from research.training.bitnet_lora import add_lora_adapters
+
+        if alpha is None:
+            alpha = rank * 2
+        if target_modules is None:
+            target_modules = ["w_gate", "w_up", "w_down", "q_proj", "v_proj",
+                              "out_proj", "in_proj"]
+
+        lora_file = Path(lora_path)
+        if not lora_file.exists():
+            raise FileNotFoundError(f"LoRA checkpoint not found: {lora_path}")
+
+        # Remove any existing LoRA adapters first
+        self.unload_lora()
+
+        self._log(f"Loading LoRA adapter: {lora_file.name} (rank={rank})")
+        n_adapters, _ = add_lora_adapters(
+            self.model, rank=rank, alpha=alpha,
+            target_modules=target_modules)
+
+        state = _load(str(lora_file))
+        loaded = 0
+        for name, param in self.model.named_parameters():
+            if "lora_" in name and name in state:
+                param.data.copy_(state[name])
+                loaded += 1
+
+        if loaded < len(state):
+            missing = set(state.keys()) - {
+                n for n, _ in self.model.named_parameters() if "lora_" in n}
+            self._log(f"WARNING: {len(state) - loaded} LoRA tensors not found "
+                      f"in model (checkpoint has {len(state)}, loaded {loaded}). "
+                      f"Missing: {list(missing)[:5]}...",
+                      level="warning")
+
+        n_params = sum(v.numel() for v in state.values())
+        self._lora_config = {
+            "path": str(lora_file), "rank": rank, "alpha": alpha,
+            "target_modules": target_modules, "n_adapters": n_adapters,
+            "n_params": n_params,
+        }
+        self._log(f"LoRA loaded: {loaded}/{len(state)} tensors, "
+                  f"{n_adapters} adapters, {n_params / 1e6:.1f}M params")
+        return loaded
+
+    def unload_lora(self) -> bool:
+        """Remove LoRA adapters from the model.
+
+        Detaches all LoRA modules and restores the original forward functions.
+        The base model weights are unaffected.
+
+        Returns:
+            True if any LoRA adapters were removed, False if none were attached.
+        """
+        removed = 0
+        for name, module in self.model.named_modules():
+            # IRIFP4Linear: lora_adapter is a submodule attribute
+            if hasattr(module, 'lora_adapter') and module.lora_adapter is not None:
+                del module.lora_adapter
+                removed += 1
+            # nn.Linear with monkey-patched forward: restore original
+            if hasattr(module, '_lora_orig_forward'):
+                module.forward = module._lora_orig_forward
+                del module._lora_orig_forward
+                # Also remove the LoRA adapter module if present
+                if hasattr(module, 'lora_adapter'):
+                    del module.lora_adapter
+                removed += 1
+
+        if removed > 0:
+            self._log(f"LoRA unloaded: {removed} adapters removed")
+            self._lora_config = None
+        return removed > 0
+
+    def has_lora(self) -> bool:
+        """Check if LoRA adapters are currently loaded."""
+        return getattr(self, '_lora_config', None) is not None
+
+    def lora_info(self) -> dict | None:
+        """Return info about the currently loaded LoRA, or None."""
+        return getattr(self, '_lora_config', None)
 
     # ── Sleep / wake ──────────────────────────────────────────────────────
 

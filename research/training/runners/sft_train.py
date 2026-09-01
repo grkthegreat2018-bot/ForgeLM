@@ -1,4 +1,4 @@
-"""Supervised fine-tuning (SFT) for ForgeLM V2 (LFM2.5-1.2B).
+"""Supervised fine-tuning (SFT) for ForgeLM V10-1.2B.
 
 Trains the model on teacher-generated data (function-calling trajectories,
 chain-of-thought, code) using completion-only cross-entropy loss — only
@@ -32,9 +32,9 @@ Usage:
         --data research/data/finetune/tool_use_fc_70.jsonl \\
         --data research/data/finetune/short_cot_70.jsonl \\
         --data research/data/finetune/code_70.jsonl \\
-        --config lfm25_1.2b \\
-        --checkpoint research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors \\
-        --save research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft.safetensors \\
+        --config forgelm_v10_1.2b \\
+        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
+        --save research/checkpoints/ForgeLM_V10_1.2B.sft.safetensors \\
         --max-steps 500 --lr 5e-5 --batch-size 2 --seq-len 1024
 """
 import argparse
@@ -254,14 +254,15 @@ def load_examples(paths: list[str]) -> list[dict]:
                     ex["reward"] = float(obj["reward"])
                 examples.append(ex)
                 n_loaded += 1
-            elif "prompt" in obj and "response" in obj:
+            elif "prompt" in obj and ("response" in obj or "solution" in obj):
                 key = obj["prompt"][:200]
                 if key in seen:
                     continue
                 seen.add(key)
+                resp = obj.get("response", obj.get("solution", ""))
                 examples.append({"type": "single_turn",
                                  "prompt": obj["prompt"],
-                                 "response": obj["response"]})
+                                 "response": resp})
                 n_loaded += 1
             else:
                 n_skipped += 1
@@ -326,14 +327,15 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
                 seen.add(key)
                 examples.append({"type": "multi_turn", "messages": row["messages"]})
                 n_loaded += 1
-            elif "prompt" in row and "response" in row:
+            elif "prompt" in row and ("response" in row or "solution" in row):
                 key = str(row["prompt"])[:200]
                 if key in seen:
                     continue
                 seen.add(key)
+                resp = row.get("response", row.get("solution", ""))
                 examples.append({"type": "single_turn",
                                  "prompt": row["prompt"],
-                                 "response": row["response"]})
+                                 "response": resp})
                 n_loaded += 1
             else:
                 n_skipped += 1
@@ -469,6 +471,11 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
     Returns (input_ids, labels, attention_mask, reward_weights) all [B, T] or [B].
     Left-padding keeps the completion at the end so causal LM predicts correctly.
     Uses pin_memory when transferring to GPU for faster H2D copy.
+
+    R&D round 25: when device="cpu" and CUDA is available, tensors are
+    pinned anyway — this supports the transfer-on-consume prefetcher path
+    where the background thread produces pinned CPU tensors and the
+    consumer does the async H2D transfer.
     """
     max_len = max(len(ex["input_ids"]) for ex in batch)
     b = len(batch)
@@ -477,18 +484,28 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
     attn_mask = torch.zeros((b, max_len), dtype=torch.long)
     reward_weights = torch.ones(b, dtype=torch.float32)
     for i, ex in enumerate(batch):
-        n = len(ex["input_ids"])
+        ids = ex["input_ids"]
+        labs = ex["labels"]
+        n = len(ids)
         offset = max_len - n  # left-pad
-        input_ids[i, offset:] = torch.tensor(ex["input_ids"], dtype=torch.long)
-        labels[i, offset:] = torch.tensor(ex["labels"], dtype=torch.long)
+        # R&D round 25: avoid torch.tensor() copy when input is already a tensor
+        if isinstance(ids, torch.Tensor):
+            input_ids[i, offset:] = ids
+            labels[i, offset:] = labs
+        else:
+            input_ids[i, offset:] = torch.tensor(ids, dtype=torch.long)
+            labels[i, offset:] = torch.tensor(labs, dtype=torch.long)
         attn_mask[i, offset:] = 1
         reward_weights[i] = ex.get("reward", 1.0)
-    # Use pin_memory + non_blocking for faster CPU→GPU transfer
-    use_pin = "cuda" in device and torch.cuda.is_available()
+    # Use pin_memory + non_blocking for faster CPU→GPU transfer.
+    # R&D round 25: pin even when device="cpu" if CUDA is available —
+    # supports the transfer-on-consume prefetcher path.
+    use_pin = torch.cuda.is_available()
     if use_pin:
         input_ids = input_ids.pin_memory()
         labels = labels.pin_memory()
         attn_mask = attn_mask.pin_memory()
+        reward_weights = reward_weights.pin_memory()
     return (input_ids.to(device, non_blocking=use_pin),
             labels.to(device, non_blocking=use_pin),
             attn_mask.to(device, non_blocking=use_pin),
@@ -679,7 +696,7 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
 
 
 def main():
-    p = argparse.ArgumentParser(description="SFT for ForgeLM V2 (LFM2.5-1.2B)")
+    p = argparse.ArgumentParser(description="SFT for ForgeLM V10-1.2B")
     p.add_argument("--data", nargs="+", required=True,
                    help="Training data file(s) (JSONL or Parquet)")
     p.add_argument("--data-format", default="jsonl", choices=["jsonl", "parquet"],
@@ -702,11 +719,11 @@ def main():
                         "on I/O-bound workloads). Default: True.")
     p.add_argument("--prefetch-count", type=int, default=4,
                    help="Number of batches to prefetch ahead (default 4).")
-    p.add_argument("--config", default="forgelm_v7_moe",
-                   help="Model config name (default: forgelm_v7_moe)")
-    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors",
+    p.add_argument("--config", default="forgelm_v10_1.2b",
+                   help="Model config name (default: forgelm_v10_1.2b)")
+    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V10_1.2B.safetensors",
                    help="Base checkpoint to fine-tune from")
-    p.add_argument("--save", default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.sft.safetensors",
+    p.add_argument("--save", default="research/checkpoints/ForgeLM_V10_1.2B.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
     p.add_argument("--lr", type=float, default=5e-5)
@@ -1005,10 +1022,11 @@ def main():
         print(f"Tokenizing (with disk cache, {n_workers} workers)...")
         dataset = []
         n_dropped = 0
-        if n_workers > 1 and len(examples) > 1000:
+        if n_workers > 1 and len(examples) > 1000 and sys.platform != "win32":
             # ── Parallel tokenization (multiprocessing.Pool) ──
             # 30x speedup on 128-core Vast.ai instances for 150K+ examples.
             # Linux uses fork() so the tokenizer + disk cache are inherited.
+            # Windows can't fork, so falls through to single-threaded below.
             from multiprocessing import Pool, get_context
             global _parallel_tokenizer, _parallel_seq_len
             _parallel_tokenizer = tokenizer
@@ -1042,12 +1060,15 @@ def main():
         packed_ds = PackedSequenceDataset(dataset, seq_len=args.seq_len,
                                           pack_examples=True, pad_id=pad_id)
         print(f"Packed sequences: {packed_ds.stats()}")
-        dataset = [packed_ds[i] for i in range(len(packed_ds))]
-        # Convert packed dicts to the format expected by collate_batch
-        dataset = [{"input_ids": ex["input_ids"].tolist(),
-                     "labels": ex["labels"].tolist(),
-                     "n_comp": ex["n_comp"],
-                     "reward": 1.0} for ex in dataset]
+        # R&D round 25: keep packed sequences as tensors — avoid the
+        # tensor→list→tensor round-trip that was happening here. The
+        # PackedSequenceDataset.__getitem__ returns tensors; collate_batch
+        # handles both tensor and list inputs. This eliminates ~5K
+        # .tolist() + torch.tensor() conversions per epoch.
+        dataset = [{"input_ids": packed_ds[i]["input_ids"],
+                     "labels": packed_ds[i]["labels"],
+                     "n_comp": packed_ds[i]["n_comp"],
+                     "reward": 1.0} for i in range(len(packed_ds))]
 
     # ── Validation split ──
     val_dataset = None
@@ -1223,17 +1244,43 @@ def main():
     # For 8B dense models on 12GB VRAM: int8 ternary weights on GPU (8GB),
     # bf16 master weights on CPU (16GB RAM). BAdam updates CPU master,
     # then re-quantizes active block to int8 on GPU.
-    if getattr(cfg, 'bitnet_int8_training', False) and args.optimizer == "badam":
-        from research.keys.quantization.bitnet_b158_key import enable_int8_training
-        n_converted = enable_int8_training(model)
-        if n_converted > 0:
-            gpu_w = sum(m.weight_int8.numel() for m in model.modules()
-                        if hasattr(m, '_int8_trainable') and m._int8_trainable)
-            cpu_w = sum(m.weight.numel() for m in model.modules()
-                        if hasattr(m, '_int8_trainable') and m._int8_trainable)
-            print(f"  [Int8Train] {n_converted} BitNetLinear layers converted to int8 trainable storage")
-            print(f"    GPU int8 weights: {gpu_w/1e9:.2f}B params ({gpu_w/1e9:.2f} GB)")
-            print(f"    CPU bf16 master:  {cpu_w/1e9:.2f}B params ({cpu_w*2/1e9:.2f} GB RAM)")
+    if getattr(cfg, 'bitnet_int8_training', False):
+        # Check if model was already loaded with int8 weights (prequantized).
+        # If so, skip convert_model_to_int8 / enable_int8_training — the
+        # weights are already int8 buffers, no bf16→int8 re-quantization needed.
+        from research.keys.quantization.bitnet_b158_key import BitNetLinear
+        n_already_int8 = sum(1 for m in model.modules()
+                             if isinstance(m, BitNetLinear) and m._prequantized)
+        if use_manual_lora:
+            if n_already_int8 > 0:
+                gpu_w = sum(m.weight_int8.numel() for m in model.modules()
+                            if hasattr(m, 'weight_int8'))
+                print(f"  [Int8Storage] {n_already_int8} BitNetLinear layers already int8 (prequantized load)")
+                print(f"    GPU int8 weights: {gpu_w/1e9:.2f}B params ({gpu_w/1e9:.2f} GB)")
+            else:
+                # LoRA path: freeze base as int8 inference storage (no CPU master,
+                # no trainable int8). Only LoRA adapters train.
+                from research.keys.quantization.bitnet_b158_key import convert_model_to_int8
+                n_converted = convert_model_to_int8(model)
+                if n_converted > 0:
+                    gpu_w = sum(m.weight_int8.numel() for m in model.modules()
+                                if hasattr(m, 'weight_int8'))
+                    print(f"  [Int8Storage] {n_converted} BitNetLinear layers → int8 inference storage (LoRA base frozen)")
+                    print(f"    GPU int8 weights: {gpu_w/1e9:.2f}B params ({gpu_w/1e9:.2f} GB)")
+        else:
+            if n_already_int8 > 0:
+                print(f"  [Int8Train] {n_already_int8} layers already int8 — skipping enable_int8_training (no bf16 re-quant)")
+            else:
+                from research.keys.quantization.bitnet_b158_key import enable_int8_training
+                n_converted = enable_int8_training(model)
+                if n_converted > 0:
+                    gpu_w = sum(m.weight_int8.numel() for m in model.modules()
+                                if hasattr(m, '_int8_trainable') and m._int8_trainable)
+                    cpu_w = sum(m.weight.numel() for m in model.modules()
+                                if hasattr(m, '_int8_trainable') and m._int8_trainable)
+                    print(f"  [Int8Train] {n_converted} BitNetLinear layers converted to int8 trainable storage")
+                    print(f"    GPU int8 weights: {gpu_w/1e9:.2f}B params ({gpu_w/1e9:.2f} GB)")
+                    print(f"    CPU bf16 master:  {cpu_w/1e9:.2f}B params ({cpu_w*2/1e9:.2f} GB RAM)")
 
     # ── NLRQ factor training (STE masters) for NLRQ-compressed configs ──
     # 8B-D uses NLRQ FFN compression. Without STE factor training, only the
@@ -1273,16 +1320,39 @@ def main():
     # then freezes any param where p.grad is None (autograd's reachability
     # truth). This mirrors train_8b_all.freeze_dead_params_.
     if args.optimizer in ("badam", "fira_nlrq"):
-        from research.training.runners.train_8b_all import freeze_dead_params_
-        # FLCE (chunked fused linear-CE) is used when batch*seq >= 1024
-        # (matches train_8b_all.py logic). The probe must match the real
-        # training loss path for accurate dead-param detection.
-        use_flce = args.batch_size * args.seq_len >= 1024
-        n_dead = freeze_dead_params_(model, torch.device(device), use_flce=use_flce)
-        if n_dead > 0:
-            print(f"  [DeadParams] Froze {n_dead} dead param tensors "
-                  f"(no grad path — MTP/loop_block/gated modules); "
-                  f"BAdam blocks now contain only live params")
+        # Skip the dead-param probe when int8 training is active — the probe
+        # does a full forward+backward with ALL params trainable, which creates
+        # bf16 grads for the entire model on GPU. With int8 training, the
+        # masters are on CPU and the probe would OOM trying to materialize
+        # 9.7GB of grads on GPU. The MTP freeze above already handles the
+        # known dead params; other dead params (loop_block, gated modules)
+        # are not present in V10 configs.
+        if not getattr(cfg, 'bitnet_int8_training', False):
+            from research.training.runners.train_8b_all import freeze_dead_params_
+            use_flce = args.batch_size * args.seq_len >= 1024
+            n_dead = freeze_dead_params_(model, torch.device(device), use_flce=use_flce)
+            if n_dead > 0:
+                print(f"  [DeadParams] Froze {n_dead} dead param tensors "
+                      f"(no grad path — MTP/loop_block/gated modules); "
+                      f"BAdam blocks now contain only live params")
+        else:
+            print("  [DeadParams] Skipped probe (int8 training — MTP freeze sufficient)")
+
+    # ── Post-loading memory cleanup ──
+    # The model loading path (build_model_fast + convert_model_to_int8) creates
+    # large intermediate tensors (int8→bf16 cast = 10.5 GB for 5B params) that
+    # may not be returned to the OS on Windows. Force GC + empty_cache after
+    # all model modifications are done, before the training loop starts.
+    import gc as _gc
+    _gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if device == "cuda":
+        vram_after = torch.cuda.memory_allocated() / 1e9
+        import psutil
+        ram_pct = psutil.virtual_memory().percent
+        print(f"  [MemCleanup] After loading: VRAM {vram_after:.2f} GB, "
+              f"RAM {ram_pct:.0f}%")
 
     if args.grad_checkpoint:
         # ConfigurableResearchLLM uses enable_gradient_checkpointing (not HF's
@@ -1443,6 +1513,7 @@ def main():
         step = 0
         accum_count = 0
         indices = list(range(len(dataset)))
+        last_loss = 0.0  # initialized; updated at log intervals (R&D round 25)
 
         # ── Async prefetcher: pre-collate batches in background ──
         # The prefetcher runs a background thread that pre-loads and collates
@@ -1454,6 +1525,12 @@ def main():
                 dataset, batch_size=args.batch_size, device=device,
                 collate_fn=collate_batch, prefetch_count=args.prefetch_count,
                 shuffle=True, pad_id=pad_id)
+            # R&D round 25: CPU-first collate + consumer-side H2D transfer.
+            # The background thread produces pinned CPU tensors; the main
+            # thread does .to(device, non_blocking=True) which overlaps the
+            # H2D copy with the previous batch's GPU compute.
+            if "cuda" in device:
+                prefetcher.set_transfer_on_consume(True)
 
         for epoch in range(100):
             random.shuffle(indices)
@@ -1463,31 +1540,40 @@ def main():
             for batch_start in range(0, len(indices), args.batch_size):
                 if step >= args.max_steps:
                     break
-                if vram_exceeded(args.vram_limit_gb, device):
-                    print("VRAM limit exceeded; emergency save + abort.")
-                    emergency_save(model, args.save, "emergency", step, optimizer=optimizer)
-                    aborted = True
-                    break
-
-                # ── RAM safeguard (psutil) ──
-                # Prevents OOMKilled / freezing / stuttering from host memory pressure.
-                # Throttle at threshold%, emergency save at threshold+10%.
-                if ram_exceeded(args.ram_limit_percent):
-                    ru = ram_usage()
-                    emergency_pct = args.ram_limit_percent + 10
-                    if ru.get("percent", 0) > emergency_pct:
-                        print(f"RAM critical ({ru.get('percent', 0):.0f}%); emergency save + abort.")
+                # R&D round 25: run VRAM/RAM safeguards every 10 steps instead
+                # of every step. torch.cuda.memory_allocated() is a sync point
+                # and psutil.virtual_memory() is a syscall — both add per-step
+                # latency that starves the GPU pipeline. 10-step granularity is
+                # sufficient: OOM develops over multiple steps, not instantly.
+                if step % 10 == 0:
+                    if vram_exceeded(args.vram_limit_gb, device):
+                        print("VRAM limit exceeded; emergency save + abort.")
                         emergency_save(model, args.save, "emergency", step, optimizer=optimizer)
                         aborted = True
                         break
-                    else:
-                        print(f"RAM high ({ru.get('percent', 0):.0f}%); gc.collect() + skip batch.")
-                        import gc
-                        gc.collect()
-                        continue  # skip this batch, try next
+
+                    # ── RAM safeguard (psutil) ──
+                    # Prevents OOMKilled / freezing / stuttering from host memory pressure.
+                    # Throttle at threshold%, emergency save at threshold+10%.
+                    if ram_exceeded(args.ram_limit_percent):
+                        ru = ram_usage()
+                        emergency_pct = args.ram_limit_percent + 10
+                        if ru.get("percent", 0) > emergency_pct:
+                            print(f"RAM critical ({ru.get('percent', 0):.0f}%); emergency save + abort.")
+                            emergency_save(model, args.save, "emergency", step, optimizer=optimizer)
+                            aborted = True
+                            break
+                        else:
+                            print(f"RAM high ({ru.get('percent', 0):.0f}%); gc.collect() + skip batch.")
+                            import gc
+                            gc.collect()
+                            continue  # skip this batch, try next
 
                 # ── Periodic gc.collect() to prevent memory fragmentation ──
-                if step > 0 and step % 100 == 0:
+                # R&D round 25: reduced from every 100 to every 200 steps.
+                # gc.collect() is expensive (can take 100ms+ on large heaps)
+                # and the BAdam optimizer now does its own periodic cleanup.
+                if step > 0 and step % 200 == 0:
                     import gc
                     gc.collect()
 
@@ -1598,7 +1684,12 @@ def main():
                     accum_count = 0
                     continue
                 accum_count += 1
-                last_loss = ce_loss.item()  # log CE only for comparability
+                # R&D round 25: defer .item() to log intervals to avoid
+                # GPU→CPU sync every step. Keep the loss tensor detached on
+                # GPU; only materialize the scalar when logging (every 5
+                # steps). This eliminates a per-step sync point that was
+                # blocking the GPU pipeline.
+                last_loss_tensor = ce_loss.detach()
 
                 # ── Grad Mixup (novel: average gradients from N batches) ──
                 # Tested in .devin/test_stack_winners.py: 3-way mixup + muon_sf
@@ -1650,12 +1741,25 @@ def main():
                     if hybrid_clipper is not None:
                         hybrid_clipper.clip(model.parameters())
                     else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                        # R&D round 25: for BAdam, only the active block has
+                        # gradients (all other params have grad=None). Filter
+                        # to only params with grads to avoid iterating the
+                        # full parameter list every step.
+                        grad_params = [p for p in model.parameters()
+                                       if p.grad is not None]
+                        if grad_params:
+                            torch.nn.utils.clip_grad_norm_(grad_params, args.grad_clip)
                     lr = get_lr(step, args.max_steps, args.lr, args.min_lr, args.warmup_steps)
                     for g in optimizer.param_groups:
                         g["lr"] = lr
                     optimizer.step()
                     optimizer.zero_grad()
+                    # BitNet int8: re-quantize CPU master → GPU int8 buffer
+                    if getattr(cfg, 'bitnet_int8_training', False):
+                        from research.keys.quantization.bitnet_b158_key import BitNetLinear
+                        for m in model.modules():
+                            if isinstance(m, BitNetLinear) and getattr(m, '_int8_trainable', False):
+                                m.requantize_from_master()
                     # DeepSeek-V3 aux-loss-free: update expert bias after step.
                     try:
                         from research.moe.moe import update_moe_biases, disable_dense_bypass
@@ -1720,6 +1824,11 @@ def main():
 
                 # Logging.
                 if step % 5 == 0 or step == args.max_steps - 1:
+                    # R&D round 25: materialize the deferred loss scalar only
+                    # at log intervals. This is the only point where we sync
+                    # for loss reporting — the GPU pipeline runs uninterrupted
+                    # between log intervals.
+                    last_loss = last_loss_tensor.item()
                     vram_gb = torch.cuda.memory_allocated() / 1e9 if "cuda" in device else 0.0
                     msg = (f"Step {step+1}/{args.max_steps} | epoch {epoch} | "
                            f"loss {last_loss:.4f} | lr {lr:.2e} | "
@@ -1739,6 +1848,10 @@ def main():
 
                 # ── Validation ──
                 if val_dataset is not None and step > 0 and step % args.val_every == 0:
+                    # R&D round 25: ensure last_loss is materialized for val
+                    # logging (may not be set if val_every isn't a multiple of 5).
+                    if step % 5 != 0:
+                        last_loss = last_loss_tensor.item()
                     # Note: don't call model.eval() — BitNet eval mode uses fp32
                     # master weights which causes dtype mismatch with bf16 inputs.
                     # torch.inference_mode() is sufficient for validation.

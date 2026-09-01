@@ -1,6 +1,6 @@
 """Continued pre-training (CPT) with reasoning trace injection.
 
-Implements the midtraining stage of the LFM2.5-1.2B-Thinking recipe:
+Implements the midtraining stage of the ForgeLM V10-Thinking recipe:
   - Mix reasoning traces into continued pretraining
   - Teaches the model the "reason first, then answer" pattern
   - Uses full-sequence next-token prediction (no completion masking, unlike SFT)
@@ -31,9 +31,9 @@ Usage:
                        research/distillation/hf_datasets/dolphin_r1.jsonl \\
       --general-data research/distillation/hf_datasets/orca_math.jsonl \\
                      research/distillation/hf_datasets/metamath.jsonl \\
-      --config forgelm_v7 \\
-      --checkpoint research/checkpoints/forgelm_v7_Base.safetensors \\
-      --save research/checkpoints/forgelm_v7_CPT.safetensors \\
+      --config forgelm_v10_1.2b \\
+      --checkpoint research/checkpoints/forgelm_v10_1.2b_Base.safetensors \\
+      --save research/checkpoints/forgelm_v10_1.2b_CPT.safetensors \\
       --max-steps 5000 --lr 1e-4 --batch-size 2 --seq-len 2048 \\
       --optimizer cpu_offload --reasoning-ratio 0.6
 """
@@ -161,22 +161,29 @@ def tokenize_and_pack(
         text = render_cpt_text(ex)
         enc = tokenizer(text, add_special_tokens=False, return_tensors=None)
         ids = enc["input_ids"] if isinstance(enc, dict) else enc
+        # gigatoken fast path returns list[Encoding]; extract .ids from each
+        if ids and hasattr(ids[0], "ids"):
+            ids = ids[0].ids
         if not isinstance(ids, list):
             ids = list(ids)
-        all_tokens.extend(ids)
+        all_tokens.extend(int(x) for x in ids)
         n += 1
         if max_examples and n >= max_examples:
             break
 
-    # Pack into seq_len chunks
-    n_seqs = len(all_tokens) // seq_len
-    if n_seqs == 0:
-        print(f"Warning: only {len(all_tokens)} tokens, need {seq_len} for one sequence")
+    # Pack into seq_len chunks; pad the final partial chunk with pad_id.
+    n_full = len(all_tokens) // seq_len
+    remainder = len(all_tokens) % seq_len
+    if n_full == 0 and remainder == 0:
+        print(f"Warning: 0 tokens, nothing to pack")
         return torch.empty(0, seq_len, dtype=torch.long)
-
-    packed = torch.tensor(all_tokens[: n_seqs * seq_len], dtype=torch.long)
-    packed = packed.view(n_seqs, seq_len)
-    print(f"Packed {len(all_tokens)} tokens into {n_seqs} sequences of {seq_len}")
+    if remainder > 0:
+        # Pad the final partial chunk to seq_len so all data is used.
+        all_tokens = all_tokens + [pad_id] * (seq_len - remainder)
+        n_full += 1
+    packed = torch.tensor(all_tokens[: n_full * seq_len], dtype=torch.long)
+    packed = packed.view(n_full, seq_len)
+    print(f"Packed {len(all_tokens)} tokens into {n_full} sequences of {seq_len}")
     return packed
 
 
@@ -244,7 +251,7 @@ def main():
                         help="JSONL files with reasoning traces (prompt + solution)")
     parser.add_argument("--general-data", nargs="+", default=[],
                         help="JSONL files with general data (prompt + response/solution)")
-    parser.add_argument("--config", default="forgelm_v7",
+    parser.add_argument("--config", default="forgelm_v10_1.2b",
                         help="Model config preset name")
     parser.add_argument("--checkpoint", required=True,
                         help="Starting checkpoint (safetensors)")

@@ -101,22 +101,28 @@ class DiscoveryLoop:
         # auto_advance: after each session, try to fine-tune / distill if the
         # DB is deemed high-quality and large enough.
         self.auto_advance = auto_advance
+        # Engine reference for LoRA hot-swap (set by from_default_model)
+        self._engine = None
 
     # ── model loading ────────────────────────────────────────────────
     @classmethod
     def from_default_model(cls, db_path: str | None = None, **kw) -> "DiscoveryLoop":
-        """Load the most recent ForgeLM V2 model into the discovery loop.
+        """Load the most recent ForgeLM V10 model into the discovery loop.
 
         Resolution order (first existing wins):
           1. Best discovery epoch checkpoint (if any epochs have been trained)
-          2. Base ForgeLM V2 LFM2.5-1.2B checkpoint (research/checkpoints/)
+          2. Base ForgeLM V10 checkpoint (research/checkpoints/)
           3. Random weights (fallback — prints a warning)
+
+        If a LoRA adapter checkpoint exists (e.g. ForgeLM_V10_1.2B_R31_lora.safetensors),
+        it is loaded on top of the base model. This allows self-play to use the
+        latest fine-tuned LoRA without merging into the base weights.
 
         This ensures re-runs continue from the best trained model, not from
         random weights or the base model every time.
         """
         from research.model_loader import load_default_model
-        from research.paths import LFM25_CHECKPOINT, as_str
+        from research.paths import V10_CHECKPOINT, as_str
 
         db = DiscoveryDB(db_path or str(_DB_PATH))
 
@@ -125,15 +131,38 @@ class DiscoveryLoop:
         if best and best.get("checkpoint_path"):
             ckpt = best["checkpoint_path"]
             print(f"[discovery] loading best epoch checkpoint: {ckpt}")
-        elif LFM25_CHECKPOINT.exists():
-            ckpt = as_str(LFM25_CHECKPOINT)
-            print(f"[discovery] loading ForgeLM V2 base checkpoint: {ckpt}")
+        elif V10_CHECKPOINT.exists():
+            ckpt = as_str(V10_CHECKPOINT)
+            print(f"[discovery] loading ForgeLM V10 base checkpoint: {ckpt}")
         else:
             ckpt = None
             print("[discovery] WARNING: no checkpoint found — using random weights")
 
-        model, tok = load_default_model("forgelm_v7", checkpoint_path=ckpt)
-        return cls(model, tok, db, **kw)
+        model, tok = load_default_model("forgelm_v10_1.2b", checkpoint_path=ckpt)
+
+        # Check for LoRA adapter (R31+) to load on top of R30 base
+        r30_path = V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R30.safetensors"
+        lora_path = V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R31_lora.safetensors"
+        _engine_ref = None
+        if lora_path.exists():
+            from research.inference.forge_engine import ForgeEngine
+            # Reload from R30 base via ForgeEngine (supports LoRA hot-loading)
+            if r30_path.exists():
+                print(f"[discovery] reloading R30 base for LoRA: {r30_path}")
+                engine = ForgeEngine.from_checkpoint(
+                    str(r30_path), config_name="forgelm_v10_1.2b",
+                    device=str(model.device if hasattr(model, 'device') else "cuda"),
+                    auto_activate=False)
+                model = engine.model
+                model.eval()
+                _engine_ref = engine
+            print(f"[discovery] loading R31 LoRA adapter: {lora_path}")
+            loaded = engine.load_lora(str(lora_path), rank=32, alpha=64)
+            print(f"[discovery] LoRA loaded: {loaded} tensors")
+
+        loop = cls(model, tok, db, **kw)
+        loop._engine = _engine_ref  # store for LoRA hot-swap during auto-advance
+        return loop
 
     def _default_generate(self, prompt: str) -> str:
         """Generate via the loaded model, returning ONLY the new tokens.
@@ -329,7 +358,19 @@ class DiscoveryLoop:
         if self.auto_advance and self.model is not None:
             try:
                 from research.self_play.discovery.epoch_manager import EpochManager
-                epoch_result = EpochManager(self.db, self.device).maybe_advance()
+                em = EpochManager(self.db, self.device)
+                epoch_result = em.maybe_advance()
+                # If a new epoch was promoted and it's a LoRA checkpoint,
+                # hot-swap the LoRA adapter on the running model.
+                if epoch_result and epoch_result.get("winner") == "candidate":
+                    new_ckpt = epoch_result.get("candidate", "")
+                    if new_ckpt and "_lora" in new_ckpt:
+                        print(f"[discovery] hot-swapping LoRA: {new_ckpt}")
+                        # Unload current LoRA and load the new one
+                        if hasattr(self, '_engine') and self._engine is not None:
+                            self._engine.unload_lora()
+                            self._engine.load_lora(new_ckpt, rank=32, alpha=64)
+                            print(f"[discovery] LoRA hot-swapped successfully")
             except Exception as e:
                 self.db.emit("epoch_error", {"error": str(e)}, self.session_id)
                 epoch_result = {"error": str(e)}

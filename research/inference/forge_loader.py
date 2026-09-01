@@ -313,7 +313,7 @@ class ForgeLoader:
             return "huggingface"
         return "unknown"
 
-    def load(self, source: str | Path, config_name: str = "forgelm_v7",
+    def load(self, source: str | Path, config_name: str = "forgelm_v10_1.2b",
              device: str = "cuda", **kwargs):
         """Load a model from any supported source.
 

@@ -84,14 +84,14 @@ def add_lora_adapters(
     target_modules: list[str] | None = None,
     min_size: int = 64,
 ) -> tuple[int, list[nn.Parameter]]:
-    """Add LoRA adapters to target layers (works with BitNetLinear).
+    """Add LoRA adapters to target layers (works with BitNetLinear + IRIFP4Linear).
 
     Args:
         model: The model to add LoRA to.
         rank: LoRA rank.
         alpha: LoRA alpha (scale = alpha / rank).
         target_modules: List of module name substrings to target (e.g. ["q_proj", "w_gate"]).
-            None = target all Linear/BitNetLinear with in_features >= min_size.
+            None = target all Linear/BitNetLinear/IRIFP4Linear with in_features >= min_size.
         min_size: Skip layers smaller than this (e.g. MoD routers with 1 output).
 
     Returns (n_adapters, lora_params_list).
@@ -99,14 +99,21 @@ def add_lora_adapters(
     n_adapters = 0
     lora_params = []
 
+    # Check for IRIFP4Linear without importing (avoid circular deps)
+    def is_iri_fp4_linear(mod):
+        cls = type(mod).__name__
+        return cls == "IRIFP4Linear"
+
     def find_and_add(module, prefix=""):
         nonlocal n_adapters
         for name, child in module.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
             has_weight = isinstance(getattr(child, 'weight', None), nn.Parameter)
             has_dims = hasattr(child, 'in_features') and hasattr(child, 'out_features')
+            is_iri = is_iri_fp4_linear(child)
 
-            if has_weight and has_dims:
+            # Valid target: has dims + (has Parameter weight OR is IRIFP4Linear)
+            if has_dims and (has_weight or is_iri):
                 is_target = True
                 if target_modules is not None:
                     is_target = any(t in full_name for t in target_modules)
@@ -115,23 +122,32 @@ def add_lora_adapters(
 
                 if is_target:
                     lora = LoRAAdapter(child.in_features, child.out_features, rank=rank, alpha=alpha)
-                    lora = lora.to(child.weight.device).to(child.weight.dtype if child.weight.dtype != torch.float32 else torch.bfloat16)
+                    # Use bfloat16 for LoRA params on IRIFP4 (base is bf16 dequantized)
+                    lora_dtype = torch.bfloat16 if is_iri else (
+                        child.weight.dtype if child.weight.dtype != torch.float32 else torch.bfloat16)
+                    lora = lora.to(child.weight_packed.device if is_iri else child.weight.device).to(lora_dtype)
                     setattr(child, 'lora_adapter', lora)
 
-                    orig_forward = child.forward
-                    def make_new_forward(orig_fwd, lora_mod):
-                        def new_forward(x):
-                            out = orig_fwd(x)
-                            return out + lora_mod(x)
-                        return new_forward
-                    child.forward = make_new_forward(orig_forward, lora)
+                    # For IRIFP4Linear, forward() already checks for lora_adapter
+                    # For BitNetLinear/nn.Linear, we need to wrap forward
+                    if not is_iri:
+                        orig_forward = child.forward
+                        child._lora_orig_forward = orig_forward  # save for unload
+                        def make_new_forward(orig_fwd, lora_mod):
+                            def new_forward(x):
+                                out = orig_fwd(x)
+                                return out + lora_mod(x)
+                            return new_forward
+                        child.forward = make_new_forward(orig_forward, lora)
 
                     # Freeze base weights
-                    child.weight.requires_grad = False
+                    if has_weight:
+                        child.weight.requires_grad = False
                     if hasattr(child, 'qscale') and child.qscale is not None:
                         child.qscale.requires_grad = False
                     if hasattr(child, 'bias') and child.bias is not None:
-                        child.bias.requires_grad = False
+                        if isinstance(child.bias, nn.Parameter):
+                            child.bias.requires_grad = False
 
                     lora_params.extend([lora.lora_A, lora.lora_B])
                     n_adapters += 1
@@ -144,12 +160,21 @@ def add_lora_adapters(
 def merge_lora_adapters(model: nn.Module) -> int:
     """Merge LoRA adapters into base weights: W += scale * B @ A.
 
+    For nn.Linear/BitNetLinear: directly adds delta to weight Parameter.
+    For IRIFP4Linear: dequantizes → adds delta → re-quantizes to IRI-FP4.
     Call before saving checkpoint so output is standalone (no LoRA dependency).
     Returns n_merged.
     """
     n_merged = 0
     for module in model.modules():
         if hasattr(module, 'lora_adapter') and isinstance(module.lora_adapter, LoRAAdapter):
+            cls_name = type(module).__name__
+            if cls_name == "IRIFP4Linear":
+                # QLoRA merge: dequant → merge → re-quantize
+                if module.merge_lora():
+                    n_merged += 1
+                continue
+            # Standard merge for nn.Linear / BitNetLinear
             lora = module.lora_adapter
             with torch.no_grad():
                 # W += scale * B @ A  (out_features, in_features)

@@ -24,9 +24,16 @@ LCB_EVAL_DIR = DATA_DIR / "lcb_eval"
 REASONING_BENCH_DIR = DATA_DIR / "reasoning_bench"
 AIRMOE_MODULES_DIR = CHECKPOINTS_DIR / "airmoe_modules"
 
-# LFM2.5 model checkpoint and tokenizer.
-LFM25_CHECKPOINT = CHECKPOINTS_DIR / "ForgeLM_V2_LFM25-1.2B.safetensors"
+# Tokenizer (shared by all ForgeLM models — Qwen-style, from LFM2.5).
 LFM25_HF_DIR = CHECKPOINTS_DIR / "lfm25_tokenizer"
+
+# ForgeLM V10-1.2B: the sole base model (lossless LFM2.5 port + V10 features).
+# All tests and training use this as the default checkpoint.
+V10_CHECKPOINT = CHECKPOINTS_DIR / "ForgeLM_V10_1.2B.safetensors"
+
+# Backward-compatible aliases — V7/V9 checkpoints were deleted; all point to V10.
+LFM25_CHECKPOINT = V10_CHECKPOINT
+V9_CHECKPOINT = V10_CHECKPOINT
 
 # LM Studio model paths (for GGUF inference / data generation).
 LMSTUDIO_MODELS_ROOT = Path("D:/LMstudio/Models/lmstudio-community")

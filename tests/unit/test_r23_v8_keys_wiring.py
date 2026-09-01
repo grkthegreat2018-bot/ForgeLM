@@ -15,7 +15,11 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _tiny_v8_config(**extra_overrides):
-    """Build a tiny V8 config suitable for CPU testing."""
+    """Build a tiny V8-like config suitable for CPU testing.
+
+    V10 is a plain GQA port — V8 features (QSA, gated residual, ngram,
+    hashed NLRQ) must be explicitly enabled via overrides.
+    """
     from research.config import get_config
     overrides = dict(
         vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
@@ -25,9 +29,15 @@ def _tiny_v8_config(**extra_overrides):
         bitnet_int8_training=False, use_gradient_checkpointing=False,
         use_hyperloop=False, use_lisa=False,
         ngram_host=False,  # disable host table for CPU tests
+        # Explicitly enable V8 features (not on by default in V10)
+        use_qsa=True, use_gated_residual=True, use_ngram_embedding=True,
+        use_hashed_nlrq=True, ffn_compression="nlrq", nlrq_rank=32,
+        use_bitnet=False,
+        # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V8 feature tests)
+        use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
     )
     overrides.update(extra_overrides)
-    cfg = get_config("forgelm_v8_8b", **overrides)
+    cfg = get_config("forgelm_v10_1.2b", **overrides)
     cfg.device = "cpu"
     cfg.dtype = "float32"
     return cfg

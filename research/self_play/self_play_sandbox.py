@@ -1473,10 +1473,10 @@ def main():
     print("=" * 60)
 
     # Load model
-    print("\n[1] Loading ForgeLM V3 (diff-attn + BitNet QAT + TITAN + MoD)...")
-    cfg = get_config("forgelm_v7", device="cuda")
+    print("\n[1] Loading ForgeLM V10 (IRI-FP4 + BitNet QAT + TITAN + MoD)...")
+    cfg = get_config("forgelm_v10_1.2b", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/ForgeLM_V2_BSP.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V10_1.2B.safetensors")
     model.to("cuda").eval()
     tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
 

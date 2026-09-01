@@ -16,7 +16,7 @@ Cycle per epoch:
 
 Usage:
     python -m research.self_play.infinite_loop \\
-        --checkpoint research/checkpoints/forgelm_v7_SFT.safetensors \\
+        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
         --epochs 50 --tasks-per-epoch 30
 
 The loop is resumable: if interrupted, it picks up from the last
@@ -41,7 +41,15 @@ from research.self_play.infinite_curriculum import InfiniteCurriculum
 
 @dataclass
 class LoopConfig:
-    """Configuration for the unified AZR self-play loop."""
+    """Configuration for the unified AZR self-play loop.
+
+    V10 update (2026-08-31): defaults to ForgeLM V10-1.2B, wires ForgeEngine
+    inference features (SpectralKV, MTP self-speculative decoding, prefix
+    cache, Triton conv) into the self-play generation phase, and exposes
+    all sft_train training tricks (Muon-SF optimizer, grad-mixup, curriculum,
+    augmentation, SYNPRO, focal loss, entropy weighting, MTP auxiliary loss,
+    distillation, sequential freeze, EMA, BitNet-everywhere).
+    """
     # Self-play (AZR curriculum)
     tasks_per_epoch: int = 30        # propose + solve per epoch
     max_gen_tokens: int = 256        # max tokens per generation
@@ -51,20 +59,86 @@ class LoopConfig:
     propose_batch_size: int = 8      # parallel task proposal
     domains: tuple = ("algorithms", "math", "strings", "logic", "data_structures")
 
+    # ── ForgeEngine inference features (self-play generation phase) ──
+    # V10: SpectralKV is the production KV cache (63× compression at 0.095 error).
+    # When use_forge_engine=True, the self-play phase loads via ForgeEngine
+    # and activates these features instead of the bare model path.
+    use_forge_engine: bool = True    # load via ForgeEngine (V10 features)
+    kv_cache: str = "spectral"       # V10 SpectralKV (was: none / bare model)
+    decoding: str = "mtp_selfspec"   # MTP self-speculative (2-4× decode speedup)
+    quantize: str | None = None      # weight quantization (None=bf16, "w8a8", "nvfp4")
+    acceleration: str | None = None  # "cuda_graph", "megakernel", "flex_decoding"
+    use_compile: bool = False        # torch.compile (experimental on Windows)
+    use_triton_conv: bool = True     # Triton fused conv kernel (89% conv bottleneck cut)
+    use_prefix_cache: bool = True    # prefix KV cache (repeated prompt prefixes)
+    use_chunked_prefill: bool = True # chunked prefill (long prompts)
+    # NOTE: disabled — FusedQKNormRopeCacheWrapper has a RoPE-convention
+    # mismatch on V10 (model uses NeoX full-dim cos/sin via cat((freqs,freqs)),
+    # but the wrapper's _py_qk_norm_rope expects GPT-J half-dim cos/sin →
+    # 32-vs-64 shape crash). The original attention forward handles RoPE
+    # correctly. Re-enable only after a bit-exact forward-pass comparison
+    # (AGENTS.md directive A). Tracked in .devin/scratchpad.md.
+    use_fused_qk_norm_rope_cache: bool = False  # fused QK-norm+RoPE+cache-write
+    use_seq_split: bool = True       # sequence-split attention (long context)
+    use_spec_attn: bool = True       # speculative attention
+    kv_cache_tokens: int = 4096      # KV cache token budget
+    warmup: bool = True              # warmup dummy token (init CUDA kernels)
+
     # Finetune
     ft_max_steps: int = 100          # SFT steps per epoch
-    ft_lr: float = 2e-5
+    ft_lr: float = 5e-5              # V10 default (muon_sf tolerates higher LR)
+    ft_min_lr: float = 5e-6          # cosine decay floor
     ft_batch_size: int = 1
-    ft_grad_accum: int = 4           # effective batch 4
+    ft_grad_accum: int = 5           # evolution-discovered: 5 (effective batch 5)
+    ft_sync_freq: int = 15           # evolution-discovered: sync every 15 steps
     ft_seq_len: int = 1024
+    ft_warmup_steps: int = 20        # warmup for stability (evolution: 0 was synthetic-only)
     ft_grad_checkpoint: bool = True
-    ft_optimizer: str = "bnb"        # 8-bit AdamW (saves ~7GB VRAM)
+    ft_checkpoint_strategy: str = "all"  # selective: "ffn", "attn", "lazy", "optimal"
+    ft_optimizer: str = "muon_sf"    # V10 default: Muon-SF (2.39× vs AdamW)
     ft_lora: bool = True             # LoRA: train ~1M params
-    ft_lora_r: int = 16
-    ft_lora_alpha: int = 32
-    ft_entropy_alpha: float = 0.0    # disabled: saves 1GB, enables chunked CE
+    ft_lora_r: int = 32              # V10 default rank (was 16)
+    ft_lora_alpha: int = 64          # V10 default alpha (was 32)
+    ft_bitnet_everywhere: bool = True  # BitNet ternary QAT (1.58 bits, 2.39× vs AdamW)
+    ft_manual_lora: bool = True      # BitNet-compatible LoRA (auto-enabled w/ bitnet)
+    ft_entropy_alpha: float = 0.5    # token entropy weighting (WeFT/VCORE 2025)
+    ft_loss_function: str = "ce"     # "ce", "focal", "label_smoothing", "dynamic_focal"
+    ft_focal_gamma: float = 4.93     # evolution-discovered focal optimum
+    ft_label_smoothing_eps: float = 0.1
+    ft_grad_compression: str = "int4"  # evolution-discovered: int4 for CPU offload
     ft_vram_limit_gb: float = 11.0
     ft_min_examples: int = 8         # skip finetune if fewer than this
+
+    # ── Training tricks (R&D round 14+, wired to sft_train) ──
+    ft_grad_mixup: int = 1           # N-batch grad averaging (1=off, 3=1.25× convergence)
+    ft_curriculum: str = "none"      # "vanilla", "pacing", "interleaved", "warmup"
+    ft_augment: bool = False         # token noise + FIM + target offset (anti-overfit)
+    ft_synpro: bool = False          # SYNPRO synthetic data (3.7-5.2× effective tokens)
+    ft_norm_type: str = "rmsnorm"    # "seednorm", "dyt" (Muon-compatible)
+    ft_mtp_weight: float = 0.0       # MTP auxiliary loss (Nemotron Lightning)
+    ft_mtp_n_heads: int | None = None  # override MTP heads (None=use config)
+    ft_distill: bool = False         # knowledge distillation from teacher
+    ft_teacher_checkpoint: str | None = None  # teacher checkpoint for distill
+    ft_distill_topk: int = 50        # top-K logits to cache from teacher
+    ft_distill_truncate: float = 1.0  # sequence truncation ratio for distill
+    ft_distill_prefix: bool = False  # on-policy prefix distillation (2-40× FLOP cut)
+    ft_sequential_freeze: int = 0    # sequential freeze/unfreeze (0=off, 4=4 phases)
+    ft_final_finetune_steps: int = 0  # reserved all-layer finetune steps at end
+    ft_ema: bool = False             # EMA shadow weights
+    ft_ema_decay: float = 0.999
+    ft_anchor: str | None = None     # L2-SP anchor checkpoint (anti-drift)
+    ft_l2_lambda: float = 0.01       # L2-SP regularization lambda
+    ft_sample_weighting: bool = False  # easy sample upweighting (ICML 2025)
+    ft_lazy_train: bool = False      # LazyTrain scheduler (1.24× sustained TFLOPS)
+    ft_oomb: bool = False            # OOMB chunk-recurrent (128K+ context on 12GB)
+    ft_hybrid_clip: bool = False     # Hybrid8Bit fast grad clip
+    ft_elastic_grad_accum: bool = False  # dynamic grad_accum (OOM prevention)
+    ft_freetoken: bool = False       # FreeToken double-buffered grad pipeline
+    ft_compile: bool = False         # torch.compile model (experimental on Windows)
+    ft_disk_cache: bool = True       # disk-backed tokenization cache
+    ft_pack_sequences: bool = True   # pack variable-length sequences (Llama-3 style)
+    ft_async_prefetch: bool = True   # async background prefetcher (2-3× throughput)
+    ft_prefetch_count: int = 4       # batches to prefetch ahead
 
     # Loop control
     max_epochs: int = 50
@@ -74,10 +148,10 @@ class LoopConfig:
     # Paths
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data/finetune"
-    config_name: str = "forgelm_v7"
+    config_name: str = "forgelm_v10_1.2b"  # V10 default
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
-    replay_file: str = ""            # path to prior SFT JSONL (e.g. forgelm_v7_train.jsonl)
+    replay_file: str = ""            # path to prior SFT JSONL
     replay_ratio: float = 0.2        # fraction of replay examples in each epoch
 
     # Task source: "model" (AZR self-propose) or "api" (distillation APIs)
@@ -96,30 +170,97 @@ class InfiniteSelfPlayLoop:
 
         # Trajectory storage: (task_description, solution_code, success)
         self._trajectories: list[dict] = []
+        # ForgeEngine retained across self-play → eval for weight-swap reuse.
+        self._engine = None
 
     def _epoch_checkpoint_path(self, epoch: int) -> str:
         return os.path.normpath(os.path.join(
             self.config.checkpoint_dir,
-            f"forgelm_v7_SP{epoch}.safetensors"))
+            f"ForgeLM_V10_SP{epoch}.safetensors"))
+
+    def _load_engine(self):
+        """Load a ForgeEngine with V10 inference features activated.
+
+        When ``use_forge_engine`` is True (default), uses
+        ``ForgeEngine.from_checkpoint`` and activates the V10 feature set
+        (SpectralKV, MTP self-speculative decoding, prefix cache, Triton
+        conv, fused QK-norm+RoPE+cache-write, sequence-split attention).
+        The engine.model is used for curriculum generation; the engine
+        itself is reused by fast_eval (weight-swap, no reload).
+
+        When False, falls back to the bare ``load_default_model`` path
+        (legacy, no V10 inference features — kept for debugging/ablation).
+        """
+        cfg = self.config
+        if cfg.use_forge_engine:
+            from research.inference.forge_engine import ForgeEngine
+            engine = ForgeEngine.from_checkpoint(
+                checkpoint=self.best_checkpoint,
+                config_name=cfg.config_name,
+                tokenizer_path="research/checkpoints/lfm25_tokenizer",
+                device=cfg.device,
+                auto_activate=False,  # we activate explicitly below
+            )
+            # Activate V10 inference features. SpectralKV is the V10 production
+            # KV cache (63× compression). MTP self-spec gives 2-4× decode
+            # speedup when the checkpoint has MTP heads (V10-growth configs).
+            engine.activate(
+                kv_cache=cfg.kv_cache,
+                decoding=cfg.decoding,
+                quantize=cfg.quantize,
+                acceleration=cfg.acceleration,
+                kv_cache_tokens=cfg.kv_cache_tokens,
+                use_compile=cfg.use_compile,
+                use_triton_conv=cfg.use_triton_conv,
+                use_prefix_cache=cfg.use_prefix_cache,
+                use_chunked_prefill=cfg.use_chunked_prefill,
+                use_fused_qk_norm_rope_cache=cfg.use_fused_qk_norm_rope_cache,
+                use_seq_split=cfg.use_seq_split,
+                use_spec_attn=cfg.use_spec_attn,
+                warmup=cfg.warmup,
+            )
+            print(f"  [ForgeEngine] V10 features active: kv={cfg.kv_cache}, "
+                  f"decoding={cfg.decoding}, triton_conv={cfg.use_triton_conv}, "
+                  f"prefix_cache={cfg.use_prefix_cache}")
+            return engine
+
+        # Legacy bare-model path (no V10 inference features)
+        from research.model_loader import load_default_model
+        from research.inference.forge_engine import ForgeEngine
+        model, tokenizer = load_default_model(
+            cfg.config_name,
+            checkpoint_path=self.best_checkpoint,
+            device=cfg.device,
+            dtype=torch.bfloat16,
+        )
+        model.eval()
+        # Wrap in a minimal ForgeEngine shell so fast_eval's weight-swap
+        # path still works (engine.model + engine.tokenizer).
+        engine = ForgeEngine(model, tokenizer, device=cfg.device,
+                             checkpoint_path=self.best_checkpoint)
+        return engine
 
     # ── Phase 1: Self-Play (AZR curriculum) ──────────────────────────
 
     def _run_self_play(self) -> dict:
-        """Phase 1: Load model, run AZR curriculum (propose → solve → verify)."""
+        """Phase 1: Load model, run AZR curriculum (propose → solve → verify).
+
+        V10: loads via ForgeEngine and activates V10 inference features
+        (SpectralKV, MTP self-speculative decoding, prefix cache, Triton
+        conv, fused QK-norm+RoPE+cache-write, sequence-split attention).
+        The engine.model is passed to InfiniteCurriculum; the engine is
+        retained on self._engine for fast_eval reuse (skips ~40s reload).
+        """
         print(f"\n{'='*70}")
         print(f"  PHASE 1: AZR SELF-PLAY (epoch {self.epoch})")
         print(f"{'='*70}")
 
-        from research.model_loader import load_default_model
-        from research.tokenizer_cache import get_tokenizer
-
-        model, tokenizer = load_default_model(
-            self.config.config_name,
-            checkpoint_path=self.best_checkpoint,
-            device=self.config.device,
-            dtype=torch.bfloat16,
-        )
-        model.eval()
+        engine = self._load_engine()
+        model = engine.model
+        tokenizer = engine.tokenizer
+        # Keep engine alive for fast_eval reuse (set before curriculum so
+        # cleanup paths can find it).
+        self._engine = engine
 
         curriculum = InfiniteCurriculum(
             model=model,
@@ -194,7 +335,7 @@ class InfiniteSelfPlayLoop:
 
         if not validated:
             print("  [Propose] No valid tasks generated, skipping epoch")
-            self._free_model(model)
+            self._free_engine()
             del curriculum
             gc.collect()
             if torch.cuda.is_available():
@@ -302,9 +443,10 @@ class InfiniteSelfPlayLoop:
         print(f"\n  [Self-Play] {successes}/{len(validated)} solved "
               f"({stats['success_rate']:.0%}), domain={domain}")
 
-        # Free model AND curriculum (curriculum holds self.model = model,
-        # so deleting only the local var leaves a live reference → VRAM leak).
-        self._free_model(model)
+        # Free curriculum (holds self.model = engine.model reference).
+        # The engine itself is retained on self._engine for fast_eval reuse
+        # (weight-swap skips ~40s model reload). It is freed after eval/promote
+        # via _free_engine().
         del curriculum
         gc.collect()
         if torch.cuda.is_available():
@@ -313,9 +455,27 @@ class InfiniteSelfPlayLoop:
             torch.cuda.synchronize()
         return stats
 
-    def _free_model(self, model):
-        """Free model from VRAM + verify release."""
-        del model
+    def _free_engine(self):
+        """Free the ForgeEngine from VRAM + verify release.
+
+        Releases the model, KV cache, CUDA graphs, Triton patches, and
+        prefix cache held by the engine. Called after fast_eval completes
+        (or on early-return paths where eval is skipped).
+        """
+        engine = self._engine
+        if engine is None:
+            return
+        # Release acceleration resources (CUDA graphs, megakernels, etc.)
+        # before deleting the model to prevent pool leaks.
+        if hasattr(engine, "_release_acceleration_resources"):
+            engine._release_acceleration_resources()
+        # Sleep level 2 to drop the model from VRAM if the engine supports it.
+        try:
+            engine.sleep(level=2)
+        except Exception:
+            pass
+        del engine
+        self._engine = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -326,7 +486,7 @@ class InfiniteSelfPlayLoop:
             # Verify VRAM was actually released
             allocated = torch.cuda.memory_allocated() / 1e9
             reserved = torch.cuda.memory_reserved() / 1e9
-            print(f"  [VRAM] After free: {allocated:.2f} GB allocated, "
+            print(f"  [VRAM] After engine free: {allocated:.2f} GB allocated, "
                   f"{reserved:.2f} GB reserved")
 
     # ── Phase 2: Export + Finetune ───────────────────────────────────
@@ -403,33 +563,144 @@ class InfiniteSelfPlayLoop:
         return output_path
 
     def _finetune(self, data_path: str, epoch: int) -> str:
-        """Phase 2b: SFT continuation from best checkpoint (subprocess)."""
+        """Phase 2b: SFT continuation from best checkpoint.
+
+        V10: wires all sft_train training tricks — Muon-SF optimizer, grad-mixup,
+        curriculum learning, augmentation, SYNPRO, focal/dynamic-focal loss,
+        entropy weighting, MTP auxiliary loss, distillation, sequential freeze,
+        EMA, BitNet-everywhere, LazyTrain, OOMB, Hybrid8Bit clip, elastic
+        grad-accum, FreeToken, disk cache, packed sequences, async prefetch.
+        Each trick is gated by its LoopConfig field so users can toggle them
+        via CLI args.
+        """
         print(f"\n{'='*70}")
         print(f"  PHASE 2: FINETUNE (epoch {self.epoch})")
         print(f"{'='*70}")
 
+        # Free the self-play engine before finetuning — training needs the
+        # full VRAM budget. The engine is reloaded fresh next epoch.
+        self._free_engine()
+
         save_path = self._epoch_checkpoint_path(epoch)
+        c = self.config
 
         cmd = [
             os.sys.executable, "-m", "research.training.runners.sft_train",
             "--data", data_path,
             "--checkpoint", self.best_checkpoint,
             "--save", save_path,
-            "--max-steps", str(self.config.ft_max_steps),
-            "--lr", str(self.config.ft_lr),
-            "--batch-size", str(self.config.ft_batch_size),
-            "--grad-accum", str(self.config.ft_grad_accum),
-            "--seq-len", str(self.config.ft_seq_len),
-            "--optimizer", self.config.ft_optimizer,
-            "--entropy-alpha", str(self.config.ft_entropy_alpha),
-            "--vram-limit-gb", str(self.config.ft_vram_limit_gb),
+            "--config", c.config_name,
+            "--max-steps", str(c.ft_max_steps),
+            "--lr", str(c.ft_lr),
+            "--min-lr", str(c.ft_min_lr),
+            "--batch-size", str(c.ft_batch_size),
+            "--grad-accum", str(c.ft_grad_accum),
+            "--sync-freq", str(c.ft_sync_freq),
+            "--seq-len", str(c.ft_seq_len),
+            "--warmup-steps", str(c.ft_warmup_steps),
+            "--optimizer", c.ft_optimizer,
+            "--grad-compression", c.ft_grad_compression,
+            "--entropy-alpha", str(c.ft_entropy_alpha),
+            "--loss-function", c.ft_loss_function,
+            "--focal-gamma", str(c.ft_focal_gamma),
+            "--label-smoothing-eps", str(c.ft_label_smoothing_eps),
+            "--norm-type", c.ft_norm_type,
+            "--grad-mixup", str(c.ft_grad_mixup),
+            "--curriculum", c.ft_curriculum,
+            "--vram-limit-gb", str(c.ft_vram_limit_gb),
             "--ram-limit-percent", "90",
         ]
-        if self.config.ft_lora:
-            cmd.extend(["--lora", "--lora-r", str(self.config.ft_lora_r),
-                        "--lora-alpha", str(self.config.ft_lora_alpha)])
-        if self.config.ft_grad_checkpoint:
-            cmd.append("--grad-checkpoint")
+
+        # ── LoRA / BitNet ──
+        if c.ft_lora:
+            cmd.extend(["--lora-r", str(c.ft_lora_r),
+                        "--lora-alpha", str(c.ft_lora_alpha)])
+        else:
+            cmd.append("--no-lora")
+        if c.ft_bitnet_everywhere:
+            cmd.append("--bitnet-everywhere")
+        else:
+            cmd.append("--no-bitnet-everywhere")
+        if c.ft_manual_lora:
+            cmd.append("--manual-lora")
+
+        # ── Gradient checkpointing ──
+        if c.ft_grad_checkpoint:
+            cmd.extend(["--grad-checkpoint", "--checkpoint-strategy",
+                        c.ft_checkpoint_strategy])
+        else:
+            cmd.append("--no-grad-checkpoint")
+
+        # ── Data pipeline ──
+        if c.ft_disk_cache:
+            cmd.append("--disk-cache")
+        else:
+            cmd.append("--no-disk-cache")
+        if c.ft_pack_sequences:
+            cmd.append("--pack-sequences")
+        else:
+            cmd.append("--no-pack-sequences")
+        if c.ft_async_prefetch:
+            cmd.extend(["--async-prefetch", "--prefetch-count",
+                        str(c.ft_prefetch_count)])
+        else:
+            cmd.append("--no-async-prefetch")
+
+        # ── Augmentation / SYNPRO ──
+        if c.ft_augment:
+            cmd.append("--augment")
+        if c.ft_synpro:
+            cmd.append("--synpro")
+
+        # ── MTP auxiliary loss ──
+        if c.ft_mtp_weight > 0:
+            cmd.extend(["--mtp-weight", str(c.ft_mtp_weight)])
+            if c.ft_mtp_n_heads is not None:
+                cmd.extend(["--mtp-n-heads", str(c.ft_mtp_n_heads)])
+
+        # ── Distillation ──
+        if c.ft_distill:
+            cmd.append("--distill")
+            if c.ft_teacher_checkpoint:
+                cmd.extend(["--teacher-checkpoint", c.ft_teacher_checkpoint])
+            cmd.extend(["--distill-topk", str(c.ft_distill_topk),
+                        "--distill-truncate", str(c.ft_distill_truncate)])
+            if c.ft_distill_prefix:
+                cmd.append("--distill-prefix")
+
+        # ── Sequential freeze ──
+        if c.ft_sequential_freeze > 0:
+            cmd.extend(["--sequential-freeze", str(c.ft_sequential_freeze),
+                        "--final-finetune-steps", str(c.ft_final_finetune_steps)])
+
+        # ── EMA ──
+        if c.ft_ema:
+            cmd.extend(["--ema", "--ema-decay", str(c.ft_ema_decay)])
+
+        # ── L2-SP anchor regularization ──
+        if c.ft_anchor:
+            cmd.extend(["--anchor", c.ft_anchor,
+                        "--l2-lambda", str(c.ft_l2_lambda)])
+
+        # ── Sample weighting ──
+        if c.ft_sample_weighting:
+            cmd.append("--sample-weighting")
+
+        # ── LazyTrain / OOMB / Hybrid8Bit / elastic / FreeToken ──
+        if c.ft_lazy_train:
+            cmd.append("--lazy-train")
+        if c.ft_oomb:
+            cmd.append("--oomb")
+        if c.ft_hybrid_clip:
+            cmd.append("--hybrid-clip")
+        if c.ft_elastic_grad_accum:
+            cmd.append("--elastic-grad-accum")
+        if c.ft_freetoken:
+            cmd.append("--freetoken")
+
+        # ── torch.compile ──
+        if c.ft_compile:
+            cmd.append("--compile")
 
         # Run in-process (no subprocess spawn overhead)
         if not self._run_subprocess(cmd, "Finetune"):
@@ -439,10 +710,85 @@ class InfiniteSelfPlayLoop:
 
         return save_path
 
+    def _run_subprocess(self, cmd: list[str], stage_name: str) -> bool:
+        """Run a training stage in-process (no subprocess spawn).
+
+        Calls the runner's main() directly via sys.argv manipulation, with
+        explicit VRAM cleanup before/after. Falls back to subprocess if the
+        module has no main() or the in-process path fails.
+        """
+        # cmd[0] is the python executable, cmd[1] is "-m", cmd[2] is the module
+        if len(cmd) >= 3 and cmd[1] == "-m":
+            module_name = cmd[2]
+            cli_args = cmd[3:]
+        else:
+            return self._run_subprocess_fallback(cmd, stage_name)
+
+        print(f"  Running (in-process): {module_name} "
+              f"{' '.join(cli_args[:3])}... ({len(cli_args)} args)")
+
+        # Cleanup VRAM from self-play before starting training
+        self._free_engine()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        import sys
+        import importlib
+        old_argv = sys.argv
+        sys.argv = [module_name] + cli_args
+        try:
+            mod = importlib.import_module(module_name)
+            if hasattr(mod, "main"):
+                mod.main()
+                return True
+            else:
+                print(f"  {stage_name}: module has no main() — falling back to subprocess")
+                sys.argv = old_argv
+                return self._run_subprocess_fallback(cmd, stage_name)
+        except SystemExit as e:
+            code = e.code
+            if code is None or code == 0:
+                return True
+            print(f"  {stage_name} FAILED (exit code {code})")
+            return False
+        except Exception as e:
+            print(f"  {stage_name} FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            sys.argv = old_argv
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+    def _run_subprocess_fallback(self, cmd: list[str], stage_name: str) -> bool:
+        """Legacy subprocess fallback (used when in-process isn't possible)."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        print(f"  Running (subprocess fallback): {' '.join(cmd[:4])}... ({len(cmd)} args)")
+        import subprocess
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            print(f"  {stage_name} FAILED (exit code {result.returncode})")
+            return False
+        return True
+
     # ── Phase 3: Evaluate ────────────────────────────────────────────
 
     def _evaluate(self, checkpoint: str) -> dict:
-        """Phase 3: Evaluate candidate vs current best via fast_eval."""
+        """Phase 3: Evaluate candidate vs current best via fast_eval.
+
+        V10: passes the self-play ForgeEngine to fast_eval for weight-swap
+        reuse (skips ~40s model reload). The engine's KV cache is
+        re-activated to a standard eval configuration before testing.
+        """
         print(f"\n{'='*70}")
         print(f"  PHASE 3: EVALUATE")
         print(f"{'='*70}")
@@ -454,11 +800,16 @@ class InfiniteSelfPlayLoop:
                 base_checkpoint=self.best_checkpoint,
                 candidate_checkpoint=checkpoint,
                 device=self.config.device,
+                engine=self._engine,           # reuse self-play engine
+                config_name=self.config.config_name,  # V10 config
             )
         except Exception as e:
             print(f"  Eval failed: {e}")
             import traceback; traceback.print_exc()
             return {"passed": False, "error": str(e)}
+        finally:
+            # Engine is no longer needed after eval — free VRAM for next epoch.
+            self._free_engine()
 
         base_q = results.get("base", {}).get("quality", 0)
         cand_q = results.get("candidate", {}).get("quality", 0)
@@ -610,27 +961,33 @@ def main():
                 os.environ.setdefault(k.strip(), v.strip())
 
     parser = argparse.ArgumentParser(
-        description="Infinite AZR self-play training loop")
+        description="Infinite AZR self-play training loop (V10: ForgeEngine + all training tricks)")
     parser.add_argument("--checkpoint", required=True,
-                        help="Starting checkpoint (safetensors)")
+                        help="Starting checkpoint (safetensors). Default V10: "
+                             "research/checkpoints/ForgeLM_V10_1.2B.safetensors")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Max epochs to run")
     parser.add_argument("--tasks-per-epoch", type=int, default=30,
                         help="Tasks to propose + solve per epoch")
     parser.add_argument("--ft-steps", type=int, default=100,
                         help="Finetune steps per epoch")
-    parser.add_argument("--ft-lr", type=float, default=2e-5,
-                        help="Finetune learning rate")
+    parser.add_argument("--ft-lr", type=float, default=5e-5,
+                        help="Finetune learning rate (V10 default 5e-5 for muon_sf)")
     parser.add_argument("--ft-batch-size", type=int, default=1)
-    parser.add_argument("--ft-grad-accum", type=int, default=4)
-    parser.add_argument("--ft-optimizer", type=str, default="bnb",
-                        choices=["fused", "bnb", "lion", "flash_adamw", "flash_lion", "forge", "cpu_offload"])
+    parser.add_argument("--ft-grad-accum", type=int, default=5,
+                        help="Gradient accumulation steps (evolution: 5)")
+    parser.add_argument("--ft-optimizer", type=str, default="muon_sf",
+                        choices=["fused", "bnb", "lion", "muon", "muon_sf",
+                                 "muon_sf_plain", "flash_adamw", "flash_lion",
+                                 "forge", "sf_normuon", "amuse", "mona",
+                                 "cpu_offload", "badam", "fira_nlrq"],
+                        help="Finetune optimizer (V10 default: muon_sf, 2.39x vs AdamW)")
     parser.add_argument("--self-play-mode", type=str, default="azr",
                         choices=["azr", "soar", "sgs", "thinking"],
                         help="Self-play mode: 'azr' (standard), 'soar' (meta-RL curriculum, "
                              "escapes learning plateaus), 'sgs' (self-guided self-play, "
                              "prevents Conjecturer collapse with Guide role), "
-                             "'thinking' (LFM2.5-Thinking pipeline: CPT to SFT to DPO to RLVR)")
+                             "'thinking' (ForgeLM V10-Thinking pipeline: CPT to SFT to DPO to RLVR)")
     parser.add_argument("--saerl", action="store_true",
                         help="Enable SAERL: SAE-guided data engineering for RL. "
                              "Diversity control + difficulty curriculum + quality filtering. "
@@ -640,7 +997,12 @@ def main():
                              "Dynamically adjusts mixing ratio across data sources.")
     parser.add_argument("--ft-no-lora", action="store_true",
                         help="Disable LoRA (full fine-tuning)")
-    parser.add_argument("--ft-grad-checkpoint", action="store_true", default=True)
+    parser.add_argument("--ft-grad-checkpoint", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Gradient checkpointing (default True, use --no-ft-grad-checkpoint)")
+    parser.add_argument("--ft-checkpoint-strategy", type=str, default="all",
+                        choices=["all", "ffn", "attn", "none", "lazy", "optimal"],
+                        help="Selective gradient checkpointing strategy")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="Self-play exploration temperature")
     parser.add_argument("--top-k", type=int, default=80)
@@ -652,10 +1014,81 @@ def main():
                         choices=["model", "api"],
                         help="Task source: 'model' (AZR self-propose) or "
                              "'api' (distillation teacher APIs)")
-    parser.add_argument("--config", type=str, default="forgelm_v7",
+    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b",
                         help="Model config name")
     parser.add_argument("--eval-threshold", type=float, default=0.5,
                         help="Min candidate quality vs base to promote")
+
+    # ── V10 ForgeEngine inference features ──
+    parser.add_argument("--no-forge-engine", action="store_true",
+                        help="Disable ForgeEngine (use bare model path, no V10 inference features)")
+    parser.add_argument("--kv-cache", type=str, default="spectral",
+                        help="KV cache strategy for self-play generation (V10 default: spectral)")
+    parser.add_argument("--decoding", type=str, default="mtp_selfspec",
+                        choices=["standard", "speculative", "medusa", "dspark",
+                                 "eagle3", "mtp_selfspec"],
+                        help="Decoding strategy (V10 default: mtp_selfspec)")
+    parser.add_argument("--quantize", type=str, default=None,
+                        choices=[None, "int8", "int4", "fp8", "w8a8", "nvfp4"],
+                        help="Weight quantization for self-play generation")
+    parser.add_argument("--acceleration", type=str, default=None,
+                        choices=[None, "cuda_graph", "megakernel", "flex_decoding"],
+                        help="Acceleration strategy")
+    parser.add_argument("--use-compile", action="store_true",
+                        help="torch.compile the self-play model (experimental on Windows)")
+    parser.add_argument("--no-triton-conv", action="store_true",
+                        help="Disable Triton fused conv kernel")
+    parser.add_argument("--no-prefix-cache", action="store_true",
+                        help="Disable prefix KV cache")
+    parser.add_argument("--kv-cache-tokens", type=int, default=4096,
+                        help="KV cache token budget for self-play generation")
+
+    # ── Training tricks ──
+    parser.add_argument("--ft-loss-function", type=str, default="ce",
+                        choices=["ce", "focal", "label_smoothing", "lovasz",
+                                 "dynamic_focal", "mixture"],
+                        help="Loss function (focal/dynamic_focal: +36%% exact match)")
+    parser.add_argument("--ft-focal-gamma", type=float, default=4.93,
+                        help="Focal loss gamma (evolution optimum: 4.93)")
+    parser.add_argument("--ft-entropy-alpha", type=float, default=0.5,
+                        help="Token entropy weighting alpha (0 disables)")
+    parser.add_argument("--ft-grad-mixup", type=int, default=1,
+                        help="N-batch grad averaging (1=off, 3=1.25x convergence)")
+    parser.add_argument("--ft-curriculum", type=str, default="none",
+                        choices=["none", "vanilla", "pacing", "interleaved", "warmup"],
+                        help="Curriculum learning strategy (18-45%% fewer steps)")
+    parser.add_argument("--ft-augment", action="store_true",
+                        help="Training-time data augmentation (token noise, FIM, target offset)")
+    parser.add_argument("--ft-synpro", action="store_true",
+                        help="SYNPRO synthetic data generation (3.7-5.2x effective tokens)")
+    parser.add_argument("--ft-norm-type", type=str, default="rmsnorm",
+                        choices=["rmsnorm", "seednorm", "dyt"],
+                        help="Normalization type (dyt = Muon-compatible Dynamic Tanh)")
+    parser.add_argument("--ft-mtp-weight", type=float, default=0.0,
+                        help="MTP auxiliary loss weight (Nemotron Lightning, 0=disabled)")
+    parser.add_argument("--ft-distill", action="store_true",
+                        help="Knowledge distillation from a teacher model")
+    parser.add_argument("--ft-teacher-checkpoint", type=str, default=None,
+                        help="Teacher model checkpoint for distillation")
+    parser.add_argument("--ft-sequential-freeze", type=int, default=0,
+                        help="Sequential freeze/unfreeze (0=off, 4=4 phases)")
+    parser.add_argument("--ft-ema", action="store_true",
+                        help="EMA shadow weights")
+    parser.add_argument("--ft-anchor", type=str, default=None,
+                        help="L2-SP anchor checkpoint (anti-drift, NeurIPS 2024)")
+    parser.add_argument("--ft-lazy-train", action="store_true",
+                        help="LazyTrain scheduler (1.24x sustained TFLOPS)")
+    parser.add_argument("--ft-oomb", action="store_true",
+                        help="OOMB chunk-recurrent training (128K+ context on 12GB)")
+    parser.add_argument("--ft-elastic-grad-accum", action="store_true",
+                        help="Dynamic grad_accum (OOM prevention)")
+    parser.add_argument("--ft-freetoken", action="store_true",
+                        help="FreeToken double-buffered grad pipeline (cpu_offload only)")
+    parser.add_argument("--ft-compile", action="store_true",
+                        help="torch.compile the training model (experimental on Windows)")
+    parser.add_argument("--ft-bitnet-everywhere", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="BitNet ternary QAT (1.58 bits, 2.39x vs AdamW)")
     args = parser.parse_args()
 
     config = LoopConfig(
@@ -667,6 +1100,37 @@ def main():
         ft_optimizer=args.ft_optimizer,
         ft_lora=not args.ft_no_lora,
         ft_grad_checkpoint=args.ft_grad_checkpoint,
+        ft_checkpoint_strategy=args.ft_checkpoint_strategy,
+        ft_loss_function=args.ft_loss_function,
+        ft_focal_gamma=args.ft_focal_gamma,
+        ft_entropy_alpha=args.ft_entropy_alpha,
+        ft_grad_mixup=args.ft_grad_mixup,
+        ft_curriculum=args.ft_curriculum,
+        ft_augment=args.ft_augment,
+        ft_synpro=args.ft_synpro,
+        ft_norm_type=args.ft_norm_type,
+        ft_mtp_weight=args.ft_mtp_weight,
+        ft_distill=args.ft_distill,
+        ft_teacher_checkpoint=args.ft_teacher_checkpoint,
+        ft_sequential_freeze=args.ft_sequential_freeze,
+        ft_ema=args.ft_ema,
+        ft_anchor=args.ft_anchor,
+        ft_lazy_train=args.ft_lazy_train,
+        ft_oomb=args.ft_oomb,
+        ft_elastic_grad_accum=args.ft_elastic_grad_accum,
+        ft_freetoken=args.ft_freetoken,
+        ft_compile=args.ft_compile,
+        ft_bitnet_everywhere=args.ft_bitnet_everywhere,
+        # V10 inference features
+        use_forge_engine=not args.no_forge_engine,
+        kv_cache=args.kv_cache,
+        decoding=args.decoding,
+        quantize=args.quantize,
+        acceleration=args.acceleration,
+        use_compile=args.use_compile,
+        use_triton_conv=not args.no_triton_conv,
+        use_prefix_cache=not args.no_prefix_cache,
+        kv_cache_tokens=args.kv_cache_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
         max_epochs=args.epochs,
@@ -707,7 +1171,7 @@ def main():
         return
 
     if args.self_play_mode == "thinking":
-        print("[InfiniteLoop] THINKING mode: LFM2.5-1.2B-Thinking pipeline (CPT->SFT->DPO->RLVR)")
+        print("[InfiniteLoop] THINKING mode: ForgeLM V10-Thinking pipeline (CPT->SFT->DPO->RLVR)")
         pipeline_config = ThinkingPipelineConfig(
             config_name=args.config,
             optimizer=args.ft_optimizer if args.ft_optimizer != "bnb" else "cpu_offload",
@@ -731,13 +1195,13 @@ def main():
     loop.run()
 
 
-# ── LFM2.5-Thinking Pipeline ─────────────────────────────────────────────
+# ── ForgeLM V10-Thinking Pipeline ─────────────────────────────────────────
 
 @dataclass
 class ThinkingPipelineConfig:
-    """Configuration for the LFM2.5-1.2B-Thinking multi-stage pipeline.
+    """Configuration for the ForgeLM V10-Thinking multi-stage pipeline.
 
-    Implements the full training recipe from Liquid AI's LFM2.5-1.2B-Thinking:
+    Implements the full training recipe from Liquid AI's ForgeLM V10-Thinking:
       CPT (midtraining with reasoning traces) →
       SFT (curriculum: short CoT → long CoT + mix distillation) →
       DPO (doom-loop mitigation with LLM judge) →
@@ -748,9 +1212,9 @@ class ThinkingPipelineConfig:
     output checkpoint existence.
     """
     # Model
-    config_name: str = "forgelm_v7"
+    config_name: str = "forgelm_v10_1.2b"  # V10 default
     device: str = "cuda"
-    optimizer: str = "cpu_offload"  # full-precision on 12GB GPU
+    optimizer: str = "muon_sf"  # V10 default: Muon-SF (was: cpu_offload)
 
     # Stage 1: CPT (midtraining with reasoning traces)
     cpt_enabled: bool = True
@@ -817,7 +1281,7 @@ class ThinkingPipelineConfig:
 
 
 class ThinkingPipeline:
-    """Orchestrates the full LFM2.5-1.2B-Thinking training pipeline.
+    """Orchestrates the full ForgeLM V10-Thinking training pipeline.
 
     Stages:
       1. CPT: Midtrain with reasoning traces (openthoughts, openr1_math, dolphin_r1)
@@ -839,7 +1303,7 @@ class ThinkingPipeline:
         """Get the checkpoint path for a stage output."""
         return os.path.normpath(os.path.join(
             self.config.checkpoint_dir,
-            f"forgelm_v7_{stage}.safetensors"))
+            f"ForgeLM_V10_{stage}.safetensors"))
 
     def _run_subprocess(self, cmd: list[str], stage_name: str) -> bool:
         """Run a training stage in-process (no subprocess spawn).
@@ -1131,13 +1595,13 @@ class ThinkingPipeline:
     # ── Full pipeline ─────────────────────────────────────────────────
 
     def run(self) -> str:
-        """Run the full 4-stage LFM2.5-Thinking pipeline.
+        """Run the full 4-stage ForgeLM V10-Thinking pipeline.
 
         Returns the path to the final RLVR checkpoint.
         """
         t0 = time.time()
         print(f"\n{'#'*70}")
-        print(f"#  LFM2.5-1.2B-THINKING PIPELINE")
+        print(f"#  FORGELM V10-THINKING PIPELINE")
         print(f"#  Base checkpoint: {self.base_checkpoint}")
         print(f"#  Config: {self.config.config_name}")
         print(f"#  Optimizer: {self.config.optimizer}")

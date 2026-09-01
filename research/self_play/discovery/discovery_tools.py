@@ -430,13 +430,13 @@ class ToolRegistry:
             return {"error": f"tool '{name}' failed: {e}"}
 
     def prompt_block(self) -> str:
-        """JSON description of all tools (legacy — use tool_definitions for LFM2.5)."""
+        """JSON description of all tools (legacy — use tool_definitions for ForgeLM V10)."""
         return json.dumps(self.schemas, indent=2, ensure_ascii=False)
 
     def tool_definitions(self) -> list[dict]:
-        """Return tool definitions in LFM2.5 format for the chat template.
+        """Return tool definitions in ForgeLM V10 format for the chat template.
 
-        LFM2.5 expects: [{"name": "...", "description": "...", "parameters": {...}}]
+        ForgeLM V10 expects: [{"name": "...", "description": "...", "parameters": {...}}]
         where parameters is a JSON schema-like dict.
         """
         defs = []

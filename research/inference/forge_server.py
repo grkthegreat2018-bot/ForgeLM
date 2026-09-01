@@ -15,7 +15,7 @@ Usage:
     # Or programmatically:
     from research.inference.forge_server import ForgeServer
     server = ForgeServer()
-    server.register("forgelm-v3", checkpoint="...", config="forgelm_v7")
+    server.register("forgelm-v10", checkpoint="...", config="forgelm_v10_1.2b")
     server.serve(port=8000)
 
 Task-based concurrent generation:
@@ -1512,7 +1512,7 @@ class ForgeServer:
 DEFAULT_MODELS = {
     "lfm2.5-1.2b": {
         "checkpoint": str(LFM25_CHECKPOINT),
-        "config": "forgelm_v7",
+        "config": "forgelm_v10_1.2b",
         "tokenizer": str(LFM25_HF_DIR),
         "vram_gb": 2.5,
     },
@@ -1527,7 +1527,7 @@ def main():
                         help="Comma-separated model IDs to load")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Override checkpoint path")
-    parser.add_argument("--config", type=str, default="forgelm_v7",
+    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b",
                         help="Model config preset")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Override tokenizer path")

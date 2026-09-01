@@ -388,6 +388,9 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
         return HqeKVCache()
     if strategy == "kvzip":
         return KVzipCacheStrategy()
+    if strategy == "spectral":
+        from research.inference.kv.spectral_kv import SpectralKVCache
+        return SpectralKVCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()

@@ -129,7 +129,7 @@ class DomainSpec:
     checker_type: str = "script"
     # For llm_judge: natural-language description of what the answer must satisfy
     checker_requirements: str = ""
-    # For model_boot: config name to boot (e.g. "forgelm_v7")
+    # For model_boot: config name to boot (e.g. "forgelm_v10_1.2b")
     checker_model_config: str = ""
 
     @property

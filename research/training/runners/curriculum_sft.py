@@ -1,6 +1,6 @@
 """Curriculum SFT: Mix Distillation + two-stage curriculum for small models.
 
-Implements the SFT stage of the LFM2.5-1.2B-Thinking recipe, augmented with
+Implements the SFT stage of the ForgeLM V10-Thinking recipe, augmented with
 insights from the Small Model Learnability Gap research (arXiv 2502.12143):
 
   Small models (≤3B) do NOT benefit from long CoT distillation. They perform
@@ -18,7 +18,7 @@ Solutions implemented here:
        to externalize its latent reasoning as explicit chains.
   3. Doom-loop filtering: n-gram repetition detector removes training
      examples with excessive repetition (the #1 failure mode of reasoning
-     models, per Liquid AI's LFM2.5-1.2B-Thinking report: 15.74% baseline).
+     models, per Liquid AI's ForgeLM V10-Thinking report: 15.74% baseline).
   4. CoT length classification: automatically splits data into short/long
      CoT buckets based on solution length and reasoning marker presence.
 
@@ -44,15 +44,15 @@ Output: Two filtered JSONL files (stage1_short.jsonl, stage2_long.jsonl)
   # Step 2: Run Stage 1 (short CoT — internal solver)
   python -m research.training.runners.curriculum_sft train-stage1 \\
       --data research/data/curriculum/stage1_short.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v7_CPT.safetensors \\
-      --save research/checkpoints/forgelm_v7_SFT1.safetensors \\
+      --checkpoint research/checkpoints/forgelm_v10_1.2b_CPT.safetensors \\
+      --save research/checkpoints/forgelm_v10_1.2b_SFT1.safetensors \\
       --lr 5e-5 --max-steps 1000 --optimizer cpu_offload
 
   # Step 3: Run Stage 2 (long CoT — externalize reasoning)
   python -m research.training.runners.curriculum_sft train-stage2 \\
       --data research/data/curriculum/stage2_long.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v7_SFT1.safetensors \\
-      --save research/checkpoints/forgelm_v7_SFT2.safetensors \\
+      --checkpoint research/checkpoints/forgelm_v10_1.2b_SFT1.safetensors \\
+      --save research/checkpoints/forgelm_v10_1.2b_SFT2.safetensors \\
       --lr 2e-5 --max-steps 1500 --optimizer cpu_offload
 
   # Or run the full pipeline in one command:
@@ -535,7 +535,7 @@ def main():
     p_s1.add_argument("--data", required=True, help="Stage 1 JSONL data file")
     p_s1.add_argument("--checkpoint", required=True, help="Starting checkpoint (CPT output)")
     p_s1.add_argument("--save", required=True, help="Output checkpoint")
-    p_s1.add_argument("--config", default="forgelm_v7")
+    p_s1.add_argument("--config", default="forgelm_v10_1.2b")
     p_s1.add_argument("--lr", type=float, default=5e-5)
     p_s1.add_argument("--max-steps", type=int, default=1000)
     p_s1.add_argument("--optimizer", default="cpu_offload")
@@ -553,7 +553,7 @@ def main():
     p_s2.add_argument("--data", required=True, help="Stage 2 JSONL data file")
     p_s2.add_argument("--checkpoint", required=True, help="Starting checkpoint (Stage 1 output)")
     p_s2.add_argument("--save", required=True, help="Output checkpoint")
-    p_s2.add_argument("--config", default="forgelm_v7")
+    p_s2.add_argument("--config", default="forgelm_v10_1.2b")
     p_s2.add_argument("--lr", type=float, default=2e-5)
     p_s2.add_argument("--max-steps", type=int, default=1500)
     p_s2.add_argument("--optimizer", default="cpu_offload")
@@ -572,7 +572,7 @@ def main():
     p_full.add_argument("--output-dir", required=True)
     p_full.add_argument("--checkpoint", required=True, help="CPT checkpoint to start from")
     p_full.add_argument("--save", required=True, help="Final SFT checkpoint")
-    p_full.add_argument("--config", default="forgelm_v7")
+    p_full.add_argument("--config", default="forgelm_v10_1.2b")
     p_full.add_argument("--short-cot-max-tokens", type=int, default=150)
     p_full.add_argument("--long-cot-min-tokens", type=int, default=300)
     p_full.add_argument("--mix-ratio", type=float, default=0.5)

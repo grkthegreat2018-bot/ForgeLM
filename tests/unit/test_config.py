@@ -46,7 +46,7 @@ class TestModelConfigs:
 
     def test_configs_exist(self):
         expected = {
-            "lfm25_1.2b",
+            "forgelm_v10_1.2b",
             "lfm25_tiny",
         }
         assert expected.issubset(set(MODEL_CONFIGS.keys()))
@@ -57,8 +57,8 @@ class TestModelConfigs:
         assert cfg.n_layers == 4
         assert cfg.n_heads == 4
 
-    def test_lfm25_1_2b_matches_architecture(self):
-        cfg = MODEL_CONFIGS["lfm25_1.2b"]
+    def test_forgelm_v10_1_2b_matches_architecture(self):
+        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
         assert cfg.vocab_size == 65536
         assert cfg.d_model == 2048
         assert cfg.n_layers == 16
@@ -70,35 +70,15 @@ class TestModelConfigs:
         assert cfg.norm_type == "rmsnorm"
         assert cfg.rope_base == 1_000_000.0
 
-    def test_lfm25_1_2b_has_qk_norm(self):
-        cfg = MODEL_CONFIGS["lfm25_1.2b"]
+    def test_forgelm_v10_1_2b_has_qk_norm(self):
+        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
         assert cfg.use_qk_norm is True
 
-    def test_lfm25_1_2b_has_conv_layers(self):
-        cfg = MODEL_CONFIGS["lfm25_1.2b"]
+    def test_forgelm_v10_1_2b_has_conv_layers(self):
+        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
         assert cfg.layer_types is not None
         assert cfg.layer_types.count("conv") == 10
         assert cfg.layer_types.count("attention") == 6
-
-    def test_forgelm_v7_is_labeled_full_stack(self):
-        """ForgeLM V7 = NLRQ-compressed 7B with all architecture keys."""
-        cfg = MODEL_CONFIGS["forgelm_v7"]
-        assert cfg.d_model == 4096 and cfg.n_layers == 32
-        assert cfg.attn_type == "gta"           # Grouped-Tied Attention
-        assert cfg.use_bitnet is True           # BitNet b1.58 QAT
-        assert cfg.use_titan_memory is True     # TITAN neural memory
-        assert cfg.titan_memory_rank == 128     # scaled with d_model
-        assert cfg.use_mod is True              # Mixture-of-Depths
-        assert cfg.mod_keep_fraction == 1.0     # lossless start
-        assert cfg.ffn_compression == "nlrq"    # NLRQ FFN compression
-        assert cfg.nlrq_rank == 768             # SVD truncation rank
-
-    def test_forgelm_v7_same_base_arch(self):
-        """V7 shares vocab/rope/qk_norm with the LFM2.5 base (scaled dims)."""
-        a = MODEL_CONFIGS["lfm25_1.2b"]
-        b = MODEL_CONFIGS["forgelm_v7"]
-        for f in ("vocab_size", "rope_base", "max_seq_len", "use_qk_norm"):
-            assert getattr(a, f) == getattr(b, f), f
 
     def test_all_configs_pass_validation(self):
         """Every pre-defined config should pass __post_init__ without error."""

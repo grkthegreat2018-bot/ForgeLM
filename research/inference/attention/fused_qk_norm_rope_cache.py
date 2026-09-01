@@ -205,7 +205,18 @@ class FusedQKNormRopeCacheWrapper:
 
         def fused_forward(self, x, past_key_value=None, use_cache=False,
                           preallocated_cache=None, layer_idx=0,
-                          attention_bias=None, position_ids=None):
+                          attention_bias=None, position_ids=None,
+                          cu_seqlens=None):
+            # Varlen (packed sequences) is a training-time feature that the
+            # fused inference path doesn't handle — delegate to the original
+            # forward, which has the varlen_attention path. The fused path is
+            # an inference optimization (no cu_seqlens at inference time).
+            if cu_seqlens is not None:
+                return original_forward(
+                    x, past_key_value=past_key_value, use_cache=use_cache,
+                    preallocated_cache=preallocated_cache, layer_idx=layer_idx,
+                    attention_bias=attention_bias, position_ids=position_ids,
+                    cu_seqlens=cu_seqlens)
             B, T, C = x.shape
             hd = self.head_dim
 

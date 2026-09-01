@@ -88,16 +88,37 @@ def db_is_ready(db: DiscoveryDB, min_score: float = 0.6) -> bool:
 
 
 def _load_model_at(checkpoint_path: str | None, device: str):
-    """Load the LFM2.5 model, optionally overriding weights from a checkpoint."""
+    """Load the ForgeLM V10 model, optionally with LoRA adapter or full checkpoint.
+
+    Handles two checkpoint types:
+      - LoRA adapter (*_lora.safetensors): Load R30 base + attach LoRA via
+        engine.load_lora() (hot-loading, no merge needed).
+      - Full checkpoint (*.safetensors): Load directly into model weights.
+    """
     from research.model_loader import load_default_model
     from research.checkpoint_io import load_checkpoint
-    model, tok = load_default_model("forgelm_v7")
+
+    model, tok = load_default_model("forgelm_v10_1.2b")
+
     if checkpoint_path:
-        sd = load_checkpoint(checkpoint_path)
-        # strict=False: checkpoints saved before the TITAN/MoD keys existed
-        # load losslessly — the new params are zero/keep-all init.
-        model.load_state_dict(
-            {k: v.to(model.device) for k, v in sd.items()}, strict=False)
+        # LoRA adapter checkpoint: load R30 base + hot-load LoRA
+        if "_lora" in Path(checkpoint_path).name:
+            from research.inference.forge_engine import ForgeEngine
+            from research.paths import V10_CHECKPOINT
+            r30_path = str(V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R30.safetensors")
+            # Reload from R30 base (LoRA was trained on R30)
+            engine = ForgeEngine.from_checkpoint(
+                r30_path, config_name="forgelm_v10_1.2b",
+                device=device, auto_activate=False)
+            engine.load_lora(checkpoint_path, rank=32, alpha=64)
+            model = engine.model
+            tok = engine.tokenizer
+        else:
+            # Full checkpoint: load directly
+            sd = load_checkpoint(checkpoint_path)
+            model.load_state_dict(
+                {k: v.to(model.device) for k, v in sd.items()}, strict=False)
+
     model.to(device).eval()
     return model, tok
 

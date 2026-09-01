@@ -337,27 +337,37 @@ class BitNetLinear(nn.Module):
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
-        had_weight = prefix + "weight" in state_dict
-        # Check if loading a pre-quantized int8 weight
         weight_key = prefix + "weight"
+        qscale_key = prefix + "qscale"
         src_tensor = state_dict.get(weight_key, None)
         is_int8_weight = src_tensor is not None and src_tensor.dtype == torch.int8
 
+        if is_int8_weight:
+            # Pre-quantized int8: load directly into int8 storage — NO bf16 upcast.
+            # Use checkpoint qscale if available, else compute from absmean.
+            qscale = state_dict.get(qscale_key)
+            if qscale is None:
+                qscale = src_tensor.float().abs().mean().clamp(min=_TERNARY_EPS) / 0.7
+            # Remove from state_dict so super() doesn't try to load it as bf16
+            del state_dict[weight_key]
+            if qscale_key in state_dict:
+                del state_dict[qscale_key]
+            # Call super for any remaining keys (bias, etc.)
+            super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict,
+                missing_keys, unexpected_keys, error_msgs)
+            # Load int8 directly
+            self.load_prequantized(src_tensor, qscale)
+            return
+
+        # Normal (bf16/fp32) weight loading path
+        had_weight = weight_key in state_dict
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)
 
         if had_weight and self.qscale is not None:
-            # qscale was initialized from the RANDOM init weight; re-anchor
-            # it to the loaded checkpoint's absmean (b1.58 convention).
-            # Skip if weight is still on meta (assign=True defers replacement)
-            # or if loading pre-quantized int8 (qscale set by convert_to_int8_storage)
-            if is_int8_weight:
-                # Pre-quantized: compute scale from the int8 source tensor directly
-                with torch.no_grad():
-                    absmean = src_tensor.float().abs().mean().clamp(min=_TERNARY_EPS)
-                    self.qscale.copy_(absmean / 0.7)
-            elif not self.weight.is_meta:
+            if not self.weight.is_meta:
                 with torch.no_grad():
                     self.qscale.copy_(
                         self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
@@ -530,8 +540,10 @@ def apply_bitnet_b158(state: dict[str, torch.Tensor], scale: float | None = None
     out = {}
     for k, v in state.items():
         if isinstance(v, torch.Tensor) and k.endswith(".weight"):
-            q, _ = ternary_quantize(v.float(), scale)
-            out[k] = q.to(v.dtype)
+            q, s = ternary_quantize(v.float(), scale)
+            # Save ternary weights as int8 (1 byte/param) + qscale key
+            out[k] = q.to(torch.int8)
+            out[k.replace(".weight", ".qscale")] = torch.tensor([s], dtype=torch.float32)
         else:
             out[k] = v
     return out
@@ -628,6 +640,15 @@ class BitNetEmbedding(nn.Module):
             self.qscale = None
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if getattr(self, '_prequantized', False):
+            # Pre-quantized int8 path: weights already ternary, stored as int8
+            w_int8 = self.weight_int8
+            scale = self.qscale_buf if hasattr(self, 'qscale_buf') else None
+            # Cast to bf16 to match model dtype (avoids RMSNorm dtype mismatch)
+            x = F.embedding(token_ids, w_int8.to(torch.bfloat16))
+            if scale is not None:
+                x = x * scale.to(x.dtype)
+            return x
         x = F.embedding(token_ids, self.weight)
         if self.quantize and (self.training or self.force_quant):
             scale = self.qscale if self.qscale is not None else None
@@ -636,6 +657,21 @@ class BitNetEmbedding(nn.Module):
             # STE: gradient flows through master weights
             x = x + (q_out - x).detach()
         return x
+
+    def load_prequantized(self, weight_int8: torch.Tensor, qscale):
+        """Load a pre-quantized ternary weight (int8) directly into int8 storage."""
+        device = weight_int8.device
+        if hasattr(self, 'weight'):
+            del self.weight
+        self.register_buffer("weight_int8", weight_int8.to(torch.int8))
+        if isinstance(qscale, torch.Tensor):
+            self.register_buffer("qscale_buf", qscale.to(device))
+        else:
+            self.register_buffer("qscale_buf", torch.tensor(qscale, device=device))
+        if self.qscale is not None:
+            del self.qscale
+            self.qscale = None
+        self._prequantized = True
 
     @property
     def weight_data(self) -> torch.Tensor:
@@ -683,9 +719,17 @@ class BitNetConv1d(nn.Module):
             self.qscale = nn.Parameter(scale)
         else:
             self.qscale = None
+        self._prequantized = False  # set True by load_prequantized()
 
     def forward(self, x):
         # x: (B, C, T)
+        if getattr(self, '_prequantized', False):
+            # Pre-quantized int8 path: weights already ternary, stored as int8
+            w_int8 = self.weight_int8  # int8 buffer, values {-1, 0, +1}
+            scale = self.qscale_buf.to(x.dtype) if hasattr(self, 'qscale_buf') else 1.0
+            w = w_int8.to(x.dtype)
+            y = F.conv1d(x, w, self.bias, padding=0, groups=self.groups)
+            return y * scale
         if self.quantize and (self.training or self.force_quant):
             scale = self.qscale if self.qscale is not None else None
             q, s = ternary_quantize(self.weight, scale)
@@ -695,8 +739,47 @@ class BitNetConv1d(nn.Module):
         else:
             return F.conv1d(x, self.weight, self.bias, padding=0, groups=self.groups)
 
+    def load_prequantized(self, weight_int8: torch.Tensor, qscale):
+        """Load a pre-quantized ternary weight (int8) directly into int8 storage.
+
+        Mirrors BitNetLinear.load_prequantized but for conv1d weights.
+        Bypasses the fp32 parameter — stores as int8 buffer.
+        """
+        device = weight_int8.device
+        if hasattr(self, 'weight'):
+            del self.weight
+        self.register_buffer("weight_int8", weight_int8.to(torch.int8))
+        if isinstance(qscale, torch.Tensor):
+            self.register_buffer("qscale_buf", qscale.to(device))
+        else:
+            self.register_buffer("qscale_buf", torch.tensor(qscale, device=device))
+        if self.qscale is not None:
+            del self.qscale
+            self.qscale = None
+        self._prequantized = True
+
     def _load_from_state_dict(self, state_dict, prefix, local_metadata,
                               strict, missing_keys, unexpected_keys, error_msgs):
+        weight_key = prefix + "weight"
+        qscale_key = prefix + "qscale"
+        src_tensor = state_dict.get(weight_key, None)
+        is_int8_weight = src_tensor is not None and src_tensor.dtype == torch.int8
+
+        if is_int8_weight:
+            # Pre-quantized int8: load directly — NO bf16 upcast
+            qscale = state_dict.get(qscale_key)
+            if qscale is None:
+                qscale = src_tensor.float().abs().mean().clamp(min=_TERNARY_EPS) / 0.7
+            del state_dict[weight_key]
+            if qscale_key in state_dict:
+                del state_dict[qscale_key]
+            super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict,
+                missing_keys, unexpected_keys, error_msgs)
+            self.load_prequantized(src_tensor, qscale)
+            return
+
+        # Normal (bf16/fp32) weight loading path
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)

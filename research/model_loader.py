@@ -217,10 +217,22 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
 def unpack_output_with_kv(out) -> Tuple[torch.Tensor, Optional[KVCache]]:
     """Unpack a model forward output into (logits, past_kv).
 
-    Handles the (logits, loss, presents) and (logits, presents) tuple shapes
-    emitted by ConfigurableResearchLLM.  Replaces the 3-4 line
-    ``if isinstance(out, tuple): ...`` block repeated across inference paths.
+    Handles:
+      - (logits, loss, presents) and (logits, presents) tuple shapes
+        emitted by ConfigurableResearchLLM.
+      - HuggingFace ModelOutput dataclasses (CausalLMOutputWithPast, etc.)
+        which expose .logits and .past_key_values attributes.
+    Replaces the 3-4 line ``if isinstance(out, tuple): ...`` block repeated
+    across inference paths.
     """
+    # HuggingFace ModelOutput (CausalLMOutputWithPast, BaseModelOutputWithPast, etc.)
+    if hasattr(out, "logits"):
+        logits = out.logits
+        past_kv = getattr(out, "past_key_values", None)
+        return logits, past_kv
+    # Some HF base-model outputs use last_hidden_state instead of logits
+    if hasattr(out, "last_hidden_state") and not hasattr(out, "logits"):
+        return out.last_hidden_state, getattr(out, "past_key_values", None)
     if isinstance(out, tuple):
         logits = out[0]
         past_kv = out[2] if len(out) > 2 else out[1]
@@ -523,12 +535,13 @@ class GroupedQueryAttention(nn.Module):
     """
 
     def __init__(self, d_model=768, n_heads=12, n_kv_heads=None, max_seq_len=2048, base=10000.0, rope_scaling=None,
-                 use_qk_norm=False, attn_scale=None, attn_bias=False):
+                 use_qk_norm=False, attn_scale=None, attn_bias=False, qk_norm_eps=1e-6):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads  # default to MHA
         self.head_dim = d_model // n_heads
         self.n_rep = n_heads // self.n_kv_heads
+        self._qk_norm_eps = qk_norm_eps
         self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=attn_bias)
         self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
@@ -540,8 +553,8 @@ class GroupedQueryAttention(nn.Module):
         self.use_qk_norm = use_qk_norm
         self._qk_norm_identity = True  # assume identity until weights loaded
         if use_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            self.q_norm = RMSNorm(self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6))
+            self.k_norm = RMSNorm(self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6))
 
         # ValueResidual: V_0 from layer 0 is injected by the parent model.
         # When set, v = v + gate * v0 (applied before attention).
@@ -799,11 +812,17 @@ class DoubleGatedConvLayer(nn.Module):
         # Input gate: raw multiply (NO sigmoid — LFM2 uses multiplicative gates)
         Bx = B_gate * x_proj  # (B, T, D)
 
-        # New sequence (no KV cache carried over): stale conv state from a
-        # previous sequence must not be reused. Prefill (T>1) re-initializes
-        # state below, but a T==1-first call would silently reuse old state.
-        if past_key_value is None and T == 1:
+        # Conv state is reset at the MODEL level when starting a new sequence
+        # (past_key_values is None at the model level). Per-layer reset based
+        # on past_key_value is incorrect because conv layers ALWAYS get
+        # past_key_value=None (they don't have KV cache entries), which would
+        # wipe the state during every decode step.
+        #
+        # The _conv_state_reset flag is set by the parent model's forward when
+        # starting a new sequence.
+        if getattr(self, '_conv_state_reset', False):
             self._conv_state = None
+            self._conv_state_reset = False
 
         if T == 1 and self._conv_state is not None:
             conv_out = self._incremental_conv(Bx)
@@ -880,7 +899,8 @@ class ModularBlock(nn.Module):
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         _use_triton = getattr(config, 'use_triton_kernels', False)
         if norm is RMSNorm:
-            self.ln1 = RMSNorm(config.d_model, use_triton=_use_triton)
+            self.ln1 = RMSNorm(config.d_model, eps=getattr(config, 'norm_eps', 1e-6),
+                              use_triton=_use_triton)
         else:
             self.ln1 = norm(config.d_model)
         # Determine layer type: conv or attention
@@ -899,7 +919,8 @@ class ModularBlock(nn.Module):
         else:
             self.attn = build_attention(config)
         if norm is RMSNorm:
-            self.ln2 = RMSNorm(config.d_model, use_triton=_use_triton)
+            self.ln2 = RMSNorm(config.d_model, eps=getattr(config, 'norm_eps', 1e-6),
+                              use_triton=_use_triton)
         else:
             self.ln2 = norm(config.d_model)
         self.ffn = build_ffn(config)
@@ -1079,18 +1100,24 @@ class ModularBlock(nn.Module):
             attn_in = self.ln1(x)
             if shift_msa is not None:
                 attn_in = attn_in * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+            # Inference path: wrappers (SeqSplit, FusedQKNormRopeCache, etc.)
+            # patch attn.forward with fixed signatures that don't accept
+            # cu_seqlens. cu_seqlens is only meaningful when not use_cache
+            # (training varlen); at inference it is always None. Only pass
+            # it when set, so patched forwards never see the unexpected kwarg.
+            _cu_kw = {"cu_seqlens": cu_seqlens} if cu_seqlens is not None else {}
             if preallocated_cache is not None and self._supports_prealloc_cache:
                 attn_out, present = self.attn(
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                     attention_bias=attention_bias, position_ids=position_ids,
-                    cu_seqlens=cu_seqlens,
+                    **_cu_kw,
                 )
             else:
                 attn_out, present = self.attn(
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     attention_bias=attention_bias, position_ids=position_ids,
-                    cu_seqlens=cu_seqlens,
+                    **_cu_kw,
                 )
             x = x + attn_out
             # SandwichNorm: post-attention norm (identity init = no-op).
@@ -1197,7 +1224,8 @@ class ModularBlock(nn.Module):
 
 def build_attention(config: ModelConfig) -> nn.Module:
     kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
-                  use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None))
+                  use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None),
+                  qk_norm_eps=getattr(config, 'norm_eps', 1e-6))
     # LeRoPE/AdaRoPE: learnable RoPE frequencies (identity init = lossless).
     # Applied post-construction by replacing the RotaryEmbedding module.
     rope_variant = getattr(config, 'rope_variant', 'standard')
@@ -1492,7 +1520,7 @@ def build_ffn(config: ModelConfig) -> nn.Module:
                 use_clamp=getattr(config, 'use_swiglu_clamp', False),
                 clamp_alpha=getattr(config, 'swiglu_clamp_alpha', 1.702),
                 clamp_limit=getattr(config, 'swiglu_clamp_limit', 7.0))
-            # V8/R21: HashedNLRQ — replace NLRQ low-rank factors with hashed
+            # HashedNLRQ — replace NLRQ low-rank factors with hashed
             # shared vectors for an additional 4-8x compression on top of
             # NLRQ's 12.8x (total ~50x).  Not lossless (different weight
             # structure), so only used when use_hashed_nlrq=True.
@@ -1590,10 +1618,23 @@ class ConfigurableResearchLLM(nn.Module):
         self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         _use_triton_f = getattr(config, 'use_triton_kernels', False)
-        if norm is RMSNorm:
-            self.ln_f = RMSNorm(config.d_model, use_triton=_use_triton_f)
+        _norm_eps = getattr(config, 'norm_eps', 1e-6)
+        # Embedding norm: applied after embedding, before layers (LFM2.5 has this)
+        if getattr(config, 'use_embed_norm', False):
+            if norm is RMSNorm:
+                self.embed_norm = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f)
+            else:
+                self.embed_norm = norm(config.d_model)
         else:
-            self.ln_f = norm(config.d_model)
+            self.embed_norm = None
+        # Final norm: applied after layers, before head (standard, LFM2.5 doesn't have this)
+        if getattr(config, 'use_final_norm', True):
+            if norm is RMSNorm:
+                self.ln_f = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f)
+            else:
+                self.ln_f = norm(config.d_model)
+        else:
+            self.ln_f = None
         # Weight tying: skip if PIT or factorized is enabled (they handle tying),
         # or if config explicitly disables it (e.g., Qwen2.5).
         if (not getattr(config, 'use_pit', False)
@@ -1700,7 +1741,7 @@ class ConfigurableResearchLLM(nn.Module):
             self._hyperloop_loop_iters = _hl.loop_iters
             self._hyperloop_n_middle = _hl.n_middle
 
-        # ── V8/R23: R19 keys wiring ────────────────────────────────────────
+        # ── R19 keys wiring ────────────────────────────────────────────────
         # These modules are created AFTER all other model modules so their
         # random init does not perturb the main model's weight init sequence
         # (critical for the lossless-at-init test: same seed → same main
@@ -1767,9 +1808,24 @@ class ConfigurableResearchLLM(nn.Module):
 
     def cache_devices(self):
         """Scan and cache module device placement (lazy, on first forward)."""
-        self._embed_device = next(self.embed.parameters()).device
-        self._ln_f_device = next(self.ln_f.parameters()).device
-        self._block_devices = [next(b.parameters()).device for b in self.blocks]
+        # Use buffers if no parameters exist (pre-quantized int8 storage)
+        embed_params = list(self.embed.parameters())
+        if embed_params:
+            self._embed_device = embed_params[0].device
+        else:
+            embed_bufs = list(self.embed.buffers())
+            self._embed_device = embed_bufs[0].device if embed_bufs else torch.device("cpu")
+        self._ln_f_device = (next(self.ln_f.parameters()).device
+                             if self.ln_f is not None else self._embed_device)
+        block_devs = []
+        for b in self.blocks:
+            params = list(b.parameters())
+            if params:
+                block_devs.append(params[0].device)
+            else:
+                bufs = list(b.buffers())
+                block_devs.append(bufs[0].device if bufs else torch.device("cpu"))
+        self._block_devices = block_devs
 
     def invalidate_device_cache(self):
         """Clear cached device placement (call after moving modules)."""
@@ -1938,7 +1994,10 @@ class ConfigurableResearchLLM(nn.Module):
         if idx.device != embed_device:
             idx = idx.to(embed_device)
         x = self.embed(idx)
-        # V8/R19: N-gram embedding — add n-gram lookup embeddings to token
+        # LFM2.5: apply embedding norm after embedding, before layers
+        if self.embed_norm is not None:
+            x = self.embed_norm(x)
+        # N-gram embedding — add n-gram lookup embeddings to token
         # embeddings.  Lossless at init (table = all zeros → additive zero).
         if self.ngram_embed is not None:
             x = self.ngram_embed(idx, x)
@@ -1964,6 +2023,15 @@ class ConfigurableResearchLLM(nn.Module):
                 self._attn_res.gates.abs().max().item() == 0.0)
         attn_res_active = use_attn_res and not self._attn_res_gate_zero
         past_outputs: list[torch.Tensor] = [] if attn_res_active else None
+        # New sequence: when past_key_values is None, reset conv layer states
+        # so stale state from a previous sequence is not reused. This is the
+        # correct place to reset — conv layers always get past_key_value=None
+        # (they don't have KV cache entries), so they can't detect new vs.
+        # continuation at the per-layer level.
+        if past_key_values is None:
+            for block in self.blocks:
+                if hasattr(block, 'attn') and hasattr(block.attn, '_conv_state'):
+                    block.attn._conv_state_reset = True
         for i, block in enumerate(self.blocks):
             # DiffusionBlocks: skip layers not in the active set
             if active_layers is not None and i not in active_layers:
@@ -2005,11 +2073,14 @@ class ConfigurableResearchLLM(nn.Module):
         # Advance the pre-allocated cache position after all layers processed.
         if preallocated_cache is not None:
             preallocated_cache.advance(idx.shape[1])
-        # Move x to ln_f's device (GPU for hybrid offload)
-        ln_f_device = self._ln_f_device
-        if x.device != ln_f_device:
-            x = x.to(ln_f_device)
-        hidden = self.ln_f(x)
+        # Final norm (if model has one — LFM2.5 doesn't)
+        if self.ln_f is not None:
+            ln_f_device = self._ln_f_device
+            if x.device != ln_f_device:
+                x = x.to(ln_f_device)
+            hidden = self.ln_f(x)
+        else:
+            hidden = x
 
         # Collect MoE aux_loss from all blocks that have it.
         # Stored as self._last_moe_aux_loss so callers that don't pass targets
@@ -2536,15 +2607,137 @@ class ModelLoader:
                 raise state_result["error"]
             state = state_result.get("state", {})
 
-            # Pre-quantized BitNet: int8 weights need cast to bf16 for
-            # load_state_dict(assign=True). The weights are ternary {-1,0,+1}
-            # so this cast is lossless. convert_model_to_int8() re-quantizes
-            # post-load for VRAM savings.
+            # Pre-quantized BitNet: int8 weights are loaded directly into
+            # int8 storage via load_prequantized() — NO bf16/fp32 intermediate.
+            # This keeps peak CPU RAM at ~checkpoint size (e.g. 4.7 GB for 4B
+            # model) instead of 3x (int8 + bf16 cast + model copy).
             _has_int8 = any(t.dtype == torch.int8 for t in state.values())
             if _has_int8:
-                for k in list(state.keys()):
-                    if state[k].dtype == torch.int8:
-                        state[k] = state[k].to(torch.bfloat16)
+                from research.keys.quantization.bitnet_b158_key import (
+                    BitNetLinear, BitNetConv1d, BitNetEmbedding,
+                )
+                # Build module map: param_name → module
+                bitnet_modules = {}
+                for name, module in model.named_modules():
+                    if isinstance(module, (BitNetLinear, BitNetConv1d, BitNetEmbedding)):
+                        bitnet_modules[name + ".weight"] = module
+                head_module = getattr(model, 'head', None)
+                # Collect qscale tensors from checkpoint
+                qscale_map = {}
+                for k, t in state.items():
+                    if k.endswith(".qscale") and t.dtype != torch.int8:
+                        qscale_map[k[:-len(".qscale")] + ".weight"] = t
+                # Route int8 weights to load_prequantized, collect rest for assign
+                other_keys = {}
+                int8_loaded = 0
+                import torch.nn.functional as _F
+                for k, t in state.items():
+                    if k in bitnet_modules and t.dtype == torch.int8:
+                        mod = bitnet_modules[k]
+                        qs = qscale_map.get(k)
+                        if qs is None:
+                            qs = t.float().abs().mean().clamp(min=1e-8) / 0.7
+                        mod.load_prequantized(
+                            t.to(device).to(torch.int8), qs.to(device))
+                        int8_loaded += 1
+                    elif k == "head.weight" and t.dtype == torch.int8 and head_module is not None:
+                        dev = torch.device(device)
+                        w_int8 = t.to(dev).to(torch.int8)
+                        qs = qscale_map.get(k)
+                        if qs is None:
+                            qs = t.float().abs().mean().clamp(min=1e-8) / 0.7
+                        qs = qs.to(dev)
+                        del head_module.weight
+                        head_module.register_buffer("weight_int8", w_int8)
+                        head_module.register_buffer("qscale_buf", qs)
+                        head_module._prequantized = True
+                        _orig_fwd = head_module.forward
+                        def _int8_fwd(x, _w=w_int8, _s=qs, _b=head_module.bias):
+                            return _F.linear(x, _w.to(x.dtype), _b) * _s.to(x.dtype)
+                        head_module.forward = _int8_fwd
+                        int8_loaded += 1
+                    elif k.endswith(".qscale") and (
+                        k[:-len(".qscale")] + ".weight" in bitnet_modules
+                        or k[:-len(".qscale")] + ".weight" == "head.weight"):
+                        continue  # qscale already handled
+                    else:
+                        other_keys[k] = t
+                # Replace state with only non-int8 tensors for the assign path
+                state = other_keys
+                if int8_loaded > 0:
+                    print(f"  [FastBuild] Direct int8 load: {int8_loaded} BitNet layers (no bf16 intermediate)")
+
+            # V10: IRI-FP4 pre-quantized checkpoint — load packed FP4 data
+            # directly into IRIFP4Linear modules (keeps weights packed in
+            # VRAM, dequantizes on-the-fly during forward pass).
+            # This saves ~3.5x VRAM vs bf16 for the quantized weight tensors.
+            _has_iri = any(k.endswith(".iri_packed") for k in state)
+            if _has_iri and getattr(config, 'use_iri_fp4', False):
+                from research.keys.quantization.iri_fp4_key import IRIFP4Linear
+                _block = getattr(config, 'iri_fp4_block_size', 32)
+                _rounds = getattr(config, 'iri_fp4_rounds', 2)
+                # Find which base keys have IRI-FP4 packed data in checkpoint
+                # Checkpoint stores: {module_name}.weight.iri_packed
+                # Module name in model: {module_name} (without .weight)
+                iri_weight_keys = set()
+                for k in state:
+                    if k.endswith(".iri_packed"):
+                        # e.g. "blocks.0.ffn.w_gate.weight.iri_packed" -> "blocks.0.ffn.w_gate.weight"
+                        iri_weight_keys.add(k[:-len(".iri_packed")])
+                # Map: module_name -> weight_key (module_name + ".weight")
+                iri_module_names = set(k[:-len(".weight")] for k in iri_weight_keys
+                                       if k.endswith(".weight"))
+                # Replace only the nn.Linear modules that have packed data
+                iri_modules = {}
+                for name, mod in list(model.named_modules()):
+                    if isinstance(mod, nn.Linear) and name in iri_module_names:
+                        new_mod = IRIFP4Linear(
+                            mod.in_features, mod.out_features,
+                            bias=mod.bias is not None,
+                            block_size=_block, n_rounds=_rounds)
+                        # Replace in parent
+                        parent = model
+                        parts = name.split(".")
+                        for p in parts[:-1]:
+                            parent = getattr(parent, p)
+                        setattr(parent, parts[-1], new_mod)
+                        iri_modules[name] = new_mod
+                # Load packed data from checkpoint into IRIFP4Linear modules
+                # Checkpoint keys: {module_name}.weight.iri_packed, .iri_scales, etc.
+                # Module lookup: by module_name (without .weight)
+                iri_loaded = 0
+                other_keys = {}
+                for k, t in state.items():
+                    if k.endswith(".iri_packed"):
+                        # "blocks.0.ffn.w_gate.weight.iri_packed" -> "blocks.0.ffn.w_gate"
+                        weight_key = k[:-len(".iri_packed")]  # blocks.0.ffn.w_gate.weight
+                        mod_name = weight_key[:-len(".weight")] if weight_key.endswith(".weight") else weight_key
+                        mod = iri_modules.get(mod_name)
+                        if mod is not None:
+                            mod.weight_packed = t.to(device)
+                            iri_loaded += 1
+                    elif k.endswith(".iri_scales"):
+                        weight_key = k[:-len(".iri_scales")]
+                        mod_name = weight_key[:-len(".weight")] if weight_key.endswith(".weight") else weight_key
+                        mod = iri_modules.get(mod_name)
+                        if mod is not None:
+                            mod.weight_scales = t.to(device)
+                    elif k.endswith(".iri_global_scale"):
+                        weight_key = k[:-len(".iri_global_scale")]
+                        mod_name = weight_key[:-len(".weight")] if weight_key.endswith(".weight") else weight_key
+                        mod = iri_modules.get(mod_name)
+                        if mod is not None:
+                            mod.weight_global_scale = t.to(device)
+                    elif k.endswith(".bias") and k[:-len(".bias")] in iri_modules:
+                        mod = iri_modules[k[:-len(".bias")]]
+                        if mod.bias is not None:
+                            mod.bias = t.to(device)
+                    else:
+                        other_keys[k] = t
+                state = other_keys
+                if iri_loaded > 0:
+                    print(f"  [FastBuild] IRI-FP4 packed load: {iri_loaded} layers "
+                          f"(stays packed in VRAM, {_rounds} rounds)")
 
             # GQA -> diff warm start (CPU-side transform on loaded state_dict)
             if config.attn_type == "diff":
@@ -2631,8 +2824,10 @@ class ModelLoader:
                 state, strict=False, assign=True)
             # Re-tie weights (assign breaks parameter sharing; head.weight
             # is not in the checkpoint because of weight tying).
+            # Skip re-tying when head/embed are prequantized int8 (no weight param).
             if getattr(config, 'tie_word_embeddings', True) \
-                    and not getattr(config, 'use_pit', False):
+                    and not getattr(config, 'use_pit', False) \
+                    and not _has_int8:
                 model.head.weight = model.embed.weight
             # Re-initialize non-persistent buffers (RoPE cos/sin) left on meta.
             ModelLoader._reset_non_persistent_buffers(model, device)
@@ -2667,8 +2862,22 @@ class ModelLoader:
                 torch.cuda.synchronize()
             t_gpu = time.time() - t_gpu
 
+            # ── Free the state dict + background load result ──
+            # After assign=True + move-to-device, the model params are new
+            # GPU tensors. The state dict still holds the original CPU tensors
+            # (up to 10.5 GB for 5B param int8→bf16 cast). On Windows, Python's
+            # allocator doesn't return freed memory to the OS automatically,
+            # so we must explicitly del + gc.collect() to release it.
+            del state, state_result
+            import gc as _gc
+            _gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
             # Convert dtype (state may already be bf16 from fastsafetensors)
-            if dtype is not None:
+            # Skip dtype conversion when int8 weights were loaded directly —
+            # model.to(bf16) would upcast int8 buffers back to bf16.
+            if dtype is not None and not _has_int8:
                 model = model.to(dtype)
 
             if missing:
@@ -3077,7 +3286,7 @@ class ModelLoader:
 
 
 def load_default_model(
-    config_name: str = "forgelm_v7",
+    config_name: str = "forgelm_v10_1.2b",
     checkpoint_path: str | None = None,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -3093,7 +3302,7 @@ def load_default_model(
         tokenizer = get_tokenizer(...)
 
     Args:
-        config_name: model config name (default "forgelm_v7")
+        config_name: model config name (default "forgelm_v10_1.2b")
         checkpoint_path: path to .safetensors checkpoint (default: config default)
         device: "cuda" or "cpu"
         dtype: torch.bfloat16 or torch.float32 (default: bf16 for cuda, fp32 for cpu)
@@ -3162,7 +3371,7 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
         The quantized model (modified in-place).
 
     Example:
-        model = load_default_model("lfm25_1.2b")
+        model = load_default_model("forgelm_v10_1.2b")
         model = quantize_int4(model)  # 2.3GB → ~0.7GB VRAM (int4)
     """
     try:
@@ -3219,7 +3428,7 @@ except ImportError:
 # immediately without ~500ms context creation overhead.
 try:
     from research.config import get_config as _get_config_warmup
-    _warmup_cfg = _get_config_warmup("forgelm_v7", device="meta")
+    _warmup_cfg = _get_config_warmup("forgelm_v10_1.2b", device="meta")
     with torch.device("meta"):
         _warmup_model = ConfigurableResearchLLM(_warmup_cfg)
     del _warmup_model, _warmup_cfg
@@ -3233,7 +3442,7 @@ except Exception:
 if __name__ == "__main__":
     from research.config import get_config
 
-    for name in ["lfm25_tiny", "forgelm_v7"]:
+    for name in ["lfm25_tiny", "forgelm_v10_1.2b"]:
         print("\n" + "=" * 50)
         cfg = get_config(name)
         cfg.device = "cpu"

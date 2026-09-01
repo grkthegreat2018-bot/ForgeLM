@@ -1,6 +1,6 @@
-"""LFM2.5 ChatML template + Pythonic tool-call parsing.
+"""ForgeLM V10 ChatML template + Pythonic tool-call parsing.
 
-LFM2.5-Instruct uses a ChatML-like format with special tokens:
+ForgeLM V10 uses a ChatML-like format with special tokens:
   <|startoftext|>  — BOS, start of conversation
   <|im_start|>     — start of message (followed by role + newline)
   <|im_end|>       — end of message (= EOS)
@@ -38,7 +38,7 @@ TOOL_RESP_END = "<|tool_response_end|>"
 
 
 def format_tool_definitions(tools: list[dict]) -> str:
-    """Render tool schemas as the LFM2.5 'List of tools:' string.
+    """Render tool schemas as the ForgeLM V10 'List of tools:' string.
 
     Each tool is a dict with name, description, parameters.
     The Jinja template joins them as: List of tools: [{json}, {json}]
@@ -54,7 +54,7 @@ def apply_chat_template(
     tools: list[dict] | None = None,
     add_generation_prompt: bool = True,
 ) -> str:
-    """Render a conversation in LFM2.5 ChatML format.
+    """Render a conversation in ForgeLM V10 ChatML format.
 
     Args:
         messages: list of {"role": "system"|"user"|"assistant"|"tool",
@@ -108,7 +108,7 @@ def apply_chat_template(
 
 
 def render_tool_calls(tool_calls: list[dict]) -> str:
-    """Render tool calls in LFM2.5 Pythonic syntax.
+    """Render tool calls in ForgeLM V10 Pythonic syntax.
 
     Input: [{"name": "func", "args": {"arg1": "val1"}}]
     Output: <|tool_call_start|>[func(arg1='val1')]<|tool_call_end|>
@@ -138,7 +138,7 @@ _RE_TOOL_CALL = re.compile(
 
 
 def parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
-    """Parse LFM2.5 Pythonic tool calls from model output.
+    """Parse ForgeLM V10 Pythonic tool calls from model output.
 
     Returns (tool_calls | None, musing_text).
     Tool calls are in format: <|tool_call_start|>[func(arg='val')]<|tool_call_end|>

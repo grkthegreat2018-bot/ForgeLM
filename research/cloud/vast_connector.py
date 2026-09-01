@@ -48,8 +48,7 @@ Instead of destroy-after-run, the connector supports:
 
 ## Hardware context (RTX 5070 12GB local)
 
-Full fine-grain training of the 1.2B model (and especially the V7 7B /
-8B / MoE presets) does not fit comfortably on 12GB VRAM for high-throughput
+Full fine-grain training of the 1.2B model (and especially the V10 preset) does not fit comfortably on 12GB VRAM for high-throughput
 runs. Vast.ai lets you rent an H100 / A100 / RTX 4090 by the hour for the
 heavy lift, then pull the checkpoint back to the local box for inference /
 quantization. The connector is the bridge.
@@ -75,9 +74,9 @@ quantization. The connector is the bridge.
 
     python -m research.cloud.vast_connector run \\
         --data research/data/finetune/tool_use_fc_70.jsonl \\
-        --config forgelm_v7 \\
-        --checkpoint research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors \\
-        --save ForgeLM_V2_LFM25-1.2B.sft.safetensors \\
+        --config forgelm_v10_1.2b \\
+        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
+        --save ForgeLM_V10.sft.safetensors \\
         --max-steps 500 --gpu-filter "gpu_name=RTX_4090" --max-price 0.5
 
 ## Usage (via sft_train.py)
@@ -136,7 +135,7 @@ REMOTE_EXIT_CODE = f"{REMOTE_ROOT}/exit_code"
 
 # ─── Critical files for training (minimal upload set) ──────────────────────
 # Only these files are synced to the remote — NOT the entire research/ tree.
-# Derived by tracing sft_train.py's import tree for the forgelm_v7 config.
+# Derived by tracing sft_train.py's import tree for the forgelm_v10_1.2b config.
 # Adding a new training dependency? Add its path here.
 CRITICAL_SOURCE_FILES: list[str] = [
     # Core
@@ -322,7 +321,7 @@ class RemoteTrainingSpec:
     # training hours from max_steps + est_sec_per_step, computes the max
     # affordable $/hr, and filters offers accordingly. 0 = no budget cap.
     budget: float = 10.0
-    est_sec_per_step: float = 5.0   # rough: V7 8B model on an A100. Override for 1.2B (~1.5s).
+    est_sec_per_step: float = 5.0   # rough: V10 model on an A100. Override for 1.2B (~1.5s).
     # SSH
     ssh_key: str = ""               # private key path; default ~/.ssh/id_ed25519
     # Lifecycle (v2: persistent reuse)
@@ -1217,7 +1216,7 @@ class VastConnector:
         Instead of uploading the entire ``research/`` tree (427+ files),
         uploads only the ~53 files in :data:`CRITICAL_SOURCE_FILES` +
         :data:`CRITICAL_INIT_FILES` — the minimal set traced from
-        sft_train.py's import tree for the forgelm_v7 config.
+        sft_train.py's import tree for the forgelm_v10_1.2b config.
 
         Uses manifest-based incremental sync: only uploads files that
         changed since the last sync (sha256 + mtime comparison).
@@ -1958,10 +1957,10 @@ def main() -> int:
 
     p_run = sub.add_parser("run", help="Ensure instance, sync, train, download, stop.")
     p_run.add_argument("--data", nargs="+", required=True)
-    p_run.add_argument("--config", default="forgelm_v7_8b_b")
+    p_run.add_argument("--config", default="forgelm_v10_1.2b")
     p_run.add_argument("--checkpoint",
-                       default="research/checkpoints/ForgeLM_V2_LFM25-1.2B.safetensors")
-    p_run.add_argument("--save", default="ForgeLM_V7_8B.sft.safetensors")
+                       default="research/checkpoints/ForgeLM_V10_1.2B.safetensors")
+    p_run.add_argument("--save", default="ForgeLM_V10.sft.safetensors")
     p_run.add_argument("--max-steps", type=int, default=500)
     p_run.add_argument("--lr", type=float, default=2e-4)
     p_run.add_argument("--batch-size", type=int, default=1)

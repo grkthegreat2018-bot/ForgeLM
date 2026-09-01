@@ -14,7 +14,7 @@ Usage:
     from research.inference.model_registry import ModelRegistry
 
     registry = ModelRegistry()
-    registry.register("forgelm-v3", checkpoint="...", config="forgelm_v7", vram_budget_gb=2.5)
+    registry.register("forgelm-v10", checkpoint="...", config="forgelm_v10_1.2b", vram_budget_gb=2.5)
     registry.register("qwen2.5", checkpoint="...", config="qwen25_coder", vram_budget_gb=3.5)
 
     # Generate with either model — registry handles wake/sleep automatically

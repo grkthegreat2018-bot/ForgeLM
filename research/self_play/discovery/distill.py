@@ -19,7 +19,7 @@ Process:
   3. For each knowledge item, the teacher generates a concise canonical
      response under a brevity instruction (BIRD's insight: brevity-instructed
      generation produces cleaner targets than the raw DB text).
-  4. Fine-tune a FRESH copy of the base LFM2.5 checkpoint on these
+  4. Fine-tune a FRESH copy of the base ForgeLM V10 checkpoint on these
      (prompt -> concise response) pairs. The fresh start means no prior
      bloat survives — only DB-curated knowledge is reinjected.
   5. The distilled model becomes a new epoch (kind='distill') and goes
@@ -123,7 +123,7 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     Args:
         db: discovery database (corpus source + epoch bookkeeping).
         teacher_checkpoint: path to the current best epoch (teacher). If None,
-            uses the base LFM2.5 checkpoint.
+            uses the base ForgeLM V10 checkpoint.
         config: DistillConfig.
     Returns:
         Path to the new distilled epoch checkpoint.
@@ -140,7 +140,7 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     cfg = config or DistillConfig()
 
     # 1. Load teacher (current best or base).
-    teacher, tokenizer = load_default_model("forgelm_v7")
+    teacher, tokenizer = load_default_model("forgelm_v10_1.2b")
     if teacher_checkpoint:
         from research.checkpoint_io import load_checkpoint
         sd = load_checkpoint(teacher_checkpoint)
@@ -169,7 +169,7 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # 4. Fresh student from the BASE checkpoint (no prior bloat).
-    model_cfg = get_config("forgelm_v7", device=device)
+    model_cfg = get_config("forgelm_v10_1.2b", device=device)
     model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
     model_cfg.use_chunked_ce = cfg.use_chunked_ce
     model_cfg.ce_chunk_size = 128

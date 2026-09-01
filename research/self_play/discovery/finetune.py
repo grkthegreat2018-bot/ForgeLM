@@ -1,8 +1,8 @@
 """Fine-tune the discovery model on its own curated DB content.
 
 When the LLM deems its DB high-quality and large enough, this module builds
-an SFT dataset from the DB's best content and fine-tunes a copy of the
-current best model. The result is saved as a new epoch checkpoint, then
+an SFT dataset from the DB's best content and fine-tunes a LoRA adapter on
+the current best model. The result is saved as a LoRA checkpoint, then
 handed to the epoch manager for best-vs-loser comparison.
 
 Training data sources (only curated, verified content — bloat is excluded):
@@ -10,16 +10,12 @@ Training data sources (only curated, verified content — bloat is excluded):
   - theories     (status='supported') -> "State the hypothesis." -> statement
   - scripts      (returncode=0, non-empty stdout) -> prompt-stub -> code
   - research     -> "Summarize findings on {query}." -> summary
+  - tool_trajectories -> multi-turn tool-use examples
 
-Reuses existing ForgeAI infra:
-  - research.config.get_config
-  - research.model_loader.ModelLoader.build_model_fast, load_default_model
-  - research.tokenizer_cache.get_tokenizer
-  - research.training.training_utils (configure_optimizer, get_lr,
-    compute_ce_loss, has_nan_params, vram_exceeded, vram_gb, init_ema,
-    update_ema)
-  - research.checkpoint_io.save_checkpoint
-  - research.json_compat.dumps
+Uses ForgeAI's QLoRA system (IRI-FP4 frozen base + trainable LoRA adapters)
+instead of HuggingFace PEFT, which is incompatible with IRI-FP4 quantized
+weights. LoRA adapters are saved separately (not merged) so they can be
+hot-loaded via engine.load_lora() without reloading the base model.
 """
 from __future__ import annotations
 
@@ -29,8 +25,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn as nn
 
-from research.paths import DATA_DIR
+from research.paths import DATA_DIR, V10_CHECKPOINT
 from research.self_play.discovery.discovery_db import DiscoveryDB
 
 
@@ -39,25 +36,22 @@ _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 
 @dataclass
 class FinetuneConfig:
-    epochs: int = 1
-    batch_size: int = 1           # batch 1 + grad_accum 4 = effective batch 4
-    grad_accum: int = 4
-    max_lr: float = 5e-5
-    min_lr: float = 5e-6
-    warmup_steps: int = 20
+    epochs: int = 2
+    batch_size: int = 2
+    grad_accum: int = 8
+    max_lr: float = 1e-4
+    min_lr: float = 1e-6
+    warmup_steps: int = 30
     max_seq_len: int = 512
     weight_decay: float = 0.01
-    ema_decay: float = 0.999
     vram_limit_gb: float = 11.0
-    # VRAM-saving options (match sft_train.py defaults for self-play loop)
-    optimizer: str = "bnb"        # 8-bit AdamW (saves ~7GB vs fp32)
-    use_lora: bool = True         # LoRA: train ~1M params instead of 1.17B
-    lora_r: int = 16
-    lora_alpha: int = 32
-    grad_checkpoint: bool = True  # activation checkpointing (saves ~0.5GB)
-    use_chunked_ce: bool = True   # avoids materializing [B,T,V] logits
-    # L2-SP anchor regularization (prevents catastrophic forgetting)
-    l2_sp_lambda: float = 0.01    # lower layers get 10x this
+    # QLoRA config (IRI-FP4 frozen base + trainable LoRA)
+    use_lora: bool = True
+    lora_r: int = 32
+    lora_alpha: int = 64
+    lora_dropout: float = 0.05
+    # Target modules: FFN + attention (attention needed for tool-name copying)
+    lora_targets: tuple = ("w_gate", "w_up", "w_down", "q_proj", "v_proj", "out_proj", "in_proj")
 
 
 def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict]:
@@ -83,7 +77,6 @@ def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict
         pairs.append((f"Summarize findings on: {r['query']}", r["summary"]))
 
     # Tool-use trajectories: render as Qwen-format per-turn examples.
-    # These teach the model to call tools and produce final answers.
     from research.self_play.discovery.qwen_adapter import qwen_render_messages
     traj_pairs = _build_trajectory_pairs(db)
     pairs.extend(traj_pairs)
@@ -107,14 +100,7 @@ def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict
 def _build_trajectory_pairs(db: DiscoveryDB,
                             min_reward: float = 0.5,
                             max_pairs: int = 200) -> list[tuple[str, str]]:
-    """Build (prompt, completion) pairs from tool-use trajectories.
-
-    Each trajectory is a multi-turn conversation. We split it into per-turn
-    examples: each assistant turn becomes a completion, with everything before
-    it as the prompt.
-
-    This mirrors the per-turn splitting in sft_train.py.
-    """
+    """Build (prompt, completion) pairs from tool-use trajectories."""
     from research.self_play.discovery.qwen_adapter import (
         qwen_render_messages, IM_START, IM_END)
 
@@ -126,23 +112,19 @@ def _build_trajectory_pairs(db: DiscoveryDB,
         if not isinstance(messages, list) or len(messages) < 2:
             continue
 
-        # Split into per-turn examples
         for i in range(1, len(messages)):
             msg = messages[i]
             if msg.get("role") != "assistant":
                 continue
 
-            # Prompt = everything up to and including the generation prompt
             prompt_msgs = messages[:i]
             prompt = qwen_render_messages(
                 prompt_msgs, tools=None, add_generation_prompt=True)
 
-            # Completion = this assistant turn (with <|im_end|>)
             if msg.get("tool_calls"):
                 import json as _json
                 body = "\n".join(
-                    _json.dumps(tc, ensure_ascii=False) for tc in msg["tool_calls"]
-                )
+                    _json.dumps(tc, ensure_ascii=False) for tc in msg["tool_calls"])
             else:
                 body = msg.get("content", "")
 
@@ -172,141 +154,115 @@ def _collate(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor,
 def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
                      config: FinetuneConfig | None = None,
                      device: str = "cuda") -> str:
-    """Fine-tune on the DB and return the new checkpoint path.
+    """Fine-tune a QLoRA adapter on the DB and return the checkpoint path.
+
+    Uses ForgeAI's QLoRA system (IRI-FP4 frozen base + trainable LoRA adapters)
+    instead of HuggingFace PEFT. The LoRA adapter is saved separately (not
+    merged into base weights) so it can be hot-loaded via engine.load_lora().
 
     Args:
         db: the discovery database (training source + epoch bookkeeping).
-        base_checkpoint: path to the parent epoch checkpoint (None = base LFM2.5).
+        base_checkpoint: path to the parent checkpoint (None = R30 base).
         config: FinetuneConfig.
     Returns:
-        Path to the newly saved epoch checkpoint.
+        Path to the newly saved LoRA adapter checkpoint.
     """
-    from research.config import get_config
-    from research.model_loader import ModelLoader, load_default_model
+    from research.inference.forge_engine import ForgeEngine
     from research.tokenizer_cache import get_tokenizer
-    from research.training.training_utils import (
-        configure_optimizer, get_lr, compute_ce_loss, has_nan_params,
-        vram_exceeded, init_ema, update_ema)
-    from research.checkpoint_io import save_checkpoint
+    from research.training.bitnet_lora import add_lora_adapters
+    from safetensors.torch import save_file as _save
 
     cfg = config or FinetuneConfig()
 
-    # Load base model + tokenizer (reuse existing loaders).
-    model_cfg = get_config("forgelm_v7", device=device)
-    # Enable gradient checkpointing + chunked CE in the model config.
-    model_cfg.use_gradient_checkpointing = cfg.grad_checkpoint
-    model_cfg.use_chunked_ce = cfg.use_chunked_ce
-    model_cfg.ce_chunk_size = 128
-    model = ModelLoader.build_model_fast(
-        model_cfg, checkpoint_path=base_checkpoint,
-        moe_top_k=0, dtype=torch.bfloat16)
-    model.to(device).train()
-    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    # Load base model via ForgeEngine (IRI-FP4 quantized, stays packed in VRAM)
+    ckpt = base_checkpoint or str(V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R30.safetensors")
+    print(f"  [finetune] Loading base: {ckpt}")
+    engine = ForgeEngine.from_checkpoint(ckpt, config_name="forgelm_v10_1.2b",
+                                          device=device, auto_activate=False)
+    model = engine.model
+    model.train()
+    tokenizer = engine.tokenizer
     pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
 
     dataset = build_sft_dataset(db, tokenizer, cfg.max_seq_len)
     if len(dataset) < 8:
         raise ValueError(f"DB too small to fine-tune: only {len(dataset)} usable samples")
+    print(f"  [finetune] Dataset: {len(dataset)} samples")
 
-    # ── LoRA (PEFT) ──
-    # Train ~1M LoRA params instead of 1.17B full params. Saves ~9GB optimizer
-    # state. Adapters are merged into base weights before saving so the
-    # checkpoint is a standalone full model.
-    if cfg.use_lora:
-        from peft import LoraConfig, get_peft_model
-        lora_cfg = LoraConfig(
-            r=cfg.lora_r,
-            lora_alpha=cfg.lora_alpha,
-            target_modules=["q_proj", "k_proj", "v_proj", "out_proj",
-                            "w_gate", "w_up", "w_down"],
-            lora_dropout=0.0,
-            bias="none",
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
-    else:
-        for param in model.parameters():
-            param.requires_grad_(True)
+    # ── QLoRA: add LoRA adapters to IRI-FP4 frozen base ──
+    n_adapters, lora_params = add_lora_adapters(
+        model, rank=cfg.lora_r, alpha=cfg.lora_alpha,
+        target_modules=list(cfg.lora_targets))
+    total_params = sum(p.numel() for p in lora_params)
+    print(f"  [finetune] QLoRA: {n_adapters} adapters, rank={cfg.lora_r}, "
+          f"{total_params:,} params ({total_params/1e6:.1f}M)")
 
-    # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
-    # Penalizes drift from the base checkpoint to prevent catastrophic
-    # forgetting. Lower layers (0-5) get 10x higher lambda.
-    anchor_named_params = None
-    if cfg.l2_sp_lambda > 0 and base_checkpoint is not None and not cfg.use_lora:
-        from safetensors.torch import load_file as safetensors_load
-        anchor_sd = safetensors_load(base_checkpoint)
-        anchor_named_params = {}
-        for name, p in model.named_parameters():
-            if name in anchor_sd and p.requires_grad:
-                anchor_named_params[name] = anchor_sd[name].to(device).to(p.dtype)
-        print(f"  L2-SP: {len(anchor_named_params)} anchored params, "
-              f"lambda={cfg.l2_sp_lambda}")
+    # Optimizer (only LoRA params are trainable)
+    optimizer = torch.optim.AdamW(lora_params, lr=cfg.max_lr,
+                                   weight_decay=cfg.weight_decay,
+                                   betas=(0.9, 0.95))
 
-    opt = configure_optimizer(model, cfg.max_lr, cfg.weight_decay,
-                              optimizer_name=cfg.optimizer)
-    ema = init_ema(model) if not cfg.use_lora else None  # EMA less useful with LoRA
     steps_per_epoch = max(1, len(dataset) // (cfg.batch_size * cfg.grad_accum))
     total_steps = steps_per_epoch * cfg.epochs
+    print(f"  [finetune] {cfg.epochs} epochs, {total_steps} steps")
+
+    def get_lr(step):
+        if step < cfg.warmup_steps:
+            return cfg.max_lr * step / cfg.warmup_steps
+        progress = (step - cfg.warmup_steps) / max(1, total_steps - cfg.warmup_steps)
+        return cfg.max_lr * 0.1 ** (progress * 2)
 
     step = 0
+    t0 = time.time()
     for ep in range(cfg.epochs):
-        # Shuffle-ish: reverse for variety without importing random overhead.
-        order = list(range(len(dataset)))[::-1]
+        order = list(range(len(dataset)))
+        order.reverse()  # variety without importing random
+        optimizer.zero_grad()
+
         for sp in range(steps_per_epoch):
-            if vram_exceeded(cfg.vram_limit_gb, device):
-                raise RuntimeError(f"VRAM limit {cfg.vram_limit_gb}GB exceeded during fine-tune")
-            opt.zero_grad(set_to_none=True)
-            for _ in range(cfg.grad_accum):
-                idx = (sp * cfg.grad_accum + _) % len(order)
-                batch = [dataset[order[idx]]] if cfg.batch_size == 1 else \
-                    [dataset[order[(sp * cfg.grad_accum + j) % len(order)]]
-                     for j in range(cfg.batch_size)]
-                ids, tgt, mask = _collate(batch, pad_id, device)
-                # Chunked CE fast path: pass targets to model to avoid
-                # materializing [B, T, V] logits (saves ~1GB at vocab=65536).
-                if cfg.use_chunked_ce:
-                    shift_tgt = tgt[:, 1:].contiguous()
-                    pad_col = torch.full((shift_tgt.size(0), 1), -100,
-                                         dtype=shift_tgt.dtype, device=device)
-                    shift_tgt = torch.cat([shift_tgt, pad_col], dim=1)
-                    out = model(ids, targets=shift_tgt)
-                    loss = out[1] if isinstance(out, tuple) else out
-                    if loss is None:
-                        out = model(ids)
-                        logits = out[0] if isinstance(out, tuple) else out
-                        loss = compute_ce_loss(logits, tgt)
-                else:
-                    out = model(ids)
-                    logits = out[0] if isinstance(out, tuple) else out
-                    loss = compute_ce_loss(logits, tgt)
-                # L2-SP anchor regularization
-                if anchor_named_params is not None:
-                    from research.training.runners.sft_train import compute_l2_sp_loss
-                    l2_sp = compute_l2_sp_loss(model, anchor_named_params, cfg.l2_sp_lambda)
-                    loss = loss + l2_sp
-                (loss / cfg.grad_accum).backward()
-            lr = get_lr(step, total_steps, cfg.max_lr, cfg.min_lr, cfg.warmup_steps)
-            for g in opt.param_groups:
-                g["lr"] = lr
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            if ema is not None:
-                update_ema(ema, model, cfg.ema_decay)
-            step += 1
-            if has_nan_params(model):
-                raise RuntimeError("NaN params during fine-tune — aborting")
+            # Build batch
+            batch_indices = [order[(sp * cfg.batch_size + j) % len(order)]
+                            for j in range(cfg.batch_size)]
+            batch = [dataset[idx] for idx in batch_indices]
+            ids, tgt, mask = _collate(batch, pad_id, device)
 
-    # ── Merge LoRA adapters into base model for standalone save ──
-    if cfg.use_lora and hasattr(model, "merge_and_unload"):
-        model = model.merge_and_unload()
-        print("  Merged LoRA adapters into base model for standalone save.")
+            # Forward (targets passed for chunked CE)
+            shift_tgt = tgt[:, 1:].contiguous()
+            pad_col = torch.full((shift_tgt.size(0), 1), -100,
+                                 dtype=shift_tgt.dtype, device=device)
+            shift_tgt = torch.cat([shift_tgt, pad_col], dim=1)
+            out = model(ids, targets=shift_tgt)
+            loss = out[1] if isinstance(out, tuple) else None
+            if loss is None:
+                logits = out[0] if isinstance(out, tuple) else out
+                loss = nn.functional.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    tgt.view(-1), ignore_index=-100)
 
-    # Save the new epoch checkpoint.
+            (loss / cfg.grad_accum).backward()
+
+            if (sp + 1) % cfg.grad_accum == 0:
+                lr = get_lr(step)
+                for pg in optimizer.param_groups:
+                    pg["lr"] = lr
+                torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                step += 1
+                if step % 10 == 0:
+                    print(f"    step {step}/{total_steps} loss={loss.item():.4f} lr={lr:.2e}")
+
+    elapsed = time.time() - t0
+    print(f"  [finetune] Done: {step} steps in {elapsed:.1f}s")
+
+    # ── Save LoRA adapter only (base not merged) ──
     _EPOCHS_DIR.mkdir(parents=True, exist_ok=True)
     epoch_num = db.last_epoch_num() + 1
-    path = str(_EPOCHS_DIR / f"epoch{epoch_num}.safetensors")
-    state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-    save_checkpoint(state, path)
+    path = str(_EPOCHS_DIR / f"epoch{epoch_num}_lora.safetensors")
+    lora_state = {n: p.cpu() for n, p in model.named_parameters() if "lora_" in n}
+    _save(lora_state, path)
+    print(f"  [finetune] Saved LoRA: {path} ({len(lora_state)} tensors)")
+
     db.add_epoch(epoch_num, path, parent_epoch=None, kind="finetune",
                  status="candidate")
     db.emit("finetune_done", {"epoch": epoch_num, "checkpoint": path,
