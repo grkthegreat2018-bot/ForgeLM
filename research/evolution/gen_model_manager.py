@@ -46,6 +46,7 @@ import math
 import time
 import json
 import pickle
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -616,7 +617,7 @@ class GenModelManager:
         autocast_ctx = (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if use_autocast
-            else _nullcontext()
+            else nullcontext()
         )
 
         for epoch in range(DISTILL_EPOCHS):
@@ -765,7 +766,7 @@ class GenModelManager:
         autocast_ctx = (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if use_autocast
-            else _nullcontext()
+            else nullcontext()
         )
 
         loss_history = []
@@ -1210,15 +1211,6 @@ class _CPUAdamW:
         self.t = state["t"]
         self.m = [m.clone() for m in state["m"]]
         self.v = [v.clone() for v in state["v"]]
-
-
-class _nullcontext:
-    """No-op context manager (for when autocast is not needed)."""
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
 
 
 # ── Standalone Wipe Function ───────────────────────────────────────────

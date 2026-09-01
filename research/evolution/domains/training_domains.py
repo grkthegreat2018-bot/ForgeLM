@@ -621,7 +621,10 @@ class FlashOptimConfig(BaseDomain):
         # memory_savings: 8-bit = 75% (2 bytes vs 8), 4-bit = 87.5% (1 byte vs 8)
         memory_savings = 0.75 if bits == 8 else 0.875
         # companding_bonus: sqrt best for small values, log good, linear baseline
-        companding_bonus = 5.0 if companding == "sqrt" else (3.0 if companding == "log" else 0.0)
+        # + strength bonus (optimal around 1.0) to match flash_optim_simulate
+        strength = float(config.get("companding_strength", 1.0))
+        strength_bonus = 5.0 - abs(strength - 1.0) * 3.0
+        companding_bonus = (5.0 if companding == "sqrt" else (3.0 if companding == "log" else 0.0)) + strength_bonus
         # 4-bit penalty: more aggressive, may lose precision on large models
         bit_penalty = -10.0 if bits == 4 else 0.0
         score = memory_savings * 30 + companding_bonus + bit_penalty

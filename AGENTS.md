@@ -110,6 +110,52 @@ unless the user explicitly overrides them for a specific task.
   now use `device=W.device` for sign tensors. `training_sim.py`
   `optimizer_simulate` now returns `final_loss` in metrics dict.
 
+#### Refactor 2026-09-01 (b): Test suite repair + dead script cleanup
+- **Test suite was broken on Windows**: 11 script-style test files executed at
+  import time during pytest collection — a failure aborted the ENTIRE suite
+  (`sys.exit(1)` in `test_training_migration.py` caused INTERNALERROR; open
+  SQLite unlink in `test_applied_flag.py` raised PermissionError). All 11
+  converted to proper pytest tests (module bodies wrapped in `test_*()`,
+  `tempfile.mktemp` → `tmp_path`, DB close before unlink). Silent scripts
+  that printed FAIL without failing now assert (`n_fail == 0` / `all_pass`).
+  Suite: **1225 passed, 0 failed** (was 1077 passed + 3 failed + broken collection).
+- **Bit-exact migration fixes** (legacy Python domains aligned to canonical
+  JSON spec + simulator scoring):
+  - `FlashOptimConfig` (training_domains.py): added `strength_bonus` term
+    missing vs `flash_optim_simulate`.
+  - `CrossLayerKV` (kv_domains.py): scoring weights updated to spec
+    (`param_reduction*150 - recon_err*100 - overhead*2`, was `*100/-500/-2`).
+  - `GlaAttention` (attention_domains.py): aligned with `gla_attn_simulate` —
+    QR/SVD semi-orthogonal projections (was random → err ~1.4 regardless of
+    latent dim), graduated trivial penalty (compression<2.0), flag-handler
+    cancellation.
+- **ForgeEvolve engine fix** (`engine.py`): seed configs are now persisted to
+  the DB (`_pending_discoveries`), so `query_best_configs` reflects the
+  archive's best. Previously the archive best (-1.41) never reached the DB
+  (best row -4.61) — warm-start loaded stale generators.
+- **Delegation simulator recursion fix** (`simulators/misc_sim.py`):
+  `kara_simulate`/`hqe_kv_simulate`/`sparse_attn_simulate` called
+  `domain.evaluate(config)` where `domain` is the JSONSpecDomain itself →
+  infinite recursion (RecursionError in test_all_domains). Now delegate to
+  the legacy domain classes (`KARADomain`, `HqeKVDomain`,
+  `SparseAttentionDomain`, `KVEvictionDomain`) via a cached instance keyed by
+  (class, seq_len, seed, device). Rewrote `kara.json`/`hqe_kv.json`/
+  `sparse_attn.json` specs with REAL params (were generic `param0..N` stubs
+  that decoded to defaults).
+- **Duplication merge**: duplicate `_nullcontext` classes in
+  `gen_model_manager.py` + `llm_gen_model.py` → stdlib `contextlib.nullcontext`.
+- **Dead scripts deleted (7)** — referenced deleted V2/V7/V8/V9 checkpoints
+  or configs: `train_dspark.py` (`forgelm_v2` config deleted, crashed at
+  import), `compare_lfm25_vs_v9.py`, `verify_port_loss.py`,
+  `test_v9_8b_expanded.py`, `test_v9_8b_forgeengine.py`,
+  `test_v9_8b_ternary_load.py`, `test_finetune_growth.py`.
+  `test_sheet_v9.py` renamed → `test_sheet_v10.py` (it already loaded V10).
+  Dead "Train DSpark Head" preset removed from `forge_gui/api/process_manager.py`.
+- **.gitignore**: `scripts/r2*_*.json`, `scripts/_*.json`, `scripts/_*.txt`
+  (R&D round result outputs, regenerable).
+- `test_forge_evolve.py`: removed `return results` from test functions
+  (PytestReturnNotNoneWarning).
+
 #### Refactor 2026-09-01: Engine fallbacks + file merges + API cleanup
 - **Engine fallback chains added** (`forge_engine.py`):
   - `_apply_quantization`: fallback chain (nvfp4→w8a8→fp8→int8→int4→bf16)

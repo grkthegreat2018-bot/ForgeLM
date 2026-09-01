@@ -1,16 +1,16 @@
 {
   "name": "sparse_attn",
   "category": "misc",
-  "description": "Sparse attention domain. Delegated simulator.",
+  "description": "Sparse attention: strategy, budget_ratio, block_size, min_seq_len, k_ratio. Delegates to SparseAttentionDomain.",
   "simulator": "sparse_attn_simulate",
   "params": [
-    {"name": "param0", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param1", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param2", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param3", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param4", "type": "float", "range": [0.0, 1.0]}
+    {"name": "strategy", "type": "choice", "values": ["compact", "cosa", "mosa"]},
+    {"name": "budget_ratio", "type": "float", "range": [0.1, 0.9]},
+    {"name": "block_size", "type": "int", "range": [8, 32]},
+    {"name": "min_seq_len", "type": "int", "range": [256, 1024]},
+    {"name": "k_ratio", "type": "float", "range": [0.2, 0.8]}
   ],
-  "behavioral_dims": [["behavioral_0", 10, 0.0, 1.0], ["behavioral_1", 10, 0.0, 1.0]],
+  "behavioral_dims": [["compression", 10, 1.0, 10.0], ["fwd_error", 10, 0.0, 0.3]],
   "scoring": {
     "components": [
       {"metric": "base_score", "weight": 1.0}

@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import math
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -180,7 +181,7 @@ class LLMGenModel:
         autocast_ctx = (
             torch.autocast(device_type="cuda", dtype=self.dtype)
             if use_autocast
-            else _nullcontext()
+            else nullcontext()
         )
 
         generated_len = 0
@@ -362,12 +363,3 @@ class LLMGenModel:
                 f"n_layers={size['n_layers']}, "
                 f"params={self.param_count():,}, "
                 f"device={self.device}, dtype={self.dtype})")
-
-
-class _nullcontext:
-    """No-op context manager (for when autocast is not needed)."""
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False

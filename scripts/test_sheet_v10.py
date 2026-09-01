@@ -1,4 +1,4 @@
-"""ForgeEngine test sheet for ForgeLM V9-1.2B — the new base model.
+"""ForgeEngine test sheet for ForgeLM V10-1.2B â€” the new base model.
 
 Uses ForgeEngine's full feature set (activate, generate, stats, bottleneck)
 instead of raw model.forward(). Tests:
@@ -13,9 +13,9 @@ instead of raw model.forward(). Tests:
   8. Engine stats dump
 
 Usage:
-  python scripts/test_sheet_v9.py
-  python scripts/test_sheet_v9.py --kv spectral
-  python scripts/test_sheet_v9.py --quick  # skip bottleneck profiling
+  python scripts/test_sheet_v10.py
+  python scripts/test_sheet_v10.py --kv spectral
+  python scripts/test_sheet_v10.py --quick  # skip bottleneck profiling
 """
 import sys, os, time, json, argparse, traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,7 +26,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 def log(msg):
     print(msg, flush=True)
 
-# ─── Test questions (multi-turn, increasing difficulty) ───────────────────────
+# â”€â”€â”€ Test questions (multi-turn, increasing difficulty) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 QUESTIONS = [
     # Arithmetic
     ("What is 2+2? Answer with just the number.", "4"),
@@ -54,12 +54,12 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     from research.paths import V10_CHECKPOINT
 
     log("=" * 70)
-    log(f"ForgeEngine Test Sheet — ForgeLM V9-1.2B")
+    log(f"ForgeEngine Test Sheet â€” ForgeLM V10-1.2B")
     log(f"KV strategy: {kv_strategy}")
     log("=" * 70)
 
-    # ── Load model ──
-    log(f"\n[1] Loading V9-1.2B...")
+    # â”€â”€ Load model â”€â”€
+    log(f"\n[1] Loading V10-1.2B...")
     t0 = time.time()
     model, tokenizer = load_default_model(
         "forgelm_v10_1.2b",
@@ -71,13 +71,13 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     n_params = sum(p.numel() for p in model.parameters())
     log(f"  Loaded in {load_time:.1f}s | {n_params/1e6:.1f}M params")
 
-    # ── Create ForgeEngine ──
+    # â”€â”€ Create ForgeEngine â”€â”€
     log(f"\n[2] Creating ForgeEngine...")
     engine = ForgeEngine(model, tokenizer, device=device,
                          checkpoint_path=str(V10_CHECKPOINT))
     log(f"  Engine created. KV cache: {engine.kv_cache}")
 
-    # ── Activate with strategy ──
+    # â”€â”€ Activate with strategy â”€â”€
     log(f"\n[3] Activating with kv_cache='{kv_strategy}'...")
     activate_kwargs = {
         "kv_cache": kv_strategy,
@@ -97,7 +97,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         engine.activate(kv_cache="standard", warmup=True)
         kv_strategy = "standard (fallback)"
 
-    # ── Engine stats ──
+    # â”€â”€ Engine stats â”€â”€
     log(f"\n[4] Engine stats:")
     stats = engine.stats()
     for k, v in stats.items():
@@ -108,7 +108,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         else:
             log(f"  {k}: {v}")
 
-    # ── Test 1: Speed (tokens/sec) ──
+    # â”€â”€ Test 1: Speed (tokens/sec) â”€â”€
     log(f"\n" + "=" * 50)
     log(f"TEST 1: Generation speed (kv={kv_strategy})")
     log("=" * 50)
@@ -140,7 +140,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             log(f"  {label}: ERROR: {e}")
             speed_results[label] = {"error": str(e)}
 
-    # ── Test 2: Memory ──
+    # â”€â”€ Test 2: Memory â”€â”€
     log(f"\n" + "=" * 50)
     log(f"TEST 2: Memory usage (kv={kv_strategy})")
     log("=" * 50)
@@ -158,7 +158,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         kv_info = engine.kv_cache.info()
         log(f"  KV cache info: {kv_info}")
 
-    # ── Test 3: Accuracy (10 questions) ──
+    # â”€â”€ Test 3: Accuracy (10 questions) â”€â”€
     log(f"\n" + "=" * 50)
     log(f"TEST 3: Accuracy (10 questions, greedy)")
     log("=" * 50)
@@ -171,7 +171,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             is_correct = check_answer(response, expected)
             if is_correct:
                 correct += 1
-            status = "✓" if is_correct else "✗"
+            status = "âœ“" if is_correct else "âœ—"
             log(f"  Q{i+1} {status}: {question[:40]} -> '{response[:60]}'")
         except Exception as e:
             log(f"  Q{i+1} ERROR: {e}")
@@ -179,7 +179,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     accuracy = correct / total
     log(f"\n  Accuracy: {correct}/{total} = {accuracy:.0%}")
 
-    # ── Test 3b: Accuracy with sampling (temperature=0.7) ──
+    # â”€â”€ Test 3b: Accuracy with sampling (temperature=0.7) â”€â”€
     log(f"\n" + "=" * 50)
     log(f"TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)")
     log("=" * 50)
@@ -192,7 +192,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             is_correct = check_answer(response, expected)
             if is_correct:
                 correct_s += 1
-            status = "✓" if is_correct else "✗"
+            status = "âœ“" if is_correct else "âœ—"
             log(f"  Q{i+1} {status}: {question[:40]} -> '{response[:60]}'")
         except Exception as e:
             log(f"  Q{i+1} ERROR: {e}")
@@ -200,7 +200,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     accuracy_s = correct_s / total
     log(f"\n  Accuracy (sampled): {correct_s}/{total} = {accuracy_s:.0%}")
 
-    # ── Test 4: Bottleneck profile (skip if quick) ──
+    # â”€â”€ Test 4: Bottleneck profile (skip if quick) â”€â”€
     bottleneck_results = None
     if not quick:
         log(f"\n" + "=" * 50)
@@ -218,7 +218,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         except Exception as e:
             log(f"  Bottleneck profiling failed: {e}")
 
-    # ── Test 5: KV cache comparison ──
+    # â”€â”€ Test 5: KV cache comparison â”€â”€
     log(f"\n" + "=" * 50)
     log(f"TEST 5: KV cache comparison")
     log("=" * 50)
@@ -236,9 +236,9 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
 
     log(f"  Standard KV @ {seq_len} tokens: {standard_mb:.1f} MB")
     log(f"  SpectralKV @ {seq_len} tokens: {spectral_mb:.1f} MB")
-    log(f"  Compression: {standard_mb/spectral_mb:.1f}×")
+    log(f"  Compression: {standard_mb/spectral_mb:.1f}Ã—")
 
-    # ── Final engine stats ──
+    # â”€â”€ Final engine stats â”€â”€
     log(f"\n" + "=" * 50)
     log(f"FINAL ENGINE STATS")
     log("=" * 50)
@@ -250,7 +250,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     if final_stats.get('vram'):
         log(f"  VRAM: {final_stats['vram']}")
 
-    # ── Summary ──
+    # â”€â”€ Summary â”€â”€
     log(f"\n" + "=" * 70)
     log(f"SUMMARY (kv={kv_strategy})")
     log("=" * 70)
@@ -263,7 +263,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"  Accuracy (sampled): {correct_s}/{total} = {accuracy_s:.0%}")
     log(f"  VRAM: {vram.get('used_gb', 0):.2f} GB / {vram.get('total_gb', 0):.2f} GB")
     log(f"  RAM: {ram:.0f} MB")
-    log(f"  KV compression: {standard_mb/spectral_mb:.1f}×")
+    log(f"  KV compression: {standard_mb/spectral_mb:.1f}Ã—")
 
     # Save results
     results = {
@@ -289,7 +289,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ForgeEngine test sheet for V9-1.2B")
+    parser = argparse.ArgumentParser(description="ForgeEngine test sheet for V10-1.2B")
     parser.add_argument("--kv", default="standard",
                         choices=["standard", "spectral", "s4r", "paged", "snapkv"],
                         help="KV cache strategy to test")

@@ -528,7 +528,8 @@ class CrossLayerKV(BaseDomain):
         recon_err /= max(1, n_groups)
         # Compute overhead for learned mode (higher due to weight params + compute)
         overhead = 1.5 if mode == "learned" else (1.2 if mode == "max" else 1.0)
-        score = param_reduction * 100 - recon_err * 500 - overhead * 2
+        # Weights match cross_layer_kv.json scoring spec (canonical)
+        score = param_reduction * 150 - recon_err * 100 - overhead * 2
         return {"score": float(score), "behavioral": (param_reduction, recon_err),
                 "metadata": {"share_ratio": ratio, "n_share_groups": n_groups, "share_mode": mode,
                              "param_reduction": param_reduction, "recon_err": recon_err}}

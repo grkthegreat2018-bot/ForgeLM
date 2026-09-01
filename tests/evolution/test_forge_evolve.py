@@ -146,7 +146,6 @@ def test_synthetic(tmp_db):
         print(f"  WARN: Archive only has {len(elites)} elites (low diversity)")
     assert len(elites) >= 1, "Archive has zero elites — MAP-Elites is broken"
 
-    return results
 
 
 # ── Test 2: Quant domain (real evaluation, slower) ──
@@ -229,7 +228,6 @@ def test_quant():
         else:
             print(f"  WARN: Slower than target ({time_per_disc/60:.1f} min per discovery)")
 
-    return results
 
 
 # ── Test 3: Surrogate accuracy over generations ──
@@ -287,7 +285,6 @@ def test_surrogate_learning(tmp_db):
         for d in results['discoveries_list'][-5:]:  # last 5
             print(f"    Gen {d['generation']:3d}: score={d['score']:.4f}")
 
-    return results
 
 
 def main():

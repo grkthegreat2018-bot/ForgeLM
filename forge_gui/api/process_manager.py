@@ -234,12 +234,6 @@ def get_presets() -> list[ProcessPreset]:
             arg_defaults={"--topic": "python_algorithms", "--mode": "selfplay", "--epochs": "3"},
         ),
         ProcessPreset(
-            name="Train DSpark Head",
-            script="scripts/train_dspark.py",
-            description="Train speculative decoding head (4-token prediction) on ForgeLM V2",
-            arg_defaults={"--epochs": "3", "--lr": "1e-4", "--batch-size": "2"},
-        ),
-        ProcessPreset(
             name="Ablation Benchmark",
             script="scripts/ablation_benchmark.py",
             description="Run ablation benchmark suite across model configurations",

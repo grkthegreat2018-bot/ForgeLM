@@ -12,6 +12,7 @@ import os, sys
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
+import pytest
 import torch
 import torch.nn as nn
 from research.training.optim.hybrid_offload import CPUAdamW
@@ -70,6 +71,7 @@ def main():
                    for pa, pb in zip(model_a.parameters(), model_b.parameters()))
     status = "PASS" if max_diff < 1e-5 else "FAIL"
     print(f"Test 5 (double_buffer correctness): max_diff={max_diff:.8f} {status}")
+    assert max_diff < 1e-5, f"double_buffer correctness: max_diff={max_diff:.8f}"
 
     # Test 6: bandwidth predictor
     for vram in [5.0, 5.5, 6.0, 6.5, 7.0]:
@@ -79,6 +81,11 @@ def main():
     print(f"Test 6 (predictor): should_preempt={preempt}")
     print(f"  stats: {stats}")
     print("ALL TESTS PASSED")
+
+
+@pytest.mark.gpu
+def test_hybrid_offload_ft():
+    main()
 
 
 if __name__ == "__main__":

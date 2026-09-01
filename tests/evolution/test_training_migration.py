@@ -4,11 +4,9 @@ For each of the 13 training domains, evaluate the same config with both
 the original Python domain class and the new JSONSpecDomain, then assert
 the scores match within 1e-4.
 """
-import sys
-import torch
 import numpy as np
-
-sys.path.insert(0, "D:\\windsurf\\ForgeAI")
+import pytest
+import torch
 
 from research.evolution.domains.training_domains import (
     OptimizerConfig, SchedulerConfig, LossConfig, MuonConfig,
@@ -64,12 +62,12 @@ TESTS = [
 # Config key remapping for domains where flag handlers expect different keys
 KEY_REMAPS = {}
 
-def remap_config(spec_name, config):
+
+def _remap_config(spec_name, config):
     """Remap config keys for JSONSpecDomain if needed."""
     remap = KEY_REMAPS.get(spec_name, {})
     new_config = {}
     for k, v in config.items():
-        # If the old key has a remap, use the new key name
         new_key = k
         for new_k, old_k in remap.items():
             if k == old_k:
@@ -78,35 +76,21 @@ def remap_config(spec_name, config):
         new_config[new_key] = v
     return new_config
 
-passed = 0
-failed = 0
 
-for old_cls, spec_name, config, desc in TESTS:
-    try:
-        torch.manual_seed(42)
-        np.random.seed(42)
-        old = old_cls()
-        ro = old.evaluate(config)
+@pytest.mark.parametrize("old_cls,spec_name,config,desc", TESTS, ids=[t[3] for t in TESTS])
+def test_bit_exact_match(old_cls, spec_name, config, desc):
+    torch.manual_seed(42)
+    np.random.seed(42)
+    old = old_cls()
+    ro = old.evaluate(config)
 
-        torch.manual_seed(42)
-        np.random.seed(42)
-        new_config = remap_config(spec_name, config)
-        new = JSONSpecDomain(spec_name)
-        rn = new.evaluate(new_config)
+    torch.manual_seed(42)
+    np.random.seed(42)
+    new_config = _remap_config(spec_name, config)
+    new = JSONSpecDomain(spec_name)
+    rn = new.evaluate(new_config)
 
-        diff = abs(ro["score"] - rn["score"])
-        if diff < 1e-4:
-            print(f"PASS: {desc} (old={ro['score']:.6f} new={rn['score']:.6f} diff={diff:.2e})")
-            passed += 1
-        else:
-            print(f"FAIL: {desc} (old={ro['score']:.6f} new={rn['score']:.6f} diff={diff:.2e})")
-            failed += 1
-    except Exception as e:
-        print(f"ERROR: {desc}: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-print(f"\n{passed}/{passed + failed} passed")
-if failed > 0:
-    sys.exit(1)
+    diff = abs(ro["score"] - rn["score"])
+    assert diff < 1e-4, (
+        f"{desc}: old={ro['score']:.6f} new={rn['score']:.6f} diff={diff:.2e}"
+    )

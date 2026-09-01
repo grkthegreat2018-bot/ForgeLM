@@ -387,6 +387,15 @@ class ForgeEvolve:
                     "behavioral": result.get("behavioral", (0,)),
                     "metadata": result.get("metadata", {}),
                 })
+                # Persist seeds so query_best_configs reflects the archive's
+                # best (dedup updates the row if a better score comes later)
+                self._pending_discoveries.append({
+                    "generation": -1,
+                    "config": sc,
+                    "score": result["score"],
+                    "behavioral": result.get("behavioral", (0,)),
+                    "metadata": result.get("metadata", {}),
+                })
                 # Encode for surrogate training
                 params = self.domain.encode(sc)
                 if params is not None:

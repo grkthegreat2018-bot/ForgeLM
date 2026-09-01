@@ -1,6 +1,6 @@
 """Launch page — boot processes via GUI with preset scripts + custom commands.
 
-Shows preset process templates (train_expert, train_dspark, etc.) with
+Shows preset process templates (train_expert, ablation_benchmark, etc.) with
 editable arguments, a custom command input, and a list of running/finished
 tasks with kill buttons. Process output is shown live in the Tasks page.
 """

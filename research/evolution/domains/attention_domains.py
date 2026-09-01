@@ -184,19 +184,37 @@ class GlaAttention(BaseDomain):
         # but each head has smaller dim, affecting reconstruction quality.
         head_dim = d // max(n_h, 1)
         k = self._randn(4, n_h, 32, head_dim)
-        # Project each head's K separately
-        proj_down = self._randn(head_dim, ld) / (head_dim ** 0.5)
-        proj_up = self._randn(ld, head_dim) / (ld ** 0.5)
-        k_latent = k @ proj_down
-        k_recon = k_latent @ proj_up
-        recon_err = float((k - k_recon).norm().item() / (k.norm().item() + 1e-8))
+        # Semi-orthogonal projections for realistic reconstruction error,
+        # matching gla_attn_simulate (random projections give ~1.4 error
+        # regardless of latent dim — unrealistic).
+        if ld >= head_dim:
+            # Overcomplete: near-lossless reconstruction
+            proj_down = self._randn(head_dim, ld)
+            Q, _ = torch.linalg.qr(proj_down.T)
+            proj_down = Q[:head_dim, :head_dim].T
+            proj_up = proj_down.T
+            recon_err = 0.02 + 0.01 * torch.rand(1, device=self._device).item()
+        else:
+            # Undercomplete: SVD/QR-based optimal projection
+            proj_down = self._randn(head_dim, ld)
+            Q, _ = torch.linalg.qr(proj_down)
+            proj_down = Q
+            proj_up = proj_down.T
+            k_latent = k @ proj_down
+            k_recon = k_latent @ proj_up
+            recon_err = float((k - k_recon).norm().item() / (k.norm().item() + 1e-8))
         compression = d / ld
         # More heads = better parallelism but more projection params
         head_overhead = n_h * 0.02  # param cost per head
-        if compression < 1.5:
-            score = -50
-        else:
-            score = -recon_err * 100 + compression * 5 - head_overhead
+        # Scoring matches gla_attention.json spec: base components plus a
+        # graduated trivial penalty (-50 at compression=1.0 → 0 at 2.0).
+        # The spec's n_heads_score/head_overhead flag handlers cancel against
+        # the simulator's flag_adjustment, so the legacy path just omits both.
+        base_score = -recon_err * 30 + compression * 5 - head_overhead
+        score = base_score
+        if compression < 2.0:
+            deficit = 2.0 - compression
+            score += -50.0 * deficit - base_score * deficit
         return {"score": float(score), "behavioral": (recon_err, compression),
                 "metadata": {"latent_dim": ld, "n_heads": n_h, "recon_err": recon_err}}
 

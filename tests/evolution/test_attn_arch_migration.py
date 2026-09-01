@@ -189,6 +189,11 @@ def run_test():
     return failed == 0
 
 
+def test_attn_arch_migration():
+    """Pytest entry: bit-exact attention + arch domain migration check."""
+    assert run_test(), "attention/arch migration mismatches (see FAIL lines above)"
+
+
 if __name__ == "__main__":
     success = run_test()
     sys.exit(0 if success else 1)

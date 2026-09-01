@@ -1128,3 +1128,12 @@ Need facts that Qwen 0.5B gets WRONG at baseline. Options:
   - Made-up facts (synthetic: "What is the capital of Zzzland? -> Quux")
   - Rare trivia the model likely hasn't seen
   - Custom domain knowledge (API docs, config values)
+
+## 2026-09-01 Refactor session (b)
+- Fixed pytest suite-killer: 11 script-style tests converted to pytest (import-time sys.exit/unlink crashed whole suite on Windows).
+- Bit-exact parity restored: FlashOptimConfig (+strength_bonus), CrossLayerKV (spec weights 150/-100/-2), GlaAttention (QR/SVD proj + graduated penalty).
+- engine.py: seeds persisted to DB (query_best_configs == archive best now).
+- misc_sim.py: delegation simulators now build+cache legacy domain instances (was infinite recursion via JSONSpecDomain). Specs kara/hqe_kv/sparse_attn got real params.
+- Deleted 7 dead scripts (V2/V7/V8/V9 refs), renamed test_sheet_v9->v10, merged _nullcontext x2 -> contextlib.nullcontext.
+- Full suite: 1225 passed / 0 failed / 0 skipped.
+- NOTE: two explore subagents stalled (b6eeba29, a6464224) - abandoned; survey done manually.

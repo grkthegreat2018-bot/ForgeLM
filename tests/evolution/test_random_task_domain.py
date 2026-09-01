@@ -125,5 +125,9 @@ def main():
     print("\nALL CHECKS PASSED")
 
 
+def test_random_task_domain():
+    main()
+
+
 if __name__ == "__main__":
     main()

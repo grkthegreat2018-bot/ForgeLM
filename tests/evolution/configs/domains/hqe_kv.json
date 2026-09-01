@@ -1,16 +1,16 @@
 {
   "name": "hqe_kv",
   "category": "misc",
-  "description": "HQE KV cache compression. Delegated simulator.",
+  "description": "HQE KV tiered quantization: budget_full/int8/int4, group_size, recency_decay. Delegates to HqeKVDomain.",
   "simulator": "hqe_kv_simulate",
   "params": [
-    {"name": "param0", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param1", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param2", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param3", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param4", "type": "float", "range": [0.0, 1.0]}
+    {"name": "budget_full", "type": "float", "range": [0.05, 0.25]},
+    {"name": "budget_int8", "type": "float", "range": [0.1, 0.5]},
+    {"name": "budget_int4", "type": "float", "range": [0.2, 0.7]},
+    {"name": "group_size", "type": "int", "range": [32, 128]},
+    {"name": "recency_decay", "type": "float", "range": [0.8, 1.0]}
   ],
-  "behavioral_dims": [["behavioral_0", 10, 0.0, 1.0], ["behavioral_1", 10, 0.0, 1.0]],
+  "behavioral_dims": [["compression", 10, 1.0, 8.0], ["fwd_error", 10, 0.0, 0.3]],
   "scoring": {
     "components": [
       {"metric": "base_score", "weight": 1.0}

@@ -1,15 +1,15 @@
 {
   "name": "kara",
   "category": "misc",
-  "description": "KARA attention domain. Delegated simulator.",
+  "description": "KARA KV cache: sink_size, window_size, target_budget, chunk_expand_size. Delegates to KARADomain.",
   "simulator": "kara_simulate",
   "params": [
-    {"name": "param0", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param1", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param2", "type": "float", "range": [0.0, 1.0]},
-    {"name": "param3", "type": "float", "range": [0.0, 1.0]}
+    {"name": "sink_size", "type": "int", "range": [2, 8]},
+    {"name": "window_size", "type": "int", "range": [128, 1024]},
+    {"name": "target_budget", "type": "int", "range": [512, 4096]},
+    {"name": "chunk_expand_size", "type": "int", "range": [4, 16]}
   ],
-  "behavioral_dims": [["behavioral_0", 10, 0.0, 1.0], ["behavioral_1", 10, 0.0, 1.0]],
+  "behavioral_dims": [["compression", 10, 1.0, 8.0], ["fwd_error", 10, 0.0, 0.3]],
   "scoring": {
     "components": [
       {"metric": "base_score", "weight": 1.0}

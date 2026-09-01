@@ -171,6 +171,14 @@ def main():
         }, f, indent=2)
     print(f"\n  Summary saved to {out}")
 
+    # Under pytest, the script's own FAIL checks must fail the test
+    # (WARN checks above intentionally do not fail).
+    assert all_pass, "SOME CHECKS FAILED — review above"
+
+
+def test_persistence():
+    main()
+
 
 if __name__ == "__main__":
     main()

@@ -29,17 +29,25 @@ tests = [
      {'calib_method': 'minmax', 'percentile': 0.99, 'smooth_alpha': 0.5}),
 ]
 
-for name, old_cls, spec_name, cfg in tests:
-    torch.manual_seed(42); np.random.seed(42)
-    old = old_cls()
-    ro = old.evaluate(cfg)
-    try:
+
+def test_quant_migration():
+    n_fail = 0
+    for name, old_cls, spec_name, cfg in tests:
         torch.manual_seed(42); np.random.seed(42)
-        new = JSONSpecDomain(spec_name)
-        rn = new.evaluate(cfg)
-        match = abs(ro['score'] - rn['score']) < 1e-4
-        print(f'{name:20s} old={ro["score"]:10.4f} new={rn["score"]:10.4f} match={match}')
-    except FileNotFoundError as e:
-        print(f'{name:20s} SPEC NOT FOUND: {spec_name}')
-    except Exception as e:
-        print(f'{name:20s} ERROR: {e}')
+        old = old_cls()
+        ro = old.evaluate(cfg)
+        try:
+            torch.manual_seed(42); np.random.seed(42)
+            new = JSONSpecDomain(spec_name)
+            rn = new.evaluate(cfg)
+            match = abs(ro['score'] - rn['score']) < 1e-4
+            print(f'{name:20s} old={ro["score"]:10.4f} new={rn["score"]:10.4f} match={match}')
+            if not match:
+                n_fail += 1
+        except FileNotFoundError as e:
+            print(f'{name:20s} SPEC NOT FOUND: {spec_name}')
+        except Exception as e:
+            n_fail += 1
+            print(f'{name:20s} ERROR: {e}')
+    assert n_fail == 0, (
+        f"{n_fail} quant migration checks failed (see MISMATCH/ERROR lines above)")
