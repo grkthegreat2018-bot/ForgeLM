@@ -41,6 +41,9 @@ def qwen_render_tool_defs(tools: list[dict]) -> str:
     """
     lines = []
     for t in tools:
+        # unwrap OpenAI-style {"type": "function", "function": {...}}
+        if t.get("type") == "function" and "function" in t:
+            t = t["function"]
         params = t.get("parameters", {})
         if isinstance(params, dict) and "properties" in params:
             # Already in JSON schema format
