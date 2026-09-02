@@ -115,7 +115,7 @@ class AgentPage(QWidget):
         self.tool_harness = tool_harness
         self.lorebook = lorebook
         self._runner: Optional[AgentRunner] = None
-        self._rounds: dict[str, _RoundBlock] = {}
+        self._round_blocks: dict[str, _RoundBlock] = {}
         self._n_runs = 0
 
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
@@ -304,27 +304,27 @@ class AgentPage(QWidget):
     # ── runner slots ──────────────────────────────────────────────────
     def _on_round(self, round_idx: str) -> None:
         block = _RoundBlock(int(round_idx))
-        self._rounds[round_idx] = block
+        self._round_blocks[round_idx] = block
         self._trace_lay.insertWidget(self._trace_lay.count() - 1, block)
         self._scroll_bottom()
 
     def _on_text(self, round_idx: str, content: str) -> None:
-        block = self._rounds.get(round_idx)
+        block = self._round_blocks.get(round_idx)
         if block is not None:
             block.text.setText(content or "(no text)")
             self._scroll_bottom()
 
     def _on_tool_call(self, round_idx: str, call: dict) -> None:
-        block = self._rounds.get(round_idx)
+        block = self._round_blocks.get(round_idx)
         if block is None:
             self._on_round(round_idx)
-            block = self._rounds[round_idx]
+            block = self._round_blocks[round_idx]
         card = _ToolCard(call)
         block.add_tool_card(card)
         self._scroll_bottom()
 
     def _on_tool_result(self, round_idx: str, rec: dict) -> None:
-        block = self._rounds.get(round_idx)
+        block = self._round_blocks.get(round_idx)
         if block is None:
             return
         cards = block.findChildren(_ToolCard)
@@ -365,7 +365,7 @@ class AgentPage(QWidget):
 
     # ── trace helpers ─────────────────────────────────────────────────
     def _clear_trace(self) -> None:
-        self._rounds.clear()
+        self._round_blocks.clear()
         while self._trace_lay.count() > 1:
             it = self._trace_lay.takeAt(0)
             w = it.widget()
