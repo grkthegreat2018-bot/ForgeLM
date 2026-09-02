@@ -36,10 +36,29 @@ TOOL_CALL_END_FIRST_ID = 11     # special token id for the end marker
 def qwen_render_tool_defs(tools: list[dict]) -> str:
     """Render tool definitions as a text block for the system/user message.
 
-    Unlike ForgeLM V10's special-token-wrapped format, Qwen format puts tool
-    definitions as plain text in the system message.
+    Includes explicit instructions on how to call tools using the
+    <|tool_call_start|>/<|tool_call_end|> marker format so the model
+    knows to emit structured tool calls rather than writing code.
     """
-    lines = []
+    lines = [
+        "You have access to the following tools. To use a tool, output a tool call "
+        "wrapped in the special markers <|tool_call_start|> and <|tool_call_end|>, "
+        "containing a JSON object with the tool name and arguments.",
+        "",
+        "Example tool call:",
+        '<|tool_call_start|>',
+        '{"name": "list_dir", "arguments": {"path": "."}}',
+        '<|tool_call_end|>',
+        "",
+        "Rules:",
+        "- Always use the tool call markers to invoke a tool. Never write Python "
+        "code to perform actions — use the tools instead.",
+        "- You can make multiple tool calls in one response.",
+        "- After each tool call, you will receive the result and can continue.",
+        "- Only call tools that are listed below.",
+        "",
+        "Available tools:",
+    ]
     for t in tools:
         # unwrap OpenAI-style {"type": "function", "function": {...}}
         if t.get("type") == "function" and "function" in t:

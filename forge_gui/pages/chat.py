@@ -134,7 +134,8 @@ class _EngineChatToolWorker(QThread):
             )
             import json as _json
 
-            defs = self.tool_harness.tool_defs()
+            # use reduced tool set for chat (keeps prompt within KV cache)
+            defs = self.tool_harness.chat_tool_defs()
             messages = list(self.messages)
             final_text = ""
 

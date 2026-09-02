@@ -181,6 +181,30 @@ class ToolHarness:
                     if d["function"]["name"] not in self._side_effect_tools]
         return defs
 
+    def chat_tool_defs(self) -> list[dict]:
+        """Return a reduced set of tool definitions suitable for chat mode.
+
+        Chat mode has a limited KV cache (2048 tokens on 12GB VRAM), so
+        we only expose the most commonly useful tools to keep the system
+        prompt short. The full set is available in agent mode.
+        """
+        # tools that are useful in chat and have short descriptions
+        chat_tools = {
+            # memory
+            "remember", "recall_memory", "forget",
+            # LoRA
+            "load_lora", "unload_lora", "list_loras",
+            # read-only file tools
+            "list_dir", "read_file", "grep_project", "file_info",
+            # time
+            "get_time", "set_timer", "check_timer", "cancel_timer", "list_timers",
+            # library check (read-only)
+            "check_library", "list_allowed_libraries",
+        }
+        defs = self.tool_defs()
+        return [d for d in defs
+                if d["function"]["name"] in chat_tools]
+
     # ── dispatch ──────────────────────────────────────────────────────
     def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Execute a tool call with safety checking.
