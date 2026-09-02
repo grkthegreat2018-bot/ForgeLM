@@ -32,6 +32,7 @@ class Palette:
     grad_a = "#8aa3ff"
     grad_b = "#a06bff"
     card_hover = "#3b4a6b"    # card border highlight on hover
+    surface_hover = "#1d2432"  # hover background for buttons/controls
     chart_grid = "#1c2333"    # subtle chart grid lines
     chart_loss = "#f85149"
     chart_lr = "#d29922"
