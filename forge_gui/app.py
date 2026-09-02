@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         self.page_dashboard = DashboardPage(self.gpu, self.status_reader, self.models_index)
         self.page_chat = ChatPage(self.chat_store, self.engine_runtime,
                                   self.models_index, self.lorebook,
-                                  self.lora_harness)
+                                  self.lora_harness, self.tool_harness)
         self.page_agent = AgentPage(self.engine_runtime, self.tool_harness,
                                     self.lorebook)
         self.page_generations = GenerationsPage(self.engine_runtime, self.models_index)

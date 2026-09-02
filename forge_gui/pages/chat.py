@@ -93,6 +93,107 @@ class _EngineChatWorker(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _EngineChatToolWorker(QThread):
+    """Chat worker with tool calling support.
+
+    Runs an agentic loop: generate → parse tool calls → execute → feed back.
+    Streams the final text response. Tool calls are emitted as signals
+    so the UI can show tool-use cards.
+    """
+
+    chunk = Signal(str)
+    done = Signal(str)
+    failed = Signal(str)
+    tool_call_made = Signal(dict)      # {name, arguments}
+    tool_call_result = Signal(dict)    # sandbox record
+
+    def __init__(self, runtime: EngineRuntime, messages: list[dict],
+                 tool_harness, max_new_tokens: int, temperature: float,
+                 top_p: float, top_k: int,
+                 repetition_penalty: float = 1.05,
+                 max_rounds: int = 6, parent=None) -> None:
+        super().__init__(parent)
+        self._runtime = runtime
+        self.messages = messages
+        self.tool_harness = tool_harness
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.repetition_penalty = repetition_penalty
+        self.max_rounds = max_rounds
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            from research.self_play.discovery.qwen_adapter import (
+                qwen_parse_tool_calls, qwen_render_messages,
+            )
+            import json as _json
+
+            defs = self.tool_harness.tool_defs()
+            messages = list(self.messages)
+            final_text = ""
+
+            for round_idx in range(self.max_rounds):
+                if self._cancelled:
+                    break
+
+                rendered = qwen_render_messages(
+                    messages, tools=defs, add_generation_prompt=True)
+
+                with self._runtime.acquire(timeout_s=30.0) as engine:
+                    raw = engine.generate(
+                        rendered, max_new_tokens=self.max_new_tokens,
+                        temperature=self.temperature, top_p=self.top_p,
+                        top_k=self.top_k,
+                        repetition_penalty=self.repetition_penalty)
+
+                if self._cancelled:
+                    break
+
+                tool_calls, content = qwen_parse_tool_calls(raw)
+                final_text = content or ""
+                messages.append({"role": "assistant", "content": content or ""})
+
+                if not tool_calls:
+                    # no tools — stream the final text to UI
+                    self.chunk.emit(final_text)
+                    break
+
+                # execute tool calls
+                for tc in tool_calls:
+                    if self._cancelled:
+                        break
+                    call = tc if isinstance(tc, dict) else {"name": str(tc)}
+                    self.tool_call_made.emit(call)
+                    results = self.tool_harness.execute_calls([call])
+                    rec = results[0] if results else {
+                        "ok": False, "result": {"error": "no result"}}
+                    self.tool_call_result.emit(rec)
+                    # feed result back to model
+                    messages.append({
+                        "role": "tool",
+                        "name": call.get("name", "tool"),
+                        "content": _json.dumps(rec.get("result", rec),
+                                                ensure_ascii=False),
+                    })
+            else:
+                # ran out of rounds — emit whatever we have
+                if final_text:
+                    self.chunk.emit(final_text)
+
+            self.done.emit(final_text)
+        except RuntimeError as e:
+            self.failed.emit(str(e))
+        except Exception as e:
+            logger.warning("chat tool worker failed: %s", e, exc_info=True)
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
 class _EndpointWorker(QThread):
     """Streams a chat completion from an OpenAI-compatible endpoint."""
 
@@ -238,6 +339,53 @@ class _ThinkingBlock(QFrame):
         self._label.setText("Thinking")
 
 
+class _ToolBlock(QFrame):
+    """Collapsible tool-call/result block (like Claude/other platforms)."""
+
+    def __init__(self, tool_name: str, args_str: str = "",
+                 result_str: str = "", status: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("toolBlock")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(4)
+
+        # header row: tool name + status + toggle
+        header = QHBoxLayout()
+        if result_str:
+            label_text = f"\U0001f9ea {tool_name} \u2192 {status}"
+        else:
+            label_text = f"\U0001f527 {tool_name}"
+        self._label = QLabel(label_text)
+        self._label.setObjectName("toolLabel")
+        header.addWidget(self._label)
+        header.addStretch(1)
+
+        # toggle button to expand/collapse detail
+        self._toggle = QToolButton()
+        self._toggle.setText("\u25BC")
+        self._toggle.setObjectName("toolToggle")
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(False)
+        self._toggle.clicked.connect(self._toggle_detail)
+        header.addWidget(self._toggle)
+        lay.addLayout(header)
+
+        # detail area (args or result)
+        self._detail = QTextEdit()
+        self._detail.setObjectName("toolDetail")
+        self._detail.setReadOnly(True)
+        self._detail.setMaximumHeight(120)
+        detail_text = result_str if result_str else args_str
+        self._detail.setPlainText(detail_text)
+        self._detail.setVisible(False)
+        lay.addWidget(self._detail)
+
+    def _toggle_detail(self) -> None:
+        self._detail.setVisible(self._toggle.isChecked())
+        self._toggle.setText("\u25C0" if self._toggle.isChecked() else "\u25BC")
+
+
 class _MessageBubble(QFrame):
     """One chat message with model-name label, optional image, tool/thinking blocks."""
 
@@ -318,6 +466,17 @@ class _MessageBubble(QFrame):
         self._blocks_lay.addWidget(block)
         return block
 
+    def add_tool_block(self, tool_name: str, args_str: str) -> None:
+        """Add a collapsible tool-call block to the bubble."""
+        block = _ToolBlock(tool_name, args_str)
+        self._blocks_lay.addWidget(block)
+
+    def add_tool_result(self, tool_name: str, status: str,
+                        result_str: str) -> None:
+        """Add a tool result block to the bubble."""
+        block = _ToolBlock(tool_name, "", result_str, status)
+        self._blocks_lay.addWidget(block)
+
     def _rate(self, which: str) -> None:
         self.rated.emit(self.msg_index, which)
 
@@ -338,6 +497,7 @@ class ChatPage(QWidget):
     def __init__(self, store: Optional[ChatStore] = None,
                  runtime: Optional[EngineRuntime] = None,
                  models_index=None, lorebook=None, lora_harness=None,
+                 tool_harness=None,
                  base_url: str = "http://localhost:8080/v1",
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -346,6 +506,7 @@ class ChatPage(QWidget):
         self.models_index = models_index
         self.lorebook = lorebook
         self.lora_harness = lora_harness
+        self.tool_harness = tool_harness
         self._base = base_url.rstrip("/")
         self._worker: Optional[QThread] = None
         self._conv_id: Optional[str] = None
@@ -804,10 +965,20 @@ class ChatPage(QWidget):
                               "and click Load (fast load ≈ 15-30s), or switch "
                               "to HTTP endpoint.")
                 return
-            self._worker = _EngineChatWorker(
-                self.runtime, history, self._max_tok.value(),
-                self._temp.value(), self._top_p.value(), self._top_k.value(),
-                self._rep_pen.value())
+            if self._tools_enabled.isChecked() and self.tool_harness is not None:
+                # use tool-aware worker that can call tools
+                self._worker = _EngineChatToolWorker(
+                    self.runtime, history, self.tool_harness,
+                    self._max_tok.value(), self._temp.value(),
+                    self._top_p.value(), self._top_k.value(),
+                    self._rep_pen.value())
+                self._worker.tool_call_made.connect(self._on_tool_call)
+                self._worker.tool_call_result.connect(self._on_tool_result)
+            else:
+                self._worker = _EngineChatWorker(
+                    self.runtime, history, self._max_tok.value(),
+                    self._temp.value(), self._top_p.value(), self._top_k.value(),
+                    self._rep_pen.value())
         else:
             self._worker = _EndpointWorker(
                 self._endpoint.text() or self._base,
@@ -850,6 +1021,28 @@ class ChatPage(QWidget):
         self._send_btn.setEnabled(True); self._stop_btn.setEnabled(False)
         self._worker = None
         self._status.setText(f"error: {err[:120]}")
+
+    def _on_tool_call(self, call: dict) -> None:
+        """Show a tool call card in the assistant bubble."""
+        if self._assistant_bubble is not None:
+            name = call.get("name", "tool")
+            args = call.get("arguments", {})
+            import json as _json
+            args_str = _json.dumps(args, ensure_ascii=False)[:200]
+            self._assistant_bubble.add_tool_block(name, args_str)
+        self._status.setText(f"tool: {call.get('name', '?')}…")
+
+    def _on_tool_result(self, rec: dict) -> None:
+        """Show tool result in the assistant bubble."""
+        if self._assistant_bubble is not None:
+            name = rec.get("name", "tool")
+            ok = rec.get("ok", False)
+            result = rec.get("result", {})
+            import json as _json
+            result_str = _json.dumps(result, ensure_ascii=False)[:300]
+            status = "ok" if ok else "error"
+            self._assistant_bubble.add_tool_result(name, status, result_str)
+        self._status.setText("tool done")
 
     def _finalize_reply(self) -> None:
         if self._conv_id is not None and self._assistant_text:

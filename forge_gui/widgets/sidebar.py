@@ -98,11 +98,12 @@ class NavSidebar(QFrame):
         outer.setSpacing(0)
 
         # ── brand row + collapse button (fixed top) ──
-        brand_container = QFrame()
-        brand_container.setObjectName("sidebarBrand")
-        brand_lay = QVBoxLayout(brand_container)
+        self._brand_container = QFrame()
+        self._brand_container.setObjectName("sidebarBrand")
+        brand_lay = QVBoxLayout(self._brand_container)
         brand_lay.setContentsMargins(16, 22, 12, 8)
         brand_lay.setSpacing(6)
+        self._brand_lay = brand_lay
 
         brand_row = QHBoxLayout(); brand_row.setSpacing(10)
         self._logo = QLabel(); self._logo.setObjectName("brand")
@@ -142,7 +143,7 @@ class NavSidebar(QFrame):
         self._search.textChanged.connect(self._filter_buttons)
         brand_lay.addWidget(self._search)
 
-        outer.addWidget(brand_container)
+        outer.addWidget(self._brand_container)
 
         # ── scrollable nav area (flex) ──
         self._scroll = QScrollArea()
@@ -278,8 +279,11 @@ class NavSidebar(QFrame):
             self._search.setVisible(False)
             self._status.setVisible(False)
             self._gpu.setVisible(False)
-            # adjust margins for icon-only mode
-            self._nav_lay.setContentsMargins(8, 8, 4, 8)
+            # tight margins for icon-only mode — keep button accessible
+            self._brand_lay.setContentsMargins(4, 10, 4, 4)
+            self._nav_lay.setContentsMargins(4, 8, 4, 8)
+            # make collapse button bigger in collapsed mode for easy click
+            self._collapse_btn.setMaximumWidth(16777215)  # remove max-width constraint
         else:
             self.setFixedWidth(self._full_width)
             self._collapse_btn.setText("\u25C0")
@@ -296,5 +300,7 @@ class NavSidebar(QFrame):
             self._search.clear()
             self._status.setVisible(True)
             self._gpu.setVisible(True)
+            self._brand_lay.setContentsMargins(16, 22, 12, 8)
             self._nav_lay.setContentsMargins(16, 8, 12, 8)
+            self._collapse_btn.setMaximumWidth(24)
         self.collapsed_changed.emit(collapsed)
