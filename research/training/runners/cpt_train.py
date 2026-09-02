@@ -31,9 +31,9 @@ Usage:
                        research/distillation/hf_datasets/dolphin_r1.jsonl \\
       --general-data research/distillation/hf_datasets/orca_math.jsonl \\
                      research/distillation/hf_datasets/metamath.jsonl \\
-      --config forgelm_v10_1.2b \\
-      --checkpoint research/checkpoints/forgelm_v10_1.2b_Base.safetensors \\
-      --save research/checkpoints/forgelm_v10_1.2b_CPT.safetensors \\
+      --config forgelm_v2_light \\
+      --checkpoint research/checkpoints/forgelm_v2_light_Base.safetensors \\
+      --save research/checkpoints/forgelm_v2_light_CPT.safetensors \\
       --max-steps 5000 --lr 1e-4 --batch-size 2 --seq-len 2048 \\
       --optimizer cpu_offload --reasoning-ratio 0.6
 """
@@ -251,7 +251,7 @@ def main():
                         help="JSONL files with reasoning traces (prompt + solution)")
     parser.add_argument("--general-data", nargs="+", default=[],
                         help="JSONL files with general data (prompt + response/solution)")
-    parser.add_argument("--config", default="forgelm_v10_1.2b",
+    parser.add_argument("--config", default="forgelm_v2_light",
                         help="Model config preset name")
     parser.add_argument("--checkpoint", required=True,
                         help="Starting checkpoint (safetensors)")

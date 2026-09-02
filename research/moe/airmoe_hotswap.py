@@ -294,9 +294,9 @@ def main():
 
     # Load model
     print("\n[1] Loading ForgeLM V10...")
-    cfg = get_config("forgelm_v10_1.2b", device="cuda")
+    cfg = get_config("forgelm_v2_light", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/ForgeLM_V10_1.2B.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V2_Light.safetensors")
     model.to("cuda").eval()
     tokenizer = get_tokenizer("research/checkpoints/qwen_hf")
 

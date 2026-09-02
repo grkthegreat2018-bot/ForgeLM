@@ -9,7 +9,7 @@ unless the user explicitly overrides them for a specific task.
 - **Every new custom model version MUST be derived from the immediately
   preceding version**, carrying forward all prior keys/architecture as the
   baseline, then adding or replacing only what's new. Example chain:
-  `lfm25_1.2b` â†’ `forgelm_v10_1.2b` (V3/V4/V5/V7/V8/V9 presets were superseded by V10;
+  `lfm25_1.2b` â†’ `forgelm_v2_light` (V3/V4/V5/V7/V8/V9 presets were superseded by V10;
   their architecture keys are preserved in V10's config).
 - **Port-first, train-second**: when introducing a new architecture key or
   attention variant, write the lossless checkpoint-conversion path
@@ -182,6 +182,124 @@ unless the user explicitly overrides them for a specific task.
     `flash_attention/varlen_attention -> torch.Tensor`
 - **Test results**: 1077 passed, 3 skipped, 0 failed (was 1074+3 failed)
 
+#### GUI 2026-09-01: ForgeAI Control Center v2 (LM Studio + Agent + Train platform)
+- **New shared backends** (`forge_gui/api/`):
+  - `chat_store.py` — pure-python conversation persistence
+    (`data/chats/conversations.json`) with per-message ratings
+    (good/bad/toggle). `export_training_data()` writes good-rated turns as
+    sft_train-compatible JSONL (`{"messages": [...]}` per line) to
+    `data/sft/forge_chats_*.jsonl`. Export format is covered by a test that
+    round-trips through `sft_train.load_examples`.
+  - `engine_runtime.py` — ONE resident `ForgeEngine` shared by Chat/Agent/
+    Engine pages. QThread loader, states idle→loading→ready/error,
+    `acquire()` lease serializes generation across threads (12GB VRAM:
+    only one model resident). `unload()` sleeps + empties CUDA cache.
+  - `agent_tools.py` — sandboxed coding tools jailed to a workspace root
+    (absolute paths + `..` escapes rejected), command allowlist
+    (python/pip/pytest/git/...), timeouts, 4k output cap. Tools:
+    list_dir/read_file/write_file/append_file/delete_file/run_python/
+    run_cmd/grep_project. A returned `{"error": ...}` dict marks the call
+    not-ok (execute() checks).
+  - `agent_runner.py` — QThread agentic loop: qwen_render_messages →
+    engine.generate → qwen_parse_tool_calls → ToolSandbox → feed results
+    back, up to N rounds. Emits per-step Qt signals; optional approval gate
+    (threading.Event) before side-effecting tools.
+- **New pages** (`forge_gui/pages/`): `chat.py` (full rewrite: multi-chat
+  sidebar, local-engine streaming via `generate_stream` OR OpenAI endpoint,
+  system prompt, temp/top_p/top_k/max-tok, per-reply 👍/👎 rating → SFT
+  export), `agent.py` (agentic coding: workspace picker, live round trace
+  with tool-call cards, approval dialogs, tool toggles), `engine.py`
+  (load/unload checkpoint, stats, benchmark/bottleneck/diagnose,
+  sleep/wake), `finetune.py` (dataset multi-select from data/sft + data/,
+  hyperparam form mirroring sft_train.py defaults, launches
+  `research/training/runners/sft_train.py` via ProcessManager → Tasks page).
+- **Wiring** (`app.py`): 13 pages — Dashboard, Chat Studio, Agent, Engine,
+  Fine-Tune, Self-Play, Training Live, Generations, Models, Launch, Tasks,
+  Compute, Logs. `EngineRuntime` + `ChatStore` created in MainWindow and
+  passed to pages. Sidebar brand now shows `ForgeAI_Icon.png` pixmap.
+- **Theme** (`theme.py`): added QSS for chat bubbles (user/assistant/
+  system), rating buttons, agent round blocks + tool cards, engine console
+  kv rows, QListWidget lists, tabs, checkboxes.
+- **Tests**: `tests/unit/test_gui_chat_store.py` (8) +
+  `tests/unit/test_gui_agent_tools.py` (14) — all pure-python, no Qt.
+  Suite: 1247 passed, 0 failed. Smoke: `QT_QPA_PLATFORM=offscreen
+  venv\Scripts\python.exe forge_gui\_smoke_test.py` (13 pages construct/
+  switch/refresh); real-window check: `forge_gui\_launch_test.py`.
+
+#### Engine fixes 2026-09-01: BOS tokenization + fused QK-RoPE + compile opt-out
+Root-caused "model generates garbage" reported from the GUI. Chain of 3 bugs:
+- **BOS stripped from prompts** (`forge_engine.py` — THE garbage-output bug):
+  `_generate_impl` / `_tokenize` used `add_special_tokens=False`, but
+  LFM2.5/V10 was trained with BOS `<|startoftext|>` (id 1). Without it the
+  model repeats the last prompt token ("is is is…"). Fixed: special tokens
+  now added in `_generate_impl`, `_tokenize` (default True), and the
+  `generate_raw`/`generate_stream` call sites. Verified: raw greedy
+  "The capital of France is" → " Paris. It is the most populous…", chat
+  template → "Paris", code stream → real fibonacci.
+- **fused_qk_norm_rope_cache.py shape/type bugs** (eager fallback was dead):
+  (1) wrapper passed `position_ids` into the `eps` slot of
+  `fused_qk_norm_rope` → triton kernel got a tensor as eps
+  ("pointer<int64> + float32" compile error) and the py fallback did
+  `.add(eps)` with a (1,T) tensor → shape corruption; (2) wrapper fallback
+  `_py_qk_norm_rope` used half-dim NeoX math against the FULL-dim
+  (duplicated-halves) `cos_cached` → 32-vs-64 dim error. Fixed: slice
+  cos/sin to `[cache_position : cache_position+T]` inside
+  `fused_qk_norm_rope_cache`, call `fused_qk_norm_rope(q, k, qw, kw,
+  cos_chunk, sin_chunk)` (no position_ids), and rewrote `_py_qk_norm_rope`
+  to full-dim rotate_half. Fused output now bit-matches standard path.
+- **torch.compile broken on this stack** (triton/SM120): inductor
+  mis-compiles the fused kernel → InductorError on every forward when
+  compiled. `from_checkpoint` auto-activates the optimal preset
+  (use_compile=True) so it crashed even when later `activate(use_compile=
+  False)`. Fix: `_auto_activate_optimal` honors `FORGE_NO_COMPILE=1` env
+  var; GUI fast-load sets it before importing the engine. Fast load
+  ≈ 15-45s (was 161s with compile). Compile stays broken on SM120 until
+  the triton kernel is fixed — GUI checkbox warns.
+- **GUI logging**: `run()` now installs `logs/gui.log` (rotating, 2MB×3)
+  + console handler, and forces UTF-8 stdio (`PYTHONUTF8=1` +
+  `reconfigure`) — cp1252 consoles raised UnicodeEncodeError on engine
+  prints (→/·) which silently skipped engine warmup.
+- Diagnostics kept in `.devin/tmp/` (bisect_gen, diag_tok_logits,
+  verify_bos_fix, verify_fused). Key lesson: two checkpoints (base + R30)
+  produced IDENTICAL garbage → weights were fine, the decode path wasn't;
+  always bisect features before blaming the checkpoint.
+
+#### GUI memory fix 2026-09-02: one resident engine everywhere
+Root-caused "GUI uses more VRAM than script boots": the GUI had THREE
+independent engine-loading paths — EngineRuntime (Engine/Chat/Agent,
+fast-load) plus `model_boot.py` (Models page) and `generation.py`
+(Generations page), which each spawned their OWN engine with full
+auto-activation (compile + CUDA graphs). Two resident engines + graph
+pools = 12.82GB / 0 free → KV cap collapsed to 64 tokens → second load
+fell into AirLLM meta-device streaming. Fixes:
+- `model_boot.py` + `generation.py` now borrow the SHARED EngineRuntime
+  (Models boot reloads only if checkpoint/config differs; Generations
+  shows the resident model and errors with a hint if nothing is loaded).
+  app.py passes runtime into ModelsPage/GenerationsPage.
+- `EngineRuntime._LoadWorker`: VRAM pre-flight (free < checkpoint×2.5 →
+  fail fast with "close other GPU apps / GUI instances" instead of the
+  silent AirLLM meta-device fallback).
+- LoRA adapters (`*lora*`) filtered out of Engine/Chat/Models boot combos
+  — a 43MB LoRA file was loadable as a "base model" and produced the
+  AirLLM meta-device mess in the field.
+- `EngineRuntime.shutdown()` + MainWindow.closeEvent waits for in-flight
+  loads (fixes "QThread: Destroyed while thread is still running").
+- stdout/stderr teed into `logs/gui.log` (`_Tee` in app.py) — engine
+  output is print()-based and never reached the logging file before.
+- **triton kernel fixed** (`fused_rope_qknorm.py`): `tl.gather(x, idx)`
+  requires `axis` on this triton (kernel never worked — every real
+  generation used the py fallback). Replaced with gather-free shifted
+  re-load + rotated weight + negate mask; verified vs py fallback
+  (≤0.031 bf16 noise) standalone AND under torch.compile. NOTE: a test
+  bug cost an iteration — build RoPE tables with `freqs.cos()`, not raw
+  angles (cos[0] must be 1.0, not 0.0).
+- **Compile mode still blocked** (different root): IRIFP4Linear
+  `_dequantize_weight(cache=True)` caches a CUDA-graph-pool output →
+  "tensor output of CUDAGraphs overwritten by subsequent run". Proper fix
+  = pre-materialize ~2.4GB bf16 weights outside compiled region (defeats
+  FP4 VRAM saving) — R&D item, not a quick fix. Fast load stays the
+  default; Engine checkbox tooltip names the blocker.
+
 ### F. Math Thinking + Script Testing â€” Find The True Optimum
 - **Every optimization claim must be backed by a number from a script**,
   not a paper citation. Papers report numbers on different hardware/models;
@@ -231,9 +349,9 @@ unless the user explicitly overrides them for a specific task.
   file write into multiple smaller edits (â‰¤20 QA lines per edit) or write
   the data to a separate `.json`/`.jsonl` file and load it at runtime.
 
-## Current Architecture: ForgeLM V10-1.2B (SOLE BASE)
+## Current Architecture: ForgeLM V2 Light-1.2B (SOLE BASE)
 
-**Base model**: ForgeLM V10-1.2B — lossless 1:1 port of LFM2.5-1.2B + V10 inference features.
+**Base model**: ForgeLM V2 Light-1.2B — lossless 1:1 port of LFM2.5-1.2B + V10 inference features.
 - Same architecture as LFM2.5: 16 layers (10 conv + 6 GQA), d_model=2048, 32 heads, 8 KV heads
 - V10 additions: IRI-FP4 weight quantization (9.0 bits/w, lossless, 3.5× vs fp32)
 - 1304.6M params, 1.87 GB checkpoint (IRI-FP4 compressed)
@@ -244,9 +362,9 @@ after all layers, before head), NOT a post-embedding norm. The HF name is mislea
 Config uses `use_final_norm=True, use_embed_norm=False` to match. Port script:
 `research/architecture/port_lfm25_to_v10.py`.
 
-**Base checkpoint**: `research/checkpoints/ForgeLM_V10_1.2B.safetensors`
+**Base checkpoint**: `research/checkpoints/ForgeLM_V2_Light.safetensors`
 **Tokenizer**: `research/checkpoints/lfm25_tokenizer/`
-**Default config**: `forgelm_v10_1.2b` (load_default_model() defaults to this)
+**Default config**: `forgelm_v2_light` (load_default_model() defaults to this)
 **Path constant**: `research.paths.V10_CHECKPOINT` (LFM25_CHECKPOINT and V9_CHECKPOINT are backward-compat aliases to V10_CHECKPOINT)
 
 ### LFM2.5 original architecture (preserved in V10)
@@ -258,10 +376,10 @@ Config uses `use_final_norm=True, use_embed_norm=False` to match. Port script:
 
 ## Config Presets
 
-Config presets (V3/V4/V5/V7/V8/V9 superseded and checkpoints deleted; V10-1.2B is the sole base):
-- `forgelm_v10_1.2b` â€” **ForgeLM V10-1.2B: THE DEFAULT AND SOLE BASE.** Lossless 1:1 port of LFM2.5-1.2B + V10 inference features (IRI-FP4 weight quantization, 9.0 bits/w, lossless, 3.5× vs fp32). Same architecture as LFM2.5 (d_model=2048, 16 layers, 1304.6M params). `load_default_model()` defaults to this. All tests run against this checkpoint.
+Config presets (V3/V4/V5/V7/V8/V9 superseded and checkpoints deleted; V2-Light-1.2B is the sole base):
+- `forgelm_v2_light` â€” **ForgeLM V2 Light-1.2B: THE DEFAULT AND SOLE BASE.** Lossless 1:1 port of LFM2.5-1.2B + V10 inference features (IRI-FP4 weight quantization, 9.0 bits/w, lossless, 3.5× vs fp32). Same architecture as LFM2.5 (d_model=2048, 16 layers, 1304.6M params). `load_default_model()` defaults to this. All tests run against this checkpoint.
 - `lfm25_tiny` â€” 4-layer tiny model for fast testing (no checkpoint, config-only)
-- Other presets (`forgelm_v7*`, `forgelm_v8_8b`, `forgelm_v9*`, `lfm25_1.2b`) have been DELETED from config.py. Only `forgelm_v10_1.2b`, `lfm25_tiny`, and `gen_model_tiny` remain.
+- Other presets (`forgelm_v7*`, `forgelm_v8_8b`, `forgelm_v9*`, `lfm25_1.2b`) have been DELETED from config.py. Only `forgelm_v2_light`, `lfm25_tiny`, and `gen_model_tiny` remain.
 
 ### Evolution-Discovered Promotions (2026-08-24, from forge_evolve.db)
 Promoted after validation against evolution data (39,631 discoveries scanned):
@@ -419,7 +537,7 @@ Data-driven optimization round. 11 test scripts validated novel ideas on real LF
 - `scripts/test_real_spectral_kv.py`, `scripts/test_real_svd_decay.py`, `scripts/test_airmoe_rebase.py`, `scripts/test_spectral_kv_recovery.py`, `scripts/test_real_ternary_residual.py`, `scripts/test_weight_fourier.py` — R&D validation scripts
 
 **Modified files:**
-- `research/config.py` — V9/V10 config fields (use_spectral_kv, spectral_kv_max_freq, use_bitnet_residual, bitnet_residual_frac) + `forgelm_v10_1.2b` preset
+- `research/config.py` — V9/V10 config fields (use_spectral_kv, spectral_kv_max_freq, use_bitnet_residual, bitnet_residual_frac) + `forgelm_v2_light` preset
 - `research/inference/kv_backend.py` — `"spectral"` strategy in build_kv_cache factory
 - `docs/RND_PLAN_V8_AND_NOVEL_ARCH.md` — §12-§15 results + revised priorities
 
@@ -1917,13 +2035,13 @@ Target hardware: RTX 5070 12GB VRAM + 32 GB system RAM (~28 GB available).
 
 
 
-All config-driven, dimension-generic (work at V10-1.2B scale, d_model=2048). **Main `forgelm_v10_1.2b` preset now enables ALL of them losslessly** â€” verified bit-exact (max logit diff 0.0) vs the plain GQA model on the real BSP checkpoint, for both plain and KV-cached prefill+decode:
+All config-driven, dimension-generic (work at V2-Light-1.2B scale, d_model=2048). **Main `forgelm_v2_light` preset now enables ALL of them losslessly** â€” verified bit-exact (max logit diff 0.0) vs the plain GQA model on the real BSP checkpoint, for both plain and KV-cached prefill+decode:
 - `quantization/bitnet_b158_key.py` â€” BitNet b1.58 ternary QAT: `BitNetLinear` (STE, learned per-layer `qscale` re-anchored on checkpoint load, ternary ONLY in training; eval = full-precision master weights until `bitnet_force_quant`). **True BitNet integer kernels on CUDA**: default = int8 @ int8 tensor-core GEMM (`torch._int_mm`, a4.8-style activation quant); `FORGE_BITNET_KERNEL=triton` selects the b1.58 add-only Triton kernel (fp activations, zero-skip, no weight multiplies â€” verified bit-exact vs fp on small shapes). Applies to FFN + attention q/k/v/o projections. Enable: `use_bitnet=True` (main preset: on).
 - `attention/differential_attn_key.py` â€” Diff-Transformer: dual-softmax subtraction, per-head Î», per-head RMSNorm+scale. **Identity warm start** (`lambda=0`): group-1 rows extracted contiguously (`_group1_weights`) so GEMM shapes match GQA exactly â†’ bit-exact conversion; training moves Î» off 0 to activate the real mechanism. `attn_type="diff"` (main preset: on; GQA checkpoints auto-convert at load). KV cache stores 2Ã— head_dim.
 - `attention/differential_attn_key.py` â€” Diff-Transformer: dual-softmax subtraction, per-head Î» (paper init), per-head RMSNorm+scale. `attn_type="diff"`; KV cache stores 2Ã— head_dim. `DifferentialAttentionKey` = GQAâ†’diff weight transform (dup rows, warm start).
 - `architecture/titan_memory_key.py` â€” TITAN neural memory: gated memory, zero-init gate => **lossless at start** (ported checkpoint loads identically). `TitanMemory.update()` = Hebbian surprise step (test-time training). Enable: `use_titan_memory=True`.
 - `architecture/mod_router_key.py` â€” Mixture-of-Depths: per-block top-k token router (STE hard mask, soft grad). keep_fraction=1.0 => **lossless**. **TRUE skip in training** (no cache/mask): skipped tokens genuinely bypass attention+FFN (per-row gather/scatter, FLOPs scale with keep_fraction â€” verified: 0.5 fraction processes exactly 50% of tokens); router trained via aux loss (`ModRouter.aux_loss`). Inference keeps all tokens (KV alignment). Enable: `use_mod=True`.
-- Main `forgelm_v10_1.2b` preset: `attn_type="diff"`, `use_bitnet=True`, `use_titan_memory=True` (rank 64), `use_mod=True` (keep_fraction=1.0) â€” all lossless at load; training activates each mechanism. `get_config` returns FRESH copies (preset mutation no longer leaks).
+- Main `forgelm_v2_light` preset: `attn_type="diff"`, `use_bitnet=True`, `use_titan_memory=True` (rank 64), `use_mod=True` (keep_fraction=1.0) â€” all lossless at load; training activates each mechanism. `get_config` returns FRESH copies (preset mutation no longer leaks).
 - Tests: `tests/unit/test_arch_keys.py` (incl. main 1.2B build forward).
 
 ## AirMoE Expert Consolidation (research/training_free/expert_bake.py)
@@ -2559,7 +2677,7 @@ curl http://localhost:8000/v1/tasks
 
 ## V10 Full Trainer (research/training/runners/train_8b_all.py)
 
-Production trainer for ForgeLM V10-class models on RTX 5070 12GB. Trains
+Production trainer for ForgeLM V2 Light-class models on RTX 5070 12GB. Trains
 from scratch on the packed datasets (`research/data/`, `research/data/`)
 with BAdam block-wise full-parameter training.
 
@@ -2569,7 +2687,7 @@ with BAdam block-wise full-parameter training.
   masters with straight-through estimator. Checkpoints export back to pure
   INT8 format (masters stripped by `snapshot_state`). Auto mode falls back
   to S-only if masters don't fit VRAM (rank 1024/8B-B doesn't; rank 768/
-  `forgelm_v10_1.2b` does â€” validated 4092 tok/s @ seq 2048).
+  `forgelm_v2_light` does â€” validated 4092 tok/s @ seq 2048).
 - **VRAM preflight + spill guard** â€” refuses runs that would spill into
   Windows shared GPU memory (~18x slowdown); `--allow-spill` overrides.
   Hard runtime check after step 1 against actual peak. `--badam-blocks-per-layer 2`
@@ -2607,7 +2725,7 @@ with BAdam block-wise full-parameter training.
   grad-norm skip steps; EMA loss display, tok/s window, ETA; runtime WDDM
   soft-spill detector (tok/s collapse warning).
 - From-scratch learning on 12GB (2026-08-22, post-init-fix): 8B-B S-only
-  plateaus ~11.5 (FFN = frozen random basis); `forgelm_v10_1.2b` (rank 768) with
+  plateaus ~11.5 (FFN = frozen random basis); `forgelm_v2_light` (rank 768) with
   factor training is the config that actually learns (EMA descending past
   11.4 by step 350 @ seq 2048). `--badam-switch-every 3` speeds early
   descent at ~40% throughput cost; 10 sustains 4000+ tok/s.
@@ -2626,7 +2744,7 @@ with BAdam block-wise full-parameter training.
 
 ## R&D Round 16: Param Memory Cost Minimization (2026-08-24)
 
-Target: minimize LLM parameter memory cost across ForgeLM V10, ForgeEngine, and
+Target: minimize LLM parameter memory cost across ForgeLM V2 Light, ForgeEngine, and
 trainer. Three novel techniques implemented, all tested, zero regressions.
 
 ### Technique 1: int4 Gradient Compression with EF21 Error Feedback
@@ -2898,7 +3016,7 @@ esearch/architecture/ligo.py — learned linear growth operator
 **Goal**: Get memory cost near or below BitNet (1.58 bits/w) with better quality,
 training-free (post-training), supporting train-to-tune (STE + LoRA).
 
-**Tested on**: V10-1.2B (LFM2.5 port) + Qwen 2.5 0.5B (real pretrained weights).
+**Tested on**: V2-Light-1.2B (LFM2.5 port) + Qwen 2.5 0.5B (real pretrained weights).
 Scripts: scripts/test_r25_baselines.py, test_r25_additive_fp4_v3.py,
 test_r26_sub_bitnet.py, test_r26_ternlc.py, test_r26_qwen.py.
 
@@ -2952,7 +3070,7 @@ quantize_ternlc(), ternlc_dequantize(), ternlc_bpw().
 
 ### R&D Round 26: V10 -- IRI-FP4 Lossless Weight Quantization (2026-08-31)
 
-**ForgeLM V10-1.2B**: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quantization.
+**ForgeLM V2 Light-1.2B**: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quantization.
 Replaces V9 BitNetResidual (ternary, catastrophic post-training PPL: 663K vs 9.64
 baseline) with IRI-FP4 x2 (9.0 bits/w, 41.6 dB SQNR, -0.4% PPL delta -- near-lossless).
 
@@ -2979,15 +3097,15 @@ V10 uses x2: best lossless compression (PPL delta within noise).
 | Cosine similarity | -- | 1.000000 | near-lossless |
 
 **V10 files**:
-- Config: research/config.py -- forgelm_v10_1.2b preset
+- Config: research/config.py -- forgelm_v2_light preset
 - Port: research/architecture/port_lfm25_to_v10.py -- LFM2.5 -> V10
 - Key: research/keys/quantization/iri_fp4_key.py -- IRIFP4Linear, IRIFP4Key
 - Model loader: research/model_loader.py -- packed VRAM load via IRIFP4Linear
-- Checkpoint: research/checkpoints/ForgeLM_V10_1.2B.safetensors (1.87 GB)
+- Checkpoint: research/checkpoints/ForgeLM_V2_Light.safetensors (1.87 GB)
 
 **V10 usage**:
   python -m research.architecture.port_lfm25_to_v10 --input lfm25.safetensors --output V10.safetensors --rounds 2
-  engine = ForgeEngine.from_checkpoint(checkpoint=V10.safetensors, config_name=forgelm_v10_1.2b)
+  engine = ForgeEngine.from_checkpoint(checkpoint=V10.safetensors, config_name=forgelm_v2_light)
 
 **Sub-BitNet research findings** (R26, documented dead ends):
 - Post-training ternary (BitNet, TernPack, TernLC): catastrophic PPL (663K-2.6M vs 9.64)
@@ -3057,7 +3175,7 @@ the answer; the exact-match metric flags it as a strict flip.
 
 ### R&D Round 30: V10 QLoRA Training with Golden Ratio (2026-09-01)
 
-**Goal**: Apply the R29 golden ratio to train ForgeLM V10-1.2B with IRI-FP4
+**Goal**: Apply the R29 golden ratio to train ForgeLM V2 Light-1.2B with IRI-FP4
 quantized weights using QLoRA (frozen quant base + trainable LoRA adapters).
 
 **QLoRA implementation** (new):
@@ -3093,7 +3211,7 @@ quantized weights using QLoRA (frozen quant base + trainable LoRA adapters).
 - PPL on 20 held-out openhermes examples: **-12.05%** (1.36 -> 1.20, improvement)
 - General knowledge preserved ("capital of France" unchanged, both correct)
 - Some improvements on trained domains (US government branches, code generation)
-- Checkpoint: `ForgeLM_V10_1.2B_R30.safetensors` (1.79 GB, 281 tensors)
+- Checkpoint: `ForgeLM_V2_Light_R30.safetensors` (1.79 GB, 281 tensors)
 
 **Files**:
 - `scripts/train_r30_qlora.py` -- QLoRA training pipeline (dataset conversion,
@@ -3103,7 +3221,7 @@ quantized weights using QLoRA (frozen quant base + trainable LoRA adapters).
 - `research/training/bitnet_lora.py` -- add_lora_adapters + merge_lora_adapters
   updated for IRIFP4Linear compatibility
 - `research/data/finetune/r30_training.jsonl` -- converted training data
-- `research/checkpoints/ForgeLM_V10_1.2B_R30.safetensors` -- trained checkpoint
+- `research/checkpoints/ForgeLM_V2_Light_R30.safetensors` -- trained checkpoint
 
 ### R30 v2: Full-Feature QLoRA Training (2026-09-01)
 
@@ -3143,7 +3261,7 @@ targeting weaknesses revealed by v1 verification (math, code, reasoning).
 - Math: recognizes "distance = speed x time" formula (v1 was gibberish)
 - Code: recognizes sum() pattern (v1 was gibberish)
 - Government: correctly lists "Executive, Legislative and Judicial"
-- Checkpoint: `ForgeLM_V10_1.2B_R30.safetensors` (1.79 GB, 281 tensors, IRI-FP4)
+- Checkpoint: `ForgeLM_V2_Light_R30.safetensors` (1.79 GB, 281 tensors, IRI-FP4)
 
 **Key lesson**: The golden ratio assumes ALL LoRA params trained simultaneously.
 Sequential freeze, grad-mixup, and entropy-alpha either fight this assumption or
@@ -3171,7 +3289,7 @@ or perform multi-turn agent trajectories.
 - 3 epochs, 256 steps (aligned to eff_batch=16), LR=1e-4, 75s training
 - val_loss: 0.53 (down from R30's 1.16)
 
-**LoRA-only save** (no merge): `ForgeLM_V10_1.2B_R31_lora.safetensors` (86MB, 172 tensors)
+**LoRA-only save** (no merge): `ForgeLM_V2_Light_R31_lora.safetensors` (86MB, 172 tensors)
 - Base R30 checkpoint untouched — LoRA loaded at runtime via `engine.load_lora()`
 
 **KV cache bug fix** (critical, affected ALL models not just LoRA):

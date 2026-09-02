@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         # Explicit override — load the given checkpoint directly.
         from research.model_loader import load_default_model
         print(f"[discovery] loading explicit checkpoint: {args.checkpoint}")
-        model, tok = load_default_model("forgelm_v10_1.2b",
+        model, tok = load_default_model("forgelm_v2_light",
                                         checkpoint_path=args.checkpoint)
         loop = DiscoveryLoop(model, tok, db, max_gen_tokens=args.max_gen,
                             temperature=args.temp, idle_limit=args.idle,

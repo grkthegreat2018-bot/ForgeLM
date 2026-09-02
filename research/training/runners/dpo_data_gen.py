@@ -24,7 +24,7 @@ dpo_align.py.
   # Generate preference data from SFT checkpoint
   python -m research.training.runners.dpo_data_gen \\
       --prompts research/data/curriculum/stage2_long.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v10_1.2b_SFT2.safetensors \\
+      --checkpoint research/checkpoints/forgelm_v2_light_SFT2.safetensors \\
       --output research/data/dpo/preference_pairs.jsonl \\
       --n-temp-samples 5 \\
       --max-new-tokens 512 \\
@@ -33,8 +33,8 @@ dpo_align.py.
   # Then run DPO training:
   python -m research.training.runners.dpo_align \\
       --data research/data/dpo/preference_pairs.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v10_1.2b_SFT2.safetensors \\
-      --save research/checkpoints/forgelm_v10_1.2b_DPO.safetensors \\
+      --checkpoint research/checkpoints/forgelm_v2_light_SFT2.safetensors \\
+      --save research/checkpoints/forgelm_v2_light_DPO.safetensors \\
       --optimizer cpu_offload
 """
 from __future__ import annotations
@@ -396,7 +396,7 @@ def main():
                         help="SFT checkpoint to generate candidates from")
     parser.add_argument("--output", required=True,
                         help="Output JSONL file for preference pairs")
-    parser.add_argument("--config", default="forgelm_v10_1.2b")
+    parser.add_argument("--config", default="forgelm_v2_light")
     parser.add_argument("--n-temp-samples", type=int, default=5,
                         help="Number of temperature-sampled candidates per prompt")
     parser.add_argument("--temperature", type=float, default=0.8)

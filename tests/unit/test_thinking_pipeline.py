@@ -17,7 +17,7 @@ def test_pipeline_config_defaults():
     assert config.rlvr_enabled
     # V10 update: optimizer default changed from cpu_offload to muon_sf
     assert config.optimizer == "muon_sf"
-    assert config.config_name == "forgelm_v10_1.2b"
+    assert config.config_name == "forgelm_v2_light"
     assert config.cpt_reasoning_ratio == 0.6
     assert config.sft_mix_ratio == 0.5
     assert config.dpo_n_temp_samples == 5
@@ -80,7 +80,7 @@ def test_loop_config_v10_defaults():
     """LoopConfig should default to V10 config + ForgeEngine + training tricks."""
     cfg = LoopConfig()
     # V10 config
-    assert cfg.config_name == "forgelm_v10_1.2b"
+    assert cfg.config_name == "forgelm_v2_light"
     # ForgeEngine inference features
     assert cfg.use_forge_engine is True
     assert cfg.kv_cache == "spectral"

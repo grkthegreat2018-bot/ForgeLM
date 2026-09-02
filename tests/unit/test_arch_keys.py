@@ -430,7 +430,7 @@ class TestMod:
 class TestMainModel:
     def test_main_config_builds_with_new_keys(self):
         """Test V10 config fields + tiny model build on GPU with ForgeEngine features."""
-        cfg = get_config("forgelm_v10_1.2b")
+        cfg = get_config("forgelm_v2_light")
         # V10 is a lossless LFM2.5 port — plain GQA, no BitNet/NLRQ/TITAN/MoD
         assert cfg.attn_type == "gqa"
         assert cfg.use_bitnet is False

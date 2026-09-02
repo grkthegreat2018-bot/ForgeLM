@@ -13,7 +13,7 @@ def main():
     from research.tokenizer_cache import get_tokenizer_no_wrap as load_tokenizer
 
     # Use the full 1.2B config
-    config_name = "forgelm_v10_1.2b"
+    config_name = "forgelm_v2_light"
     log(f"Using config: {config_name}")
     cfg = get_config(config_name)
     log(f"Config: d={cfg.d_model}, L={cfg.n_layers}, vocab={cfg.vocab_size}, inter={cfg.intermediate_size}")
@@ -93,7 +93,7 @@ def main():
     # Build model and load weights using fast build
     log("\n=== Building model ===")
     from research.model_loader import load_default_model
-    model, _ = load_default_model("forgelm_v10_1.2b",
+    model, _ = load_default_model("forgelm_v2_light",
                                    checkpoint_path=out_path,
                                    device="cuda", dtype=torch.bfloat16)
     model.eval()

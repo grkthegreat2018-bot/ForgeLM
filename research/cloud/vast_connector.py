@@ -74,8 +74,8 @@ quantization. The connector is the bridge.
 
     python -m research.cloud.vast_connector run \\
         --data research/data/finetune/tool_use_fc_70.jsonl \\
-        --config forgelm_v10_1.2b \\
-        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
+        --config forgelm_v2_light \\
+        --checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \\
         --save ForgeLM_V10.sft.safetensors \\
         --max-steps 500 --gpu-filter "gpu_name=RTX_4090" --max-price 0.5
 
@@ -135,7 +135,7 @@ REMOTE_EXIT_CODE = f"{REMOTE_ROOT}/exit_code"
 
 # ─── Critical files for training (minimal upload set) ──────────────────────
 # Only these files are synced to the remote — NOT the entire research/ tree.
-# Derived by tracing sft_train.py's import tree for the forgelm_v10_1.2b config.
+# Derived by tracing sft_train.py's import tree for the forgelm_v2_light config.
 # Adding a new training dependency? Add its path here.
 CRITICAL_SOURCE_FILES: list[str] = [
     # Core
@@ -1216,7 +1216,7 @@ class VastConnector:
         Instead of uploading the entire ``research/`` tree (427+ files),
         uploads only the ~53 files in :data:`CRITICAL_SOURCE_FILES` +
         :data:`CRITICAL_INIT_FILES` — the minimal set traced from
-        sft_train.py's import tree for the forgelm_v10_1.2b config.
+        sft_train.py's import tree for the forgelm_v2_light config.
 
         Uses manifest-based incremental sync: only uploads files that
         changed since the last sync (sha256 + mtime comparison).
@@ -1957,9 +1957,9 @@ def main() -> int:
 
     p_run = sub.add_parser("run", help="Ensure instance, sync, train, download, stop.")
     p_run.add_argument("--data", nargs="+", required=True)
-    p_run.add_argument("--config", default="forgelm_v10_1.2b")
+    p_run.add_argument("--config", default="forgelm_v2_light")
     p_run.add_argument("--checkpoint",
-                       default="research/checkpoints/ForgeLM_V10_1.2B.safetensors")
+                       default="research/checkpoints/ForgeLM_V2_Light.safetensors")
     p_run.add_argument("--save", default="ForgeLM_V10.sft.safetensors")
     p_run.add_argument("--max-steps", type=int, default=500)
     p_run.add_argument("--lr", type=float, default=2e-4)

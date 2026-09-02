@@ -17,7 +17,7 @@ from safetensors import safe_open
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
 
-CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V10_1.2B.safetensors"
+CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
 
 def rel_err(a, b):

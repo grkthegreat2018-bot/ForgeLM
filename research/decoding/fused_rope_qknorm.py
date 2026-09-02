@@ -122,12 +122,15 @@ if _TRITON_AVAILABLE:
         d_idx = tl.arange(0, BLOCK_D)
         # rotate_half: indices [d/2, d/2+1, ..., d-1, 0, 1, ..., d/2-1]
         rotate_idx = (d_idx + half) % BLOCK_D
-        x_rotated = tl.gather(x_normed, rotate_idx)
-        # Negate the first half (the -x[:d/2] part)
-        # After gather, x_rotated = [x[d/2:], x[:d/2]]
-        # We need [-x[d/2:], x[:d/2]], so negate elements where original index < d/2
-        # In the rotated array, positions 0..half-1 correspond to original d/2..d-1
-        # These need negation
+        # Gather-free rotate: re-load x with shifted pointers (L2 hit) and
+        # re-apply norm+weight with the same rotated weight indices.
+        # tl.gather needs an `axis` kwarg on newer triton and breaks
+        # inductor tracing, so avoid it entirely.
+        rot_ptrs = x_ptr + x_offset + rotate_idx * x_stride_d
+        x_rot_raw = tl.load(rot_ptrs).to(tl.float32)
+        weight_rot = tl.load(weight_ptr + rotate_idx).to(tl.float32)
+        x_rotated = (x_rot_raw / rms) * weight_rot
+        # negate the first half: rotate_half(x) = [-x[d/2:], x[:d/2]]
         negate_mask = d_idx < half
         x_rotated = tl.where(negate_mask, -x_rotated, x_rotated)
 

@@ -46,7 +46,7 @@ class TestModelConfigs:
 
     def test_configs_exist(self):
         expected = {
-            "forgelm_v10_1.2b",
+            "forgelm_v2_light",
             "lfm25_tiny",
         }
         assert expected.issubset(set(MODEL_CONFIGS.keys()))
@@ -58,7 +58,7 @@ class TestModelConfigs:
         assert cfg.n_heads == 4
 
     def test_forgelm_v10_1_2b_matches_architecture(self):
-        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
+        cfg = MODEL_CONFIGS["forgelm_v2_light"]
         assert cfg.vocab_size == 65536
         assert cfg.d_model == 2048
         assert cfg.n_layers == 16
@@ -71,11 +71,11 @@ class TestModelConfigs:
         assert cfg.rope_base == 1_000_000.0
 
     def test_forgelm_v10_1_2b_has_qk_norm(self):
-        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
+        cfg = MODEL_CONFIGS["forgelm_v2_light"]
         assert cfg.use_qk_norm is True
 
     def test_forgelm_v10_1_2b_has_conv_layers(self):
-        cfg = MODEL_CONFIGS["forgelm_v10_1.2b"]
+        cfg = MODEL_CONFIGS["forgelm_v2_light"]
         assert cfg.layer_types is not None
         assert cfg.layer_types.count("conv") == 10
         assert cfg.layer_types.count("attention") == 6

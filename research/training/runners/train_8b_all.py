@@ -4,7 +4,7 @@ Datasets:
   1. research/data/v7_train/  — 16.5M tokens (SFT + pretrain mix, 7,660 seqs)
   2. research/data/           — 100M tokens (original LFM pretrain, ~48,800 seqs)
 
-Model:     forgelm_v10_1.2b (d=4096, L=32, NLRQ rank=1024, ~2.8B params, 8 GB)
+Model:     forgelm_v2_light (d=4096, L=32, NLRQ rank=1024, ~2.8B params, 8 GB)
 Optimizer: BAdam (block-wise, 1 layer at a time, fp32 states, fits 12 GB)
 
 Features:
@@ -740,7 +740,7 @@ def abort_over_budget(args) -> None:
     log("memory (PCIe paging, ~18x slower). Options:")
     log("  - --badam-blocks-per-layer 2 (halves the optimizer spike)")
     log("  - reduce --seq-len or --batch-size")
-    log("  - a smaller --config (factor training fits forgelm_v10_1.2b, not 8B-B)")
+    log("  - a smaller --config (factor training fits forgelm_v2_light, not 8B-B)")
     if not args.allow_spill:
         sys.exit("Aborting (use --allow-spill to override)")
 
@@ -767,7 +767,7 @@ def parse_args() -> argparse.Namespace:
                         help="validate every N steps (0 = final validation only)")
     parser.add_argument("--val-batches", type=int, default=25,
                         help="number of val batches per evaluation")
-    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b")
+    parser.add_argument("--config", type=str, default="forgelm_v2_light")
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--resume", type=str, default="",
                         help="checkpoint to resume from (restores step/LR/BAdam/RNG)")

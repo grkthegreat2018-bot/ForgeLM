@@ -387,7 +387,7 @@ class TestConfigFields:
     def test_v10_preset_has_speedup_features(self):
         """V10 preset should have use_varlen and use_triton_kernels available."""
         from research.config import MODEL_CONFIGS
-        for name in ["forgelm_v10_1.2b"]:
+        for name in ["forgelm_v2_light"]:
             if name in MODEL_CONFIGS:
                 cfg = MODEL_CONFIGS[name]
                 # V10 is a lossless port — these features are available but not enabled by default

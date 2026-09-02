@@ -391,6 +391,24 @@ class ModelConfig:
     kv_compression_dim: int = 128  # used by MLA keys (no longer in core)
     enable_draft_head: bool = False
 
+    # === V11: Vision-Language Model (LFM2.5-VL-3B) ===
+    # Multimodal extension: SigLIP2 vision encoder + projector + LM.
+    # The LM is a standard ConfigurableResearchLLM; the vision tower is
+    # a separate module that produces token-aligned embeddings injected
+    # before the first attention layer.
+    use_vision: bool = False               # enable vision tower
+    vision_encoder: str = "siglip2"        # "siglip2" (only supported)
+    vision_hidden_size: int = 1152         # SigLIP2-SO400M hidden dim
+    vision_image_size: int = 384           # input image resolution
+    vision_patch_size: int = 14            # patch size for ViT
+    vision_n_layers: int = 27              # SigLIP2-SO400M layers
+    vision_n_heads: int = 16               # SigLIP2 attention heads
+    vision_intermediate_size: int = 4304   # SigLIP2 FFN dim
+    vision_projector_dim: int = 2048       # projector output (matches d_model)
+    vision_projector_type: str = "mlp"     # "mlp" or "linear"
+    vision_n_queries: int = 128            # number of visual tokens after pooling
+    vision_layer_idx: int = -1             # which LM layer receives visual tokens (-1 = before layer 0)
+
     def __post_init__(self):
         if self.d_model % self.n_heads != 0:
             raise ValueError(f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads}).")
@@ -490,7 +508,7 @@ MODEL_CONFIGS = {
     ),
 
 
-    # ForgeLM V10-1.2B: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quant.
+    # ForgeLM V2 Light-1.2B: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quant.
     # Same dimensions as V9 (d_model=2048, 16 layers) for 1:1 architecture compat.
     # V10 replaces V9's BitNetResidual (ternary, catastrophic post-training PPL)
     # with IRI-FP4 x2 (9.0 bits/w, 41.6 dB SQNR, -0.4% PPL — near-lossless).
@@ -504,7 +522,7 @@ MODEL_CONFIGS = {
     # Memory: 1.2B params * 9.0 bits/w / 8 = ~1.35 GB weights (vs 2.61 GB bf16)
     # Full model with KV cache: ~1.8 GB total (fits any GPU)
     # ──────────────────────────────────────────────────────────────────────
-    "forgelm_v10_1.2b": ModelConfig(
+    "forgelm_v2_light": ModelConfig(
         vocab_size=65536,
         d_model=2048,
         n_layers=16,
@@ -553,7 +571,117 @@ MODEL_CONFIGS = {
         min_lr=3e-5,
     ),
 
+    # ──────────────────────────────────────────────────────────────────────
+    # ForgeLM V2 Pro — LFM2.5-VL-3B Multimodal (2026-09-02)
+    #
+    # First multimodal ForgeLM. Built on LFM2.5-VL-3B architecture:
+    #   - 3B total params: 2.6B LM + 400M vision (SigLIP2-SO400M)
+    #   - 30 LM layers (was 16 in V10), d_model=2560, 40 heads, 8 KV heads
+    #   - 128K vocab (was 65536) — expanded for multimodal tokens
+    #   - SigLIP2 vision encoder: 1152 hidden, 27 layers, 384px images
+    #   - MLP projector: 1152→2560 dim, 128 visual tokens per image
+    #
+    # Carries forward ALL V10 keys:
+    #   - IRI-FP4 lossless weight quantization (9.0 bits/w)
+    #   - SpectralKV (63x KV cache compression)
+    #   - QK-norm, zero-init residual, conv hybrid layers
+    #   - GQA, SwiGLU, RMSNorm, rope_base=1M
+    #
+    # NEW V11 keys:
+    #   - use_vision=True, SigLIP2 vision tower + MLP projector
+    #   - 128K vocab (expanded from 64K for visual + special tokens)
+    #   - 30 layers (deeper for multimodal reasoning)
+    #   - max_seq_len=131072 (128K context for multi-image)
+    #
+    # Memory budget (12GB RTX 5070):
+    #   - LM weights: 2.6B * 9.0 bits / 8 = ~2.9 GB (IRI-FP4)
+    #   - Vision tower: 400M * 2 bytes = ~0.8 GB (bf16, frozen at inference)
+    #   - KV cache (8K tokens): ~0.5 GB (SpectralKV compressed)
+    #   - Total: ~4.2 GB (fits comfortably in 12GB)
+    # ──────────────────────────────────────────────────────────────────────
+    "forgelm_v2_pro": ModelConfig(
+        vocab_size=131072,             # 128K (expanded from 64K for VLM)
+        d_model=2560,                  # 1.25x V10 (2048→2560)
+        n_layers=30,                   # 1.875x V10 (16→30)
+        n_heads=40,                    # 1.25x V10 (32→40)
+        n_kv_heads=8,                  # same as V10 (GQA 5:1 ratio)
+        intermediate_size=10240,       # 4*d_model (was 8192=4*2048)
+        attn_type="gqa",
+        attn_bias=False,
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        norm_eps=1e-5,                 # V10 carried
+        use_embed_norm=False,
+        use_final_norm=True,
+        rope_base=1_000_000.0,         # V10 carried
+        max_seq_len=131072,            # 128K context (was 32K)
+        conv_kernel_size=3,            # V10 carried
+        use_qk_norm=True,              # V10 carried
+        # 30-layer hybrid pattern: conv-conv-attn repeating, with attention
+        # every 3rd layer in the first 12 layers (feature extraction),
+        # then every 2nd layer in the last 18 layers (reasoning).
+        layer_types=[
+            "conv", "conv", "attention",   # 0-2
+            "conv", "conv", "attention",   # 3-5
+            "conv", "conv", "attention",   # 6-8
+            "conv", "conv", "attention",   # 9-11
+            "conv", "attention",           # 12-13
+            "conv", "attention",           # 14-15
+            "conv", "attention",           # 16-17
+            "conv", "attention",           # 18-19
+            "conv", "attention",           # 20-21
+            "conv", "attention",           # 22-23
+            "conv", "attention",           # 24-25
+            "conv", "attention",           # 26-27
+            "conv", "attention",           # 28-29
+        ],
+        # ── V10 carried: IRI-FP4 lossless weight quantization ──
+        use_iri_fp4=True,
+        iri_fp4_rounds=2,
+        iri_fp4_block_size=32,
+        # ── V10 carried: SpectralKV ──
+        use_spectral_kv=True,
+        spectral_kv_max_freq=64,
+        spectral_kv_sink_size=4,
+        # ── V10 carried: no BitNet (replaced by IRI-FP4) ──
+        use_bitnet_residual=False,
+        use_bitnet=False,
+        use_bitnet_embedding=False,
+        ffn_compression="none",
+        nlrq_rank=0,
+        use_hashed_nlrq=False,
+        use_factorized_embeddings=False,
+        embed_factorized_rank=0,
+        use_pit=False,
+        zero_init_residual=True,
+        # ── V11 NEW: Vision tower (SigLIP2-SO400M) ──
+        use_vision=True,
+        vision_encoder="siglip2",
+        vision_hidden_size=1152,
+        vision_image_size=384,
+        vision_patch_size=14,
+        vision_n_layers=27,
+        vision_n_heads=16,
+        vision_intermediate_size=4304,
+        vision_projector_dim=2560,       # matches d_model
+        vision_projector_type="mlp",
+        vision_n_queries=128,            # 128 visual tokens per image
+        vision_layer_idx=-1,             # inject before layer 0
+        # ── Training hyperparams ──
+        batch_size=1,
+        seq_len=4096,                    # longer for multimodal (image tokens)
+        max_steps=50000,
+        warmup_steps=2000,
+        max_lr=2e-4,                     # slightly lower for 3B model
+        min_lr=2e-5,
+    ),
+
 }
+
+# ── Backward-compat aliases (old names → new names) ──
+# Existing checkpoints/scripts referencing these keys still load correctly.
+MODEL_CONFIGS["forgelm_v10_1.2b"] = MODEL_CONFIGS["forgelm_v2_light"]
+MODEL_CONFIGS["forgelm_v11_3b_vl"] = MODEL_CONFIGS["forgelm_v2_pro"]
 
 
 def get_config(name: str | None = None, **overrides) -> ModelConfig:

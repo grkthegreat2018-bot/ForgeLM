@@ -22,9 +22,9 @@ Uses the existing GRPOTrainer with:
 
   python -m research.training.runners.rlvr_train \\
       --tasks research/distillation/hf_datasets/gsm8k.jsonl \\
-      --checkpoint research/checkpoints/forgelm_v10_1.2b_DPO.safetensors \\
-      --save research/checkpoints/forgelm_v10_1.2b_RLVR.safetensors \\
-      --config forgelm_v10_1.2b \\
+      --checkpoint research/checkpoints/forgelm_v2_light_DPO.safetensors \\
+      --save research/checkpoints/forgelm_v2_light_RLVR.safetensors \\
+      --config forgelm_v2_light \\
       --max-steps 500 \\
       --group-size 4 \\
       --rl-algorithm grpo \\
@@ -245,7 +245,7 @@ def main():
                         help="DPO checkpoint to start RLVR from")
     parser.add_argument("--save", required=True,
                         help="Output checkpoint path")
-    parser.add_argument("--config", default="forgelm_v10_1.2b")
+    parser.add_argument("--config", default="forgelm_v2_light")
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--group-size", type=int, default=4,
                         help="GRPO group size (G completions per prompt)")

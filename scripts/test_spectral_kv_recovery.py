@@ -30,7 +30,7 @@ from safetensors import safe_open
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
 
-CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V10_1.2B.safetensors"
+CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 THETA = 1_000_000.0
 HEAD_DIM = 64
 N_HEADS = 32

@@ -75,7 +75,13 @@ NavButton[active="true"] {
     border-left: 3px solid $accent;
 }
 QLabel#statusLabel { color: $text_faint; font-size: 11px; padding: 6px 16px; }
+QLabel#navSection { color: $text_faint; font-size: 10px; font-weight: 700;
+    letter-spacing: 2px; padding: 8px 16px 2px 16px; }
 QFrame#sidebarSep { background: $border; max-height: 1px; border: none; }
+QToolButton#collapseBtn { background: transparent; border: none;
+    color: $text_faint; font-size: 11px; padding: 4px;
+    border-radius: 4px; max-width: 24px; max-height: 24px; }
+QToolButton#collapseBtn:hover { background: $surface_hover; color: $text; }
 
 /* ── Topbar ──────────────────────────────────────────── */
 QFrame#topbar { background: $bg; border-bottom: 1px solid $border; }
@@ -205,6 +211,98 @@ QLabel#tagIdle { color: #5a6577; font-size: 11px; font-weight: 700; }
 
 QToolTip { background: #1c2230; color: #e6edf3; border: 1px solid #2e3850;
     border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+
+/* ── Chat studio ─────────────────────────────────────── */
+QFrame#bubbleUser { background: #1d2740; border: 1px solid #33436e;
+    border-radius: 12px 12px 4px 12px; }
+QFrame#bubbleAssistant { background: #161b28; border: 1px solid #232b3c;
+    border-radius: 12px 12px 12px 4px; }
+QFrame#bubbleSystem { background: #141a26; border: 1px dashed #2e3850;
+    border-radius: 10px; }
+QLabel#bubbleWho { font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    color: #93a0b4; }
+QLabel#bubbleBody, QTextEdit#bubbleBody {
+    background: transparent; color: #e8edf5; font-size: 13px; border: none; }
+QTextEdit#bubbleBody {
+    font-family: 'Cascadia Mono','JetBrains Mono','Consolas',monospace;
+    font-size: 12px; }
+QPushButton#rateGood { border: 1px solid #233a2a; color: #3fb950;
+    border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 700; }
+QPushButton#rateGood:checked { background: #16321e; border-color: #3fb950; }
+QPushButton#rateBad { border: 1px solid #3a2a2a; color: #f85149;
+    border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 700; }
+QPushButton#rateBad:checked { background: #321616; border-color: #f85149; }
+QLabel#chatMeta { color: #5d687c; font-size: 10px; }
+
+/* ── Chat: tool + thinking blocks ────────────────────── */
+QFrame#toolBlock { background: #111620; border: 1px solid #2a3450;
+    border-radius: 8px; }
+QFrame#thinkingBlock { background: #0f1420; border: 1px solid #3a2a5a;
+    border-radius: 8px; }
+QLabel#toolLabel { color: #58a6ff; font-size: 11px; font-weight: 600; }
+QLabel#thinkingLabel { color: #bc8cff; font-size: 11px; font-weight: 600;
+    font-style: italic; }
+QToolButton#toolToggle { background: transparent; border: none;
+    color: #8b96a8; font-size: 10px; padding: 0; }
+QTextEdit#toolDetail { background: #0a0e16; color: #b1bac4;
+    font-family: 'Cascadia Mono','Consolas',monospace; font-size: 11px;
+    border: 1px solid #1e2638; border-radius: 4px; padding: 4px; }
+QTextEdit#thinkingBody { background: #0a0e16; color: #c9b3e6;
+    font-family: 'Cascadia Mono','Consolas',monospace; font-size: 11px;
+    border: 1px solid #2a1e3e; border-radius: 4px; padding: 4px; }
+QLabel#bubbleImage { background: transparent; border: 1px solid #2e3850;
+    border-radius: 8px; padding: 4px; }
+
+/* ── Agent trace ─────────────────────────────────────── */
+QFrame#agentRound { background: #12161f; border: 1px solid #232b3c;
+    border-radius: 10px; }
+QLabel#agentRoundHead { color: #a06bff; font-size: 11px; font-weight: 700;
+    letter-spacing: 1px; }
+QFrame#toolCard { background: #171d2a; border: 1px solid #2a3450;
+    border-radius: 8px; }
+QLabel#toolName { color: #3ad9c9; font-size: 11px; font-weight: 700;
+    font-family: 'Cascadia Mono','JetBrains Mono','Consolas',monospace; }
+QLabel#toolArgs, QTextEdit#toolArgs {
+    background: #0b0e14; color: #9fb4ff; border: none; border-radius: 6px;
+    font-family: 'Cascadia Mono','JetBrains Mono','Consolas',monospace;
+    font-size: 11px; padding: 6px; }
+QTextEdit#toolResult {
+    background: #0b0e14; color: #8b96a8; border: none; border-radius: 6px;
+    font-family: 'Cascadia Mono','JetBrains Mono','Consolas',monospace;
+    font-size: 11px; padding: 6px; }
+QLabel#toolOk { color: #3fb950; font-size: 10px; font-weight: 700; }
+QLabel#toolErr { color: #f85149; font-size: 10px; font-weight: 700; }
+QLabel#toolPending { color: #d29922; font-size: 10px; font-weight: 700; }
+
+/* ── Engine console / fine-tune studio ───────────────── */
+QLabel#engineState { font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+QFrame#kvRow { background: #12161f; border: 1px solid #232b3c;
+    border-radius: 8px; }
+QLabel#kvKey { color: #93a0b4; font-size: 11px; font-weight: 600; }
+QLabel#kvVal { color: #e8edf5; font-size: 12px;
+    font-family: 'Cascadia Mono','JetBrains Mono','Consolas',monospace; }
+QListWidget#datasetList, QListWidget#convList {
+    background: #11151f; border: 1px solid #232a3a; border-radius: 8px;
+    color: #e6edf3; font-size: 12px; padding: 4px; outline: 0; }
+QListWidget#datasetList::item, QListWidget#convList::item {
+    padding: 6px 8px; border-radius: 6px; }
+QListWidget#datasetList::item:selected, QListWidget#convList::item:selected {
+    background: #2e3850; color: #e8edf5; }
+QListWidget#datasetList::item:hover, QListWidget#convList::item:hover {
+    background: #1d2432; }
+QCheckBox { color: #93a0b4; font-size: 12px; spacing: 6px; }
+QCheckBox::indicator { width: 14px; height: 14px; border-radius: 4px;
+    border: 1px solid #2e3850; background: #11151f; }
+QCheckBox::indicator:checked { background: #7c9cff;
+    border-color: #7c9cff; }
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0; }
+QTabWidget::pane { border: 1px solid #232b3c; border-radius: 8px;
+    background: #0e121b; }
+QTabBar::tab { background: transparent; color: #93a0b4; padding: 8px 14px;
+    border: none; border-bottom: 2px solid transparent; font-weight: 600; }
+QTabBar::tab:selected { color: #aebdff; border-bottom: 2px solid #8aa3ff; }
+QTabBar::tab:hover { color: #e8edf5; }
 """)
 
 

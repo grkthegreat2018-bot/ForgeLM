@@ -18,7 +18,7 @@ Usage:
     key = TextToWeightsKey()
     state_dict = key.synthesize(
         text_path="data/corpus.txt",
-        config=get_config("forgelm_v10_1.2b"),
+        config=get_config("forgelm_v2_light"),
         tokenizer=tokenizer,
     )
     model.load_state_dict(state_dict, assign=True)

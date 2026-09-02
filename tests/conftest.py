@@ -50,7 +50,7 @@ def v10_config():
     """Full V10 config on GPU (bf16). For integration tests."""
     if not CUDA_AVAILABLE:
         pytest.skip("CUDA not available — V10 requires GPU")
-    return _gpu_config("forgelm_v10_1.2b", vocab=65536)
+    return _gpu_config("forgelm_v2_light", vocab=65536)
 
 
 @pytest.fixture

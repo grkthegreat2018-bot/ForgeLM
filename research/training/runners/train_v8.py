@@ -279,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--val-every", type=int, default=0)
     parser.add_argument("--val-batches", type=int, default=25)
-    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b")
+    parser.add_argument("--config", type=str, default="forgelm_v2_light")
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--datasets", type=str, default="all")

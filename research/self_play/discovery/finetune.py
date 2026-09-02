@@ -175,9 +175,9 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
     cfg = config or FinetuneConfig()
 
     # Load base model via ForgeEngine (IRI-FP4 quantized, stays packed in VRAM)
-    ckpt = base_checkpoint or str(V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R30.safetensors")
+    ckpt = base_checkpoint or str(V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R30.safetensors")
     print(f"  [finetune] Loading base: {ckpt}")
-    engine = ForgeEngine.from_checkpoint(ckpt, config_name="forgelm_v10_1.2b",
+    engine = ForgeEngine.from_checkpoint(ckpt, config_name="forgelm_v2_light",
                                           device=device, auto_activate=False)
     model = engine.model
     model.train()

@@ -16,7 +16,7 @@ Cycle per epoch:
 
 Usage:
     python -m research.self_play.infinite_loop \\
-        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
+        --checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \\
         --epochs 50 --tasks-per-epoch 30
 
 The loop is resumable: if interrupted, it picks up from the last
@@ -148,7 +148,7 @@ class LoopConfig:
     # Paths
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data/finetune"
-    config_name: str = "forgelm_v10_1.2b"  # V10 default
+    config_name: str = "forgelm_v2_light"  # V10 default
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
     replay_file: str = ""            # path to prior SFT JSONL
@@ -964,7 +964,7 @@ def main():
         description="Infinite AZR self-play training loop (V10: ForgeEngine + all training tricks)")
     parser.add_argument("--checkpoint", required=True,
                         help="Starting checkpoint (safetensors). Default V10: "
-                             "research/checkpoints/ForgeLM_V10_1.2B.safetensors")
+                             "research/checkpoints/ForgeLM_V2_Light.safetensors")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Max epochs to run")
     parser.add_argument("--tasks-per-epoch", type=int, default=30,
@@ -1014,7 +1014,7 @@ def main():
                         choices=["model", "api"],
                         help="Task source: 'model' (AZR self-propose) or "
                              "'api' (distillation teacher APIs)")
-    parser.add_argument("--config", type=str, default="forgelm_v10_1.2b",
+    parser.add_argument("--config", type=str, default="forgelm_v2_light",
                         help="Model config name")
     parser.add_argument("--eval-threshold", type=float, default=0.5,
                         help="Min candidate quality vs base to promote")
@@ -1212,7 +1212,7 @@ class ThinkingPipelineConfig:
     output checkpoint existence.
     """
     # Model
-    config_name: str = "forgelm_v10_1.2b"  # V10 default
+    config_name: str = "forgelm_v2_light"  # V10 default
     device: str = "cuda"
     optimizer: str = "muon_sf"  # V10 default: Muon-SF (was: cpu_offload)
 

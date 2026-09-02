@@ -37,7 +37,7 @@ def _tiny_v8_config(**extra_overrides):
         use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
     )
     overrides.update(extra_overrides)
-    cfg = get_config("forgelm_v10_1.2b", **overrides)
+    cfg = get_config("forgelm_v2_light", **overrides)
     cfg.device = "cpu"
     cfg.dtype = "float32"
     return cfg

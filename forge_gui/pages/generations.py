@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -16,17 +15,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..api.generation import GenerationWorker, list_checkpoints
+from ..api.generation import GenerationWorker
 from ..api.models_index import ModelsIndex
 from ..theme import Palette
 from ..widgets.metric_card import MetricCard
-from ..widgets.search_combo import SearchableComboBox
 from ._base import card_grid, page_container, section_label
 
 
 class GenerationsPage(QWidget):
-    def __init__(self, models_index: ModelsIndex, parent: QWidget | None = None) -> None:
+    def __init__(self, runtime, models_index: ModelsIndex,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._runtime = runtime
         self._models = models_index
         self._worker: GenerationWorker | None = None
         self._history: list[tuple[str, str, float]] = []  # (prompt, output, tps)
@@ -37,12 +37,10 @@ class GenerationsPage(QWidget):
         cl.addWidget(section_label("GENERATION CONTROLS"))
 
         ckpt_row = QHBoxLayout()
-        ckpt_row.addWidget(QLabel("Checkpoint"))
-        self._ckpt_combo = SearchableComboBox(); self._ckpt_combo.setMinimumWidth(280)
-        ckpt_row.addWidget(self._ckpt_combo, 1)
-        ckpt_row.addWidget(QLabel("Config"))
-        self._cfg_combo = QComboBox(); self._cfg_combo.setMinimumWidth(180)
-        ckpt_row.addWidget(self._cfg_combo, 1)
+        ckpt_row.addWidget(QLabel("Model"))
+        self._resident_lbl = QLabel("no model resident — load one on the Engine page")
+        self._resident_lbl.setObjectName("kvVal")
+        ckpt_row.addWidget(self._resident_lbl, 1)
         cl.addLayout(ckpt_row)
 
         param_row = QHBoxLayout()
@@ -102,24 +100,28 @@ class GenerationsPage(QWidget):
         return sb
 
     def _reload(self) -> None:
-        self._ckpt_combo.clear()
-        for rel, name in list_checkpoints():
-            self._ckpt_combo.addItem(name, rel)
-        self._cfg_combo.clear()
-        for c in self._models.configs():
-            self._cfg_combo.addItem(c.name, c.name)
+        # show what the shared runtime currently holds
+        if self._runtime is not None and self._runtime.is_ready():
+            info = self._runtime.info
+            import os
+            name = os.path.basename(str(info.get("checkpoint", "?")))
+            self._resident_lbl.setText(
+                f"resident: {name} ({info.get('config_name', '?')})")
+        elif self._runtime is not None and self._runtime.state == "loading":
+            self._resident_lbl.setText("model loading…")
+        else:
+            self._resident_lbl.setText(
+                "no model resident — load one on the Engine page")
 
     def _start(self) -> None:
         if self._worker and self._worker.isRunning():
             return
         prompt = self._prompt.toPlainText().strip() or "def fibonacci(n):"
-        ckpt = self._ckpt_combo.currentSearchData() or ""
-        cfg = self._cfg_combo.currentData() or ""
         self._output.clear()
         self._status_lbl.setText("Starting…")
         self._gen_btn.setEnabled(False); self._stop_btn.setEnabled(True)
         self._worker = GenerationWorker(
-            prompt=prompt, checkpoint=ckpt, config_name=cfg,
+            runtime=self._runtime, prompt=prompt,
             max_new_tokens=self._max.value(),
             temperature=self._temp.value(),
             top_k=self._topk.value(),
@@ -162,5 +164,5 @@ class GenerationsPage(QWidget):
         self._hist.setText("\n".join(lines))
 
     def refresh(self) -> None:
-        # nothing to poll; generation is event-driven
-        pass
+        # keep the resident-model label current (event-driven page otherwise)
+        self._reload()

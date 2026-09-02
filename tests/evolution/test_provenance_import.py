@@ -83,7 +83,7 @@ def test_save_discoveries_with_provenance():
             "expected_text": "4",
             "script_text": "assert ans == 4",
             "gen_model_size": 1200000000,
-            "gen_model_version": "forgelm_v10_1.2b",
+            "gen_model_version": "forgelm_v2_light",
             "scoring_hash": "abc123def456",
         }]
         n_saved, n_upd = db.save_discoveries("run1", "test_domain", discoveries)
@@ -96,7 +96,7 @@ def test_save_discoveries_with_provenance():
         assert r["output_text"] == "4"
         assert r["expected_text"] == "4"
         assert r["scoring_hash"] == "abc123def456"
-        assert r["gen_model_version"] == "forgelm_v10_1.2b"
+        assert r["gen_model_version"] == "forgelm_v2_light"
         db.close()
         print("[PASS] save_discoveries_with_provenance")
     finally:

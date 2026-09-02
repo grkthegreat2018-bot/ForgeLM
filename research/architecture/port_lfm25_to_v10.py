@@ -1,4 +1,4 @@
-"""Port official LFM2.5-1.2B HF checkpoint to ForgeLM V10 with IRI-FP4 quantization.
+"""Port official LFM2.5-1.2B HF checkpoint to ForgeLM V2 Light with IRI-FP4 quantization.
 
 V10 is the same architecture as V9 (d_model=2048, 16 layers, 10 conv + 6 GQA)
 but applies IRI-FP4 (Iterative Residual Refinement FP4) weight quantization to
@@ -20,12 +20,12 @@ Checkpoint format:
 Usage:
   python -m research.architecture.port_lfm25_to_v10 \
     --input research/checkpoints/lfm25_official/model.safetensors \
-    --output research/checkpoints/ForgeLM_V10_1.2B.safetensors
+    --output research/checkpoints/ForgeLM_V2_Light.safetensors
 
   # Verify forward-pass parity against V9:
   python -m research.architecture.port_lfm25_to_v10 \
     --input research/checkpoints/lfm25_official/model.safetensors \
-    --output research/checkpoints/ForgeLM_V10_1.2B.safetensors \
+    --output research/checkpoints/ForgeLM_V2_Light.safetensors \
     --verify --v9-checkpoint research/checkpoints/ForgeLM_V9_1.2B.safetensors
 """
 import sys
@@ -200,7 +200,7 @@ def port_lfm25_to_v10(input_path: str, output_path: str,
                        device: str = "cpu",
                        n_rounds: int = 3,
                        block_size: int = 32):
-    """Port official LFM2.5 HF checkpoint to ForgeLM V10 with IRI-FP4 quantization.
+    """Port official LFM2.5 HF checkpoint to ForgeLM V2 Light with IRI-FP4 quantization.
 
     Steps:
       1. Load LFM2.5 checkpoint (same key mapping as V9 port)
@@ -215,7 +215,7 @@ def port_lfm25_to_v10(input_path: str, output_path: str,
         block_size: IRI-FP4 block size
     """
     t0 = time.time()
-    print(f"Porting LFM2.5 → ForgeLM V10 (IRI-FP4, {n_rounds} rounds, block={block_size})")
+    print(f"Porting LFM2.5 → ForgeLM V2 Light (IRI-FP4, {n_rounds} rounds, block={block_size})")
 
     # Load source
     print(f"\n[1] Loading source: {input_path}")
@@ -418,7 +418,7 @@ def verify_v9_v10(v9_path: str, v10_path: str, device: str = "cpu",
 
     # Forward pass comparison
     print(f"\n[V5] Forward pass comparison (seq_len={seq_len}, {n_tokens} tokens)...")
-    cfg = get_config("forgelm_v10_1.2b", device=device)
+    cfg = get_config("forgelm_v2_light", device=device)
     cfg.use_iri_fp4 = False  # we'll load weights manually
 
     # Build V9 model
@@ -484,7 +484,7 @@ def verify_v9_v10(v9_path: str, v10_path: str, device: str = "cpu",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Port LFM2.5 → ForgeLM V10 (IRI-FP4 quantization)"
+        description="Port LFM2.5 → ForgeLM V2 Light (IRI-FP4 quantization)"
     )
     parser.add_argument("--input", required=True,
                         help="Path to LFM2.5 HF .safetensors checkpoint")

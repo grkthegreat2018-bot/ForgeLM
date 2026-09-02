@@ -32,9 +32,9 @@ Usage:
         --data research/data/finetune/tool_use_fc_70.jsonl \\
         --data research/data/finetune/short_cot_70.jsonl \\
         --data research/data/finetune/code_70.jsonl \\
-        --config forgelm_v10_1.2b \\
-        --checkpoint research/checkpoints/ForgeLM_V10_1.2B.safetensors \\
-        --save research/checkpoints/ForgeLM_V10_1.2B.sft.safetensors \\
+        --config forgelm_v2_light \\
+        --checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \\
+        --save research/checkpoints/ForgeLM_V2_Light.sft.safetensors \\
         --max-steps 500 --lr 5e-5 --batch-size 2 --seq-len 1024
 """
 import argparse
@@ -719,11 +719,11 @@ def main():
                         "on I/O-bound workloads). Default: True.")
     p.add_argument("--prefetch-count", type=int, default=4,
                    help="Number of batches to prefetch ahead (default 4).")
-    p.add_argument("--config", default="forgelm_v10_1.2b",
-                   help="Model config name (default: forgelm_v10_1.2b)")
-    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V10_1.2B.safetensors",
+    p.add_argument("--config", default="forgelm_v2_light",
+                   help="Model config name (default: forgelm_v2_light)")
+    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_Light.safetensors",
                    help="Base checkpoint to fine-tune from")
-    p.add_argument("--save", default="research/checkpoints/ForgeLM_V10_1.2B.sft.safetensors",
+    p.add_argument("--save", default="research/checkpoints/ForgeLM_V2_Light.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
     p.add_argument("--lr", type=float, default=5e-5)
@@ -842,6 +842,11 @@ def main():
     p.add_argument("--manual-lora", action="store_true",
                    help="Use manual LoRA adapters (BitNet-compatible, unlike PEFT). "
                         "Works with BitNetLinear. Auto-enabled with --bitnet-everywhere.")
+    p.add_argument("--save-lora-adapter", action="store_true",
+                   help="Additionally save ONLY the trained LoRA tensors to "
+                        "'<save-stem>.lora.safetensors' (small file, hot-loadable "
+                   "via ForgeEngine.load_lora / the GUI LoRA Manager). "
+                   "The merged standalone checkpoint is still saved normally.")
     p.add_argument("--sequential-freeze", type=int, default=0,
                    help="Sequential freeze/unfreeze: train N layers at a time in phases. "
                         "0=disabled. 4=4 phases (4 layers each for 16-layer model). "
@@ -1888,6 +1893,20 @@ def main():
             # saved checkpoint is a standalone full model (no LoRA dependency
             # needed for inference). This is the standard approach for
             # self-play loops where the next epoch loads from a plain checkpoint.
+            # (--save-lora-adapter snapshots the un-merged LoRA tensors first
+            #  so the adapter can be hot-loaded / swapped via ForgeEngine.)
+            if args.save_lora_adapter and (use_manual_lora or args.lora):
+                from safetensors.torch import save_file as _save_lora_file
+                lora_state = {n: p.detach().cpu().contiguous()
+                              for n, p in model.named_parameters()
+                              if "lora_" in n}
+                if lora_state:
+                    lora_path = str(Path(args.save).with_suffix(".lora.safetensors"))
+                    _save_lora_file(lora_state, lora_path)
+                    print(f"Saved LoRA adapter ({len(lora_state)} tensors) "
+                          f"to {lora_path}")
+                else:
+                    print("No LoRA tensors found — adapter save skipped.")
             if use_manual_lora:
                 from research.training.bitnet_lora import merge_lora_adapters
                 n_merged = merge_lora_adapters(model)

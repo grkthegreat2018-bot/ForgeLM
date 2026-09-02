@@ -42,7 +42,7 @@ from safetensors import safe_open
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
-CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V10_1.2B.safetensors"
+CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
 from research.keys.quantization.bitnet_residual_key import ternary_quantize
 

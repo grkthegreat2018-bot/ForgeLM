@@ -29,8 +29,8 @@ Usage:
 
     # Auto-activates optimal strategies (S4R KV, torch.compile, prefix cache, etc.)
     engine = ForgeEngine.from_checkpoint(
-        checkpoint="research/checkpoints/ForgeLM_V10_1.2B.safetensors",
-        config_name="forgelm_v10_1.2b",
+        checkpoint="research/checkpoints/ForgeLM_V2_Light.safetensors",
+        config_name="forgelm_v2_light",
         tokenizer_path="research/checkpoints/lfm25_tokenizer",
     )
     # Strategies auto-activated — just generate:
@@ -386,7 +386,7 @@ class ForgeEngine:
     # ── Checkpoint loading ────────────────────────────────────────────────
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: str, config_name: str = "forgelm_v10_1.2b",
+    def from_checkpoint(cls, checkpoint: str, config_name: str = "forgelm_v2_light",
                         tokenizer_path: str | None = None,
                         device: str = "cuda",
                         auto_activate: bool = True,
@@ -473,6 +473,14 @@ class ForgeEngine:
           - VRAM-aware: auto-select highest quantization that fits
         """
         overrides = {}
+
+        # torch.compile is broken on some triton/GPU stacks (inductor
+        # mis-types scalar args of @triton.jit kernels → InductorError on
+        # every forward). FORGE_NO_COMPILE=1 opts out at load time — the
+        # GUI fast-load path sets this before importing the engine.
+        if os.environ.get("FORGE_NO_COMPILE", "").strip().lower() in (
+                "1", "true", "yes"):
+            overrides["use_compile"] = False
 
         # Keystack-aware overrides
         if "mtp" in self.keystack_features:
@@ -1458,7 +1466,7 @@ class ForgeEngine:
         ids = self.tokenizer(
             prompt, return_tensors="pt",
             truncation=True, max_length=ctx_limit,
-            add_special_tokens=False,
+            add_special_tokens=True,  # BOS <|startoftext|> — required for sane raw prompts
         ).input_ids.to(self.device)
 
         # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
@@ -1831,11 +1839,14 @@ class ForgeEngine:
         }
 
     def _tokenize(self, prompt: str,
-                  add_special_tokens: bool = False) -> torch.Tensor:
+                  add_special_tokens: bool = True) -> torch.Tensor:
         """Tokenize a prompt and move token IDs to the engine's device.
 
         Shared by ``generate_raw`` and ``generate_stream`` so they use
-        identical tokenization semantics.
+        identical tokenization semantics. Special tokens (BOS
+        ``<|startoftext|>``) are added by default — the model was trained
+        with a BOS-prefixed sequence and raw prompts tokenize to garbage
+        without it.
         """
         return self.tokenizer(
             prompt, return_tensors="pt",
@@ -2018,7 +2029,7 @@ class ForgeEngine:
         self.hotswap.apply_pending()
 
         def _run():
-            ids = self._tokenize(prompt, add_special_tokens=False)
+            ids = self._tokenize(prompt)
             eos_set = self._eos_token_ids(eos_token_ids)
             generated_ids: list[int] = []
 
@@ -2073,7 +2084,7 @@ class ForgeEngine:
         # can't be retried mid-yield, we wrap the setup + first yield.
         # If OOM occurs, the generator raises GenerationOOMError.
         try:
-            ids = self._tokenize(prompt, add_special_tokens=False)
+            ids = self._tokenize(prompt)
             eos_set = self._eos_token_ids(eos_token_ids)
             generated_ids: list[int] = []
 

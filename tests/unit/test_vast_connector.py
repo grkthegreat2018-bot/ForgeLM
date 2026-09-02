@@ -299,16 +299,16 @@ def test_destroy_instance(connector, fake_vast):
 def test_find_instance_by_label(connector, fake_vast):
     fake_vast.set_instances([
         {"id": 1, "label": "other", "actual_status": "running"},
-        {"id": 2, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "stopped"},
+        {"id": 2, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "stopped"},
     ])
-    inst = connector.find_instance_by_label("forgeai-forgelm_v10_1.2b-auto")
+    inst = connector.find_instance_by_label("forgeai-forgelm_v2_light-auto")
     assert inst is not None
     assert inst["id"] == 2
 
 
 def test_find_instance_by_label_not_found(connector, fake_vast):
     fake_vast.set_instances([{"id": 1, "label": "other"}])
-    inst = connector.find_instance_by_label("forgeai-forgelm_v10_1.2b-auto")
+    inst = connector.find_instance_by_label("forgeai-forgelm_v2_light-auto")
     assert inst is None
 
 
@@ -316,10 +316,10 @@ def test_find_instance_by_label_not_found(connector, fake_vast):
 def test_ensure_instance_reuses_running(connector, fake_vast):
     """If a running instance with our label exists, reuse it."""
     fake_vast.set_instances([
-        {"id": 42, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "running"},
+        {"id": 42, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "running"},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
     )
     inst_id, is_new = connector.ensure_instance(spec)
@@ -330,10 +330,10 @@ def test_ensure_instance_reuses_running(connector, fake_vast):
 def test_ensure_instance_starts_stopped(connector, fake_vast):
     """If a stopped instance with our label exists, start it."""
     fake_vast.set_instances([
-        {"id": 42, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "stopped"},
+        {"id": 42, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "stopped"},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
     )
     inst_id, is_new = connector.ensure_instance(spec)
@@ -346,14 +346,14 @@ def test_ensure_instance_starts_stopped(connector, fake_vast):
 def test_ensure_instance_destroys_poll_trap(connector, fake_vast):
     """If existing instance is in poll-trap state, destroy + create new."""
     fake_vast.set_instances([
-        {"id": 42, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "exited"},
+        {"id": 42, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "exited"},
     ])
     fake_vast.set_offers([
         {"id": 100, "gpu_name": "RTX_4090", "num_gpus": 1,
          "gpu_total_ram": 24576, "dph_total": 0.30, "reliability": 0.98, "dlperf": 50},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
         budget=100.0, est_sec_per_step=1.0,
         min_vram_gb=20, min_reliability=0.9,
@@ -372,7 +372,7 @@ def test_ensure_instance_creates_new_when_not_found(connector, fake_vast):
          "gpu_total_ram": 24576, "dph_total": 0.30, "reliability": 0.98, "dlperf": 50},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
         budget=100.0, est_sec_per_step=1.0,
         min_vram_gb=20, min_reliability=0.9,
@@ -385,11 +385,11 @@ def test_ensure_instance_creates_new_when_not_found(connector, fake_vast):
 def test_ensure_instance_destroys_extras_single_cap(connector, fake_vast):
     """Multiple instances → destroy extras, keep first viable (single-instance cap)."""
     fake_vast.set_instances([
-        {"id": 10, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "running"},
+        {"id": 10, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "running"},
         {"id": 20, "label": "other", "actual_status": "running"},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
     )
     inst_id, is_new = connector.ensure_instance(spec)
@@ -403,14 +403,14 @@ def test_ensure_instance_destroys_extras_single_cap(connector, fake_vast):
 def test_ensure_instance_reuse_false_destroys_existing(connector, fake_vast):
     """reuse_instance=False → destroy any existing instance before creating new."""
     fake_vast.set_instances([
-        {"id": 10, "label": "forgeai-forgelm_v10_1.2b-auto", "actual_status": "running"},
+        {"id": 10, "label": "forgeai-forgelm_v2_light-auto", "actual_status": "running"},
     ])
     fake_vast.set_offers([
         {"id": 100, "gpu_name": "RTX_4090", "num_gpus": 1,
          "gpu_total_ram": 24576, "dph_total": 0.30, "reliability": 0.98, "dlperf": 50},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=False,
         budget=100.0, est_sec_per_step=1.0,
         min_vram_gb=20, min_reliability=0.9,
@@ -428,7 +428,7 @@ def test_ensure_instance_reuses_any_live_no_label_match(connector, fake_vast):
         {"id": 10, "label": "some-other-label", "actual_status": "running"},
     ])
     spec = RemoteTrainingSpec(
-        train_args={"--config": "forgelm_v10_1.2b"},
+        train_args={"--config": "forgelm_v2_light"},
         gpu_filter="", reuse_instance=True,
     )
     inst_id, is_new = connector.ensure_instance(spec)
@@ -497,7 +497,7 @@ def test_build_remote_train_cmd_forwards_args(connector):
         data_files=["/local/data.jsonl"],
         train_args={
             "--data": ["/local/data.jsonl"],
-            "--config": "forgelm_v10_1.2b",
+            "--config": "forgelm_v2_light",
             "--checkpoint": "/local/base.safetensors",
             "--save": "out.safetensors",
             "--max-steps": 500,
@@ -507,7 +507,7 @@ def test_build_remote_train_cmd_forwards_args(connector):
     )
     cmd = connector._build_remote_train_cmd(spec)
     assert "research.training.runners.sft_train" in cmd
-    assert "--config forgelm_v10_1.2b" in cmd
+    assert "--config forgelm_v2_light" in cmd
     assert "--max-steps 500" in cmd
     assert "--lora" not in cmd
     assert "--no-bitnet-everywhere" in cmd
@@ -604,7 +604,7 @@ def test_build_spec_from_args_resolves_uploads(tmp_path):
     data = tmp_path / "data.jsonl"
     data.write_text("{}")
     args = Namespace(
-        data=[str(data)], config="forgelm_v10_1.2b", checkpoint=str(ckpt),
+        data=[str(data)], config="forgelm_v2_light", checkpoint=str(ckpt),
         save="out.safetensors", max_steps=100, lr=5e-5, batch_size=2,
         seq_len=1024, lora=True, bitnet_everywhere=True,
         gpu_filter="gpu_name=H100", max_price=1.0, min_vram_gb=40,
@@ -629,7 +629,7 @@ def test_build_spec_from_args_resolves_uploads(tmp_path):
     assert spec.reuse_instance is True
     assert str(ckpt) in spec.checkpoints
     assert str(data) in spec.data_files
-    assert spec.train_args["--config"] == "forgelm_v10_1.2b"
+    assert spec.train_args["--config"] == "forgelm_v2_light"
     assert spec.train_args["--max-steps"] == 100
     assert spec.train_args["--lora"] is True
 

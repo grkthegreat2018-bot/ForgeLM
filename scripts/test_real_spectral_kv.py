@@ -3,7 +3,7 @@
 Tests whether the Fourier basis (§12.1 winner) fits K/V computed from REAL
 trained attention weights better or worse than random projections.
 
-Loads ForgeLM_V10_1.2B.safetensors, extracts attention layer 2 (W_q, W_k,
+Loads ForgeLM_V2_Light.safetensors, extracts attention layer 2 (W_q, W_k,
 W_v), computes K/V over synthetic hidden states, fits Fourier basis, measures
 attention-output error vs full cache and vs S4R.
 
@@ -21,7 +21,7 @@ from safetensors import safe_open
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
 
-CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V10_1.2B.safetensors"
+CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 THETA = 1_000_000.0
 HEAD_DIM = 64
 N_HEADS = 32

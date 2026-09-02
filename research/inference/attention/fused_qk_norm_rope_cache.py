@@ -62,9 +62,12 @@ def fused_qk_norm_rope_cache(
         v: (B, n_kv, T, head_dim) — value projection output
         q_norm_weight: (head_dim,) — Q RMSNorm weight (None if no QK norm)
         k_norm_weight: (head_dim,) — K RMSNorm weight
-        cos: (max_seq_len, head_dim/2) — RoPE cosine cache
-        sin: (max_seq_len, head_dim/2) — RoPE sine cache
-        position_ids: (B, T) — position IDs for RoPE
+        cos: (max_seq_len, head_dim) — FULL-dim RoPE cosine cache
+            (duplicated halves, NeoX rotate_half convention — matches
+            ``RotaryEmbedding.cos_cached``)
+        sin: (max_seq_len, head_dim) — RoPE sine cache
+        position_ids: (B, T) — position IDs (unused; ``cache_position``
+            is the authoritative chunk start)
         kv_cache_k: (B, n_kv, max_seq, head_dim) — KV cache for keys (write target)
         kv_cache_v: (B, n_kv, max_seq, head_dim) — KV cache for values (write target)
         cache_position: starting position in the cache
@@ -76,20 +79,23 @@ def fused_qk_norm_rope_cache(
     B, n_heads, T, hd = q.shape
     n_kv = k.shape[1]
 
+    # Slice the RoPE caches to this chunk's absolute positions. The fused
+    # kernel indexes cos[t] with t = 0..T-1, so it receives pre-sliced
+    # (T, head_dim) tables (see fused_rope_qknorm docstring).
+    cos_chunk = cos[cache_position:cache_position + T]
+    sin_chunk = sin[cache_position:cache_position + T]
+
     # Step 1+2: QK-Norm + RoPE (use existing fused kernel if available)
     if _HAS_FUSED_ROPE_QKNORM and q.is_cuda:
         try:
             q_out, k_out = fused_qk_norm_rope(
-                q, k, q_norm_weight, k_norm_weight,
-                cos, sin, position_ids)
+                q, k, q_norm_weight, k_norm_weight, cos_chunk, sin_chunk)
         except Exception:
             q_out, k_out = _py_qk_norm_rope(
-                q, k, q_norm_weight, k_norm_weight,
-                cos, sin, position_ids)
+                q, k, q_norm_weight, k_norm_weight, cos_chunk, sin_chunk)
     else:
         q_out, k_out = _py_qk_norm_rope(
-            q, k, q_norm_weight, k_norm_weight,
-            cos, sin, position_ids)
+            q, k, q_norm_weight, k_norm_weight, cos_chunk, sin_chunk)
 
     # Step 3: KV cache write (fused with quantization if requested)
     if kv_cache_k is not None and kv_cache_v is not None:
@@ -106,42 +112,29 @@ def fused_qk_norm_rope_cache(
     return q_out, k_out, v
 
 
-def _py_qk_norm_rope(q, k, q_norm_w, k_norm_w, cos, sin, position_ids):
-    """PyTorch fallback for QK-Norm + RoPE."""
+def _py_qk_norm_rope(q, k, q_norm_w, k_norm_w, cos, sin):
+    """PyTorch fallback for QK-Norm + RoPE.
+
+    Full-dim NeoX convention (matches RotaryEmbedding): cos/sin are
+    (T, head_dim) with duplicated halves, applied as
+    ``x * cos + rotate_half(x) * sin``.
+    """
     # RMSNorm
     if q_norm_w is not None:
         q = _rmsnorm(q, q_norm_w)
     if k_norm_w is not None:
         k = _rmsnorm(k, k_norm_w)
 
-    # RoPE (NeoX style: rotate first half with second half)
-    B, n_h, T, hd = q.shape
-    half = hd // 2
+    def rotate_half(x):
+        d = x.shape[-1]
+        return torch.cat((-x[..., d // 2:], x[..., : d // 2]), dim=-1)
 
-    if position_ids.dim() == 2:
-        pos = position_ids[0]  # (T,)
-    else:
-        pos = position_ids
+    # (T, hd) → (1, 1, T, hd) for broadcast against (B, heads, T, hd)
+    cos_b = cos.unsqueeze(0).unsqueeze(0) if cos.dim() == 2 else cos
+    sin_b = sin.unsqueeze(0).unsqueeze(0) if sin.dim() == 2 else sin
 
-    cos_vals = cos[pos]  # (T, half)
-    sin_vals = sin[pos]
-
-    # Apply RoPE to Q
-    q1, q2 = q[..., :half], q[..., half:]
-    # cos/sin: (T, half) → (1, 1, T, half)
-    cos_q = cos_vals.unsqueeze(0).unsqueeze(0)
-    sin_q = sin_vals.unsqueeze(0).unsqueeze(0)
-    q_out = torch.cat([q1 * cos_q - q2 * sin_q,
-                       q1 * sin_q + q2 * cos_q], dim=-1)
-
-    # Apply RoPE to K
-    B, n_kv, T, hd = k.shape
-    k1, k2 = k[..., :half], k[..., half:]
-    cos_k = cos_vals.unsqueeze(0).unsqueeze(0)
-    sin_k = sin_vals.unsqueeze(0).unsqueeze(0)
-    k_out = torch.cat([k1 * cos_k - k2 * sin_k,
-                       k1 * sin_k + k2 * cos_k], dim=-1)
-
+    q_out = q * cos_b + rotate_half(q) * sin_b
+    k_out = k * cos_b + rotate_half(k) * sin_b
     return q_out, k_out
 
 

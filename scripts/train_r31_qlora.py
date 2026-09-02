@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 FORGE_ROOT = Path(__file__).resolve().parent.parent
 FINETUNE_DIR = FORGE_ROOT / "research" / "data" / "finetune"
-R30_CHECKPOINT = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V10_1.2B_R30.safetensors"
+R30_CHECKPOINT = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V2_Light_R30.safetensors"
 TOKENIZER_DIR = FORGE_ROOT / "research" / "checkpoints" / "lfm25_tokenizer"
 CACHE_DIR = FORGE_ROOT / "research" / "data" / "tok_cache_r31"
 
@@ -292,7 +292,7 @@ def main():
 
     from research.inference.forge_engine import ForgeEngine
     engine = ForgeEngine.from_checkpoint(
-        ckpt, config_name="forgelm_v10_1.2b",
+        ckpt, config_name="forgelm_v2_light",
         device="cuda", auto_activate=False
     )
     model = engine.model
@@ -396,7 +396,7 @@ def main():
 
             # Checkpoint
             if step % args.save_every == 0 and step > 0:
-                ckpt_path = FORGE_ROOT / "research" / "checkpoints" / f"ForgeLM_V10_1.2B_R31_step{step}.safetensors"
+                ckpt_path = FORGE_ROOT / "research" / "checkpoints" / f"ForgeLM_V2_Light_R31_step{step}.safetensors"
                 lora_state = {n: p.cpu() for n, p in model.named_parameters() if "lora_" in n}
                 from safetensors.torch import save_file
                 save_file(lora_state, str(ckpt_path))
@@ -411,7 +411,7 @@ def main():
     print("\n  Saving LoRA adapter (base model not merged)...")
     from safetensors.torch import save_file as _save
     lora_state = {n: p.cpu() for n, p in model.named_parameters() if "lora_" in n}
-    final_path = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V10_1.2B_R31_lora.safetensors"
+    final_path = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V2_Light_R31_lora.safetensors"
     _save(lora_state, str(final_path))
     print(f"  Saved LoRA: {final_path} ({len(lora_state)} tensors, {sum(p.numel() for p in lora_state.values())/1e6:.1f}M params)")
     print(f"  Base model (R30) untouched: {R30_CHECKPOINT}")

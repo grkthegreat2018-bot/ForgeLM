@@ -114,7 +114,7 @@ class DiscoveryLoop:
           2. Base ForgeLM V10 checkpoint (research/checkpoints/)
           3. Random weights (fallback — prints a warning)
 
-        If a LoRA adapter checkpoint exists (e.g. ForgeLM_V10_1.2B_R31_lora.safetensors),
+        If a LoRA adapter checkpoint exists (e.g. ForgeLM_V2_Light_R31_lora.safetensors),
         it is loaded on top of the base model. This allows self-play to use the
         latest fine-tuned LoRA without merging into the base weights.
 
@@ -138,11 +138,11 @@ class DiscoveryLoop:
             ckpt = None
             print("[discovery] WARNING: no checkpoint found — using random weights")
 
-        model, tok = load_default_model("forgelm_v10_1.2b", checkpoint_path=ckpt)
+        model, tok = load_default_model("forgelm_v2_light", checkpoint_path=ckpt)
 
         # Check for LoRA adapter (R31+) to load on top of R30 base
-        r30_path = V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R30.safetensors"
-        lora_path = V10_CHECKPOINT.parent / "ForgeLM_V10_1.2B_R31_lora.safetensors"
+        r30_path = V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R30.safetensors"
+        lora_path = V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R31_lora.safetensors"
         _engine_ref = None
         if lora_path.exists():
             from research.inference.forge_engine import ForgeEngine
@@ -150,7 +150,7 @@ class DiscoveryLoop:
             if r30_path.exists():
                 print(f"[discovery] reloading R30 base for LoRA: {r30_path}")
                 engine = ForgeEngine.from_checkpoint(
-                    str(r30_path), config_name="forgelm_v10_1.2b",
+                    str(r30_path), config_name="forgelm_v2_light",
                     device=str(model.device if hasattr(model, 'device') else "cuda"),
                     auto_activate=False)
                 model = engine.model

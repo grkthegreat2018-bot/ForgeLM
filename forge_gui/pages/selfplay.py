@@ -237,13 +237,13 @@ class SelfPlayPage(QWidget):
                 except OSError:
                     pass
 
-        cmd = [venv_py, "-u", "-m", "research.training.self_play_expert_training",
-               "--topics", topic,
+        cmd = [venv_py, "-u", "-m", "research.self_play.infinite_loop",
+               "--checkpoint", str(root / "research" / "checkpoints"
+                                    / "ForgeLM_V2_Light.safetensors"),
+               "--config", "forgelm_v2_light",
                "--epochs", epochs,
-               "--n-tasks", n_tasks,
-               "--use-curriculum",
-               "--batch-size", "8",
-               "--verify-workers", "4"]
+               "--tasks-per-epoch", n_tasks,
+               "--ft-batch-size", "8"]
         task_id = self._proc_mgr.launch("Self-Play Training", cmd)
         self._selfplay_task_id = task_id
         self._start_btn.setEnabled(False)

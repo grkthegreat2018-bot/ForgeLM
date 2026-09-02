@@ -49,7 +49,7 @@ import torch.nn.functional as F
 FORGE_ROOT = Path(__file__).resolve().parent.parent
 HF_DATASETS = FORGE_ROOT / "research" / "distillation" / "hf_datasets"
 FINETUNE_DIR = FORGE_ROOT / "research" / "data" / "finetune"
-V10_CHECKPOINT = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V10_1.2B.safetensors"
+V10_CHECKPOINT = FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V2_Light.safetensors"
 TOKENIZER_DIR = FORGE_ROOT / "research" / "checkpoints" / "lfm25_tokenizer"
 CACHE_DIR = FORGE_ROOT / "research" / "data" / "tok_cache"
 
@@ -326,7 +326,7 @@ def load_v10_quantized(device: str = "cuda"):
     """Load V10 with IRI-FP4 quantized weights via ForgeEngine."""
     from research.inference.forge_engine import ForgeEngine
     engine = ForgeEngine.from_checkpoint(
-        str(V10_CHECKPOINT), config_name="forgelm_v10_1.2b",
+        str(V10_CHECKPOINT), config_name="forgelm_v2_light",
         device=device, auto_activate=False,
     )
     model = engine.model
@@ -777,7 +777,7 @@ def main():
     # 4. Train
     print("\n[4/4] Training QLoRA with all features...")
     save_path = args.save or str(
-        FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V10_1.2B_R30.safetensors")
+        FORGE_ROOT / "research" / "checkpoints" / "ForgeLM_V2_Light_R30.safetensors")
 
     losses, val_losses = train_qlora(
         model, lora_params, data_path, tokenizer,

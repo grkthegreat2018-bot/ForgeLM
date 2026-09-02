@@ -62,7 +62,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"\n[1] Loading V10-1.2B...")
     t0 = time.time()
     model, tokenizer = load_default_model(
-        "forgelm_v10_1.2b",
+        "forgelm_v2_light",
         checkpoint_path=str(V10_CHECKPOINT),
         device=device,
         dtype=torch.bfloat16,
@@ -85,7 +85,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     }
     if kv_strategy == "spectral":
         # SpectralKV needs max_freq config
-        cfg = get_config("forgelm_v10_1.2b")
+        cfg = get_config("forgelm_v2_light")
         activate_kwargs["kv_cache_tokens"] = cfg.spectral_kv_max_freq
     try:
         engine.activate(**activate_kwargs)
@@ -224,7 +224,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log("=" * 50)
 
     from research.config import get_config
-    cfg = get_config("forgelm_v10_1.2b")
+    cfg = get_config("forgelm_v2_light")
     n_kv = cfg.n_kv_heads
     head_dim = cfg.d_model // cfg.n_heads
     n_layers = cfg.n_layers

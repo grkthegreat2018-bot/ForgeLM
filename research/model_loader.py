@@ -3286,7 +3286,7 @@ class ModelLoader:
 
 
 def load_default_model(
-    config_name: str = "forgelm_v10_1.2b",
+    config_name: str = "forgelm_v2_light",
     checkpoint_path: str | None = None,
     device: str = "cuda",
     dtype: torch.dtype | None = None,
@@ -3302,7 +3302,7 @@ def load_default_model(
         tokenizer = get_tokenizer(...)
 
     Args:
-        config_name: model config name (default "forgelm_v10_1.2b")
+        config_name: model config name (default "forgelm_v2_light")
         checkpoint_path: path to .safetensors checkpoint (default: config default)
         device: "cuda" or "cpu"
         dtype: torch.bfloat16 or torch.float32 (default: bf16 for cuda, fp32 for cpu)
@@ -3371,7 +3371,7 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
         The quantized model (modified in-place).
 
     Example:
-        model = load_default_model("forgelm_v10_1.2b")
+        model = load_default_model("forgelm_v2_light")
         model = quantize_int4(model)  # 2.3GB → ~0.7GB VRAM (int4)
     """
     try:
@@ -3428,7 +3428,7 @@ except ImportError:
 # immediately without ~500ms context creation overhead.
 try:
     from research.config import get_config as _get_config_warmup
-    _warmup_cfg = _get_config_warmup("forgelm_v10_1.2b", device="meta")
+    _warmup_cfg = _get_config_warmup("forgelm_v2_light", device="meta")
     with torch.device("meta"):
         _warmup_model = ConfigurableResearchLLM(_warmup_cfg)
     del _warmup_model, _warmup_cfg
@@ -3442,7 +3442,7 @@ except Exception:
 if __name__ == "__main__":
     from research.config import get_config
 
-    for name in ["lfm25_tiny", "forgelm_v10_1.2b"]:
+    for name in ["lfm25_tiny", "forgelm_v2_light"]:
         print("\n" + "=" * 50)
         cfg = get_config(name)
         cfg.device = "cpu"
