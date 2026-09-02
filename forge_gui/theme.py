@@ -84,6 +84,23 @@ QToolButton#collapseBtn { background: transparent; border: none;
     border-radius: 4px; max-width: 24px; max-height: 24px; }
 QToolButton#collapseBtn:hover { background: $surface_hover; color: $text; }
 
+/* ── Sidebar search + scroll ─────────────────────────── */
+QLineEdit#navSearch { background: $bg_alt; border: 1px solid $border;
+    border-radius: 6px; padding: 5px 8px; color: $text; font-size: 12px; }
+QLineEdit#navSearch:focus { border-color: $accent; }
+QLineEdit#navSearch::placeholder { color: $text_faint; font-size: 11px; }
+QScrollArea#navScroll { background: transparent; border: none; }
+QWidget#navScrollContent { background: transparent; }
+QFrame#sidebarFooter { background: $bg; border-top: 1px solid $border; }
+QScrollBar#navScroll { background: $bg_alt; width: 6px; border: none; }
+QScrollBar::handle:vertical#navScroll { background: $border_hi;
+    border-radius: 3px; min-height: 30px; }
+QScrollBar::handle:vertical#navScroll:hover { background: $accent_dim; }
+QScrollBar::add-line:vertical#navScroll, QScrollBar::sub-line:vertical#navScroll {
+    height: 0; border: none; }
+QScrollBar::add-page:vertical#navScroll, QScrollBar::sub-page:vertical#navScroll {
+    background: transparent; }
+
 /* ── Topbar ──────────────────────────────────────────── */
 QFrame#topbar { background: $bg; border-bottom: 1px solid $border; }
 QLabel#pageTitle { color: $text; font-size: 18px; font-weight: 700; }
