@@ -39,6 +39,13 @@ class ModelConfig:
     # Each entry: "attention" (or "attn"), "conv", "mamba", or "moe".
     layer_types: list[str] | None = None
     conv_kernel_size: int = 3
+    # Mamba/SSM layer config (used when layer_types contains "mamba")
+    mamba_d_state: int = 16        # SSM state expansion factor (Mamba1: 16, Mamba2: 64)
+    mamba_d_conv: int = 4          # Local convolution width
+    mamba_expand: int = 2          # Block expansion factor (d_inner = expand * d_model)
+    mamba_dt_rank: str | int = "auto"  # "auto" = ceil(d_model/16), or explicit int
+    mamba_bias: bool = False       # Bias on in_proj/out_proj
+    mamba_conv_bias: bool = True   # Bias on conv1d
 
     # === Our keys (all zero/identity init = lossless at start) ===
     # QK-norm: RMSNorm on Q and K before RoPE (LFM2/Gemma3/Qwen3 style).

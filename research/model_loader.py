@@ -903,7 +903,7 @@ class ModularBlock(nn.Module):
                               use_triton=_use_triton)
         else:
             self.ln1 = norm(config.d_model)
-        # Determine layer type: conv or attention
+        # Determine layer type: conv, mamba, or attention
         layer_types = getattr(config, 'layer_types', None)
         if layer_types is not None and layer_idx < len(layer_types):
             ltype = layer_types[layer_idx].lower()
@@ -916,6 +916,20 @@ class ModularBlock(nn.Module):
                 config.d_model, kernel_size=ksize,
                 use_bitnet=getattr(config, 'use_bitnet', False),
                 bitnet_config=config)
+        elif ltype in ("mamba", "ssm"):
+            from research.keys.architecture.mamba_probe import MambaLayer
+            self.attn = MambaLayer(
+                d_model=config.d_model,
+                d_state=getattr(config, 'mamba_d_state', 16),
+                d_conv=getattr(config, 'mamba_d_conv', 4),
+                expand=getattr(config, 'mamba_expand', 2),
+                dt_rank=getattr(config, 'mamba_dt_rank', "auto"),
+                bias=getattr(config, 'mamba_bias', False),
+                conv_bias=getattr(config, 'mamba_conv_bias', True),
+                layer_idx=layer_idx,
+                norm_eps=getattr(config, 'norm_eps', 1e-6),
+                use_jamba_norms=True,
+            )
         else:
             self.attn = build_attention(config)
         if norm is RMSNorm:
@@ -931,6 +945,7 @@ class ModularBlock(nn.Module):
                 "GroupedTiedAttention",
                 "GroupedLatentAttention")
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
+        self._is_mamba = type(self.attn).__name__ == "MambaLayer"
         self._gradient_checkpointing = False
         # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
         # only FFN — biggest activation consumer, ~2-4x VRAM savings on
@@ -1833,6 +1848,31 @@ class ConfigurableResearchLLM(nn.Module):
         self._ln_f_device = None
         self._block_devices = None
 
+    @torch.no_grad()
+    def apply_iri_fp4_quantization(self) -> int:
+        """Quantize all 2D nn.Linear weights to IRI-FP4 in-place.
+
+        Replaces every nn.Linear (with 2D weight) in the model with an
+        IRIFP4Linear that stores the IRI-FP4 packed weights. This is the
+        build-time quantization path for ForgeLM V2 — call after training
+        (or after loading a non-quantized checkpoint) to get the 3.5x
+        weight compression V2 is designed for.
+
+        Uses ``iri_fp4_rounds`` and ``iri_fp4_block_size`` from the config.
+
+        Returns:
+            Number of nn.Linear layers replaced with IRIFP4Linear.
+        """
+        from research.keys.quantization.iri_fp4_key import (
+            convert_model_to_iri_fp4)
+        _block = int(getattr(self.config, 'iri_fp4_block_size', 32))
+        _rounds = int(getattr(self.config, 'iri_fp4_rounds', 2))
+        n_before = sum(1 for m in self.modules()
+                       if isinstance(m, nn.Linear))
+        convert_model_to_iri_fp4(self, block_size=_block, n_rounds=_rounds)
+        self.invalidate_device_cache()
+        return n_before
+
     def enable_gradient_checkpointing(self, strategy: str = "all"):
         """Enable activation checkpointing on all transformer blocks.
 
@@ -2032,6 +2072,8 @@ class ConfigurableResearchLLM(nn.Module):
             for block in self.blocks:
                 if hasattr(block, 'attn') and hasattr(block.attn, '_conv_state'):
                     block.attn._conv_state_reset = True
+                if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state'):
+                    block.attn._ssm_state = None  # reset Mamba recurrent state
         for i, block in enumerate(self.blocks):
             # DiffusionBlocks: skip layers not in the active set
             if active_layers is not None and i not in active_layers:
@@ -2900,6 +2942,25 @@ class ModelLoader:
                 if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
                     attn.set_identity((attn.lambda_param == 0.0).all().item())
 
+            # ── Post-load IRI-FP4 quantization (V2 default quant) ──
+            # If use_iri_fp4=True but the checkpoint didn't have .iri_packed
+            # keys (non-quantized checkpoint or random init), quantize all
+            # 2D nn.Linear weights to IRI-FP4 now. This makes V2 quantized by
+            # default — any V2 build ends up with IRIFP4Linear modules.
+            if getattr(config, 'use_iri_fp4', False) and not _has_iri:
+                from research.keys.quantization.iri_fp4_key import (
+                    convert_model_to_iri_fp4)
+                _block = getattr(config, 'iri_fp4_block_size', 32)
+                _rounds = getattr(config, 'iri_fp4_rounds', 2)
+                t_q = time.time()
+                model = convert_model_to_iri_fp4(
+                    model, block_size=_block, n_rounds=_rounds)
+                t_q = time.time() - t_q
+                n_iri = sum(1 for m in model.modules()
+                            if m.__class__.__name__ == "IRIFP4Linear")
+                print(f"  [FastBuild] IRI-FP4 post-quant: {n_iri} layers "
+                      f"({_rounds} rounds, {_block} block) in {t_q:.1f}s")
+
             t_total = time.time() - t0
             param_count = sum(p.numel() for p in model.parameters()) / 1e6
             print(f"  [FastBuild] Weights: {t_weights:.1f}s | assign: {t_gpu:.1f}s | "
@@ -3074,6 +3135,29 @@ class ModelLoader:
             print(f"  [FastBuild] Weights: {t_weights:.1f}s | GPU transfer: {t_gpu:.1f}s")
         elif checkpoint_path:
             print(f"Warning: checkpoint {checkpoint_path} not found, using random weights.")
+
+        # ── Post-load IRI-FP4 quantization (V2 default quant) ──
+        # Same as the fast path: if use_iri_fp4=True and the checkpoint
+        # didn't contain .iri_packed keys, quantize now.
+        if getattr(config, 'use_iri_fp4', False):
+            _has_iri_trad = any(
+                k.endswith(".iri_packed")
+                for k in (state if checkpoint_path and os.path.exists(checkpoint_path)
+                          else {}).keys()
+            ) if checkpoint_path and os.path.exists(checkpoint_path) else False
+            if not _has_iri_trad:
+                from research.keys.quantization.iri_fp4_key import (
+                    convert_model_to_iri_fp4)
+                _block = getattr(config, 'iri_fp4_block_size', 32)
+                _rounds = getattr(config, 'iri_fp4_rounds', 2)
+                t_q = time.time()
+                model = convert_model_to_iri_fp4(
+                    model, block_size=_block, n_rounds=_rounds)
+                t_q = time.time() - t_q
+                n_iri = sum(1 for m in model.modules()
+                            if m.__class__.__name__ == "IRIFP4Linear")
+                print(f"  [FastBuild] IRI-FP4 post-quant: {n_iri} layers "
+                      f"({_rounds} rounds, {_block} block) in {t_q:.1f}s")
 
         t_total = time.time() - t0
         param_count = sum(p.numel() for p in model.parameters()) / 1e6

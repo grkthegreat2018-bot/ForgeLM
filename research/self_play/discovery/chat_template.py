@@ -1,21 +1,35 @@
-"""ForgeLM V10 ChatML template + Pythonic tool-call parsing.
+"""ForgeLM V2 ChatML template + tool-call parsing (Jamba Reasoning 3B parent).
 
-ForgeLM V10 uses a ChatML-like format with special tokens:
-  <|startoftext|>  — BOS, start of conversation
-  <|im_start|>     — start of message (followed by role + newline)
-  <|im_end|>       — end of message (= EOS)
-  <|tool_list_start|> / <|tool_list_end|>     — wrap tool definitions in system prompt
-  <|tool_call_start|> / <|tool_call_end|>     — wrap tool calls from assistant
-  <|tool_response_start|> / <|tool_response_end|> — wrap tool results in tool role
+ForgeLM V2 uses ChatML format with Jamba's special tokens:
+  <|startoftext|>  — BOS (id=1), start of conversation
+  <|im_start|>     — start of message (id=518, followed by role + newline)
+  <|im_end|>       — end of message (id=519, also EOS)
+  <tool_call>      — tool call start (id=531, single token)
+  </tool_call>     — tool call end (id=532, single token)
+  <tool_response>  — tool result start (id=539)
+  </tool_response> — tool result end (id=540)
+  <think>          — thinking start (id=541)
+  </think>         — thinking end (id=542)
 
-Tool calls use PYTHONIC syntax (not JSON):
-  <|tool_call_start|>[function_name(arg1='value1', arg2='value2')]<|tool_call_end|>
+Tool calls use JSON syntax (Jamba format):
+  <tool_call>
+  {"name": "function_name", "arguments": {"arg1": "value1"}}
+  </tool_call>
 
-Tool definitions are JSON in the system prompt:
-  List of tools: [{"name": "...", "description": "...", "parameters": {...}}]
+Tool results use:
+  <tool_response>
+  {"result": "..."}
+  </tool_response>
 
-Reference: https://docs.liquid.ai/lfm/key-concepts/chat-template
-           https://docs.liquid.ai/lfm/key-concepts/tool-use
+Thinking mode (Jamba Reasoning):
+  <think>
+  reasoning steps here...
+  </think>
+
+  final answer here...
+
+Legacy LFM2.5 format (Pythonic tool calls) is still supported for backward
+compatibility via the LFM25_COMPAT flag.
 """
 from __future__ import annotations
 
@@ -25,16 +39,26 @@ import re
 from typing import Any
 
 
-# Special token strings (match the tokenizer's special_tokens_map.json).
+# Special token strings — Jamba Reasoning 3B (ForgeLM V2 parent).
 BOS = "<|startoftext|>"
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
-TOOL_LIST_START = "<|tool_list_start|>"
-TOOL_LIST_END = "<|tool_list_end|>"
-TOOL_CALL_START = "<|tool_call_start|>"
-TOOL_CALL_END = "<|tool_call_end|>"
-TOOL_RESP_START = "<|tool_response_start|>"
-TOOL_RESP_END = "<|tool_response_end|>"
+THINK_START = "<think>"
+THINK_END = "</think>"
+
+# Jamba tool call markers (single tokens: 531/532)
+TOOL_CALL_START = "<tool_call>"
+TOOL_CALL_END = "</tool_call>"
+
+# Jamba tool response markers (single tokens: 539/540)
+TOOL_RESP_START = "<tool_response>"
+TOOL_RESP_END = "</tool_response>"
+
+# Legacy LFM2.5 markers (for backward compat, token IDs 10/11)
+_LFM25_TOOL_CALL_START = bytes.fromhex(
+    "3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
+_LFM25_TOOL_CALL_END = bytes.fromhex(
+    "3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
 
 
 def format_tool_definitions(tools: list[dict]) -> str:
@@ -94,9 +118,9 @@ def apply_chat_template(
                 out += render_tool_calls(tool_calls)
             out += f"{IM_END}\n"
         elif role == "tool":
-            # Tool response wrapped in response tokens.
+            # Tool response wrapped in Jamba response tokens.
             content = msg.get("content", "")
-            out += f"{TOOL_RESP_START}{content}{TOOL_RESP_END}{IM_END}\n"
+            out += f"{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{IM_END}\n"
         else:
             # user or other roles.
             out += msg.get("content", "") + f"{IM_END}\n"
@@ -108,45 +132,70 @@ def apply_chat_template(
 
 
 def render_tool_calls(tool_calls: list[dict]) -> str:
-    """Render tool calls in ForgeLM V10 Pythonic syntax.
+    """Render tool calls in Jamba JSON format (ForgeLM V2).
 
     Input: [{"name": "func", "args": {"arg1": "val1"}}]
-    Output: <|tool_call_start|>[func(arg1='val1')]<|tool_call_end|>
+    Output:
+      {"name": "func", "arguments": {"arg1": "val1"}}
+
+    Also accepts OpenAI format: [{"function": {"name": ..., "arguments": ...}}]
     """
-    calls = []
+    parts = []
     for tc in tool_calls:
-        name = tc.get("name", "")
-        args = tc.get("args", {})
-        arg_strs = []
-        for k, v in args.items():
-            if isinstance(v, str):
-                arg_strs.append(f"{k}='{v}'")
-            elif isinstance(v, bool):
-                arg_strs.append(f"{k}={v}")
-            elif isinstance(v, (int, float)):
-                arg_strs.append(f"{k}={v}")
-            else:
-                arg_strs.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-        calls.append(f"{name}({', '.join(arg_strs)})")
-    return f"{TOOL_CALL_START}[{', '.join(calls)}]{TOOL_CALL_END}"
+        # Handle OpenAI format: {"function": {"name": ..., "arguments": ...}}
+        if "function" in tc:
+            fn = tc["function"]
+            name = fn.get("name", "")
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                # arguments may be a JSON string in OpenAI format
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    pass
+        else:
+            name = tc.get("name", "")
+            args = tc.get("args", tc.get("arguments", {}))
+        call_obj = {"name": name, "arguments": args}
+        parts.append(json.dumps(call_obj, ensure_ascii=False))
+    return f"{TOOL_CALL_START}\n" + "\n".join(parts) + f"\n{TOOL_CALL_END}"
 
 
 # ── tool-call parsing ────────────────────────────────────────────────
-_RE_TOOL_CALL = re.compile(
-    re.escape(TOOL_CALL_START) + r'\[(.+?)\]' + re.escape(TOOL_CALL_END),
+# Jamba format: {"name": "...", "arguments": {...}}
+_RE_TOOL_CALL_JAMBA = re.compile(
+    re.escape(TOOL_CALL_START) + r'(.*?)' + re.escape(TOOL_CALL_END),
+    re.DOTALL)
+
+# Legacy LFM2.5 format: [func(arg='val')]
+_RE_TOOL_CALL_LFM25 = re.compile(
+    re.escape(_LFM25_TOOL_CALL_START) + r'\[(.+?)\]' + re.escape(_LFM25_TOOL_CALL_END),
     re.DOTALL)
 
 
 def parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
-    """Parse ForgeLM V10 Pythonic tool calls from model output.
+    """Parse tool calls from model output (Jamba JSON format).
 
     Returns (tool_calls | None, musing_text).
-    Tool calls are in format: <|tool_call_start|>[func(arg='val')]<|tool_call_end|>
+    Tool calls are in Jamba format:
+      {"name": "func", "arguments": {...}}
+
     The musing is everything outside the tool-call tokens.
 
-    Falls back to JSON parsing if the model emits JSON instead (robustness).
+    Falls back to legacy LFM2.5 Pythonic format for backward compat.
     """
-    m = _RE_TOOL_CALL.search(text)
+    # Try Jamba JSON format first
+    m = _RE_TOOL_CALL_JAMBA.search(text)
+    if m:
+        raw = m.group(1).strip()
+        span = m.span()
+        musing = (text[:span[0]] + text[span[1]:]).strip()
+        calls = _parse_json_calls(raw)
+        if calls:
+            return calls, musing
+
+    # Try legacy LFM2.5 Pythonic format
+    m = _RE_TOOL_CALL_LFM25.search(text)
     if m:
         raw = m.group(1).strip()
         span = m.span()
@@ -154,13 +203,10 @@ def parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
         calls = _parse_pythonic_calls(raw)
         if calls:
             return calls, musing
-        # Fall through to JSON attempt if Pythonic parse failed.
 
-    # Fallback: try JSON format {"tool": "...", "args": {...}}
-    # (for robustness — some outputs might use JSON)
+    # Fallback: try bare JSON format {"tool": "...", "args": {...}}
     calls_json = _parse_json_tool_call(text)
     if calls_json:
-        # Find and remove the JSON from the musing.
         hint = re.search(r'\{[^{}]*"tool"[^{}]*\}', text, re.DOTALL)
         if hint:
             musing = (text[:hint.start()] + text[hint.end():]).strip()
@@ -169,6 +215,26 @@ def parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
         return calls_json, musing
 
     return None, text.strip()
+
+
+def _parse_json_calls(raw: str) -> list[dict] | None:
+    """Parse Jamba JSON tool calls: {"name": "...", "arguments": {...}}"""
+    calls = []
+    # May contain multiple JSON objects (one per line or comma-separated)
+    for line in raw.strip().split('\n'):
+        line = line.strip().rstrip(',')
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict) and "name" in obj:
+                calls.append({
+                    "name": obj["name"],
+                    "args": obj.get("arguments", obj.get("args", {})),
+                })
+        except json.JSONDecodeError:
+            continue
+    return calls if calls else None
 
 
 def _parse_pythonic_calls(raw: str) -> list[dict] | None:

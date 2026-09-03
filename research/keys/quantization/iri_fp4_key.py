@@ -477,9 +477,15 @@ def convert_model_to_iri_fp4(model: nn.Module, block_size: int = 32,
 
 def build_iri_fp4_linear(config, in_features: int, out_features: int,
                          bias: bool = True) -> nn.Module:
-    """Build an IRIFP4Linear honoring the model config."""
+    """Build an IRIFP4Linear honoring the model config.
+
+    Reads ``iri_fp4_rounds`` (canonical) with fallback to
+    ``iri_fp4_n_rounds`` (legacy alias) for the round count.
+    """
+    n_rounds = int(getattr(config, "iri_fp4_rounds",
+                           getattr(config, "iri_fp4_n_rounds", 3)))
     return IRIFP4Linear(
         in_features, out_features, bias=bias,
         block_size=int(getattr(config, "iri_fp4_block_size", 32)),
-        n_rounds=int(getattr(config, "iri_fp4_n_rounds", 3)),
+        n_rounds=n_rounds,
     )

@@ -182,6 +182,41 @@ unless the user explicitly overrides them for a specific task.
     `flash_attention/varlen_attention -> torch.Tensor`
 - **Test results**: 1077 passed, 3 skipped, 0 failed (was 1074+3 failed)
 
+#### Agent harness 2026-09-02: Web tools exposed to the model
+- **Problem**: `ToolHarness` exposed coding/memory/LoRA/MCP/backup/sub-agent/
+  time/library tools but NO web tools — the agent could not do real-time
+  research. `engine_tools.py` had Tavily/Exa/Firecrawl web tools but those
+  need API keys; `research/self_play/discovery/discovery_tools.py` had a
+  proven KEYLESS DuckDuckGo-HTML/Wikipedia/arXiv/URL-fetch implementation
+  (stdlib urllib, GET-only) but it was private to the self-play subsystem.
+- **New module** `forge_gui/api/web_tools.py`: `WebTools` class +
+  `web_tool_defs()` exposing 4 tools to the model: `web_search` (DuckDuckGo
+  HTML, no key), `web_fetch` (http(s)-only GET, HTML→text strip, truncation),
+  `wikipedia_search` (REST API), `arxiv_search` (Atom API). Primitives reuse
+  the proven discovery_tools regex/parse logic (duplicated, not imported —
+  discovery versions are `_`-private and coupled to the self-play DB emit
+  pattern; `forge_gui/api/` must not depend on `research/self_play/`).
+  Safety: `_is_safe_url()` rejects `javascript:`/`file:`/`data:`/`ftp:`
+  before any network call; all requests GET-only with a hard 12s timeout;
+  output capped (`MAX_FETCH_CHARS=4000`, snippets 400 chars) for the 12GB
+  KV-cache budget; `n` clamped to [1,10], `max_chars` to [200,8000].
+- **Wiring**: `ToolHarness.__init__` gained `web_tools: Optional[WebTools]`;
+  `tool_defs()` extends with `web_tool_defs()`; `execute()` dispatches
+  `WebTools.NAMES` to `web_tools.execute()` (normalizes falsy `error` key
+  so the harness `"error" in result` ok-check works); `chat_tool_defs()`
+  includes web tools (read-only GET → safe for chat). `app.py` constructs
+  `WebTools(enabled=True)` and passes it to the shared harness. `agent.py`
+  `HARNESS_EXTRA_TOOLS` now includes the 4 web tool names → always enabled
+  (read-only, no approval prompt, not in `SIDE_EFFECT_TOOLS`).
+- **Tests**: `tests/unit/test_gui_web_tools.py` (35) — defs shape, URL
+  scheme validation (parametrized), DDG redirect unwrap, HTML/JSON/XML
+  parsing, network-error handling, `WebTools.execute` dispatch + n/max_chars
+  clamping + disabled flag, ToolHarness integration (defs include web,
+  dispatch works, error marked not-ok, chat_defs include web, read-only
+  mode keeps web). All network mocked via `unittest.mock.patch` on
+  `urlopen` — no real HTTP, fast & deterministic. Suite: 290 GUI/tool/web
+  tests pass.
+
 #### GUI 2026-09-01: ForgeAI Control Center v2 (LM Studio + Agent + Train platform)
 - **New shared backends** (`forge_gui/api/`):
   - `chat_store.py` — pure-python conversation persistence

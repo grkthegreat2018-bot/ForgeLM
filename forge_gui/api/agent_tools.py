@@ -150,6 +150,25 @@ class ToolSandbox:
                 raise ValueError(f"unknown tool: {name}")
             result = fn(**args)
             ok = not (isinstance(result, dict) and "error" in result)
+        except TypeError as e:
+            # Include expected parameters in error for wrong-arg failures
+            import inspect
+            fn = getattr(self, f"tool_{name}", None)
+            expected = ""
+            if fn is not None:
+                try:
+                    sig = inspect.signature(fn)
+                    params = []
+                    for pname, p in sig.parameters.items():
+                        if p.default is inspect.Parameter.empty:
+                            params.append(f"{pname} (required)")
+                        else:
+                            params.append(f"{pname}={p.default!r}")
+                    expected = f". Expected parameters: {', '.join(params)}"
+                except (ValueError, TypeError):
+                    pass
+            result = {"error": f"{type(e).__name__}: {e}{expected}"}
+            ok = False
         except Exception as e:
             result = {"error": f"{type(e).__name__}: {e}"}
             ok = False

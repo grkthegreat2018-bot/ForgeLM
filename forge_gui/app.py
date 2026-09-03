@@ -33,6 +33,7 @@ from .api.status_reader import StatusReader, project_root
 from .api.sub_agent import SubAgentManager
 from .api.time_manager import TimeManager
 from .api.tool_harness import ToolHarness
+from .api.web_tools import WebTools
 from .api.lora_training_trigger import LoraTrainingTrigger
 from .pages.agent import AgentPage
 from .pages.chat import ChatPage
@@ -116,6 +117,7 @@ class MainWindow(QMainWindow):
         self.sub_agent_manager = SubAgentManager(self.engine_runtime, parent=self)
         self.time_manager = TimeManager(parent=self)
         self.library_manager = LibraryInstallManager(parent=self)
+        self.web_tools = WebTools(enabled=True)
         # shared tool harness for agent mode (full access)
         self.tool_harness = ToolHarness(
             workspace=str(project_root()),
@@ -127,6 +129,7 @@ class MainWindow(QMainWindow):
             sub_agent_manager=self.sub_agent_manager,
             time_manager=self.time_manager,
             library_manager=self.library_manager,
+            web_tools=self.web_tools,
             read_only=False,
             enable_safety=True,
         )
@@ -217,10 +220,22 @@ class MainWindow(QMainWindow):
             last_page = int(self._settings.value("lastPage", 0) or 0)
         except (TypeError, ValueError):
             last_page = 0
-        self.sidebar.select_page(last_page)
+        # Set the visible page immediately WITHOUT triggering refresh —
+        # setCurrentIndex + title update are instant, so the window paints
+        # the correct page on win.show() without waiting for GPU/CUDA init
+        # or disk scans. The sidebar button state + first refresh are
+        # deferred to the event loop (fires after win.show() but before the
+        # 500ms fast timer), so the heavy refresh() runs on a visible window
+        # instead of blocking the window from appearing.
+        self.pages.setCurrentIndex(last_page)
+        _name = _INDEX_TO_NAME.get(last_page, "")
+        self.page_title.setText(_name)
+        self.page_subtitle.setText(_SUBTITLES.get(_name, ""))
+        QTimer.singleShot(0, lambda: self.sidebar.select_page(last_page))
 
-        self._refresh_slow()
-        self._refresh_fast()
+        # NOTE: no eager _refresh_slow()/_refresh_fast() here — the timers
+        # (started above) fire on the next event-loop tick after win.show(),
+        # so the window appears before GPU/CUDA init or page scans run.
 
     def _setup_shortcuts(self) -> None:
         # Ctrl+1..N switch pages (N = number of selectable pages)

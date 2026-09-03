@@ -291,6 +291,13 @@ QTextEdit#toolResult {
 QLabel#toolOk { color: #3fb950; font-size: 10px; font-weight: 700; }
 QLabel#toolErr { color: #f85149; font-size: 10px; font-weight: 700; }
 QLabel#toolPending { color: #d29922; font-size: 10px; font-weight: 700; }
+QToolButton#categoryToggle {
+    background: #1a2138; color: #9fb4ff; border: 1px solid #2a3450;
+    border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: 600; }
+QToolButton#categoryToggle:checked {
+    background: #243056; color: #3ad9c9; border-color: #3ad9c9; }
+QToolButton#categoryToggle:hover {
+    border-color: #3ad9c9; }
 
 /* ── Engine console / fine-tune studio ───────────────── */
 QLabel#engineState { font-size: 12px; font-weight: 700; letter-spacing: 1px; }

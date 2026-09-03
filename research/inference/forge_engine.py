@@ -66,7 +66,63 @@ import torch
 import torch.nn.functional as F
 
 _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
-_DEFAULT_EOS_TOKEN_IDS = frozenset({7, 151643, 151645})
+# EOS token IDs for all supported parent models:
+#   LFM2.5: 7 (<|im_end|>), 151643/151645 (Qwen-style)
+#   Jamba Reasoning 3B: 2 (<|endoftext|>), 519 (<|im_end|>)
+_DEFAULT_EOS_TOKEN_IDS = frozenset({2, 7, 519, 151643, 151645})
+
+
+def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
+    """Min-k semantic-cliff sampling filter (ACL 2026, Ding et al.).
+
+    Analyzes the local shape of the sorted logit distribution to identify
+    "semantic cliffs" — sharp transitions from high-confidence core tokens
+    to uncertain long-tail tokens. Computes a position-weighted relative
+    decay rate to dynamically determine truncation boundaries at each step.
+
+    Temperature-invariant: operates on relative logit dynamics, not absolute
+    probabilities. Low sensitivity to hyperparameter choices.
+
+    Args:
+        logits: (batch, vocab) logit tensor.
+        sensitivity: cliff detection sensitivity in [0, 1]. Higher = more
+            aggressive truncation. 0 = no filtering.
+
+    Returns:
+        Filtered logits with long-tail tokens masked to -inf.
+    """
+    if sensitivity <= 0:
+        return logits
+    sorted_logits, _ = torch.sort(logits, descending=True, dim=-1)
+    # Compute relative decay rate between consecutive sorted logits.
+    # Avoid division by zero by adding small epsilon.
+    eps = 1e-8
+    diffs = sorted_logits[..., :-1] - sorted_logits[..., 1:]
+    # Position weights: emphasize earlier positions (high-confidence core).
+    # Weight decays linearly so cliffs near the top are more significant.
+    n = diffs.shape[-1]
+    weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
+    weighted_diffs = diffs * weights
+    # Find the sharpest transition (semantic cliff).
+    # The cliff is where the weighted decay rate exceeds sensitivity * max_decay.
+    max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
+    cliff_mask = weighted_diffs > sensitivity * max_decay  # (batch, n)
+    # Find the first cliff position (rightmost cliff that separates core from tail).
+    # We want to keep all tokens up to and including the last cliff.
+    # cliff_mask is True at positions where there's a sharp transition.
+    # The truncation point is the position of the sharpest cliff.
+    cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)  # (batch, 1)
+    # Keep tokens [0, cliff_pos], mask the rest.
+    positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
+    keep = positions <= cliff_pos  # (batch, vocab)
+    # Apply mask: set logits below threshold to -inf.
+    # We need to map back from sorted to original indices.
+    sorted_indices = torch.sort(logits, descending=True, dim=-1).indices
+    # Create a mask in original index space.
+    mask = torch.zeros_like(logits, dtype=torch.bool)
+    mask.scatter_(-1, sorted_indices, ~keep)
+    return logits.masked_fill(mask, float("-inf"))
+
 
 # Module-level caches to avoid repeated disk I/O for checkpoint metadata and sizes.
 # Keyed by (path, mtime) so stale entries are invalidated when the file changes.
@@ -1052,6 +1108,7 @@ class ForgeEngine:
         "xquant": ["s4r", "standard", "cpu_offload"],
         "hqe_kv": ["s4r", "standard", "cpu_offload"],
         "spectral": ["s4r", "standard", "cpu_offload"],
+        "residual_stream": ["s4r", "standard", "cpu_offload"],
         "s4r": ["standard", "cpu_offload"],
         "standard": ["cpu_offload"],
         "cpu_offload": [],
@@ -1418,7 +1475,8 @@ class ForgeEngine:
                  top_k: int = 80, repetition_penalty: float = 1.05,
                  finish_sentence: bool = True,
                  context_limit: int | None = None,
-                 skip_special_tokens: bool = True) -> str:
+                 skip_special_tokens: bool = True,
+                 min_p: float = 0.0, min_k: float = 0.0) -> str:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -1435,20 +1493,26 @@ class ForgeEngine:
             skip_special_tokens: If True (default), strips special tokens from
                 output. Set to False for tool-call parsing (preserves
                 <|tool_call_start|>/<|tool_call_end|> markers).
+            min_p: Min-p sampling threshold (0 = disabled). Filters tokens
+                below min_p * max_prob. Temperature-invariant.
+            min_k: Min-k semantic-cliff sampling sensitivity (0 = disabled).
+                Detects sharp logit transitions for dynamic truncation.
+                Temperature-invariant (ACL 2026).
         """
         return self._generate_with_oom_recovery(
             self._generate_impl, prompt, max_new_tokens, temperature,
             top_p, top_k, repetition_penalty, finish_sentence,
-            context_limit, skip_special_tokens)
+            context_limit, skip_special_tokens, min_p, min_k)
 
     def _generate_impl(self, prompt, max_new_tokens, temperature, top_p,
                        top_k, repetition_penalty, finish_sentence,
-                       context_limit, skip_special_tokens) -> str:
+                       context_limit, skip_special_tokens,
+                       min_p: float = 0.0, min_k: float = 0.0) -> str:
         """Internal generate implementation (no OOM wrapper)."""
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty)
+            repetition_penalty, min_p, min_k)
         self._check_vram_and_offload_if_needed()
 
         # Apply pending hot-swap changes before generation
@@ -1503,7 +1567,8 @@ class ForgeEngine:
         elif output_ids is None:
             output_ids = self.decoding.generate(
                 self.model, ids, max_new_tokens, temperature, top_p,
-                top_k=top_k, repetition_penalty=repetition_penalty)
+                top_k=top_k, repetition_penalty=repetition_penalty,
+                min_p=min_p, min_k=min_k)
 
         # Capture KV cache from decoding step for fast finish-to-stop path
         captured_kv = getattr(self.model, '_forge_last_kv', None)
@@ -1869,7 +1934,9 @@ class ForgeEngine:
     def _sample_next_token(self, logits: torch.Tensor, temperature: float,
                            top_k: int, top_p: float,
                            repetition_penalty: float,
-                           generated_ids: list[int]) -> torch.Tensor:
+                           generated_ids: list[int],
+                           min_p: float = 0.0,
+                           min_k: float = 0.0) -> torch.Tensor:
         """Sample the next token from logits with top-k / top-p / rep-penalty.
 
         Centralised sampling used by generate_raw, generate_stream,
@@ -1884,6 +1951,14 @@ class ForgeEngine:
             top_p: nucleus filter (1.0 = disabled).
             repetition_penalty: divisor applied to last 64 generated tokens.
             generated_ids: token IDs generated so far (for rep penalty).
+            min_p: minimum-probability sampling (0 = disabled). Tokens with
+                probability < min_p * max_prob are filtered. Temperature-
+                invariant dynamic truncation (Min-p sampling paper, 2024).
+            min_k: Min-k semantic-cliff sampling (0 = disabled). Analyzes
+                local shape of sorted logit distribution to find "semantic
+                cliffs" — sharp transitions from high-confidence to long-tail.
+                Temperature-invariant (ACL 2026, Ding et al.). Range [0, 1]:
+                0 = disabled, higher = more aggressive cliff detection.
 
         Returns:
             next_token tensor of shape (batch, 1).
@@ -1899,6 +1974,27 @@ class ForgeEngine:
             repeated = torch.tensor(
                 tuple(set(generated_ids[-64:])), device=logits.device)
             next_logits[:, repeated] /= repetition_penalty
+
+        # Min-p sampling: filter tokens below min_p * max_prob.
+        # Temperature-invariant because it's applied in probability space
+        # relative to the top token. Applied early as a coarse filter.
+        if min_p > 0.0:
+            probs = torch.softmax(next_logits, dim=-1)
+            max_prob = probs.max(dim=-1, keepdim=True).values
+            threshold = min_p * max_prob
+            next_logits = torch.where(
+                probs < threshold,
+                torch.full_like(next_logits, float("-inf")),
+                next_logits,
+            )
+
+        # Min-k sampling: detect semantic cliffs in sorted logit distribution.
+        # Temperature-invariant — operates on relative logit dynamics, not
+        # absolute probabilities. Finds the sharpest transition from
+        # high-confidence core to uncertain long-tail and truncates there.
+        if min_k > 0.0:
+            next_logits = _min_k_filter(next_logits, min_k)
+
         # Top-k filtering
         if top_k > 0:
             candidate_logits, candidate_ids = torch.topk(
@@ -1941,7 +2037,7 @@ class ForgeEngine:
     def _decode_tokens(
         self, logits, past_kv, max_new_tokens, temperature, top_p, top_k,
         repetition_penalty, stop_token_ids, generated_ids=None,
-        logits_processor=None,
+        logits_processor=None, min_p: float = 0.0, min_k: float = 0.0,
     ):
         generated_ids = generated_ids if generated_ids is not None else []
         try:
@@ -1954,7 +2050,7 @@ class ForgeEngine:
 
                 next_token = self._sample_next_token(
                     next_logits, temperature, top_k, top_p,
-                    repetition_penalty, generated_ids)
+                    repetition_penalty, generated_ids, min_p, min_k)
                 token_id = next_token.item()
                 generated_ids.append(token_id)
                 should_stop = token_id in stop_token_ids
@@ -1991,6 +2087,8 @@ class ForgeEngine:
         logits_processor=None,
         eos_token_ids: list[int] | None = None,
         skip_special_tokens: bool = False,
+        min_p: float = 0.0,
+        min_k: float = 0.0,
     ) -> str:
         """Generate text with raw control — for self-play / agentic loops.
 
@@ -2017,6 +2115,8 @@ class ForgeEngine:
                 {7, 151643, 151645} (LFM2.5 + Qwen2.5 defaults).
             skip_special_tokens: if True, strips special tokens from output.
                 Self-play needs False to preserve tool-call markers.
+            min_p: Min-p sampling threshold (0 = disabled).
+            min_k: Min-k semantic-cliff sampling (0 = disabled).
 
         Returns:
             Decoded string of generated tokens (not including prompt).
@@ -2024,7 +2124,7 @@ class ForgeEngine:
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty)
+            repetition_penalty, min_p, min_k)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
 
@@ -2037,6 +2137,7 @@ class ForgeEngine:
             for _ in self._decode_tokens(
                 logits, past_kv, max_new_tokens, temperature, top_p, top_k,
                 repetition_penalty, eos_set, generated_ids, logits_processor,
+                min_p, min_k,
             ):
                 pass
 
@@ -2057,6 +2158,8 @@ class ForgeEngine:
         skip_special_tokens: bool = True,
         logits_processor=None,
         eos_token_ids: list[int] | None = None,
+        min_p: float = 0.0,
+        min_k: float = 0.0,
     ) -> Iterator[str]:
         """Token-by-token streaming generator.
 
@@ -2072,11 +2175,13 @@ class ForgeEngine:
                 called BEFORE top-k/temperature. Use for grammar constraints.
             eos_token_ids: custom EOS token IDs to stop on. If None, uses
                 {7, 151643, 151645} (LFM2.5 + Qwen2.5 defaults).
+            min_p: Min-p sampling threshold (0 = disabled).
+            min_k: Min-k semantic-cliff sampling (0 = disabled).
         """
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty)
+            repetition_penalty, min_p, min_k)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
 
@@ -2092,6 +2197,7 @@ class ForgeEngine:
             for next_token, _ in self._decode_tokens(
                 logits, past_kv, max_new_tokens, temperature, top_p, top_k,
                 repetition_penalty, eos_set, generated_ids, logits_processor,
+                min_p, min_k,
             ):
                 chunk = self._safe_decode_ids([next_token.item()],
                                               skip_special_tokens)
@@ -2115,7 +2221,8 @@ class ForgeEngine:
 
     def _validate_generation_params(self, prompt: str, max_new_tokens: int,
                                     temperature: float, top_p: float,
-                                    top_k: int, repetition_penalty: float):
+                                    top_k: int, repetition_penalty: float,
+                                    min_p: float = 0.0, min_k: float = 0.0):
         """Validate generation parameters before starting.
 
         Raises ``ConfigurationError`` or ``GenerationError`` on invalid input.
@@ -2141,6 +2248,12 @@ class ForgeEngine:
         if repetition_penalty <= 0:
             raise ConfigurationError(
                 f"repetition_penalty must be positive, got {repetition_penalty}")
+        if not (0 <= min_p <= 1.0):
+            raise ConfigurationError(
+                f"min_p must be in [0, 1.0], got {min_p}")
+        if not (0 <= min_k <= 1.0):
+            raise ConfigurationError(
+                f"min_k must be in [0, 1.0], got {min_k}")
 
         # Check prompt length vs model max_seq_len (warn, don't block —
         # tokenizer may handle truncation, and estimate is rough)
@@ -2436,6 +2549,323 @@ class ForgeEngine:
                         source="engine",
                         warnings=len(report.get("warnings", [])))
         return report
+
+    # ── Evolutionary model merging ("sexual reproduction") ────────────────
+    # Implements the GENOME framework (Zhang et al. 2026): crossover,
+    # mutation, selection, succession over a population of model checkpoints.
+    # All weight recombination runs in CPU RAM; the GPU is only used for
+    # fitness evaluation (one candidate at a time → fits 12GB VRAM).
+    #
+    # See research/merge_models.py for the operator implementations.
+
+    @staticmethod
+    def _load_state_dict_cpu(path: str) -> dict:
+        """Load a checkpoint's tensors to CPU (for merge/evolve operations)."""
+        from research.checkpoint_io import load_checkpoint
+        state = load_checkpoint(path, map_location="cpu")
+        return {k: v for k, v in state.items() if isinstance(v, torch.Tensor)}
+
+    def _swap_weights(self, state: dict[str, torch.Tensor]) -> None:
+        """Hot-swap model weights in-place from a CPU state dict.
+
+        Loads the given state dict into the resident model using
+        ``load_state_dict(assign=True)`` — no model reconstruction, just
+        pointer swaps. Used as the fitness-evaluation primitive for
+        evolutionary merging: swap in a candidate, benchmark, swap back.
+
+        The model must already be built with the same architecture (same
+        config_name as the parents). All parents in an evolutionary run
+        MUST share the same architecture for this to work.
+        """
+        # Move tensors to the model's device and assign
+        dev_state = {k: (v.to(self.device) if not v.is_meta else v)
+                     for k, v in state.items()}
+        missing, unexpected = self.model.load_state_dict(
+            dev_state, strict=False, assign=True)
+        if dev_state and self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def merge_checkpoints(
+        self,
+        parents: list[str],
+        method: str = "blockwise_crossover",
+        out_path: str | None = None,
+        config_name: str | None = None,
+        load_result: bool = False,
+        **kwargs,
+    ) -> str:
+        """One-shot merge of 2+ checkpoint paths → saved merged checkpoint.
+
+        Wraps the merge functions from ``research.merge_models.py``. The
+        merged checkpoint is saved to ``out_path`` (or a temp file) and the
+        path is returned. If ``load_result=True``, the merged weights are
+        also hot-swapped into this engine.
+
+        Args:
+            parents: list of checkpoint paths (>=2 for crossover, >=1 for
+                mutation).
+            method: one of:
+                - "blockwise_crossover" (2 parents, block-level splice)
+                - "block_random_crossover" (2 parents, per-block random)
+                - "uniform_crossover" (2 parents, per-tensor random)
+                - "gaussian_mutation" (1 parent, Gaussian noise)
+                - "quant_perturb" (1 parent, quantization-scale mutation)
+                - "block_swap" (2 parents: recipient + donor)
+                - "slerp", "linear", "ties", "dare", "svd", "task_arith"
+                  (legacy merge methods from merge_models.py)
+            out_path: where to save the merged checkpoint. If None, uses
+                ``data/merged/<method>_<timestamp>.safetensors``.
+            config_name: config name for the parents (used only if
+                load_result=True). Defaults to the engine's current config.
+            load_result: if True, hot-swap the merged weights into this
+                engine after saving.
+            **kwargs: method-specific params (e.g. split_block, p, sigma,
+                rate, t, density, drop_rate, rank_ratio, seed).
+
+        Returns:
+            Path to the saved merged checkpoint.
+        """
+        from research.merge_models import (
+            crossover_blockwise, crossover_block_random, crossover_uniform,
+            mutate_gaussian, mutate_quant_perturb, mutate_block_swap,
+            merge_slerp, merge_linear, merge_ties, merge_dare, merge_svd,
+            merge_task_arith, _task_vectors,
+        )
+        from research.checkpoint_io import save_checkpoint
+        from research.paths import DATA_DIR
+
+        if len(parents) < 1:
+            raise ConfigurationError("merge_checkpoints needs >=1 parent")
+
+        states = [self._load_state_dict_cpu(p) for p in parents]
+        seed = kwargs.pop("seed", 0)
+
+        method_map = {
+            "blockwise_crossover": lambda: crossover_blockwise(
+                states[0], states[1], seed=seed, **kwargs),
+            "block_random_crossover": lambda: crossover_block_random(
+                states[0], states[1], seed=seed, **kwargs),
+            "uniform_crossover": lambda: crossover_uniform(
+                states[0], states[1], seed=seed, **kwargs),
+            "gaussian_mutation": lambda: mutate_gaussian(
+                states[0], seed=seed, **kwargs),
+            "quant_perturb": lambda: mutate_quant_perturb(
+                states[0], seed=seed, **kwargs),
+            "block_swap": lambda: mutate_block_swap(
+                states[0], states[1], seed=seed, **kwargs),
+            "slerp": lambda: merge_slerp(
+                states[0], states[1], t=kwargs.pop("t", 0.5)),
+            "linear": lambda: merge_linear(states, kwargs.pop("weights", None)),
+            "ties": lambda: merge_ties(
+                states[0], [_task_vectors(s, states[0]) for s in states[1:]],
+                density=kwargs.pop("density", 0.5)),
+            "dare": lambda: merge_dare(
+                states[0], [_task_vectors(s, states[0]) for s in states[1:]],
+                drop_rate=kwargs.pop("drop_rate", 0.1), seed=seed),
+            "svd": lambda: merge_svd(
+                states[0], [_task_vectors(s, states[0]) for s in states[1:]],
+                rank_ratio=kwargs.pop("rank_ratio", 0.5),
+                scales=kwargs.pop("weights", None)),
+            "task_arith": lambda: merge_task_arith(
+                states[0], [_task_vectors(s, states[0]) for s in states[1:]],
+                scales=kwargs.pop("weights", None)),
+        }
+        if method not in method_map:
+            raise ConfigurationError(
+                f"Unknown merge method: {method}. Valid: {list(method_map)}")
+
+        merged = method_map[method]()
+
+        if out_path is None:
+            import time as _t
+            out_path = str(Path(DATA_DIR) / "merged" /
+                           f"{method}_{int(_t.time())}.safetensors")
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        save_checkpoint(merged, out_path)
+        self._log(f"Merge ({method}): {len(parents)} parents → {out_path} "
+                  f"({len(merged)} tensors)")
+
+        if load_result:
+            self._swap_weights(merged)
+            self._log(f"Merge result hot-swapped into engine")
+
+        return out_path
+
+    def evolve_merge(
+        self,
+        parents: list[str],
+        fitness_fn=None,
+        n_generations: int = 5,
+        population_size: int | None = None,
+        crossover: str = "blockwise",
+        crossover_kwargs: dict | None = None,
+        mutation: str = "gaussian",
+        mutation_kwargs: dict | None = None,
+        mutation_rate: float = 0.5,
+        elitism: int = 1,
+        out_dir: str | None = None,
+        seed: int = 0,
+        benchmark_prompt: str = "The quick brown fox jumps over the lazy dog.",
+        benchmark_tokens: int = 32,
+        restore_original: bool = True,
+        verbose: bool = True,
+        selection: str = "tournament",
+        selection_kwargs: dict | None = None,
+        fitness_scaling: str = "none",
+        progress_bonus: float = 0.0,
+        diversity_bonus: float = 0.0,
+        adaptive_mutation: bool = False,
+        hall_of_fame_size: int = 0,
+        convergence_patience: int = 0,
+    ) -> dict:
+        """Evolutionary model merging — "sexually reproduce" LLM checkpoints.
+
+        Runs the GENOME-style evolutionary loop (crossover → mutation →
+        selection → succession) over a population of checkpoint paths,
+        using this engine as the fitness evaluator. The best offspring is
+        saved to disk and its path returned.
+
+        **Sophisticated candidate selection** (``selection`` parameter):
+          - "tournament": k-way tournament (classic, robust, default)
+          - "rank": linear ranking with selection pressure (outlier-resistant)
+          - "roulette": fitness-proportionate (fast, needs non-negative fitness)
+          - "diversity": novelty-quality hybrid (prevents premature convergence)
+
+        **Score rewarding**:
+          - ``fitness_scaling``: "none", "sigma" (linear sigma scaling),
+            "rank" (rank-based). Prevents single-individual dominance.
+          - ``progress_bonus``: rewards offspring that beat parent fitness.
+          - ``diversity_bonus``: rewards individuals far from population centroid.
+          - ``adaptive_mutation``: dynamically adjusts mutation_rate based on
+            population diversity (increases on stagnation, decreases on convergence).
+          - ``hall_of_fame_size``: maintains best-ever individuals as elite donors.
+          - ``convergence_patience``: early stop if no improvement for N gens.
+
+        **VRAM budget**: All weight recombination happens in CPU RAM. The
+        GPU is only used to evaluate one candidate at a time via in-place
+        weight hot-swap (``_swap_weights``). For a 1.2B model, each
+        candidate eval is ~2-3s; population_size=8 × n_generations=5 =
+        ~40 evals ≈ 2 minutes. No additional VRAM beyond the resident model.
+
+        **Fitness function**: If ``fitness_fn`` is None, uses
+        ``engine.benchmark(benchmark_prompt, max_new_tokens=benchmark_tokens)``
+        and returns ``tokens_per_sec`` (higher = faster = better). Pass a
+        custom ``fitness_fn(state_dict) -> float`` for quality-based
+        fitness (e.g. perplexity, benchmark accuracy — negate for
+        minimization). The custom fn receives a CPU state dict and is
+        responsible for any GPU loading (or call ``engine._swap_weights``).
+
+        Args:
+            parents: list of checkpoint paths (>=2). These form the initial
+                population. All MUST share the same architecture/config.
+            fitness_fn: callable(cpu_state_dict) -> float. If None, uses
+                benchmark speed (tok/s). Higher = better.
+            n_generations: number of evolutionary generations.
+            population_size: target pop size per gen. None = len(parents).
+            crossover: "blockwise", "block_random", or "uniform".
+            crossover_kwargs: extra kwargs for the crossover function.
+            mutation: "gaussian", "quant_perturb", or "block_swap".
+            mutation_kwargs: extra kwargs for the mutation function.
+            mutation_rate: probability each offspring is mutated.
+            elitism: number of top individuals carried forward unchanged.
+            out_dir: directory for saving per-generation best + final best.
+                If None, uses ``data/evolved/<timestamp>/``.
+            seed: base RNG seed.
+            benchmark_prompt: prompt for the default benchmark fitness.
+            benchmark_tokens: max_new_tokens for the default benchmark fitness.
+            restore_original: if True, restore the engine's original weights
+                after evolution (the engine is used as an evaluator, not
+                mutated in place). Set False to keep the best weights loaded.
+            verbose: print per-generation progress.
+
+        Returns:
+            dict from ``research.merge_models.evolve()``:
+            - "best": best state dict (CPU)
+            - "best_fitness": float
+            - "best_path": path to saved best checkpoint (if out_dir set)
+            - "history": list of per-gen fitness stats
+            - "final_population": list of state dicts
+        """
+        from research.merge_models import evolve
+        from research.checkpoint_io import save_checkpoint
+        from research.paths import DATA_DIR
+
+        if len(parents) < 2:
+            raise ConfigurationError(
+                "evolve_merge needs >=2 parent checkpoints to breed")
+
+        self._require_awake()
+        self._log(f"Evolutionary merge: {len(parents)} parents, "
+                  f"{n_generations} generations, crossover={crossover}, "
+                  f"mutation={mutation}")
+
+        # Save original weights so we can restore the engine after evolution
+        original_state = None
+        if restore_original:
+            original_state = {
+                k: v.detach().clone().to("cpu")
+                for k, v in self.model.state_dict().items()
+            }
+
+        # Build the fitness function
+        if fitness_fn is None:
+            def fitness_fn(state: dict) -> float:
+                """Default fitness: generation speed (tok/s). Higher = better."""
+                try:
+                    self._swap_weights(state)
+                    result = self.benchmark(
+                        benchmark_prompt, max_new_tokens=benchmark_tokens,
+                        n_runs=1)
+                    return result["tokens_per_sec"]
+                except Exception as e:
+                    self._log(f"Fitness eval failed: {e}", level="warn")
+                    return 0.0
+
+        # Load initial population to CPU
+        population = [self._load_state_dict_cpu(p) for p in parents]
+
+        # Output directory
+        if out_dir is None:
+            import time as _t
+            out_dir = str(Path(DATA_DIR) / "evolved" / f"run_{int(_t.time())}")
+
+        result = evolve(
+            population,
+            fitness_fn,
+            n_generations=n_generations,
+            population_size=population_size,
+            crossover=crossover,
+            crossover_kwargs=crossover_kwargs,
+            mutation=mutation,
+            mutation_kwargs=mutation_kwargs,
+            mutation_rate=mutation_rate,
+            elitism=elitism,
+            seed=seed,
+            save_fn=save_checkpoint,
+            out_dir=out_dir,
+            verbose=verbose,
+            selection=selection,
+            selection_kwargs=selection_kwargs,
+            fitness_scaling=fitness_scaling,
+            progress_bonus=progress_bonus,
+            diversity_bonus=diversity_bonus,
+            adaptive_mutation=adaptive_mutation,
+            hall_of_fame_size=hall_of_fame_size,
+            convergence_patience=convergence_patience,
+        )
+
+        self._log(f"Evolution complete: best_fitness={result['best_fitness']:.4f}, "
+                  f"best_path={result['best_path']}")
+
+        # Restore original weights or load the best
+        if restore_original and original_state is not None:
+            self._swap_weights(original_state)
+            self._log("Restored original engine weights after evolution")
+        elif result["best"] is not None:
+            self._swap_weights(result["best"])
+            self._log("Loaded best evolved weights into engine")
+
+        return result
 
     # ── LoRA hot-loading ───────────────────────────────────────────────────
 

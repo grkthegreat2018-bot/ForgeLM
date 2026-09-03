@@ -76,8 +76,9 @@ class BackupManager(QObject):
         self._active = False
         self._frozen = False
         self._project_name = self.project_root.name
-        # initial snapshot
-        self._snapshot_hashes()
+        # NOTE: initial snapshot deferred to start() — hashing every file in
+        # the project at construction time blocked GUI startup for several
+        # seconds. start() (agentic mode only) calls _snapshot_hashes().
 
     @property
     def project_name(self) -> str:

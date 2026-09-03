@@ -127,6 +127,13 @@ scripts/r2*_*.json
 scripts/_*.json
 scripts/_*.txt
 
+# Downloaded SFT datasets (multi-100MB, live on HuggingFace — keep scripts, not data)
+scripts/sft/**/.cache/
+scripts/sft/**/*.json
+scripts/sft/**/*.parquet
+!scripts/sft/**/*.md
+!scripts/sft/**/.gitattributes
+
 # IDE / OS
 .vscode/
 .idea/

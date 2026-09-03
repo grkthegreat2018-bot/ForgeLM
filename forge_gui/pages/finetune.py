@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                                QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox,
@@ -71,8 +71,10 @@ class FineTunePage(QWidget):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
         outer.addWidget(splitter)
-        self._reload_models()
-        self.refresh()
+        # Defer heavy scans to after window show — _reload_models() and
+        # refresh() scan data/sft/ and count examples per file.
+        QTimer.singleShot(0, self._reload_models)
+        QTimer.singleShot(0, self.refresh)
 
     def _reload_models(self) -> None:
         """Populate base-model combos once (NOT in refresh() — refresh runs

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFrame, QHeaderView, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QPushButton,
                                QSpinBox, QTableWidget, QTableWidgetItem,
@@ -184,7 +184,9 @@ class LoraPage(QWidget):
         self.mgr.failed.connect(self._on_failed)
         self.runtime.state_changed.connect(self._on_engine_state)
 
-        self.refresh()
+        # Defer refresh to after window show — scan_lora_adapters() + model
+        # index scan are heavy and block GUI startup if run in __init__.
+        QTimer.singleShot(0, self.refresh)
 
     # ── library ───────────────────────────────────────────────────────
     def refresh(self) -> None:

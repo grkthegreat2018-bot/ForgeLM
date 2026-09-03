@@ -197,3 +197,37 @@ the point of use in each affected domain:
 ### Verification
 - All 4 domains now handle string-typed configs correctly
 - Full unit suite (747 tests) passes
+
+## 2026-09-02 — Agent/Chat tool calls rendered as plain text (never executed)
+
+### Symptom
+In the Forge GUI Agent page and Chat Studio agent loop, the model's tool
+calls appeared as plain text in the output and were never executed. The
+agent loop terminated after one round with no tools invoked.
+
+### Root Cause
+`ForgeEngine.generate()` defaults to `skip_special_tokens=True`, which
+strips the `<|tool_call_start|>` (id 10) and `<|tool_call_end|>` (id 11)
+special tokens from the decoded output. The agent runner and chat agent
+loop both called `engine.generate(...)` without overriding this default,
+so `qwen_parse_tool_calls` could not find the marker-wrapped tool calls
+(its primary parse path). It fell back to bare-JSON detection, which
+fails on a model trained to emit the marker-wrapped format, so the raw
+text — including the JSON tool-call body — was returned as plain "musing"
+text and no tools were executed.
+
+The engine docstring documents the fix: *"Set to False for tool-call
+parsing (preserves <|tool_call_start|>/<|tool_call_end|> markers)."* —
+but the GUI call sites did not pass it.
+
+### Resolution
+- `forge_gui/api/agent_runner.py` (line ~150): added
+  `skip_special_tokens=False` to the `engine.generate(...)` call.
+- `forge_gui/pages/chat.py` (line ~150, agent-loop path): added
+  `skip_special_tokens=False` to the `engine.generate(...)` call.
+- `forge_gui/api/sub_agent.py` was checked — it does not parse tool
+  calls (returns raw text), so no change needed.
+
+### Verification
+- `tests/unit/test_gui_agent_tools.py` (14) + `test_gui_chat_store.py`
+  (8) pass: 22 passed, 0 failed.

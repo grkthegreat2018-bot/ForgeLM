@@ -273,13 +273,859 @@ def merge_svd(base: dict[str, torch.Tensor],
 
 
 # ---------------------------------------------------------------------------
+# Evolutionary operators — "sexual reproduction" of LLM weights
+# ---------------------------------------------------------------------------
+# Implements the GENOME framework (Zhang et al. 2026) operators:
+#   crossover  — recombine weights of 2 parents → offspring
+#   mutation   — small random perturbations for diversity
+#   selection  — keep high-fitness individuals
+#   succession — carry elite parents forward unchanged (elitism)
+#
+# Block-level crossover uses the ForgeAI state-dict key convention
+# `blocks.{i}.<submodule>.<param>`. Non-block keys (embed/head/norm) are
+# inherited from parent A by default (or averaged) — they are the "shared
+# genome" that shouldn't be spliced mid-model.
+#
+# All operators run on CPU (state dicts loaded to CPU). This is the 12GB-
+# VRAM-friendly path: evolution happens in system RAM, only the fitness
+# evaluation needs the GPU (and only for the candidate being scored).
+#
+# Novel twist for ForgeAI: `mutate_quant_perturb` treats quantization
+# scales (`.qscale` keys) as mutable alleles — evolutionary search over
+# the quant-precision axis, which the source papers do not explore.
+
+import re
+
+_BLOCK_RE = re.compile(r'^blocks\.(\d+)\.')
+
+
+def _block_index(key: str) -> int | None:
+    """Return the transformer-block index for a state-dict key, or None."""
+    m = _BLOCK_RE.match(key)
+    return int(m.group(1)) if m else None
+
+
+def _non_block_keys(state: dict[str, torch.Tensor]) -> list[str]:
+    """Keys that are NOT inside any transformer block (embed/head/norm/etc)."""
+    return [k for k in state if _block_index(k) is None]
+
+
+def _n_blocks(state: dict[str, torch.Tensor]) -> int:
+    """Number of transformer blocks in a state dict."""
+    max_idx = -1
+    for k in state:
+        idx = _block_index(k)
+        if idx is not None and idx > max_idx:
+            max_idx = idx
+    return max_idx + 1
+
+
+def crossover_blockwise(
+    a: dict[str, torch.Tensor],
+    b: dict[str, torch.Tensor],
+    split_block: int | None = None,
+    non_block_source: str = "a",
+    seed: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Block-level crossover: blocks [0:split] from A, [split:] from B.
+
+    This is the canonical "sexual reproduction" operator — each offspring
+    gets a contiguous prefix of layers from one parent and the suffix from
+    the other, mimicking chromosomal crossover.
+
+    Args:
+        a, b: parent state dicts (must share keys + shapes).
+        split_block: block index at which to switch from A→B. If None,
+            picks a random split point in [1, n_blocks-1].
+        non_block_source: how to handle non-block keys (embed/head/norm).
+            "a" = take from A, "b" = take from B, "avg" = average A+B.
+        seed: RNG seed for random split.
+    """
+    n = _n_blocks(a)
+    if split_block is None:
+        gen = torch.Generator().manual_seed(seed)
+        split_block = int(torch.randint(1, max(n, 2), (1,), generator=gen).item())
+    split_block = max(1, min(split_block, max(n - 1, 1)))
+
+    out = {}
+    for k, v_a in a.items():
+        if k not in b or b[k].shape != v_a.shape:
+            out[k] = v_a.clone()
+            continue
+        idx = _block_index(k)
+        if idx is None:
+            # Non-block key
+            if non_block_source == "b":
+                out[k] = b[k].clone()
+            elif non_block_source == "avg":
+                out[k] = ((v_a.float() + b[k].float()) * 0.5).to(v_a.dtype)
+            else:
+                out[k] = v_a.clone()
+        else:
+            out[k] = v_a.clone() if idx < split_block else b[k].clone()
+    return out
+
+
+def crossover_block_random(
+    a: dict[str, torch.Tensor],
+    b: dict[str, torch.Tensor],
+    p: float = 0.5,
+    non_block_source: str = "a",
+    seed: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Per-block random crossover: each block inherited from A or B.
+
+    Each transformer block is taken wholesale from parent A (prob 1-p) or
+    parent B (prob p). This is uniform crossover at the block granularity.
+
+    Args:
+        p: probability a given block comes from B.
+    """
+    n = _n_blocks(a)
+    gen = torch.Generator().manual_seed(seed)
+    from_b = torch.rand(n, generator=gen) < p
+
+    out = {}
+    for k, v_a in a.items():
+        if k not in b or b[k].shape != v_a.shape:
+            out[k] = v_a.clone()
+            continue
+        idx = _block_index(k)
+        if idx is None:
+            if non_block_source == "b":
+                out[k] = b[k].clone()
+            elif non_block_source == "avg":
+                out[k] = ((v_a.float() + b[k].float()) * 0.5).to(v_a.dtype)
+            else:
+                out[k] = v_a.clone()
+        else:
+            out[k] = b[k].clone() if bool(from_b[idx]) else v_a.clone()
+    return out
+
+
+def crossover_uniform(
+    a: dict[str, torch.Tensor],
+    b: dict[str, torch.Tensor],
+    p: float = 0.5,
+    seed: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Per-tensor uniform crossover: each tensor from A or B independently.
+
+    Finer-grained than block crossover — every parameter tensor is inherited
+    as a whole from one parent. Element-wise mixing is NOT done here (that
+    would be SLERP/linear); this preserves each parent's per-layer solutions.
+
+    Args:
+        p: probability a given tensor comes from B.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    out = {}
+    for k, v_a in a.items():
+        if k not in b or b[k].shape != v_a.shape:
+            out[k] = v_a.clone()
+            continue
+        use_b = bool(torch.rand(1, generator=gen).item() < p)
+        out[k] = b[k].clone() if use_b else v_a.clone()
+    return out
+
+
+def mutate_gaussian(
+    state: dict[str, torch.Tensor],
+    sigma: float = 0.01,
+    rate: float = 0.01,
+    seed: int = 0,
+    skip_keys: tuple[str, ...] = ("embed.weight", "head.weight"),
+) -> dict[str, torch.Tensor]:
+    """Gaussian mutation: perturb a fraction of elements by N(0, sigma).
+
+    Only a `rate` fraction of elements in each tensor are perturbed (sparse
+    mutation), keeping most of the parent's weights intact. Embedding/head
+    keys are skipped by default to avoid vocabulary disruption.
+
+    Args:
+        sigma: std dev of Gaussian noise (relative to weight magnitude scale
+            — noise is scaled by per-tensor absmean so small and large
+            tensors get proportionally-sized perturbations).
+        rate: fraction of elements to perturb (0.01 = 1%).
+        skip_keys: state-dict keys to leave untouched.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    out = {}
+    for k, v in state.items():
+        if k in skip_keys or v.dtype not in (torch.float32, torch.bfloat16,
+                                             torch.float16, torch.float64):
+            out[k] = v.clone()
+            continue
+        vf = v.float()
+        mask = (torch.rand(v.shape, generator=gen) < rate).to(vf.dtype)
+        absmean = vf.abs().mean().clamp(min=1e-8)
+        noise = torch.randn(v.shape, generator=gen).to(vf.dtype) * (sigma * absmean)
+        out[k] = (vf + noise * mask).to(v.dtype)
+    return out
+
+
+def mutate_quant_perturb(
+    state: dict[str, torch.Tensor],
+    sigma: float = 0.05,
+    seed: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Novel: perturb quantization scales (`.qscale` keys) as mutable alleles.
+
+    ForgeAI stores per-tensor quantization scales under `<param>.qscale`.
+    This operator perturbs only those scales, leaving the int8/ternary weights
+    untouched — an evolutionary search over the quantization-precision axis
+    that the source papers (GENOME, Darwin, Sakana) do not explore.
+
+    Args:
+        sigma: relative perturbation factor for scales (0.05 = ±5%).
+    """
+    gen = torch.Generator().manual_seed(seed)
+    out = {}
+    for k, v in state.items():
+        if k.endswith(".qscale") and v.is_floating_point():
+            scale = 1.0 + torch.randn(v.shape, generator=gen).to(v.float().dtype) * sigma
+            out[k] = (v.float() * scale).to(v.dtype)
+        else:
+            out[k] = v.clone()
+    return out
+
+
+def mutate_block_swap(
+    a: dict[str, torch.Tensor],
+    b: dict[str, torch.Tensor],
+    n_swaps: int = 1,
+    seed: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Translocation: swap n whole blocks from B into A.
+
+    A different mutation operator — instead of noise, graft entire blocks
+    from a donor. This is the BES "translocation" operator adapted to weights.
+    """
+    n = _n_blocks(a)
+    gen = torch.Generator().manual_seed(seed)
+    n_swaps = min(n_swaps, n)
+    swap_idxs = set(torch.randperm(n, generator=gen)[:n_swaps].tolist())
+
+    out = {}
+    for k, v_a in a.items():
+        if k not in b or b[k].shape != v_a.shape:
+            out[k] = v_a.clone()
+            continue
+        idx = _block_index(k)
+        if idx is not None and idx in swap_idxs:
+            out[k] = b[k].clone()
+        else:
+            out[k] = v_a.clone()
+    return out
+
+
+def select_tournament(
+    fitnesses: list[float],
+    k: int = 3,
+    seed: int = 0,
+) -> int:
+    """Tournament selection: pick k random individuals, return the best index.
+
+    Args:
+        fitnesses: list of fitness scores (higher = better).
+        k: tournament size.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    n = len(fitnesses)
+    contenders = torch.randperm(n, generator=gen)[:k].tolist()
+    best = contenders[0]
+    for c in contenders[1:]:
+        if fitnesses[c] > fitnesses[best]:
+            best = c
+    return best
+
+
+def select_rank(
+    fitnesses: list[float],
+    selection_pressure: float = 1.5,
+    seed: int = 0,
+) -> int:
+    """Rank-based selection (linear ranking, Baker 1985).
+
+    Less sensitive to fitness magnitude than tournament or roulette —
+    works well when one individual has a disproportionately high score
+    (which would dominate roulette wheel). Assigns selection probabilities
+    based on rank, not raw fitness.
+
+    Args:
+        fitnesses: list of fitness scores (higher = better).
+        selection_pressure: SP in [1.0, 2.0]. 1.0 = uniform (no pressure),
+            2.0 = max pressure (best individual is 2x as likely as median).
+        seed: RNG seed.
+    """
+    n = len(fitnesses)
+    if n <= 1:
+        return 0
+    sp = max(1.0, min(2.0, selection_pressure))
+    # Rank: worst=0, best=n-1
+    ranked = sorted(range(n), key=lambda i: fitnesses[i])
+    rank_of = [0] * n
+    for r, idx in enumerate(ranked):
+        rank_of[idx] = r
+    # Linear ranking probabilities: p_i = (2 - SP + 2*(SP-1)*rank_i/(n-1)) / n
+    probs = []
+    for i in range(n):
+        p = (2.0 - sp + 2.0 * (sp - 1.0) * rank_of[i] / max(n - 1, 1)) / n
+        probs.append(max(p, 1e-10))
+    total = sum(probs)
+    probs = [p / total for p in probs]
+    gen = torch.Generator().manual_seed(seed)
+    r = torch.rand(1, generator=gen).item()
+    cum = 0.0
+    for i, p in enumerate(probs):
+        cum += p
+        if r <= cum:
+            return i
+    return n - 1
+
+
+def select_roulette(
+    fitnesses: list[float],
+    seed: int = 0,
+) -> int:
+    """Fitness-proportionate (roulette wheel) selection.
+
+    Individuals are selected with probability proportional to their fitness.
+    Requires non-negative fitness (auto-shifts if min < 0).
+
+    Args:
+        fitnesses: list of fitness scores (higher = better).
+        seed: RNG seed.
+    """
+    n = len(fitnesses)
+    if n <= 1:
+        return 0
+    # Shift to non-negative
+    min_f = min(fitnesses)
+    shifted = [f - min_f + 1e-8 for f in fitnesses]
+    total = sum(shifted)
+    if total <= 0:
+        return seed % n
+    probs = [f / total for f in shifted]
+    gen = torch.Generator().manual_seed(seed)
+    r = torch.rand(1, generator=gen).item()
+    cum = 0.0
+    for i, p in enumerate(probs):
+        cum += p
+        if r <= cum:
+            return i
+    return n - 1
+
+
+def _state_distance(a: dict[str, torch.Tensor],
+                    b: dict[str, torch.Tensor]) -> float:
+    """L2 distance between two state dicts (mean of per-tensor L2 distances).
+
+    Used for diversity computation — measures how different two individuals
+    are in weight space. Cheaper than full flatten+norm for large models.
+    """
+    dists = []
+    for k in a:
+        if k in b and a[k].shape == b[k].shape and a[k].is_floating_point():
+            d = (a[k].float() - b[k].float()).norm().item()
+            dists.append(d / max(a[k].numel(), 1))
+    return sum(dists) / max(len(dists), 1)
+
+
+def _population_centroid(population: list[dict[str, torch.Tensor]]
+                         ) -> dict[str, torch.Tensor]:
+    """Compute the centroid (element-wise mean) of the population."""
+    if not population:
+        return {}
+    keys = population[0].keys()
+    centroid = {}
+    for k in keys:
+        acc = torch.zeros_like(population[0][k], dtype=torch.float32)
+        for ind in population:
+            if k in ind and ind[k].shape == population[0][k].shape:
+                acc += ind[k].float()
+        centroid[k] = acc / len(population)
+    return centroid
+
+
+def _population_diversity(population: list[dict[str, torch.Tensor]],
+                          centroid: dict[str, torch.Tensor] | None = None
+                          ) -> float:
+    """Measure population diversity as mean distance from centroid.
+
+    High diversity = spread out in weight space (good for exploration).
+    Low diversity = converged (good for exploitation, bad if premature).
+    """
+    if len(population) <= 1:
+        return 0.0
+    if centroid is None:
+        centroid = _population_centroid(population)
+    dists = [_state_distance(ind, centroid) for ind in population]
+    return sum(dists) / len(dists)
+
+
+def select_diversity(
+    fitnesses: list[float],
+    population: list[dict[str, torch.Tensor]],
+    diversity_weight: float = 0.3,
+    seed: int = 0,
+) -> int:
+    """Diversity-aware selection (novelty-quality balance).
+
+    Combines fitness with diversity: individuals that are both fit AND
+    different from the population centroid get higher selection probability.
+    This prevents premature convergence by maintaining behavioral diversity.
+
+    Based on Lehman & Stanley novelty search + quality-diversity hybrid.
+
+    Args:
+        fitnesses: list of fitness scores (higher = better).
+        population: list of state dicts (for diversity computation).
+        diversity_weight: 0.0 = pure fitness, 1.0 = pure diversity.
+            0.3 = 70% fitness, 30% diversity (good default).
+        seed: RNG seed.
+    """
+    n = len(fitnesses)
+    if n <= 1:
+        return 0
+    centroid = _population_centroid(population)
+    diversities = [_state_distance(ind, centroid) for ind in population]
+    # Normalize both to [0, 1]
+    f_min, f_max = min(fitnesses), max(fitnesses)
+    d_min, d_max = min(diversities), max(diversities)
+    f_range = max(f_max - f_min, 1e-10)
+    d_range = max(d_max - d_min, 1e-10)
+    norm_f = [(f - f_min) / f_range for f in fitnesses]
+    norm_d = [(d - d_min) / d_range for d in diversities]
+    # Combined score: weighted sum of normalized fitness + diversity
+    scores = [(1 - diversity_weight) * nf + diversity_weight * nd
+              for nf, nd in zip(norm_f, norm_d)]
+    # Roulette selection on combined scores
+    total = sum(scores)
+    if total <= 0:
+        return seed % n
+    probs = [s / total for s in scores]
+    gen = torch.Generator().manual_seed(seed)
+    r = torch.rand(1, generator=gen).item()
+    cum = 0.0
+    for i, p in enumerate(probs):
+        cum += p
+        if r <= cum:
+            return i
+    return n - 1
+
+
+def scale_fitness_sigma(fitnesses: list[float],
+                        c: float = 2.0) -> list[float]:
+    """Linear sigma scaling (Forrest & Tanomura 1990).
+
+    Scales raw fitness to prevent premature convergence when one individual
+    dominates. scaled = max(f - (mean - c*std), 0).
+
+    Args:
+        fitnesses: raw fitness scores.
+        c: scaling constant (2.0 = classic, higher = more pressure).
+    """
+    n = len(fitnesses)
+    if n <= 1:
+        return list(fitnesses)
+    mean = sum(fitnesses) / n
+    var = sum((f - mean) ** 2 for f in fitnesses) / n
+    std = var ** 0.5
+    if std < 1e-10:
+        # All equal — return uniform
+        return [1.0] * n
+    scaled = [max(f - (mean - c * std), 0.0) for f in fitnesses]
+    total = sum(scaled)
+    if total <= 0:
+        return [1.0] * n
+    return scaled
+
+
+def scale_fitness_rank(fitnesses: list[float],
+                       selection_pressure: float = 1.5) -> list[float]:
+    """Rank-based fitness scaling.
+
+    Replaces raw fitness with rank-based values, making selection robust
+    to outlier fitness values. Uses the same linear ranking as select_rank.
+    """
+    n = len(fitnesses)
+    if n <= 1:
+        return list(fitnesses)
+    sp = max(1.0, min(2.0, selection_pressure))
+    ranked = sorted(range(n), key=lambda i: fitnesses[i])
+    rank_of = [0] * n
+    for r, idx in enumerate(ranked):
+        rank_of[idx] = r
+    scaled = []
+    for i in range(n):
+        p = (2.0 - sp + 2.0 * (sp - 1.0) * rank_of[i] / max(n - 1, 1)) / n
+        scaled.append(max(p, 1e-10))
+    total = sum(scaled)
+    return [s / total for s in scaled]
+
+
+def evolve(
+    population: list[dict[str, torch.Tensor]],
+    fitness_fn,
+    n_generations: int = 5,
+    population_size: int | None = None,
+    crossover: str = "blockwise",
+    crossover_kwargs: dict | None = None,
+    mutation: str = "gaussian",
+    mutation_kwargs: dict | None = None,
+    mutation_rate: float = 0.5,
+    elitism: int = 1,
+    seed: int = 0,
+    save_fn=None,
+    out_dir: str | None = None,
+    verbose: bool = True,
+    selection: str = "tournament",
+    selection_kwargs: dict | None = None,
+    fitness_scaling: str = "none",
+    progress_bonus: float = 0.0,
+    diversity_bonus: float = 0.0,
+    adaptive_mutation: bool = False,
+    hall_of_fame_size: int = 0,
+    convergence_patience: int = 0,
+) -> dict:
+    """Run evolutionary model merging ("sexual reproduction" of LLM weights).
+
+    GENOME-style loop with sophisticated candidate selection and score rewarding:
+      1. Evaluate fitness of every individual (fitness_fn(state_dict) -> float)
+      2. Apply score rewarding: fitness scaling + progress bonus + diversity bonus
+      3. Select parents via the chosen selection strategy
+      4. Crossover two parents → offspring
+      5. Mutate offspring (with adaptive probability if enabled)
+      6. Carry forward `elitism` best individuals unchanged (succession)
+      7. Update hall of fame (best-ever individuals across all generations)
+      8. Repeat for n_generations (early stop if convergence_patience hit)
+
+    All state dicts live in CPU RAM. Only fitness_fn touches the GPU (and
+    only for the candidate being scored) — this is the 12GB-VRAM-friendly
+    operating point.
+
+    Selection strategies (``selection`` parameter):
+      - "tournament": k-way tournament (classic, robust, default)
+      - "rank": linear ranking with selection pressure (outlier-resistant)
+      - "roulette": fitness-proportionate (fast, needs non-negative fitness)
+      - "diversity": novelty-quality hybrid (prevents premature convergence)
+
+    Score rewarding (applied before selection):
+      - ``fitness_scaling``: "none" (raw), "sigma" (linear sigma scaling),
+        "rank" (rank-based scaling). Prevents single-individual dominance.
+      - ``progress_bonus``: weight for rewarding offspring that beat their
+        parents' fitness (encourages progressive improvement).
+      - ``diversity_bonus``: weight for rewarding individuals far from the
+        population centroid (maintains behavioral diversity).
+      - ``adaptive_mutation``: dynamically adjusts mutation_rate based on
+        population diversity — increases when diversity drops (stagnation),
+        decreases when diversity is high (converging toward optimum).
+
+    Args:
+        population: initial population of state dicts (on CPU).
+        fitness_fn: callable(state_dict) -> float. Higher is better.
+        n_generations: number of generations to evolve.
+        population_size: target population size per gen. If None,
+            keeps the initial population size.
+        crossover: "blockwise", "block_random", or "uniform".
+        crossover_kwargs: extra kwargs for the crossover function.
+        mutation: "gaussian", "quant_perturb", or "block_swap".
+        mutation_kwargs: extra kwargs for the mutation function.
+        mutation_rate: base probability each offspring gets mutated.
+        elitism: number of top individuals carried forward unchanged.
+        seed: base RNG seed (incremented per generation for variety).
+        save_fn: optional callable(state_dict, path) to save checkpoints.
+        out_dir: directory for saving per-generation best checkpoints.
+        verbose: print per-generation progress.
+        selection: parent selection strategy (see above).
+        selection_kwargs: extra kwargs for the selection function
+            (e.g. {"k": 5} for tournament, {"selection_pressure": 1.8}
+            for rank, {"diversity_weight": 0.4} for diversity).
+        fitness_scaling: "none", "sigma", or "rank".
+        progress_bonus: weight (0.0=disabled) for rewarding improvement
+            over parent fitness. Added to offspring fitness after eval.
+        diversity_bonus: weight (0.0=disabled) for rewarding distance
+            from population centroid.
+        adaptive_mutation: if True, dynamically adjust mutation_rate
+            based on population diversity.
+        hall_of_fame_size: size of the hall of fame (0=disabled). The HoF
+            stores the best-ever individuals and can participate in
+            crossover as elite donors.
+        convergence_patience: stop early if best fitness doesn't improve
+            for N consecutive generations (0=disabled).
+
+    Returns:
+        dict with keys:
+          - "best": best state dict
+          - "best_fitness": float
+          - "best_path": path to saved best (if save_fn + out_dir) else None
+          - "history": list of per-gen {best_fitness, mean_fitness,
+            min_fitness, diversity, mutation_rate}
+          - "final_population": list of state dicts
+          - "hall_of_fame": list of (state_dict, fitness) tuples
+    """
+    crossover_kwargs = crossover_kwargs or {}
+    mutation_kwargs = mutation_kwargs or {}
+    selection_kwargs = selection_kwargs or {}
+    if population_size is None:
+        population_size = len(population)
+
+    crossover_fns = {
+        "blockwise": crossover_blockwise,
+        "block_random": crossover_block_random,
+        "uniform": crossover_uniform,
+    }
+    mutation_fns = {
+        "gaussian": mutate_gaussian,
+        "quant_perturb": mutate_quant_perturb,
+        "block_swap": mutate_block_swap,  # note: needs a donor (uses next pop member)
+    }
+    xfn = crossover_fns[crossover]
+    mfn = mutation_fns[mutation]
+
+    # Selection function dispatch
+    def _select_parent(fits, pop, gen_seed):
+        if selection == "rank":
+            return select_rank(fits, seed=gen_seed,
+                               **{k: v for k, v in selection_kwargs.items()
+                                  if k != "diversity_weight"})
+        elif selection == "roulette":
+            return select_roulette(fits, seed=gen_seed)
+        elif selection == "diversity":
+            return select_diversity(fits, pop, seed=gen_seed,
+                                    **{k: v for k, v in selection_kwargs.items()
+                                       if k == "diversity_weight"})
+        else:  # tournament (default)
+            k = selection_kwargs.get("k", 3)
+            return select_tournament(fits, k=k, seed=gen_seed)
+
+    history = []
+    best_state = None
+    best_fitness = float("-inf")
+    best_path = None
+
+    # Hall of Fame: best-ever individuals across all generations
+    hall_of_fame: list[tuple[dict, float]] = []
+
+    # Track parent fitnesses for progress bonus
+    prev_fitnesses: list[float] | None = None
+
+    # Adaptive mutation state
+    current_mutation_rate = mutation_rate
+    initial_diversity: float | None = None
+
+    # Convergence tracking
+    gens_without_improvement = 0
+
+    for gen in range(n_generations):
+        # 1. Evaluate fitness
+        raw_fitnesses = [fitness_fn(ind) for ind in population]
+        fitnesses = list(raw_fitnesses)  # working copy for selection
+
+        # 2. Score rewarding: apply fitness scaling
+        if fitness_scaling == "sigma":
+            fitnesses = scale_fitness_sigma(fitnesses)
+        elif fitness_scaling == "rank":
+            fitnesses = scale_fitness_rank(fitnesses)
+
+        # 3. Score rewarding: diversity bonus
+        gen_diversity = 0.0
+        if diversity_bonus > 0 or adaptive_mutation or selection == "diversity":
+            centroid = _population_centroid(population)
+            gen_diversity = _population_diversity(population, centroid)
+            if initial_diversity is None:
+                initial_diversity = max(gen_diversity, 1e-10)
+            if diversity_bonus > 0:
+                diversities = [_state_distance(ind, centroid)
+                               for ind in population]
+                d_min, d_max = min(diversities), max(diversities)
+                d_range = max(d_max - d_min, 1e-10)
+                for i, d in enumerate(diversities):
+                    norm_d = (d - d_min) / d_range
+                    fitnesses[i] += diversity_bonus * norm_d
+
+        # 4. Score rewarding: progress bonus (offspring vs parents)
+        if progress_bonus > 0 and prev_fitnesses is not None:
+            # Compare each individual's fitness to the best parent fitness
+            # from the previous generation. If this individual beats it,
+            # add a progress bonus.
+            prev_best = max(prev_fitnesses)
+            for i, rf in enumerate(raw_fitnesses):
+                if rf > prev_best:
+                    fitnesses[i] += progress_bonus * (rf - prev_best)
+
+        # 5. Adaptive mutation rate
+        if adaptive_mutation and initial_diversity is not None:
+            # When diversity drops below 50% of initial, increase mutation
+            # to escape stagnation. When diversity is high, decrease to
+            # allow convergence.
+            diversity_ratio = gen_diversity / initial_diversity
+            if diversity_ratio < 0.5:
+                # Stagnating — increase mutation
+                current_mutation_rate = min(mutation_rate * 2.5, 0.95)
+            elif diversity_ratio > 1.5:
+                # High diversity — decrease mutation to converge
+                current_mutation_rate = max(mutation_rate * 0.5, 0.05)
+            else:
+                current_mutation_rate = mutation_rate
+
+        # 6. Track best (using raw fitness, not scaled)
+        gen_best_idx = max(range(len(raw_fitnesses)),
+                           key=lambda i: raw_fitnesses[i])
+        gen_best_fit = raw_fitnesses[gen_best_idx]
+        gen_mean = sum(raw_fitnesses) / len(raw_fitnesses)
+        gen_min = min(raw_fitnesses)
+        improved = gen_best_fit > best_fitness
+        history.append({
+            "generation": gen,
+            "best_fitness": gen_best_fit,
+            "mean_fitness": gen_mean,
+            "min_fitness": gen_min,
+            "best_index": gen_best_idx,
+            "diversity": gen_diversity,
+            "mutation_rate": current_mutation_rate,
+        })
+        if improved:
+            best_fitness = gen_best_fit
+            best_state = {k: v.clone() for k, v in population[gen_best_idx].items()}
+            gens_without_improvement = 0
+        else:
+            gens_without_improvement += 1
+
+        if verbose:
+            div_str = f" div={gen_diversity:.6f}" if gen_diversity > 0 else ""
+            mut_str = f" mut={current_mutation_rate:.2f}" if adaptive_mutation else ""
+            print(f"  [evolve] gen {gen}: best={gen_best_fit:.4f} "
+                  f"mean={gen_mean:.4f} min={gen_min:.4f}{div_str}{mut_str}")
+
+        # Save per-generation best
+        if save_fn is not None and out_dir is not None:
+            from pathlib import Path
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            path = str(Path(out_dir) / f"gen_{gen}_best.safetensors")
+            save_fn(population[gen_best_idx], path)
+            if gen_best_fit >= best_fitness:
+                best_path = path
+
+        # 7. Update hall of fame
+        if hall_of_fame_size > 0:
+            for i, rf in enumerate(raw_fitnesses):
+                hall_of_fame.append((
+                    {k: v.clone() for k, v in population[i].items()},
+                    rf,
+                ))
+            # Keep only top-N by fitness
+            hall_of_fame.sort(key=lambda x: x[1], reverse=True)
+            hall_of_fame = hall_of_fame[:hall_of_fame_size]
+
+        # 8. Convergence check
+        if convergence_patience > 0 and gens_without_improvement >= convergence_patience:
+            if verbose:
+                print(f"  [evolve] converged at gen {gen} "
+                      f"(no improvement for {convergence_patience} gens)")
+            break
+
+        # 9. Build next generation
+        ranked = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i],
+                        reverse=True)
+        new_pop = []
+
+        # Elitism: carry forward top individuals (succession)
+        for i in range(min(elitism, len(population))):
+            new_pop.append({k: v.clone() for k, v in population[ranked[i]].items()})
+
+        # Fill rest via crossover + mutation
+        gen_seed = seed + gen
+        # Build a donor pool that includes hall of fame members (if enabled)
+        donor_pool = list(population)
+        donor_fits = list(fitnesses)
+        if hall_of_fame_size > 0 and hall_of_fame:
+            for hof_state, hof_fit in hall_of_fame:
+                donor_pool.append(hof_state)
+                donor_fits.append(hof_fit)
+
+        while len(new_pop) < population_size:
+            parent_a_idx = _select_parent(fitnesses, population, gen_seed)
+            gen_seed += 1
+            parent_b_idx = _select_parent(fitnesses, population, gen_seed)
+            gen_seed += 1
+            if parent_a_idx == parent_b_idx:
+                parent_b_idx = (parent_a_idx + 1) % len(population)
+
+            offspring = xfn(population[parent_a_idx],
+                            population[parent_b_idx],
+                            seed=gen_seed, **crossover_kwargs)
+            gen_seed += 1
+
+            # Mutation (with adaptive rate)
+            mut_thresh = current_mutation_rate if adaptive_mutation else mutation_rate
+            if torch.rand(1, generator=torch.Generator().manual_seed(gen_seed)).item() < mut_thresh:
+                gen_seed += 1
+                if mutation == "block_swap":
+                    # block_swap needs a donor — use a random donor (may be HoF)
+                    donor_idx = torch.randperm(len(donor_pool),
+                                               generator=torch.Generator().manual_seed(gen_seed))[0].item()
+                    gen_seed += 1
+                    offspring = mfn(offspring, donor_pool[donor_idx],
+                                    seed=gen_seed, **mutation_kwargs)
+                else:
+                    offspring = mfn(offspring, seed=gen_seed, **mutation_kwargs)
+                gen_seed += 1
+
+            new_pop.append(offspring)
+
+        population = new_pop
+        prev_fitnesses = list(raw_fitnesses)
+
+    # Final evaluation of last generation
+    raw_fitnesses = [fitness_fn(ind) for ind in population]
+    gen_best_idx = max(range(len(raw_fitnesses)), key=lambda i: raw_fitnesses[i])
+    if raw_fitnesses[gen_best_idx] > best_fitness:
+        best_fitness = raw_fitnesses[gen_best_idx]
+        best_state = {k: v.clone() for k, v in population[gen_best_idx].items()}
+    # Final diversity
+    final_diversity = _population_diversity(population) if len(population) > 1 else 0.0
+    history.append({
+        "generation": len(history),
+        "best_fitness": best_fitness,
+        "mean_fitness": sum(raw_fitnesses) / len(raw_fitnesses),
+        "min_fitness": min(raw_fitnesses),
+        "best_index": gen_best_idx,
+        "diversity": final_diversity,
+        "mutation_rate": current_mutation_rate,
+    })
+    if verbose:
+        print(f"  [evolve] final: best={best_fitness:.4f}")
+
+    # Save final best
+    if save_fn is not None and out_dir is not None and best_state is not None:
+        from pathlib import Path
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        best_path = str(Path(out_dir) / "best.safetensors")
+        save_fn(best_state, best_path)
+
+    return {
+        "best": best_state,
+        "best_fitness": best_fitness,
+        "best_path": best_path,
+        "history": history,
+        "final_population": population,
+        "hall_of_fame": hall_of_fame,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser(description="Model merging for ForgeAI (LFM2.5)")
     p.add_argument("--method", required=True,
-                   choices=["linear", "task_arith", "slerp", "ties", "dare", "svd"])
+                   choices=["linear", "task_arith", "slerp", "ties", "dare", "svd",
+                            "crossover_blockwise", "crossover_block_random",
+                            "crossover_uniform", "mutate_gaussian",
+                            "mutate_quant_perturb", "mutate_block_swap", "evolve"])
     p.add_argument("--base", default=None,
                    help="Base model checkpoint (required for task_arith/ties/dare/svd)")
     p.add_argument("--model-a", default=None, help="First model (slerp/linear 2-model)")
@@ -294,8 +1140,46 @@ def main():
     p.add_argument("--drop-rate", type=float, default=0.1, help="DARE: drop fraction")
     p.add_argument("--rank-ratio", type=float, default=0.5,
                    help="SVD: rank truncation ratio (0.5 = keep top half of singular values)")
-    p.add_argument("--seed", type=int, default=0, help="DARE: RNG seed")
+    p.add_argument("--seed", type=int, default=0, help="DARE/evolutionary: RNG seed")
     p.add_argument("--out", required=True, help="Output checkpoint path")
+    # Evolutionary operator args
+    p.add_argument("--split-block", type=int, default=None,
+                   help="crossover_blockwise: block index to split at")
+    p.add_argument("--p", type=float, default=0.5,
+                   help="crossover_uniform/block_random: prob tensor/block from B")
+    p.add_argument("--sigma", type=float, default=0.01,
+                   help="mutate_gaussian/quant_perturb: noise std dev")
+    p.add_argument("--rate", type=float, default=0.01,
+                   help="mutate_gaussian: fraction of elements to perturb")
+    p.add_argument("--n-swaps", type=int, default=1,
+                   help="mutate_block_swap: number of blocks to swap")
+    p.add_argument("--n-generations", type=int, default=5,
+                   help="evolve: number of generations")
+    p.add_argument("--population-size", type=int, default=None,
+                   help="evolve: target population size (default = initial)")
+    p.add_argument("--mutation-rate", type=float, default=0.5,
+                   help="evolve: probability each offspring is mutated")
+    p.add_argument("--elitism", type=int, default=1,
+                   help="evolve: number of top individuals carried forward")
+    p.add_argument("--fitness", default="neg_norm",
+                   help="evolve: fitness function (neg_norm=random, benchmark=GPU)")
+    # Sophisticated selection + score rewarding args
+    p.add_argument("--selection", default="tournament",
+                   choices=["tournament", "rank", "roulette", "diversity"],
+                   help="evolve: parent selection strategy")
+    p.add_argument("--fitness-scaling", default="none",
+                   choices=["none", "sigma", "rank"],
+                   help="evolve: fitness scaling method")
+    p.add_argument("--progress-bonus", type=float, default=0.0,
+                   help="evolve: weight for rewarding improvement over parents")
+    p.add_argument("--diversity-bonus", type=float, default=0.0,
+                   help="evolve: weight for rewarding distance from centroid")
+    p.add_argument("--adaptive-mutation", action="store_true",
+                   help="evolve: dynamically adjust mutation rate based on diversity")
+    p.add_argument("--hall-of-fame", type=int, default=0,
+                   help="evolve: hall of fame size (0=disabled)")
+    p.add_argument("--convergence-patience", type=int, default=0,
+                   help="evolve: stop if no improvement for N gens (0=disabled)")
     args = p.parse_args()
 
     out_path = args.out
@@ -317,6 +1201,89 @@ def main():
         w = args.weights or [0.5, 0.5]
         print(f"Linear soup: {args.model_a} ({w[0]}) + {args.model_b} ({w[1]})")
         merged = merge_linear([a, b], w)
+
+    # --- Evolutionary single-shot operators (2 parents) ---
+    elif args.method in ("crossover_blockwise", "crossover_block_random",
+                         "crossover_uniform"):
+        if not args.model_a or not args.model_b:
+            p.error(f"--model-a and --model-b required for {args.method}")
+        a = _load_state_dict(args.model_a)
+        b = _load_state_dict(args.model_b)
+        if args.method == "crossover_blockwise":
+            print(f"Blockwise crossover: {args.model_a} x {args.model_b} "
+                  f"(split={args.split_block})")
+            merged = crossover_blockwise(a, b, split_block=args.split_block,
+                                         seed=args.seed)
+        elif args.method == "crossover_block_random":
+            print(f"Block-random crossover: p={args.p}")
+            merged = crossover_block_random(a, b, p=args.p, seed=args.seed)
+        else:
+            print(f"Uniform crossover: p={args.p}")
+            merged = crossover_uniform(a, b, p=args.p, seed=args.seed)
+
+    elif args.method == "mutate_gaussian":
+        if not args.model_a:
+            p.error("--model-a required for mutate_gaussian")
+        a = _load_state_dict(args.model_a)
+        print(f"Gaussian mutation: sigma={args.sigma} rate={args.rate}")
+        merged = mutate_gaussian(a, sigma=args.sigma, rate=args.rate,
+                                 seed=args.seed)
+
+    elif args.method == "mutate_quant_perturb":
+        if not args.model_a:
+            p.error("--model-a required for mutate_quant_perturb")
+        a = _load_state_dict(args.model_a)
+        print(f"Quant-scale perturbation: sigma={args.sigma}")
+        merged = mutate_quant_perturb(a, sigma=args.sigma, seed=args.seed)
+
+    elif args.method == "mutate_block_swap":
+        if not args.model_a or not args.model_b:
+            p.error("--model-a (recipient) and --model-b (donor) required")
+        a = _load_state_dict(args.model_a)
+        b = _load_state_dict(args.model_b)
+        print(f"Block swap: {args.n_swaps} blocks from {args.model_b} -> {args.model_a}")
+        merged = mutate_block_swap(a, b, n_swaps=args.n_swaps, seed=args.seed)
+
+    elif args.method == "evolve":
+        if not args.models or len(args.models) < 2:
+            p.error("--models (>=2 checkpoints) required for evolve")
+        pop = [_load_state_dict(m) for m in args.models]
+        print(f"Evolutionary merge: {len(pop)} parents, "
+              f"{args.n_generations} generations, pop_size={args.population_size}")
+
+        # Default fitness: negative L2 norm of weights (cheap proxy —
+        # smaller-norm models tend to generalize better). Use --fitness
+        # benchmark to plug in a real GPU evaluator from ForgeEngine.
+        if args.fitness == "neg_norm":
+            def fitness_fn(state):
+                return -sum(v.float().norm().item() for v in state.values()
+                            if v.is_floating_point()) / 1e6
+        else:
+            p.error(f"unknown fitness: {args.fitness} (use 'neg_norm' or "
+                    f"call ForgeEngine.evolve_merge for 'benchmark')")
+
+        result = evolve(
+            pop, fitness_fn,
+            n_generations=args.n_generations,
+            population_size=args.population_size,
+            mutation_rate=args.mutation_rate,
+            elitism=args.elitism,
+            seed=args.seed,
+            save_fn=save_checkpoint,
+            out_dir=str(Path(out_path).parent),
+            selection=args.selection,
+            fitness_scaling=args.fitness_scaling,
+            progress_bonus=args.progress_bonus,
+            diversity_bonus=args.diversity_bonus,
+            adaptive_mutation=args.adaptive_mutation,
+            hall_of_fame_size=args.hall_of_fame,
+            convergence_patience=args.convergence_patience,
+        )
+        merged = result["best"]
+        print(f"Evolution complete: best_fitness={result['best_fitness']:.4f}")
+        print(f"  history: {[h['best_fitness'] for h in result['history']]}")
+        if result.get("hall_of_fame"):
+            print(f"  hall of fame: {len(result['hall_of_fame'])} individuals")
 
     # --- N-model methods requiring base ---
     else:

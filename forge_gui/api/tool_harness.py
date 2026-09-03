@@ -35,6 +35,7 @@ from .safety_checker import StrikeTracker, check_ast, check_command, check_edit
 from .status_reader import project_root
 from .sub_agent import SubAgentManager, sub_agent_tool_defs
 from .time_manager import TimeManager, time_tool_defs
+from .web_tools import WebTools, web_tool_defs
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class ToolHarness:
                  sub_agent_manager: Optional[SubAgentManager] = None,
                  time_manager: Optional[TimeManager] = None,
                  library_manager: Optional[LibraryInstallManager] = None,
+                 web_tools: Optional[WebTools] = None,
                  read_only: bool = False,
                  enable_safety: bool = True) -> None:
         self.sandbox = ToolSandbox(workspace)
@@ -127,6 +129,7 @@ class ToolHarness:
         self.sub_agent_manager = sub_agent_manager
         self.time_manager = time_manager
         self.library_manager = library_manager
+        self.web_tools = web_tools
         self.read_only = read_only
         self.enable_safety = enable_safety
         self.strikes = StrikeTracker()
@@ -175,6 +178,8 @@ class ToolHarness:
             defs.extend(time_tool_defs())
         if self.library_manager is not None and not self.read_only:
             defs.extend(library_tool_defs())
+        if self.web_tools is not None:
+            defs.extend(web_tool_defs())
         # filter out side-effect tools in read-only mode
         if self.read_only:
             defs = [d for d in defs
@@ -200,6 +205,8 @@ class ToolHarness:
             "get_time", "set_timer", "check_timer", "cancel_timer", "list_timers",
             # library check (read-only)
             "check_library", "list_allowed_libraries",
+            # web (read-only GET — safe for chat)
+            "web_search", "web_fetch", "wikipedia_search", "arxiv_search",
         }
         defs = self.tool_defs()
         return [d for d in defs
@@ -348,6 +355,10 @@ class ToolHarness:
                 result = self._library_tool(name, args)
                 ok = not (isinstance(result, dict) and "error" in result)
                 return self._record(name, args, result, ok, t0)
+            elif self.web_tools is not None and name in WebTools.NAMES:
+                result = self.web_tools.execute(name, args)
+                ok = not (isinstance(result, dict) and "error" in result)
+                return self._record(name, args, result, ok, t0)
             else:
                 # coding tools via sandbox
                 rec = self.sandbox.execute(name, args)
@@ -357,7 +368,8 @@ class ToolHarness:
             return self._record(name, args, result, False, t0)
 
     def execute_calls(self, calls: list[dict]) -> list[dict]:
-        return [self.execute(c.get("name", ""), c.get("arguments", {}) or {})
+        return [self.execute(c.get("name", ""),
+                             c.get("arguments") or c.get("args") or {})
                 for c in calls]
 
     # ── LoRA tools ────────────────────────────────────────────────────

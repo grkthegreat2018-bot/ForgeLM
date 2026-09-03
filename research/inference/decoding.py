@@ -19,6 +19,40 @@ import torch.nn.functional as F
 from research.model_loader import unpack_output_with_kv
 
 
+def _min_k_filter_logits(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
+    """Min-k semantic-cliff sampling filter (ACL 2026, Ding et al.).
+
+    Analyzes the local shape of the sorted logit distribution to identify
+    "semantic cliffs" — sharp transitions from high-confidence core tokens
+    to uncertain long-tail tokens. Temperature-invariant: operates on
+    relative logit dynamics, not absolute probabilities.
+
+    Args:
+        logits: (batch, vocab) logit tensor.
+        sensitivity: cliff detection sensitivity in [0, 1]. Higher = more
+            aggressive truncation. 0 = no filtering.
+
+    Returns:
+        Filtered logits with long-tail tokens masked to -inf.
+    """
+    if sensitivity <= 0:
+        return logits
+    sorted_logits, _ = torch.sort(logits, descending=True, dim=-1)
+    eps = 1e-8
+    diffs = sorted_logits[..., :-1] - sorted_logits[..., 1:]
+    n = diffs.shape[-1]
+    weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
+    weighted_diffs = diffs * weights
+    max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
+    cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)
+    positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
+    keep = positions <= cliff_pos
+    sorted_indices = torch.sort(logits, descending=True, dim=-1).indices
+    mask = torch.zeros_like(logits, dtype=torch.bool)
+    mask.scatter_(-1, sorted_indices, ~keep)
+    return logits.masked_fill(mask, float("-inf"))
+
+
 class DecodingStrategy(ABC):
     """Base interface for decoding strategies."""
 
@@ -46,7 +80,8 @@ class StandardDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 min_p: float = 0.0, min_k: float = 0.0):
         ids = input_ids.clone()
         device = input_ids.device
         # EOS detection: check model attr, config, then Qwen defaults
@@ -83,6 +118,21 @@ class StandardDecoding(DecodingStrategy):
                 if generated_ids:
                     for tid in set(generated_ids[-64:]):
                         next_logits[:, tid] /= repetition_penalty
+                # Min-p sampling: filter tokens below min_p * max_prob.
+                # Temperature-invariant dynamic truncation.
+                if min_p > 0.0:
+                    probs = F.softmax(next_logits, dim=-1)
+                    max_prob = probs.max(dim=-1, keepdim=True).values
+                    threshold = min_p * max_prob
+                    next_logits = torch.where(
+                        probs < threshold,
+                        torch.full_like(next_logits, float('-inf')),
+                        next_logits,
+                    )
+                # Min-k sampling: semantic-cliff detection (ACL 2026).
+                # Temperature-invariant dynamic truncation via logit dynamics.
+                if min_k > 0.0:
+                    next_logits = _min_k_filter_logits(next_logits, min_k)
                 # Top-k filtering: keep only top_k logits before softmax
                 if top_k > 0:
                     indices_to_remove = next_logits < torch.topk(

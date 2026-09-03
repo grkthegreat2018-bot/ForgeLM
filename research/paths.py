@@ -25,7 +25,11 @@ REASONING_BENCH_DIR = DATA_DIR / "reasoning_bench"
 AIRMOE_MODULES_DIR = CHECKPOINTS_DIR / "airmoe_modules"
 
 # Tokenizer (shared by all ForgeLM models — Qwen-style, from LFM2.5).
-LFM25_HF_DIR = CHECKPOINTS_DIR / "lfm25_tokenizer"
+# The directory was renamed lfm25_tokenizer → forgelm_v2_tokenizer when
+# the V10 checkpoint became the sole base model. The old name is kept as
+# a backward-compatible alias for code that hasn't been updated yet.
+FORGE_TOKENIZER_DIR = CHECKPOINTS_DIR / "forgelm_v2_tokenizer"
+LFM25_HF_DIR = FORGE_TOKENIZER_DIR  # backward-compatible alias
 
 # ForgeLM V2 Light-1.2B: the sole base model (lossless LFM2.5 port + V10 features).
 # All tests and training use this as the default checkpoint.

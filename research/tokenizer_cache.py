@@ -11,7 +11,7 @@ path fails (e.g. missing tokenizer.json or special token config).
 Usage:
     from research.tokenizer_cache import get_tokenizer
 
-    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tokenizer = get_tokenizer()  # uses the canonical tokenizer dir
     tokens = tokenizer("print('hello')", return_tensors="pt")
     decoded = tokenizer.decode(tokens.input_ids[0])
 """
@@ -19,6 +19,35 @@ import json
 import os
 from functools import lru_cache
 from typing import Optional
+
+
+# The canonical tokenizer directory — the only one that exists on disk.
+# Old code may pass "research/checkpoints/lfm25_tokenizer" (the pre-V10
+# name); get_tokenizer() auto-redirects those to this path.
+CANONICAL_TOKENIZER_PATH = "research/checkpoints/forgelm_v2_tokenizer"
+
+# Legacy paths that should be silently redirected to the canonical one.
+# This avoids touching 20+ call sites that still reference the old name.
+_LEGACY_REDIRECTS = {
+    "research/checkpoints/lfm25_tokenizer",
+    "research/checkpoints/lfm2_5_tokenizer",
+}
+
+
+def _resolve_path(path: str) -> str:
+    """Redirect legacy/missing tokenizer paths to the canonical directory.
+
+    If the requested path doesn't exist on disk but the canonical tokenizer
+    dir does, use the canonical one. This fixes the bug where old hardcoded
+    paths (lfm25_tokenizer) caused FileNotFoundError → HF repo-id validation
+    errors.
+    """
+    if path in _LEGACY_REDIRECTS and not os.path.isdir(path):
+        return CANONICAL_TOKENIZER_PATH
+    # Generic fallback: if the requested dir doesn't exist, try canonical.
+    if not os.path.isdir(path) and os.path.isdir(CANONICAL_TOKENIZER_PATH):
+        return CANONICAL_TOKENIZER_PATH
+    return path
 
 
 def _load_fast_tokenizer(path: str):
@@ -77,29 +106,35 @@ def _load_hf_tokenizer(path: str):
 
 
 @lru_cache(maxsize=8)
-def get_tokenizer(path: str = "research/checkpoints/lfm25_tokenizer"):
+def get_tokenizer(path: str = CANONICAL_TOKENIZER_PATH):
     """Load and cache a tokenizer, wrapped with gigatoken if available.
 
     Fast path: uses `tokenizers` Rust library directly (190ms).
     Fallback: uses `transformers` AutoTokenizer (4254ms).
 
+    Legacy paths (e.g. "research/checkpoints/lfm25_tokenizer") are
+    automatically redirected to the canonical tokenizer directory if
+    they don't exist on disk.
+
     Args:
-        path: HuggingFace tokenizer directory path.
+        path: tokenizer directory path (legacy paths auto-redirected).
 
     Returns:
         A tokenizer object with HF-compatible API (encode, decode, eos_token_id, etc.).
     """
+    resolved = _resolve_path(path)
     try:
-        return _load_fast_tokenizer(path)
+        return _load_fast_tokenizer(resolved)
     except Exception:
-        return _load_hf_tokenizer(path)
+        return _load_hf_tokenizer(resolved)
 
 
 @lru_cache(maxsize=8)
-def get_tokenizer_no_wrap(path: str = "research/checkpoints/lfm25_tokenizer"):
+def get_tokenizer_no_wrap(path: str = CANONICAL_TOKENIZER_PATH):
     """Load and cache a raw HF tokenizer (no gigatoken wrapping).
 
     Use this when you need the exact HF tokenizer object (e.g. for save_pretrained).
     """
     from transformers import AutoTokenizer
-    return AutoTokenizer.from_pretrained(path)
+    resolved = _resolve_path(path)
+    return AutoTokenizer.from_pretrained(resolved)

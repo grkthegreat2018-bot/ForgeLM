@@ -18,11 +18,13 @@ import time
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPlainTextEdit, QPushButton,
-                               QProgressBar, QRadioButton, QScrollArea,
-                               QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
+                               QFileDialog, QFrame, QGridLayout, QHeaderView,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPlainTextEdit, QPushButton, QProgressBar,
+                               QRadioButton, QScrollArea, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QTabWidget, QTextEdit,
+                               QVBoxLayout, QWidget)
 
 from ..api.activation_catalog import (FIELDS, PRESETS, FieldSpec,
                                        active_diff, default_config,
@@ -82,6 +84,19 @@ class _MaintWorker(QThread):
                         self.output.emit("\n".join(
                             f"[{e.get('level', 'info')}] {e.get('source', '?')}: "
                             f"{e.get('message', e)}" for e in entries))
+                elif self.action == "read_output":
+                    outs = engine.read_output(n=10)
+                    if not outs:
+                        self.output.emit("(no recent generation outputs)")
+                    else:
+                        lines = []
+                        for o in outs:
+                            ts = o.get("timestamp", o.get("time", "?"))
+                            tps = o.get("tokens_per_sec", o.get("tok_s", "?"))
+                            toks = o.get("tokens", o.get("n_tokens", "?"))
+                            preview = str(o.get("text", o.get("output", "")))[:120]
+                            lines.append(f"[{ts}] {toks} tok · {tps} tok/s: {preview}")
+                        self.output.emit("\n".join(lines))
                 elif self.action == "recover":
                     rep = engine.recover()
                     self.output.emit(_fmt_report(rep) if rep
@@ -99,6 +114,38 @@ class _MaintWorker(QThread):
             logger.warning("maintenance action %s failed: %s", self.action, e)
             self.output.emit(f"error: {type(e).__name__}: {e}")
             self.done.emit(self.action)
+
+
+class _GenericWorker(QThread):
+    """Runs an arbitrary callable on the resident engine off-UI.
+
+    Used for long-running operations (merge, evolve, library_optimize,
+    generate_batch, generate_adaptive) that would freeze the UI if run
+    synchronously. The callable receives the engine and returns a result
+    that is emitted via ``finished_ok``.
+    """
+
+    output = Signal(str)
+    finished_ok = Signal(object)
+    failed = Signal(str)
+    done = Signal()
+
+    def __init__(self, runtime: EngineRuntime, fn, parent=None) -> None:
+        super().__init__(parent)
+        self.runtime = runtime
+        self.fn = fn
+
+    def run(self) -> None:
+        try:
+            with self.runtime.acquire(timeout_s=300.0) as engine:
+                self.output.emit("running…")
+                result = self.fn(engine)
+            self.finished_ok.emit(result)
+        except Exception as e:
+            logger.warning("generic worker failed: %s", e, exc_info=True)
+            self.failed.emit(f"{type(e).__name__}: {e}")
+        finally:
+            self.done.emit()
 
 
 def _fmt_bench(rep: Any) -> str:
@@ -143,6 +190,7 @@ class EnginePage(QWidget):
         self.runtime = runtime
         self.models_index = models_index
         self._maint: Optional[_MaintWorker] = None
+        self._generic: Optional[_GenericWorker] = None
         self._preset_group: dict[str, QPushButton] = {}
         self._combo_specs: dict[str, tuple[QComboBox, QLabel]] = {}
         self._spin_fields: dict[str, QWidget] = {}
@@ -153,6 +201,9 @@ class EnginePage(QWidget):
         self._tabs.addTab(self._build_load_tab(), "Load & Power")
         self._tabs.addTab(self._build_activation_tab(), "Activation")
         self._tabs.addTab(self._build_tools_tab(), "Stats & Tools")
+        self._tabs.addTab(self._build_library_tab(), "Library")
+        self._tabs.addTab(self._build_sessions_tab(), "Sessions")
+        self._tabs.addTab(self._build_merge_tab(), "Merge Studio")
         outer.addWidget(self._tabs)
 
         # elapsed-time ticker while loading
@@ -180,13 +231,15 @@ class EnginePage(QWidget):
         ml.setSpacing(10)
         ml.addWidget(section_label("Model"))
         self._ckpt = SearchableComboBox()
-        self._reload_checkpoints()
+        # Defer checkpoint/config scans to after window show — these trigger
+        # models_index.models()/configs() which scan research/checkpoints/.
+        QTimer.singleShot(0, self._reload_checkpoints)
         ml.addWidget(self._ckpt)
         cfg_row = QHBoxLayout(); cfg_row.setSpacing(10)
         cfg_row.addWidget(QLabel("Config"))
         self._config = QComboBox()
         self._config.setEditable(True)
-        self._reload_configs()
+        QTimer.singleShot(0, self._reload_configs)
         cfg_row.addStretch(1); cfg_row.addWidget(self._config, 1)
         ml.addLayout(cfg_row)
 
@@ -343,6 +396,13 @@ class EnginePage(QWidget):
         self._diff_lbl.setWordWrap(True)
         al.addWidget(self._diff_lbl)
         row = QHBoxLayout(); row.setSpacing(10)
+        self._apply_optimal_btn = QPushButton("★ Apply optimal preset")
+        self._apply_optimal_btn.setToolTip(
+            "Activate the engine's built-in optimal preset (rotorquant KV, "
+            "Triton conv, prefix cache, fused QK-Norm+RoPE, chunked prefill, "
+            "seq split) — overrides the form with the tuned defaults.")
+        self._apply_optimal_btn.clicked.connect(self._apply_optimal)
+        row.addWidget(self._apply_optimal_btn)
         self._apply_live_btn = QPushButton("⚡ Apply to resident engine")
         self._apply_live_btn.setObjectName("primary")
         self._apply_live_btn.setToolTip(
@@ -417,6 +477,739 @@ class EnginePage(QWidget):
         self._spin_fields[f.name] = s
         return row
 
+    # ── tab 4: library ───────────────────────────────────────────────
+    def _build_library_tab(self) -> QWidget:
+        host = QWidget(); col = QVBoxLayout(host)
+        col.setContentsMargins(22, 18, 22, 18); col.setSpacing(14)
+
+        # ── config card: enable + budget ─────────────────────────────
+        cfg_card = QFrame(); cfg_card.setObjectName("card")
+        cl = QVBoxLayout(cfg_card); cl.setContentsMargins(16, 14, 16, 16)
+        cl.setSpacing(10)
+        cl.addWidget(section_label("Library configuration"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        self._lib_enabled = QCheckBox("Lorebook injection enabled")
+        self._lib_enabled.setToolTip("Globally enable/disable library lorebook "
+                                     "injection into prompts.")
+        self._lib_enabled.toggled.connect(self._lib_set_enabled)
+        row.addWidget(self._lib_enabled)
+        row.addWidget(QLabel("Injection budget"))
+        self._lib_budget = QSpinBox(); self._lib_budget.setRange(0, 32768)
+        self._lib_budget.setSuffix(" tok")
+        self._lib_budget.setToolTip("Max tokens injected per request.")
+        row.addWidget(self._lib_budget)
+        self._lib_budget_btn = QPushButton("Set")
+        self._lib_budget_btn.clicked.connect(self._lib_set_budget)
+        row.addWidget(self._lib_budget_btn)
+        row.addStretch(1)
+        cl.addLayout(row)
+        col.addWidget(cfg_card)
+
+        # ── save card ────────────────────────────────────────────────
+        save_card = QFrame(); save_card.setObjectName("card")
+        sl = QVBoxLayout(save_card); sl.setContentsMargins(16, 14, 16, 16)
+        sl.setSpacing(10)
+        sl.addWidget(section_label("Save entry"))
+        self._lib_content = QTextEdit()
+        self._lib_content.setPlaceholderText("Content to store in the library…")
+        self._lib_content.setFixedHeight(80)
+        sl.addWidget(self._lib_content)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Category"))
+        self._lib_category = QComboBox()
+        for cat in ("custom", "failure", "win", "research", "common_data"):
+            self._lib_category.addItem(cat, cat)
+        row.addWidget(self._lib_category)
+        row.addWidget(QLabel("Priority"))
+        self._lib_priority = QSpinBox(); self._lib_priority.setRange(0, 100)
+        row.addWidget(self._lib_priority)
+        row.addStretch(1)
+        sl.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Tags"))
+        self._lib_tags = QLineEdit(); self._lib_tags.setPlaceholderText("comma-separated")
+        row.addWidget(self._lib_tags, 1)
+        sl.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Description"))
+        self._lib_desc = QLineEdit()
+        row.addWidget(self._lib_desc, 1)
+        sl.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Triggers"))
+        self._lib_triggers = QLineEdit(); self._lib_triggers.setPlaceholderText("comma-separated keywords")
+        row.addWidget(self._lib_triggers, 1)
+        sl.addLayout(row)
+        self._lib_save_btn = QPushButton("⏏ Save entry")
+        self._lib_save_btn.setObjectName("primary")
+        self._lib_save_btn.clicked.connect(self._lib_save)
+        sl.addWidget(self._lib_save_btn)
+        self._lib_save_status = QLabel("")
+        self._lib_save_status.setObjectName("chatMeta")
+        sl.addWidget(self._lib_save_status)
+        col.addWidget(save_card)
+
+        # ── search + lookup card ─────────────────────────────────────
+        search_card = QFrame(); search_card.setObjectName("card")
+        shl = QVBoxLayout(search_card); shl.setContentsMargins(16, 14, 16, 16)
+        shl.setSpacing(10)
+        shl.addWidget(section_label("Search & lookup"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        self._lib_search = QLineEdit(); self._lib_search.setPlaceholderText("full-text query…")
+        row.addWidget(self._lib_search, 1)
+        self._lib_search_btn = QPushButton("Search")
+        self._lib_search_btn.clicked.connect(self._lib_do_search)
+        row.addWidget(self._lib_search_btn)
+        shl.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Lookup tags"))
+        self._lib_lookup_tags = QLineEdit(); self._lib_lookup_tags.setPlaceholderText("comma-separated tags")
+        row.addWidget(self._lib_lookup_tags, 1)
+        row.addWidget(QLabel("Category"))
+        self._lib_lookup_cat = QComboBox()
+        self._lib_lookup_cat.addItem("(any)", "")
+        for cat in ("custom", "failure", "win", "research", "common_data"):
+            self._lib_lookup_cat.addItem(cat, cat)
+        row.addWidget(self._lib_lookup_cat)
+        self._lib_lookup_btn = QPushButton("Lookup")
+        self._lib_lookup_btn.clicked.connect(self._lib_do_lookup)
+        row.addWidget(self._lib_lookup_btn)
+        shl.addLayout(row)
+        col.addWidget(search_card)
+
+        # ── entries table ────────────────────────────────────────────
+        list_card = QFrame(); list_card.setObjectName("card")
+        ll = QVBoxLayout(list_card); ll.setContentsMargins(16, 14, 16, 16)
+        ll.setSpacing(10)
+        head = QHBoxLayout()
+        head.addWidget(section_label("Entries"))
+        head.addStretch(1)
+        self._lib_refresh_btn = QPushButton("Refresh")
+        self._lib_refresh_btn.clicked.connect(self._lib_refresh_list)
+        head.addWidget(self._lib_refresh_btn)
+        self._lib_optimize_btn = QPushButton("Optimize")
+        self._lib_optimize_btn.clicked.connect(self._lib_optimize)
+        head.addWidget(self._lib_optimize_btn)
+        ll.addLayout(head)
+        self._lib_table = QTableWidget(0, 5)
+        self._lib_table.setHorizontalHeaderLabels(
+            ["ID", "Category", "Description", "Tags", "Tokens"])
+        hh = self._lib_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self._lib_table.verticalHeader().setVisible(False)
+        self._lib_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._lib_table.setAlternatingRowColors(True)
+        self._lib_table.setObjectName("dataTable")
+        ll.addWidget(self._lib_table)
+        col.addWidget(list_card)
+
+        # ── stats card ───────────────────────────────────────────────
+        stats_card = QFrame(); stats_card.setObjectName("card")
+        stl = QVBoxLayout(stats_card); stl.setContentsMargins(16, 14, 16, 16)
+        stl.setSpacing(8)
+        head = QHBoxLayout()
+        head.addWidget(section_label("Library stats"))
+        head.addStretch(1)
+        self._lib_stats_btn = QPushButton("Refresh")
+        self._lib_stats_btn.clicked.connect(self._lib_refresh_stats)
+        head.addWidget(self._lib_stats_btn)
+        stl.addLayout(head)
+        self._lib_stats_lbl = QLabel("—")
+        self._lib_stats_lbl.setObjectName("kvVal")
+        self._lib_stats_lbl.setWordWrap(True)
+        stl.addWidget(self._lib_stats_lbl)
+        col.addWidget(stats_card)
+        col.addStretch(1)
+        return _scroll(host)
+
+    def _lib_set_enabled(self, on: bool) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        try:
+            eng.library_set_enabled(on)
+        except Exception as e:
+            self._lib_save_status.setText(f"toggle failed: {e}")
+
+    def _lib_set_budget(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._lib_save_status.setText("no engine")
+            return
+        try:
+            eng.library_set_budget(self._lib_budget.value())
+            self._lib_save_status.setText(f"budget set to {self._lib_budget.value()} tok")
+        except Exception as e:
+            self._lib_save_status.setText(f"budget failed: {e}")
+
+    def _lib_save(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._lib_save_status.setText("no engine — load a model first")
+            return
+        content = self._lib_content.toPlainText().strip()
+        if not content:
+            self._lib_save_status.setText("content is empty")
+            return
+        tags = [t.strip() for t in self._lib_tags.text().split(",") if t.strip()]
+        triggers = [t.strip() for t in self._lib_triggers.text().split(",") if t.strip()]
+        try:
+            eid = eng.library_save(
+                content=content, category=self._lib_category.currentData(),
+                tags=tags, description=self._lib_desc.text().strip(),
+                triggers=triggers, priority=self._lib_priority.value())
+            self._lib_save_status.setText(f"saved ✓ entry_id={eid}")
+            self._lib_content.clear(); self._lib_tags.clear()
+            self._lib_desc.clear(); self._lib_triggers.clear()
+            self._lib_refresh_list()
+        except Exception as e:
+            self._lib_save_status.setText(f"save failed: {e}")
+
+    def _lib_do_search(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        q = self._lib_search.text().strip()
+        if not q:
+            return
+        try:
+            results = eng.library_search(q, limit=50)
+            self._lib_fill_table(results)
+        except Exception as e:
+            self._lib_save_status.setText(f"search failed: {e}")
+
+    def _lib_do_lookup(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        tags = [t.strip() for t in self._lib_lookup_tags.text().split(",") if t.strip()]
+        cat = self._lib_lookup_cat.currentData() or None
+        kwargs = {}
+        if tags:
+            kwargs["tags"] = tags
+        if cat:
+            kwargs["category"] = cat
+        try:
+            results = eng.library_lookup(**kwargs)
+            self._lib_fill_table(results)
+        except Exception as e:
+            self._lib_save_status.setText(f"lookup failed: {e}")
+
+    def _lib_fill_table(self, entries: list) -> None:
+        t = self._lib_table
+        t.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            d = e.to_dict() if hasattr(e, "to_dict") else e
+            cells = [str(d.get("id", "?")), str(d.get("category", "?")),
+                     str(d.get("description", ""))[:80],
+                     ", ".join(d.get("tags", [])),
+                     str(d.get("token_count", 0))]
+            for j, txt in enumerate(cells):
+                it = QTableWidgetItem(txt)
+                if j in (0, 1, 4):
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignVCenter
+                                        | Qt.AlignmentFlag.AlignRight)
+                t.setItem(i, j, it)
+
+    def _lib_refresh_list(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        try:
+            entries = eng.library.list_entries(limit=200)
+            self._lib_fill_table(entries)
+        except Exception as e:
+            self._lib_save_status.setText(f"refresh failed: {e}")
+
+    def _lib_optimize(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._lib_save_status.setText("no engine")
+            return
+        self._lib_save_status.setText("optimizing…")
+        def _fn(e):
+            return e.library_optimize()
+        self._run_generic(_fn, self._lib_on_optimize)
+
+    def _lib_on_optimize(self, result) -> None:
+        self._lib_save_status.setText(f"optimized ✓ {_fmt_report(result)}")
+        self._lib_refresh_list(); self._lib_refresh_stats()
+
+    def _lib_refresh_stats(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._lib_stats_lbl.setText("—")
+            return
+        try:
+            s = eng.library_stats()
+            parts = [f"{s.get('total_entries', 0)} entries",
+                     f"{s.get('total_tokens', 0)} tokens",
+                     f"budget {s.get('injection_budget', 0)} tok"]
+            by_cat = s.get("by_category", {})
+            if by_cat:
+                parts.append(" · ".join(f"{k}:{v}" for k, v in by_cat.items()))
+            self._lib_stats_lbl.setText("  ·  ".join(parts))
+        except Exception as e:
+            self._lib_stats_lbl.setText(f"stats failed: {e}")
+
+    def _run_generic(self, fn, on_ok=None) -> None:
+        """Run a long callable on the resident engine off-UI."""
+        if not self.runtime.is_ready():
+            return
+        if self._generic is not None and self._generic.isRunning():
+            return
+        self._generic = _GenericWorker(self.runtime, fn, parent=self)
+        if on_ok is not None:
+            self._generic.finished_ok.connect(on_ok)
+        self._generic.failed.connect(
+            lambda e: self._maint_out.setPlainText(f"error: {e}"))
+        self._generic.start()
+
+    # ── tab 5: sessions ──────────────────────────────────────────────
+    def _build_sessions_tab(self) -> QWidget:
+        host = QWidget(); col = QVBoxLayout(host)
+        col.setContentsMargins(22, 18, 22, 18); col.setSpacing(14)
+
+        # ── begin session ────────────────────────────────────────────
+        begin_card = QFrame(); begin_card.setObjectName("card")
+        bl = QVBoxLayout(begin_card); bl.setContentsMargins(16, 14, 16, 16)
+        bl.setSpacing(10)
+        bl.addWidget(section_label("Begin session"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Session ID"))
+        self._sess_id = QLineEdit(); self._sess_id.setPlaceholderText("unique session name")
+        row.addWidget(self._sess_id, 1)
+        row.addWidget(QLabel("TTL (s)"))
+        self._sess_ttl = QSpinBox(); self._sess_ttl.setRange(0, 86400)
+        self._sess_ttl.setSpecialValueText("no TTL")
+        row.addWidget(self._sess_ttl)
+        self._sess_begin_btn = QPushButton("⏏ Begin")
+        self._sess_begin_btn.setObjectName("primary")
+        self._sess_begin_btn.clicked.connect(self._sess_begin)
+        row.addWidget(self._sess_begin_btn)
+        bl.addLayout(row)
+        col.addWidget(begin_card)
+
+        # ── continue session ─────────────────────────────────────────
+        cont_card = QFrame(); cont_card.setObjectName("card")
+        ctl = QVBoxLayout(cont_card); ctl.setContentsMargins(16, 14, 16, 16)
+        ctl.setSpacing(10)
+        ctl.addWidget(section_label("Continue session"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Session"))
+        self._sess_pick = QComboBox()
+        row.addWidget(self._sess_pick, 1)
+        self._sess_refresh_btn = QPushButton("↻")
+        self._sess_refresh_btn.setFixedWidth(32)
+        self._sess_refresh_btn.clicked.connect(self._sess_refresh_pick)
+        row.addWidget(self._sess_refresh_btn)
+        ctl.addLayout(row)
+        self._sess_prompt = QPlainTextEdit()
+        self._sess_prompt.setPlaceholderText("Prompt to continue the session with…")
+        self._sess_prompt.setFixedHeight(70)
+        ctl.addWidget(self._sess_prompt)
+        row = QHBoxLayout(); row.setSpacing(10)
+        for label, w in [("Max tok", self._spin_widget("sess_max", 128, 1, 4096)),
+                         ("Temp", self._dspin_widget("sess_temp", 0.0, 0.0, 2.0, 0.05)),
+                         ("Top-P", self._dspin_widget("sess_topp", 1.0, 0.0, 1.0, 0.01))]:
+            row.addWidget(QLabel(label)); row.addWidget(w)
+        row.addStretch(1)
+        ctl.addLayout(row)
+        self._sess_continue_btn = QPushButton("Generate")
+        self._sess_continue_btn.clicked.connect(self._sess_continue)
+        ctl.addWidget(self._sess_continue_btn)
+        self._sess_output = QPlainTextEdit()
+        self._sess_output.setObjectName("logView")
+        self._sess_output.setReadOnly(True)
+        self._sess_output.setFixedHeight(120)
+        ctl.addWidget(self._sess_output)
+        col.addWidget(cont_card)
+
+        # ── pin / unpin / end ────────────────────────────────────────
+        mgmt_card = QFrame(); mgmt_card.setObjectName("card")
+        ml = QVBoxLayout(mgmt_card); ml.setContentsMargins(16, 14, 16, 16)
+        ml.setSpacing(10)
+        ml.addWidget(section_label("Pin / unpin / end"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Session"))
+        self._sess_mgmt_pick = QComboBox()
+        row.addWidget(self._sess_mgmt_pick, 1)
+        row.addWidget(QLabel("Pin TTL (s)"))
+        self._sess_pin_ttl = QSpinBox(); self._sess_pin_ttl.setRange(0, 86400)
+        self._sess_pin_ttl.setSpecialValueText("no TTL")
+        row.addWidget(self._sess_pin_ttl)
+        self._sess_pin_btn = QPushButton("Pin")
+        self._sess_pin_btn.clicked.connect(self._sess_pin)
+        self._sess_unpin_btn = QPushButton("Unpin")
+        self._sess_unpin_btn.clicked.connect(self._sess_unpin)
+        self._sess_end_btn = QPushButton("End")
+        self._sess_end_btn.setObjectName("danger")
+        self._sess_end_btn.clicked.connect(self._sess_end)
+        for b in (self._sess_pin_btn, self._sess_unpin_btn, self._sess_end_btn):
+            row.addWidget(b)
+        ml.addLayout(row)
+        col.addWidget(mgmt_card)
+
+        # ── session stats ────────────────────────────────────────────
+        stats_card = QFrame(); stats_card.setObjectName("card")
+        ssl = QVBoxLayout(stats_card); ssl.setContentsMargins(16, 14, 16, 16)
+        ssl.setSpacing(8)
+        head = QHBoxLayout()
+        head.addWidget(section_label("Session stats"))
+        head.addStretch(1)
+        self._sess_stats_btn = QPushButton("Refresh")
+        self._sess_stats_btn.clicked.connect(self._sess_refresh_stats)
+        head.addWidget(self._sess_stats_btn)
+        ssl.addLayout(head)
+        self._sess_stats_lbl = QLabel("—")
+        self._sess_stats_lbl.setObjectName("kvVal")
+        self._sess_stats_lbl.setWordWrap(True)
+        ssl.addWidget(self._sess_stats_lbl)
+        col.addWidget(stats_card)
+        col.addStretch(1)
+        return _scroll(host)
+
+    def _spin_widget(self, attr: str, val, lo, hi, step=1) -> QSpinBox:
+        s = QSpinBox(); s.setRange(lo, hi); s.setSingleStep(step); s.setValue(val)
+        setattr(self, f"_{attr}", s)
+        return s
+
+    def _dspin_widget(self, attr: str, val, lo, hi, step, dec=2) -> QDoubleSpinBox:
+        s = QDoubleSpinBox(); s.setRange(lo, hi); s.setSingleStep(step)
+        s.setDecimals(dec); s.setValue(val)
+        setattr(self, f"_{attr}", s)
+        return s
+
+    def _sess_begin(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._sess_output.setPlainText("no engine")
+            return
+        sid = self._sess_id.text().strip()
+        if not sid:
+            self._sess_output.setPlainText("enter a session ID")
+            return
+        ttl = self._sess_ttl.value() or None
+        try:
+            eng.begin_session(sid, ttl=ttl)
+            self._sess_output.setPlainText(f"session '{sid}' begun ✓")
+            self._sess_refresh_pick()
+        except Exception as e:
+            self._sess_output.setPlainText(f"begin failed: {e}")
+
+    def _sess_continue(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._sess_output.setPlainText("no engine")
+            return
+        sid = self._sess_pick.currentText().strip()
+        if not sid:
+            self._sess_output.setPlainText("select a session first")
+            return
+        prompt = self._sess_prompt.toPlainText().strip()
+        if not prompt:
+            self._sess_output.setPlainText("enter a prompt")
+            return
+        self._sess_output.setPlainText("generating…")
+        def _fn(e):
+            return e.continue_session(
+                sid, prompt, max_new_tokens=self._sess_max.value(),
+                temperature=self._sess_temp.value(),
+                top_p=self._sess_topp.value())
+        self._run_generic(
+            _fn,
+            on_ok=lambda text: (self._sess_output.setPlainText(str(text)),
+                                 self._sess_prompt.clear()))
+
+    def _sess_pin(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        sid = self._sess_mgmt_pick.currentText().strip()
+        if not sid:
+            return
+        ttl = self._sess_pin_ttl.value() or None
+        try:
+            eng.pin_session(sid, ttl=ttl)
+            self._sess_output.setPlainText(f"pinned '{sid}' ✓")
+        except Exception as e:
+            self._sess_output.setPlainText(f"pin failed: {e}")
+
+    def _sess_unpin(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        sid = self._sess_mgmt_pick.currentText().strip()
+        if not sid:
+            return
+        try:
+            eng.unpin_session(sid)
+            self._sess_output.setPlainText(f"unpinned '{sid}' ✓")
+        except Exception as e:
+            self._sess_output.setPlainText(f"unpin failed: {e}")
+
+    def _sess_end(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        sid = self._sess_mgmt_pick.currentText().strip()
+        if not sid:
+            return
+        try:
+            eng.end_session(sid)
+            self._sess_output.setPlainText(f"ended '{sid}' ✓")
+            self._sess_refresh_pick()
+        except Exception as e:
+            self._sess_output.setPlainText(f"end failed: {e}")
+
+    def _sess_refresh_pick(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            return
+        try:
+            s = eng.session_stats()
+            ids = list(s.get("sessions", {}).keys()) if isinstance(s.get("sessions"), dict) else []
+            for combo in (self._sess_pick, self._sess_mgmt_pick):
+                cur = combo.currentText()
+                combo.clear(); combo.addItems(ids)
+                if cur in ids:
+                    combo.setCurrentText(cur)
+        except Exception:
+            pass
+
+    def _sess_refresh_stats(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._sess_stats_lbl.setText("—")
+            return
+        try:
+            s = eng.session_stats()
+            self._sess_stats_lbl.setText(_fmt_report(s))
+        except Exception as e:
+            self._sess_stats_lbl.setText(f"stats failed: {e}")
+
+    # ── tab 6: merge studio ──────────────────────────────────────────
+    def _build_merge_tab(self) -> QWidget:
+        host = QWidget(); col = QVBoxLayout(host)
+        col.setContentsMargins(22, 18, 22, 18); col.setSpacing(14)
+
+        # ── one-shot merge ───────────────────────────────────────────
+        merge_card = QFrame(); merge_card.setObjectName("card")
+        ml = QVBoxLayout(merge_card); ml.setContentsMargins(16, 14, 16, 16)
+        ml.setSpacing(10)
+        ml.addWidget(section_label("Merge checkpoints (one-shot)"))
+        ml.addWidget(QLabel("Parents (select 2+ for crossover, 1+ for mutation):"))
+        self._merge_parents = QTableWidget(0, 2)
+        self._merge_parents.setHorizontalHeaderLabels(["", "Checkpoint"])
+        hh = self._merge_parents.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._merge_parents.verticalHeader().setVisible(False)
+        self._merge_parents.setObjectName("dataTable")
+        QTimer.singleShot(0, self._merge_fill_parents)
+        ml.addWidget(self._merge_parents)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Method"))
+        self._merge_method = QComboBox()
+        for m in ("blockwise_crossover", "block_random_crossover",
+                  "uniform_crossover", "gaussian_mutation",
+                  "quant_perturb", "block_swap",
+                  "slerp", "linear", "ties", "dare", "svd", "task_arith"):
+            self._merge_method.addItem(m, m)
+        row.addWidget(self._merge_method, 1)
+        ml.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Output"))
+        self._merge_out = QLineEdit()
+        self._merge_out.setPlaceholderText("data/merged/<method>_<ts>.safetensors")
+        row.addWidget(self._merge_out, 1)
+        self._merge_pick_btn = QPushButton("…")
+        self._merge_pick_btn.setFixedWidth(32)
+        self._merge_pick_btn.clicked.connect(self._merge_pick_out)
+        row.addWidget(self._merge_pick_btn)
+        ml.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        self._merge_load_result = QCheckBox("Hot-swap merged weights into engine after save")
+        row.addWidget(self._merge_load_result)
+        row.addStretch(1)
+        ml.addLayout(row)
+        self._merge_btn = QPushButton("⚒ Merge (CPU — GPU untouched)")
+        self._merge_btn.setObjectName("primary")
+        self._merge_btn.clicked.connect(self._merge_run)
+        ml.addWidget(self._merge_btn)
+        col.addWidget(merge_card)
+
+        # ── evolutionary merge ───────────────────────────────────────
+        evolve_card = QFrame(); evolve_card.setObjectName("card")
+        el = QVBoxLayout(evolve_card); el.setContentsMargins(16, 14, 16, 16)
+        el.setSpacing(10)
+        el.addWidget(section_label("Evolutionary merge (GENOME)"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        for label, w in [("Generations", self._spin_widget("evo_gen", 5, 1, 50)),
+                         ("Pop size", self._spin_widget("evo_pop", 8, 2, 32)),
+                         ("Elitism", self._spin_widget("evo_elite", 1, 0, 10))]:
+            row.addWidget(QLabel(label)); row.addWidget(w)
+        row.addStretch(1)
+        el.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Crossover"))
+        self._evo_crossover = QComboBox()
+        for m in ("blockwise", "block_random", "uniform"):
+            self._evo_crossover.addItem(m, m)
+        row.addWidget(self._evo_crossover)
+        row.addWidget(QLabel("Mutation"))
+        self._evo_mutation = QComboBox()
+        for m in ("gaussian", "quant_perturb", "block_swap"):
+            self._evo_mutation.addItem(m, m)
+        row.addWidget(self._evo_mutation)
+        row.addWidget(QLabel("Mut rate"))
+        self._evo_mut_rate = QDoubleSpinBox()
+        self._evo_mut_rate.setRange(0.0, 1.0); self._evo_mut_rate.setSingleStep(0.1)
+        self._evo_mut_rate.setValue(0.5)
+        row.addWidget(self._evo_mut_rate)
+        row.addStretch(1)
+        el.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Bench prompt"))
+        self._evo_bench_prompt = QLineEdit("The quick brown fox jumps over the lazy dog.")
+        row.addWidget(self._evo_bench_prompt, 1)
+        row.addWidget(QLabel("Bench tok"))
+        self._evo_bench_tok = QSpinBox(); self._evo_bench_tok.setRange(8, 512)
+        self._evo_bench_tok.setValue(32)
+        row.addWidget(self._evo_bench_tok)
+        el.addLayout(row)
+        self._evo_btn = QPushButton("⚒ Evolve (uses engine as fitness evaluator)")
+        self._evo_btn.setObjectName("primary")
+        self._evo_btn.clicked.connect(self._evolve_run)
+        el.addWidget(self._evo_btn)
+        col.addWidget(evolve_card)
+
+        # ── output ───────────────────────────────────────────────────
+        out_card = QFrame(); out_card.setObjectName("card")
+        ol = QVBoxLayout(out_card); ol.setContentsMargins(16, 14, 16, 16)
+        ol.setSpacing(10)
+        ol.addWidget(section_label("Output"))
+        self._merge_output = QPlainTextEdit()
+        self._merge_output.setObjectName("logView")
+        self._merge_output.setReadOnly(True)
+        self._merge_output.setFixedHeight(140)
+        ol.addWidget(self._merge_output)
+        col.addWidget(out_card)
+        col.addStretch(1)
+        return _scroll(host)
+
+    def _merge_fill_parents(self) -> None:
+        t = self._merge_parents
+        paths: list[tuple[str, str]] = []
+        if self.models_index is not None:
+            try:
+                for m in self.models_index.models():
+                    if m.is_safetensors and "lora" not in m.name.lower():
+                        paths.append((m.name, m.path))
+            except Exception:
+                pass
+        if not paths:
+            paths.append(("ForgeLM_V2_Light.safetensors",
+                          "research/checkpoints/ForgeLM_V2_Light.safetensors"))
+        t.setRowCount(len(paths))
+        for i, (name, path) in enumerate(paths):
+            cb = QCheckBox()
+            cb_widget = QWidget(); cb_l = QHBoxLayout(cb_widget)
+            cb_l.setContentsMargins(0, 0, 0, 0); cb_l.addWidget(cb)
+            cb_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            t.setCellWidget(i, 0, cb_widget)
+            t.setItem(i, 1, QTableWidgetItem(f"{name}  ({path})"))
+
+    def _merge_selected_parents(self) -> list[str]:
+        t = self._merge_parents
+        root = None
+        try:
+            from ..api.status_reader import project_root as _pr
+            root = _pr()
+        except Exception:
+            pass
+        parents = []
+        for i in range(t.rowCount()):
+            cw = t.cellWidget(i, 0)
+            cb = cw.findChild(QCheckBox) if cw else None
+            if cb and cb.isChecked():
+                item = t.item(i, 1)
+                if item is None:
+                    continue
+                text = item.text()
+                # extract path from "name  (path)"
+                if "(" in text and text.endswith(")"):
+                    path = text[text.rfind("(") + 1:text.rfind(")")]
+                else:
+                    path = text
+                if root and not _isabs_str(path):
+                    path = str(root / path)
+                parents.append(path)
+        return parents
+
+    def _merge_pick_out(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Merged checkpoint output", "",
+            "Safetensors (*.safetensors)")
+        if path:
+            self._merge_out.setText(path)
+
+    def _merge_run(self) -> None:
+        parents = self._merge_selected_parents()
+        if not parents:
+            self._merge_output.setPlainText("select at least 1 parent")
+            return
+        method = self._merge_method.currentData()
+        out_path = self._merge_out.text().strip() or None
+        load_result = self._merge_load_result.isChecked()
+        cfg = self._config.currentText().strip() or None
+        self._merge_output.setPlainText(f"merging {len(parents)} parents via {method}…")
+        def _fn(e):
+            return e.merge_checkpoints(
+                parents=parents, method=method, out_path=out_path,
+                config_name=cfg, load_result=load_result)
+        self._run_generic(_fn, self._merge_on_done)
+
+    def _merge_on_done(self, path) -> None:
+        self._merge_output.setPlainText(f"merged ✓ → {path}")
+        self._poll_stats()
+
+    def _evolve_run(self) -> None:
+        parents = self._merge_selected_parents()
+        if len(parents) < 2:
+            self._merge_output.setPlainText("evolve needs 2+ parents")
+            return
+        self._merge_output.setPlainText(
+            f"evolving {len(parents)} parents, "
+            f"{self._evo_gen.value()} generations…")
+        def _fn(e):
+            return e.evolve_merge(
+                parents=parents,
+                n_generations=self._evo_gen.value(),
+                population_size=self._evo_pop.value(),
+                crossover=self._evo_crossover.currentData(),
+                mutation=self._evo_mutation.currentData(),
+                mutation_rate=self._evo_mut_rate.value(),
+                elitism=self._evo_elite.value(),
+                benchmark_prompt=self._evo_bench_prompt.text().strip(),
+                benchmark_tokens=self._evo_bench_tok.value())
+        self._run_generic(_fn, self._evolve_on_done)
+
+    def _evolve_on_done(self, result) -> None:
+        if isinstance(result, dict):
+            best = result.get("best_path", "?")
+            gens = result.get("generations_completed", "?")
+            self._merge_output.setPlainText(
+                f"evolution complete ✓ {gens} generations\n"
+                f"best checkpoint: {best}")
+        else:
+            self._merge_output.setPlainText(f"evolution complete ✓ {result}")
+        self._poll_stats()
+
     # ── tab 3: stats & tools ─────────────────────────────────────────
     def _build_tools_tab(self) -> QWidget:
         host = QWidget(); col = QVBoxLayout(host)
@@ -464,7 +1257,8 @@ class EnginePage(QWidget):
         for label, action in (("Benchmark", "benchmark"),
                               ("Bottleneck", "bottleneck"),
                               ("Diagnose", "diagnose"),
-                              ("Engine log", "read_log")):
+                              ("Engine log", "read_log"),
+                              ("Recent outputs", "read_output")):
             b = QPushButton(label)
             b.clicked.connect(lambda _=False, a=action: self._maintain(a))
             act.addWidget(b)
@@ -497,6 +1291,41 @@ class EnginePage(QWidget):
         self._rec_lbl.setObjectName("chatMeta"); self._rec_lbl.setWordWrap(True)
         rl.addWidget(self._rec_lbl)
         col.addWidget(rec_card)
+
+        # CacheBlend runtime controls
+        blend_card = QFrame(); blend_card.setObjectName("card")
+        bl = QVBoxLayout(blend_card); bl.setContentsMargins(16, 14, 16, 16)
+        bl.setSpacing(10)
+        bl.addWidget(section_label("CacheBlend (non-prefix KV reuse)"))
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Chunk size"))
+        self._blend_chunk = QSpinBox(); self._blend_chunk.setRange(32, 4096)
+        self._blend_chunk.setValue(256); self._blend_chunk.setSingleStep(32)
+        row.addWidget(self._blend_chunk)
+        row.addWidget(QLabel("Max chunks"))
+        self._blend_max = QSpinBox(); self._blend_max.setRange(1, 4096)
+        self._blend_max.setValue(512)
+        row.addWidget(self._blend_max)
+        self._blend_enable_btn = QPushButton("Enable")
+        self._blend_enable_btn.clicked.connect(self._blend_enable)
+        row.addWidget(self._blend_enable_btn)
+        row.addStretch(1)
+        bl.addLayout(row)
+        row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("Register chunk text"))
+        self._blend_text = QLineEdit()
+        self._blend_text.setPlaceholderText("text to pre-compute KV for reuse…")
+        row.addWidget(self._blend_text, 1)
+        self._blend_register_btn = QPushButton("Register")
+        self._blend_register_btn.clicked.connect(self._blend_register)
+        row.addWidget(self._blend_register_btn)
+        bl.addLayout(row)
+        self._blend_status = QLabel("CacheBlend enables non-prefix KV reuse — "
+                                    "pre-compute chunks for instant retrieval.")
+        self._blend_status.setObjectName("chatMeta"); self._blend_status.setWordWrap(True)
+        bl.addWidget(self._blend_status)
+        col.addWidget(blend_card)
+
         col.addStretch(1)
         return _scroll(host)
 
@@ -753,6 +1582,26 @@ class EnginePage(QWidget):
             self._diff_lbl.setText("Changes vs resident engine:\n  "
                                    + "\n  ".join(diff[:14]))
 
+    def _apply_optimal(self) -> None:
+        """Activate the engine's built-in optimal preset on the resident engine."""
+        if not self.runtime.is_ready():
+            self._apply_status.setText(
+                "no resident engine — load a model first")
+            return
+        self._apply_status.setText("applying optimal preset…")
+        def _fn(e):
+            e.activate_optimal()
+            ac = getattr(e, "active_config", None)
+            return ac.to_dict() if ac is not None else {}
+        self._run_generic(_fn, self._on_optimal_applied)
+
+    def _on_optimal_applied(self, active: dict) -> None:
+        self._apply_status.setText("optimal preset applied ✓")
+        self._fill_form({f.name: active.get(f.name, f.default) for f in FIELDS})
+        self._mark_matching_preset(active)
+        self._update_diff()
+        self._poll_stats(); self._update_vram()
+
     def _apply_live(self) -> None:
         if not self.runtime.is_ready():
             self._apply_status.setText(
@@ -838,6 +1687,34 @@ class EnginePage(QWidget):
         except Exception as e:
             self._vram_lbl.setText(f"vram read failed: {e}")
 
+    def _blend_enable(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._blend_status.setText("no engine")
+            return
+        try:
+            eng.enable_cache_blend(
+                chunk_size=self._blend_chunk.value(),
+                max_chunks=self._blend_max.value())
+            self._blend_status.setText("CacheBlend enabled ✓")
+        except Exception as e:
+            self._blend_status.setText(f"enable failed: {e}")
+
+    def _blend_register(self) -> None:
+        eng = self.runtime.try_engine()
+        if eng is None:
+            self._blend_status.setText("no engine")
+            return
+        text = self._blend_text.text().strip()
+        if not text:
+            return
+        def _fn(e):
+            return e.register_blend_chunk(text)
+        self._run_generic(
+            _fn,
+            on_ok=lambda n: (self._blend_status.setText(f"registered chunk #{n} ✓"),
+                             self._blend_text.clear()))
+
     def _maintain(self, action: str) -> None:
         if self._maint is not None and self._maint.isRunning():
             return
@@ -864,6 +1741,11 @@ def _flag_check(f: FieldSpec) -> QCheckBox:
 
 def _base_name(p: str) -> str:
     return str(p).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _isabs_str(p: str) -> bool:
+    import os
+    return os.path.isabs(p)
 
 
 def _short(v: Any, limit: int = 300) -> str:

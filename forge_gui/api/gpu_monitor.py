@@ -39,19 +39,30 @@ class GpuMonitor:
 
     def __init__(self) -> None:
         self._torch = None
+        self._torch_loaded = False
+
+    def _ensure_torch(self):
+        """Lazily import torch on first use — importing torch at construction
+        time adds 1-3s to GUI startup (CUDA runtime init). Deferring to the
+        first snapshot() call means the window appears before torch loads."""
+        if self._torch_loaded:
+            return self._torch
+        self._torch_loaded = True
         try:
             import torch  # noqa
             self._torch = torch
         except Exception as e:
             logger.warning("torch unavailable — GPU monitoring disabled: %s", e)
             self._torch = None
+        return self._torch
 
     @property
     def available(self) -> bool:
-        return bool(self._torch and self._torch.cuda.is_available())
+        t = self._ensure_torch()
+        return bool(t and t.cuda.is_available())
 
     def snapshot(self) -> GpuStats:
-        t = self._torch
+        t = self._ensure_torch()
         if not t or not t.cuda.is_available():
             return GpuStats()
         try:
@@ -79,7 +90,7 @@ class GpuMonitor:
             return GpuStats()
 
     def reset_peak(self) -> None:
-        t = self._torch
+        t = self._ensure_torch()
         if t and t.cuda.is_available():
             try:
                 t.cuda.reset_peak_memory_stats()

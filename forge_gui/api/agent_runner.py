@@ -24,28 +24,51 @@ from .engine_runtime import EngineRuntime
 
 logger = logging.getLogger(__name__)
 
-SIDE_EFFECT_TOOLS = {"write_file", "append_file", "delete_file",
-                     "run_python", "run_cmd"}
+# Tools that modify files or execute code — may require approval.
+SIDE_EFFECT_TOOLS = frozenset({
+    "write_file", "append_file", "delete_file",
+    "run_python", "run_cmd",
+    "search_replace", "create_file", "git_revert",
+    "rename_file", "project_search_replace", "undo_edit",
+    "git_branch", "git_stash", "run_tests",
+})
+
+# Destructive tools that can cause data loss — always prompt in
+# "destructive" approval mode.
+DESTRUCTIVE_TOOLS = frozenset({
+    "delete_file", "git_revert", "project_search_replace",
+    "git_branch", "git_stash",
+})
+
+# Approval modes
+APPROVAL_NONE = "none"
+APPROVAL_DESTRUCTIVE = "destructive"
+APPROVAL_ALL = "all"
 
 DEFAULT_SYSTEM = (
-    "You are Forge Agent, an expert coding agent working inside the user's "
-    "workspace. Solve the task step by step using the provided tools "
-    "(list_dir, read_file, write_file, run_python, run_cmd, grep_project, "
-    "remember, recall_memory, forget, load_lora, unload_lora, list_loras). "
-    "Prefer small, verifiable changes: read before writing, run the code to "
-    "check your work, and keep the final answer concise. Use 'remember' to "
-    "save important facts to long-term memory. Use 'load_lora' to specialize "
-    "the model for a task (e.g. load_lora(category='coding') before writing "
-    "code). When the task is complete, reply with a short summary and stop "
-    "calling tools."
+    "You are Forge Agent, an expert coding and research agent. You MUST use "
+    "tools to complete the task — never just write explanations. Call a tool "
+    "every turn until done, then give a short summary.\n"
+    "For research tasks: start with web_search to find information online, "
+    "then web_fetch to read full pages. Use wikipedia_search for factual "
+    "background and arxiv_search for academic papers.\n"
+    "For coding tasks: start with list_dir and read_file to explore the "
+    "workspace, then use write_file or search_replace to make changes.\n"
+    "Format: <|tool_call_start|>[tool_name(arg='value')]<|tool_call_end|>"
 )
+
+# How many times to retry when the model produces no tool call, feeding
+# back an error message each time (matches discovery loop pattern).
+NO_TOOL_RETRIES = 2
 
 
 class AgentRunner(QThread):
     """Runs one agent task to completion (or cancellation)."""
 
     round_started = Signal(int)
-    text = Signal(str, str)              # round_idx, assistant content
+    text = Signal(int, str)              # round_idx, assistant content
+    raw_output = Signal(int, str)        # round_idx, raw model output (pre-parse)
+    prompt_rendered = Signal(int, str)   # round_idx, full rendered prompt
     tool_call = Signal(int, dict)        # round_idx, {name, arguments}
     tool_result = Signal(int, dict)      # round_idx, sandbox record
     approval_requested = Signal(int, dict)  # round_idx, call dict
@@ -58,7 +81,7 @@ class AgentRunner(QThread):
                  temperature: float = 0.2, top_p: float = 0.95, top_k: int = 80,
                  repetition_penalty: float = 1.05,
                  enabled_tools: Optional[list[str]] = None,
-                 require_approval: bool = False,
+                 approval_mode: str = APPROVAL_DESTRUCTIVE,
                  history: Optional[list[dict]] = None,
                  tool_harness=None,
                  parent=None) -> None:
@@ -74,7 +97,7 @@ class AgentRunner(QThread):
         self.top_k = top_k
         self.repetition_penalty = repetition_penalty
         self.enabled_tools = enabled_tools  # None = all
-        self.require_approval = require_approval
+        self.approval_mode = approval_mode
         self.history = list(history or [])  # prior conversation (chat hand-off)
         self.tool_harness = tool_harness    # ToolHarness or None (auto-create)
         self._cancel = False
@@ -104,6 +127,7 @@ class AgentRunner(QThread):
 
     def _loop(self) -> dict:
         from research.self_play.discovery.qwen_adapter import (  # type: ignore
+            TOOL_CALL_START, TOOL_CALL_END,
             qwen_parse_tool_calls, qwen_render_messages,
         )
         from .tool_harness import ToolHarness
@@ -125,6 +149,13 @@ class AgentRunner(QThread):
         all_calls: list[dict] = []
         content = ""
         rounds = 0
+
+        # Grammar constraints enforce JSON tool-call format, but the model
+        # was trained on Pythonic format [func(arg='val')]. JSON grammar
+        # would break Pythonic parsing, so we skip grammar constraints.
+        # The model already knows the format from training.
+        grammar_proc = None
+
         for round_idx in range(self.max_rounds):
             if self._cancel:
                 break
@@ -133,40 +164,102 @@ class AgentRunner(QThread):
 
             rendered = qwen_render_messages(
                 messages, tools=defs, add_generation_prompt=True)
+            self.prompt_rendered.emit(round_idx, rendered)
+
+            # Generate with grammar-constrained decoding if available.
+            # generate_raw supports logits_processor; generate() does not.
             with self._runtime.acquire() as engine:
-                raw = engine.generate(
-                    rendered, max_new_tokens=self.max_new_tokens,
-                    temperature=self.temperature, top_p=self.top_p,
-                    top_k=self.top_k,
-                    repetition_penalty=self.repetition_penalty)
+                if grammar_proc is not None and hasattr(engine, "generate_raw"):
+                    raw = engine.generate_raw(
+                        rendered, max_new_tokens=self.max_new_tokens,
+                        temperature=self.temperature, top_p=self.top_p,
+                        top_k=self.top_k,
+                        repetition_penalty=self.repetition_penalty,
+                        logits_processor=grammar_proc,
+                        skip_special_tokens=False)
+                else:
+                    raw = engine.generate(
+                        rendered, max_new_tokens=self.max_new_tokens,
+                        temperature=self.temperature, top_p=self.top_p,
+                        top_k=self.top_k,
+                        repetition_penalty=self.repetition_penalty,
+                        skip_special_tokens=False)
             if self._cancel:
                 break
 
             tool_calls, content = qwen_parse_tool_calls(raw)
-            self.text.emit(str(round_idx), content or "")
+            self.raw_output.emit(round_idx, raw)
+            self.text.emit(round_idx, content or "")
             messages.append({"role": "assistant", "content": content or ""})
 
             if not tool_calls:
-                break
+                # Retry: feed back an error telling the model to use tools,
+                # then try again (up to NO_TOOL_RETRIES times per round).
+                # This matches the discovery loop pattern.
+                retried = False
+                for retry in range(NO_TOOL_RETRIES):
+                    if self._cancel:
+                        break
+                    err_msg = (
+                        f"No tool call found in your response. You MUST use "
+                        f"tools to complete the task. To call a tool, output: "
+                        f"{TOOL_CALL_START}\n{{\"name\": \"tool_name\", "
+                        f"\"arguments\": {{...}}}}\n{TOOL_CALL_END}\n"
+                        f"Available tools: {', '.join(d['function']['name'] for d in defs)}. "
+                        f"Try again — start by calling list_dir or read_file "
+                        f"to explore the workspace."
+                    )
+                    messages.append({"role": "tool", "name": "system",
+                                     "content": err_msg})
+                    rendered = qwen_render_messages(
+                        messages, tools=defs, add_generation_prompt=True)
+                    self.prompt_rendered.emit(round_idx, rendered)
+                    with self._runtime.acquire() as engine:
+                        if grammar_proc is not None and hasattr(engine, "generate_raw"):
+                            raw = engine.generate_raw(
+                                rendered, max_new_tokens=self.max_new_tokens,
+                                temperature=self.temperature, top_p=self.top_p,
+                                top_k=self.top_k,
+                                repetition_penalty=self.repetition_penalty,
+                                logits_processor=grammar_proc,
+                                skip_special_tokens=False)
+                        else:
+                            raw = engine.generate(
+                                rendered, max_new_tokens=self.max_new_tokens,
+                                temperature=self.temperature, top_p=self.top_p,
+                                top_k=self.top_k,
+                                repetition_penalty=self.repetition_penalty,
+                                skip_special_tokens=False)
+                    if self._cancel:
+                        break
+                    tool_calls, content = qwen_parse_tool_calls(raw)
+                    self.raw_output.emit(round_idx, raw)
+                    self.text.emit(round_idx, content or "")
+                    messages.append({"role": "assistant", "content": content or ""})
+                    if tool_calls:
+                        retried = True
+                        break
+                if not retried:
+                    break
 
             for tc in tool_calls:
                 if self._cancel:
                     break
                 call = tc if isinstance(tc, dict) else {"name": str(tc)}
-                self.tool_call.emit(str(round_idx), call)
+                self.tool_call.emit(round_idx, call)
                 if not self._may_execute(call):
                     results = [{"ok": False,
                                 "result": {"error": "blocked by policy"}}]
                 else:
-                    if self.require_approval and self._needs_approval(call):
+                    if self._needs_approval(call):
                         self._approval.clear()
-                        self.approval_requested.emit(str(round_idx), call)
+                        self.approval_requested.emit(round_idx, call)
                         self._approval.wait()
                         if self._cancel or not self._approval_granted:
                             results = [{"ok": False,
                                         "result": {"error": "denied by user"}}]
                             rec = results[0]
-                            self.tool_result.emit(str(round_idx), rec)
+                            self.tool_result.emit(round_idx, rec)
                             messages.append({
                                 "role": "tool",
                                 "name": call.get("name", "tool"),
@@ -176,7 +269,7 @@ class AgentRunner(QThread):
                     results = harness.execute_calls([call])
                 rec = results[0]
                 all_calls.append(call)
-                self.tool_result.emit(str(round_idx), rec)
+                self.tool_result.emit(round_idx, rec)
                 messages.append({
                     "role": "tool",
                     "name": call.get("name", "tool"),
@@ -203,6 +296,11 @@ class AgentRunner(QThread):
             return True
         return call.get("name") in set(self.enabled_tools)
 
-    @staticmethod
-    def _needs_approval(call: dict) -> bool:
-        return call.get("name") in SIDE_EFFECT_TOOLS
+    def _needs_approval(self, call: dict) -> bool:
+        name = call.get("name", "")
+        if self.approval_mode == APPROVAL_NONE:
+            return False
+        if self.approval_mode == APPROVAL_ALL:
+            return name in SIDE_EFFECT_TOOLS
+        # destructive only
+        return name in DESTRUCTIVE_TOOLS

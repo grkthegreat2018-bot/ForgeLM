@@ -151,7 +151,8 @@ class _EngineChatToolWorker(QThread):
                         rendered, max_new_tokens=self.max_new_tokens,
                         temperature=self.temperature, top_p=self.top_p,
                         top_k=self.top_k,
-                        repetition_penalty=self.repetition_penalty)
+                        repetition_penalty=self.repetition_penalty,
+                        skip_special_tokens=False)
 
                 if self._cancelled:
                     break
@@ -604,7 +605,9 @@ class ChatPage(QWidget):
         self._model_label = section_label("Checkpoint")
         rl.addWidget(self._model_label)
         self._model = QComboBox()
-        self._reload_models()
+        # Defer model scan to after window show — _reload_models() triggers
+        # models_index.models() which scans research/checkpoints/.
+        QTimer.singleShot(0, self._reload_models)
         rl.addWidget(self._model)
 
         self._endpoint_label = section_label("Endpoint URL")

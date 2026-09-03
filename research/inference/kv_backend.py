@@ -391,6 +391,9 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     if strategy == "spectral":
         from research.inference.kv.spectral_kv import SpectralKVCache
         return SpectralKVCache()
+    if strategy == "residual_stream":
+        from research.inference.kv.residual_cache import ResidualStreamCache
+        return ResidualStreamCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()

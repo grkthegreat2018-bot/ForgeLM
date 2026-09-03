@@ -1,19 +1,20 @@
-"""Qwen-format tool-call adapter for the discovery self-play loop.
+"""Jamba-format tool-call adapter for the discovery self-play loop.
 
-The discovery loop was built for ForgeLM V10's native Pythonic tool-call format
-(<|tool_call_start|>[func(arg='val')]<|tool_call_end|>). Our SFT model uses
-Qwen chat format with JSON tool calls wrapped in the native special tokens
-(ids 10/11):
+ForgeLM V2 uses Jamba Reasoning 3B as parent, with ChatML format and
+JSON tool calls wrapped in Jamba's native special tokens (ids 531/532):
   <|im_start|>assistant
-  {start_token}\n{"name": "tool_name", "arguments": {...}}\n{end_token}<|im_end|>
+  {"name": "tool_name", "arguments": {...}}
+  <|im_end|>
+
+Jamba also supports thinking mode with tags (ids 541/542).
 
 This module provides:
-  - qwen_render_messages: render a conversation in Qwen format with tool defs
+  - qwen_render_messages: render a conversation in Jamba/ChatML format with tool defs
   - qwen_parse_tool_calls: parse JSON tool calls from model output
-  - QwenDiscoveryAdapter: wraps the discovery loop to use Qwen format
+  - QwenDiscoveryAdapter: wraps the discovery loop to use Jamba format
 
-This lets the SFT-trained model participate in self-play using the format
-it was trained on, without rewriting the entire discovery infrastructure.
+Legacy LFM2.5 format (Pythonic tool calls, ids 10/11) is still supported
+for backward compatibility.
 """
 from __future__ import annotations
 
@@ -23,41 +24,29 @@ from typing import Any
 
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
-EOS_ID = 7  # <|im_end|> token id in the LFM2.5 tokenizer
+# Jamba Reasoning 3B token IDs
+EOS_IDS = (2, 519)  #  and <|im_end|>
+BOS_ID = 1  # <|startoftext|>
 
-# Tool call markers — ForgeLM V10's native special tokens (single-token ids 10/11).
-# Built from hex to avoid IDE tool-call parsing confusion.
-TOOL_CALL_START = bytes.fromhex("3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
-TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
-TOOL_CALL_START_FIRST_ID = 10   # special token id for the start marker
-TOOL_CALL_END_FIRST_ID = 11     # special token id for the end marker
+# Jamba tool call markers (single tokens: 531/532)
+TOOL_CALL_START = "<tool_call>"
+TOOL_CALL_END = "</tool_call>"
+TOOL_CALL_START_ID = 531
+TOOL_CALL_END_ID = 532
+
+# Jamba tool result markers (single tokens: 539/540)
+TOOL_RESP_START = "<tool_call>"
+TOOL_RESP_END = "
 
 
 def qwen_render_tool_defs(tools: list[dict]) -> str:
-    """Render tool definitions as a text block for the system/user message.
+    """Render tool definitions as a compact text block for the system prompt.
 
-    Includes explicit instructions on how to call tools using the
-    <|tool_call_start|>/<|tool_call_end|> marker format so the model
-    knows to emit structured tool calls rather than writing code.
+    Ultra-compact format to fit in limited KV cache (2048 tokens on 12GB):
+      tool_name(param1, param2='default') - short description
     """
     lines = [
-        "You have access to the following tools. To use a tool, output a tool call "
-        "wrapped in the special markers <|tool_call_start|> and <|tool_call_end|>, "
-        "containing a JSON object with the tool name and arguments.",
-        "",
-        "Example tool call:",
-        '<|tool_call_start|>',
-        '{"name": "list_dir", "arguments": {"path": "."}}',
-        '<|tool_call_end|>',
-        "",
-        "Rules:",
-        "- Always use the tool call markers to invoke a tool. Never write Python "
-        "code to perform actions — use the tools instead.",
-        "- You can make multiple tool calls in one response.",
-        "- After each tool call, you will receive the result and can continue.",
-        "- Only call tools that are listed below.",
-        "",
-        "Available tools:",
+        "Tools (call with <|tool_call_start|>[name(arg='val')]<|tool_call_end|>):",
     ]
     for t in tools:
         # unwrap OpenAI-style {"type": "function", "function": {...}}
@@ -65,12 +54,22 @@ def qwen_render_tool_defs(tools: list[dict]) -> str:
             t = t["function"]
         params = t.get("parameters", {})
         if isinstance(params, dict) and "properties" in params:
-            # Already in JSON schema format
-            param_str = json.dumps(params["properties"], ensure_ascii=False)
+            props = params["properties"]
+            required = set(params.get("required", []))
+            param_parts = []
+            for pname in props:
+                if pname in required:
+                    param_parts.append(pname)
+                else:
+                    param_parts.append(f"{pname}='?'")
+            param_str = ", ".join(param_parts) if param_parts else ""
         else:
-            param_str = json.dumps(params, ensure_ascii=False)
-        lines.append(f"- {t['name']}: {t.get('description', '')}\n"
-                     f"    arguments: {param_str}")
+            param_str = ""
+        desc = t.get("description", "").split(".")[0][:60]
+        if param_str:
+            lines.append(f"  {t['name']}({param_str}) - {desc}")
+        else:
+            lines.append(f"  {t['name']}() - {desc}")
     return "\n".join(lines)
 
 
@@ -113,25 +112,21 @@ def qwen_render_messages(messages: list[dict],
             content = msg.get("content", "")
             tool_calls = msg.get("tool_calls")
             if tool_calls:
-                # Render each tool call in the training format: {start}\n{json}\n{end}
-                tc_parts = []
-                for tc in tool_calls:
-                    tc_parts.append(
-                        TOOL_CALL_START + "\n" +
-                        json.dumps(tc, ensure_ascii=False) + "\n" +
-                        TOOL_CALL_END
-                    )
-                body = "\n".join(tc_parts)
-                body = body if not content else f"{content}\n{body}"
+                # Render tool calls in Jamba JSON format:
+                #   {"name": "func", "arguments": {...}}
+                from .chat_template import render_tool_calls
+                tc_str = render_tool_calls(tool_calls)
+                body = tc_str if not content else f"{content}\n{tc_str}"
             else:
                 body = content or ""
             parts.append(f"{IM_START}assistant\n{body}{IM_END}\n")
         elif role == "tool":
-            name = msg.get("name", "tool")
+            # Jamba tool result format: <|im_start|>user\n{result}\n<|im_end|>
             content = msg.get("content", "")
-            parts.append(f"{IM_START}tool\n{name}\n{content}{IM_END}\n")
+            parts.append(f"{IM_START}user\n{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{IM_END}\n")
 
     if add_generation_prompt:
+        # Jamba reasoning: start with thinking mode
         parts.append(f"{IM_START}assistant\n")
 
     return "".join(parts)
@@ -410,7 +405,14 @@ def create_tool_grammar(tokenizer, tools: list[dict]) -> tuple[xgr.GrammarMatche
     """
     compiler = _get_xgr_compiler(tokenizer)
 
-    tool_names = [t["name"] for t in tools]
+    # Unwrap OpenAI-style {"type": "function", "function": {"name": ...}}
+    unwrapped = []
+    for t in tools:
+        if t.get("type") == "function" and "function" in t:
+            unwrapped.append(t["function"])
+        else:
+            unwrapped.append(t)
+    tool_names = [t["name"] for t in unwrapped]
 
     # Schema for a single tool call object
     tool_call_schema = {

@@ -100,8 +100,27 @@ _TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("asc
 # ── Chat-format rendering ────────────────────────────────────────────────────
 
 def _render_tool_call(tc: dict) -> str:
-    """Serialize one tool call using the native special token markers."""
-    return _TOOL_CALL_START + '\n' + json.dumps(tc, ensure_ascii=False) + '\n' + _TOOL_CALL_END
+    """Serialize one tool call in Pythonic format with native special tokens.
+
+    Model was trained on Pythonic format:
+      <|tool_call_start|>[func_name(arg1='val1', arg2=42)]<|tool_call_end|>
+    """
+    name = tc.get("name", "")
+    args = tc.get("args", tc.get("arguments", {}))
+    if not isinstance(args, dict):
+        args = {}
+    arg_strs = []
+    for k, v in args.items():
+        if isinstance(v, str):
+            arg_strs.append(f"{k}='{v}'")
+        elif isinstance(v, bool):
+            arg_strs.append(f"{k}={v}")
+        elif isinstance(v, (int, float)):
+            arg_strs.append(f"{k}={v}")
+        else:
+            arg_strs.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
+    call_str = f"{name}({', '.join(arg_strs)})"
+    return _TOOL_CALL_START + '[' + call_str + ']' + _TOOL_CALL_END
 
 
 def render_messages(messages: list[dict]) -> tuple[str, int]:
