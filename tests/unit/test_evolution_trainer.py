@@ -1,4 +1,4 @@
-"""Tests for research.evolution.trainer — GeneratorTrainer REINFORCE updates."""
+"""Tests for forge.evolution.trainer — GeneratorTrainer REINFORCE updates."""
 
 import sys; sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -7,8 +7,8 @@ import copy
 import pytest
 import torch
 
-from research.evolution.generators import GeneratorConfig, BatchedGenerator
-from research.evolution.trainer import GeneratorTrainer
+from forge.evolution.generators import GeneratorConfig, BatchedGenerator
+from forge.evolution.trainer import GeneratorTrainer
 
 
 def _make_batched_gen():

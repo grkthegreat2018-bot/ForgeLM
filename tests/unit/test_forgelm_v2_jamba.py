@@ -163,8 +163,8 @@ class TestForgeLMV2ForwardPass:
 
     def test_load_into_model(self, forgelm_v2_state, forgelm_v2_config):
         """Weights load into ConfigurableResearchLLM without errors."""
-        from research.config import ModelConfig
-        from research.model_loader import ConfigurableResearchLLM
+        from forge.config import ModelConfig
+        from forge.model_loader import ConfigurableResearchLLM
 
         config = ModelConfig(
             vocab_size=forgelm_v2_config["vocab_size"],
@@ -204,8 +204,8 @@ class TestForgeLMV2ForwardPass:
 
     def test_forward_pass_shape(self, forgelm_v2_state, forgelm_v2_config):
         """Forward pass produces correct output shape."""
-        from research.config import ModelConfig
-        from research.model_loader import ConfigurableResearchLLM
+        from forge.config import ModelConfig
+        from forge.model_loader import ConfigurableResearchLLM
 
         config = ModelConfig(
             vocab_size=forgelm_v2_config["vocab_size"],
@@ -249,8 +249,8 @@ class TestForgeLMV2ForwardPass:
 
     def test_forward_pass_no_nan(self, forgelm_v2_state, forgelm_v2_config):
         """Forward pass output has no NaN values."""
-        from research.config import ModelConfig
-        from research.model_loader import ConfigurableResearchLLM
+        from forge.config import ModelConfig
+        from forge.model_loader import ConfigurableResearchLLM
 
         config = ModelConfig(
             vocab_size=forgelm_v2_config["vocab_size"],

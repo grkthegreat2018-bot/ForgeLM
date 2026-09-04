@@ -7,11 +7,11 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
-from research.training.optim.hybrid_offload import CPUAdamW, estimate_memory
+from forge.training.optim.hybrid_offload import CPUAdamW, estimate_memory
 
 def test_forgelm_cpuadamw():
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
 
     config = get_config("lfm25_tiny")  # 4-layer tiny model for fast test
     print(f"Config: {config.n_layers} layers, d_model={config.d_model}")
@@ -46,8 +46,8 @@ def test_forgelm_cpuadamw():
 
 
 def test_forgelm_cpuadamw_overlap():
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
 
     config = get_config("lfm25_tiny")
     model = ModelLoader.build_model(config)

@@ -1,4 +1,4 @@
-"""Tests for research.evolution.domains — JSON-serializable metadata regression.
+"""Tests for forge.evolution.domains — JSON-serializable metadata regression.
 
 Regression guard for the OptimizerConfig bug where a raw CUDA tensor was
 placed in `metadata`, causing `json.dumps` to fail with
@@ -16,7 +16,7 @@ import json
 import pytest
 import torch
 
-from research.evolution.domains import DOMAINS
+from forge.evolution.domains import DOMAINS
 
 
 def _sample_config(name: str) -> dict:
@@ -106,8 +106,8 @@ def test_engine_discovery_metadata_matches_config():
     """When multiple configs enter the archive in one generation, each
     discovery's metadata must correspond to its own config, not the last
     evaluated config (regression: engine used self.all_results[-1])."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.synthetic import SyntheticDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.synthetic import SyntheticDomain
 
     cfg = ForgeEvolveConfig(
         domain=SyntheticDomain(),
@@ -142,8 +142,8 @@ def test_engine_metadata_list_aligned_with_configs():
     """Unit test for the metadata_list fix: verify that the engine's
     internal metadata_list is aligned with configs/scores/behavioral_list
     by checking all_results ordering matches evaluation order."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.synthetic import SyntheticDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.synthetic import SyntheticDomain
 
     cfg = ForgeEvolveConfig(
         domain=SyntheticDomain(),
@@ -171,8 +171,8 @@ def test_engine_metadata_list_aligned_with_configs():
 def test_engine_config_dedup_cache():
     """Engine should not re-evaluate identical configs within a run.
     The _eval_cache should prevent duplicate evaluations."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.synthetic import SyntheticDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.synthetic import SyntheticDomain
 
     cfg = ForgeEvolveConfig(
         domain=SyntheticDomain(),
@@ -201,7 +201,7 @@ def test_engine_config_dedup_cache():
 
 def test_engine_config_key_normalization():
     """_config_key should treat int and string representations as equal."""
-    from research.evolution import ForgeEvolve
+    from forge.evolution import ForgeEvolve
 
     # 32 and "32" should produce the same key
     k1 = ForgeEvolve._config_key({"bits": 32, "scheme": "symmetric"})

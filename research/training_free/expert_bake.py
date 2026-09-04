@@ -1,6 +1,6 @@
 """expert_bake.py — AirMoE expert → dense consolidation via task arithmetic.
 
-AirMoE (research/moe/) trains isolated topic experts as standalone per-layer
+AirMoE (forge/moe/) trains isolated topic experts as standalone per-layer
 FFN files (expert_l{layer}_{topic}.safetensors, keys w1/w2/w3, optionally
 SVD/INT4 compressed) and hotswaps them from disk at runtime.
 
@@ -24,7 +24,7 @@ import re
 
 import torch
 
-from research.checkpoint_io import load_checkpoint, save_checkpoint
+from forge.checkpoint_io import load_checkpoint, save_checkpoint
 
 # Expert part -> dense FFN parameter name in the base model.
 _PART_MAP = {"w1": "w_gate", "w2": "w_up", "w3": "w_down"}
@@ -32,7 +32,7 @@ _RE_EXPERT_LAYER = re.compile(r"expert_l(\d+)_")
 
 
 # ---------------------------------------------------------------------------
-# Expert file decoding (mirrors research/moe/airmoe_infinite.py formats)
+# Expert file decoding (mirrors forge/moe/airmoe_infinite.py formats)
 # ---------------------------------------------------------------------------
 
 def decompress_expert(state: dict[str, torch.Tensor],

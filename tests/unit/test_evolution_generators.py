@@ -1,11 +1,11 @@
-"""Tests for research.evolution.generators — BatchedGenerator, TemplateGenerator, GeneratorPopulation."""
+"""Tests for forge.evolution.generators — BatchedGenerator, TemplateGenerator, GeneratorPopulation."""
 
 import sys; sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import pytest
 import torch
 
-from research.evolution.generators import (
+from forge.evolution.generators import (
     BatchedGenerator,
     GeneratorConfig,
     GeneratorPopulation,

@@ -39,7 +39,7 @@ os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 import torch
 from safetensors.torch import load_file, save_file
 
-from research.keys.knowledge.spectral_injection_key import SpectralInjectionKey
+from forge.keys.knowledge.spectral_injection_key import SpectralInjectionKey
 from research.tokenizer_cache import get_tokenizer
 
 EXPERT_DIR = _paths.EXPERTS_DIR
@@ -390,8 +390,8 @@ def main():
 
     # Load model + tokenizer
     print("\nLoading model...")
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
 
     config = get_config(args.model)
     device = config.device if hasattr(config, "device") else ("cuda" if torch.cuda.is_available() else "cpu")

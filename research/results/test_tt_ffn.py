@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from research.keys.compression.tt_ffn_key import TTLinear, TTSwiGLUFFN
+from forge.keys.compression.tt_ffn_key import TTLinear, TTSwiGLUFFN
 
 torch.manual_seed(0)
 

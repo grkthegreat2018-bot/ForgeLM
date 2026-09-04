@@ -72,7 +72,7 @@ def test_export_format_matches_sft_train(store):
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
-    from research.training.runners.sft_train import load_examples
+    from forge.training.runners.sft_train import load_examples
 
     conv = store.create()
     store.append_message(conv["id"], "user", "q1")

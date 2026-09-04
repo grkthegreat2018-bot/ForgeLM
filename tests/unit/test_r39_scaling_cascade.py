@@ -16,12 +16,12 @@ from typing import Any
 
 import pytest
 
-from research.inference.test_time_scaling import (
+from forge.engine.test_time_scaling import (
     BeamSearch,
     FirstFinishSearch,
     MCTSDecoder,
 )
-from research.inference.cascade import ModelCascade
+from forge.engine.cascade import ModelCascade
 
 
 # ─── Mock models ──────────────────────────────────────────────────────────
@@ -508,7 +508,7 @@ class TestEngineScalingIntegration:
 
     def test_generate_with_scaling_ffs_returns_string(self):
         """generate_with_scaling(strategy='ffs') returns a string."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         engine = _MockEngine(name="ffs", suffix=" done.")
         # Simulate the method logic using the adapter directly (avoids
         # needing a full ForgeEngine instance).
@@ -520,7 +520,7 @@ class TestEngineScalingIntegration:
 
     def test_generate_with_scaling_beam_returns_string(self):
         """generate_with_scaling(strategy='beam') returns a string."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         engine = _MockEngine(name="beam", suffix=" beam answer.")
         adapter = _ScalingModelAdapter(engine)
         bs = BeamSearch(beam_width=3, max_tokens=6)
@@ -530,7 +530,7 @@ class TestEngineScalingIntegration:
 
     def test_generate_with_scaling_mcts_returns_string(self):
         """generate_with_scaling(strategy='mcts') returns a string."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         engine = _MockEngine(name="mcts", suffix=" mcts solution.")
         adapter = _ScalingModelAdapter(engine)
         mcts = MCTSDecoder(n_iterations=4, n_children=2, max_tokens=8)
@@ -540,7 +540,7 @@ class TestEngineScalingIntegration:
 
     def test_generate_cascade_routes_easy_to_small(self):
         """generate_cascade routes easy prompts to the small model."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         small = _MockEngine(name="small", suffix=" small reply.")
         large = _MockEngine(name="large", suffix=" large reply.")
         small_adapter = _ScalingModelAdapter(small)
@@ -556,7 +556,7 @@ class TestEngineScalingIntegration:
 
     def test_generate_cascade_routes_hard_to_large(self):
         """generate_cascade routes hard prompts to the large model."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         small = _MockEngine(name="small", suffix=" small reply.")
         large = _MockEngine(name="large", suffix=" large reply.")
         small_adapter = _ScalingModelAdapter(small)
@@ -573,7 +573,7 @@ class TestEngineScalingIntegration:
 
     def test_scaling_adapter_forwards_kwargs(self):
         """The adapter merges default kwargs with per-call kwargs."""
-        from research.inference.forge_engine import _ScalingModelAdapter
+        from forge.engine.forge_engine import _ScalingModelAdapter
         engine = _MockEngine(name="kw", suffix=" x.")
         adapter = _ScalingModelAdapter(engine, temperature=0.5)
         adapter.generate("p", max_new_tokens=5)

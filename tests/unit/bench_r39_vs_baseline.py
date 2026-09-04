@@ -220,7 +220,7 @@ class CountingModel:
 
 # ── Imports under test ─────────────────────────────────────────────────────
 
-from research.inference.compat.arch_adapters import (  # noqa: E402
+from forge.engine.compat.arch_adapters import (  # noqa: E402
     convert_qwen3_checkpoint,
     convert_gemma3_checkpoint,
     convert_llama4_checkpoint,
@@ -228,18 +228,18 @@ from research.inference.compat.arch_adapters import (  # noqa: E402
     convert_checkpoint,
     gemma3_layer_types,
 )
-from research.inference.decoding import (  # noqa: E402
+from forge.engine.decoding import (  # noqa: E402
     SelfSpeculativeSparse,
     StandardDecoding,
 )
-from research.inference.structured.xgrammar import XGrammarConstrainer  # noqa: E402
-from research.inference.test_time_scaling import (  # noqa: E402
+from forge.engine.structured.xgrammar import XGrammarConstrainer  # noqa: E402
+from forge.engine.test_time_scaling import (  # noqa: E402
     FirstFinishSearch,
     BeamSearch,
     MCTSDecoder,
 )
-from research.moe.routers import LASERRouter, METRORouter  # noqa: E402
-from research.inference.cascade import ModelCascade  # noqa: E402
+from forge.moe.routers import LASERRouter, METRORouter  # noqa: E402
+from forge.engine.cascade import ModelCascade  # noqa: E402
 
 
 # ── 1. Arch Adapters ───────────────────────────────────────────────────────

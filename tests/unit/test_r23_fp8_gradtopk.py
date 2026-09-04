@@ -20,7 +20,7 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def test_fp8_activation_memory():
     """FP8 compressed activation should use ~1 byte/element vs 2 for bf16."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     d = 128
     layer = FP8ActivationLinear(d, d, bias=False).to(_DEV)
@@ -55,7 +55,7 @@ def test_fp8_activation_memory():
 
 def test_fp8_activation_roundtrip():
     """FP8 quantize → dequantize should have <10% mean relative error."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     torch.manual_seed(42)
     x = torch.randn(4096, device=_DEV) * 0.1  # typical activation scale
@@ -74,7 +74,7 @@ def test_fp8_activation_roundtrip():
 
 def test_fp8_activation_forward_correct():
     """FP8ActivationLinear forward should be close to plain nn.Linear (same weights)."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     torch.manual_seed(42)
     d_in, d_out = 128, 128
@@ -104,7 +104,7 @@ def test_fp8_activation_forward_correct():
 
 def test_fp8_activation_backward():
     """Forward + backward through FP8ActivationLinear should produce finite grads."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     torch.manual_seed(42)
     d = 128
@@ -135,7 +135,7 @@ def test_fp8_activation_backward():
 
 def test_gradtopk_sparsity():
     """TopKGradientOptimizer with ratio=0.1 should produce ~10% dense gradients."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     torch.manual_seed(42)
     model = nn.Linear(256, 256, bias=False).to(_DEV)
@@ -173,7 +173,7 @@ def test_gradtopk_sparsity():
 
 def test_gradtopk_error_feedback():
     """With EF21, TopK should converge similarly to dense over 20 steps."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     torch.manual_seed(42)
     d = 128
@@ -225,7 +225,7 @@ def test_gradtopk_error_feedback():
 
 def test_gradtopk_ratio_sweep():
     """Test multiple ratios and verify actual sparsity matches expected."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     d = 512
     ratios = [0.05, 0.1, 0.25, 0.5, 1.0]
@@ -269,7 +269,7 @@ def test_gradtopk_ratio_sweep():
 
 def test_fp8_gradtopk_combined():
     """FP8ActivationLinear + TopKGradientOptimizer should reduce loss + memory."""
-    from research.training.optim.r21_cross_domain import (
+    from forge.training.optim.r21_cross_domain import (
         FP8ActivationLinear, TopKGradientOptimizer)
 
     torch.manual_seed(42)
@@ -314,7 +314,7 @@ def test_fp8_gradtopk_combined():
 
 def test_fp8_gradtopk_nvme_speedup():
     """GradTopK should reduce gradient elements transferred (NVMe block switch)."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     torch.manual_seed(42)
     d = 256

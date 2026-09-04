@@ -5,8 +5,8 @@ Runs on CPU with the tiny_test config (no GPU required).
 import pytest
 import torch
 
-from research.config import get_config
-from research.model_loader import ConfigurableResearchLLM
+from forge.config import get_config
+from forge.model_loader import ConfigurableResearchLLM
 from research.training_free import (
     ActivationSteerer,
     RAINGenerator,
@@ -245,7 +245,7 @@ class TestSandboxIntegration:
     def test_run_task_feeds_training_free(self, tiny_model, tiny_tokenizer):
         import tempfile
 
-        from research.self_play.self_play_sandbox import SelfPlaySandbox
+        from forge.self_play.self_play_sandbox import SelfPlaySandbox
 
         solver = TrainingFreeSolver(
             tiny_model, tiny_tokenizer, device="cpu", max_tokens=8,

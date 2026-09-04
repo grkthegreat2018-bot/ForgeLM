@@ -1,4 +1,4 @@
-"""Tests for research.evolution.surrogate — SurrogateModel ensemble predictor."""
+"""Tests for forge.evolution.surrogate — SurrogateModel ensemble predictor."""
 
 import sys
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
@@ -6,7 +6,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 import pytest
 import torch
 
-from research.evolution.surrogate import SurrogateModel
+from forge.evolution.surrogate import SurrogateModel
 
 
 @pytest.fixture

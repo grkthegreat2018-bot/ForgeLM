@@ -14,8 +14,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from research.keys.misc.base import Key, KeyClass, KeyResult
-from research.keys.architecture.kronecker_embed_key import (
+from forge.keys.misc.base import Key, KeyClass, KeyResult
+from forge.keys.architecture.kronecker_embed_key import (
     KroneckerEmbedKey,
     KroneckerEmbedding,
     _ids_to_bytes,

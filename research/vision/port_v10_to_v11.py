@@ -118,8 +118,8 @@ def port_v10_to_v11(v10_path: str, v11_path: str,
         device: Device to use for conversion (cpu or cuda)
     """
     from safetensors.torch import load_file, save_file
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
 
     logger.info("Loading V10 checkpoint: %s", v10_path)
     v10_state = load_file(v10_path)

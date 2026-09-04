@@ -12,10 +12,10 @@ import math
 
 import pytest
 
-from research.self_play.data_quality import DataQualityPipeline
-from research.self_play.io_match import io_match, io_similarity
-from research.self_play.monitoring import SelfPlayMonitor
-from research.self_play.replay_buffer import ReplayBuffer
+from forge.self_play.data_quality import DataQualityPipeline
+from forge.self_play.io_match import io_match, io_similarity
+from forge.self_play.monitoring import SelfPlayMonitor
+from forge.self_play.replay_buffer import ReplayBuffer
 
 # ── io_match ────────────────────────────────────────────────────────────────
 

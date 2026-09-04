@@ -1,7 +1,7 @@
 """Index of model checkpoints + registered ModelConfigs.
 
 Scans research/checkpoints/ for *.safetensors / *.pt and pulls the registry
-from research.config.MODEL_CONFIGS without importing torch at scan time.
+from forge.config.MODEL_CONFIGS without importing torch at scan time.
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class ModelsIndex:
             return
         self._loaded = True
         try:
-            from research.config import MODEL_CONFIGS  # type: ignore
+            from forge.config import MODEL_CONFIGS  # type: ignore
             for name, cfg in MODEL_CONFIGS.items():
                 self._configs[name] = {
                     "d_model": cfg.d_model,
@@ -195,8 +195,8 @@ class ModelsIndex:
 
 
 def _static_parse_configs() -> dict[str, dict]:
-    """Best-effort regex parse of research/config.py to avoid importing torch."""
-    cfg_path = project_root() / "research" / "config.py"
+    """Best-effort regex parse of forge/config.py to avoid importing torch."""
+    cfg_path = project_root() / "forge" / "config.py"
     if not cfg_path.is_file():
         return {}
     text = cfg_path.read_text(encoding="utf-8")

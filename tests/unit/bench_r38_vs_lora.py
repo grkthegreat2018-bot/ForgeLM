@@ -23,15 +23,15 @@ import pytest
 
 torch.manual_seed(42)
 
-from research.training.bitnet_lora import LoRAAdapter
-from research.training.dlora import DLoRAAdapter
-from research.training.dora import DoRALinear
-from research.training.adapter_variants import (
+from forge.training.bitnet_lora import LoRAAdapter
+from forge.training.dlora import DLoRAAdapter
+from forge.training.dora import DoRALinear
+from forge.training.adapter_variants import (
     PiSSAInitializer,
     AdaLoRAClass,
     rsLoRALinear,
 )
-from research.training.forge_adapter import ForgeAdapter
+from forge.training.forge_adapter import ForgeAdapter
 
 
 # ── helpers ──────────────────────────────────────────────────────────────

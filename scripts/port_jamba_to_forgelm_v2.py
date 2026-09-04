@@ -24,8 +24,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from research.keys.architecture.mamba_key import MambaKey
-from research.config import ModelConfig
+from forge.keys.architecture.mamba_key import MambaKey
+from forge.config import ModelConfig
 
 
 # Jamba Reasoning 3B config

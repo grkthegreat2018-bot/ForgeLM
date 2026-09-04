@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
 import torch.nn as nn
-from research.training.optim.hybrid_offload import CPUAdamW, estimate_memory
+from forge.training.optim.hybrid_offload import CPUAdamW, estimate_memory
 
 
 def test_numerical_equivalence():

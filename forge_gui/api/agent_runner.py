@@ -126,7 +126,7 @@ class AgentRunner(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
     def _loop(self) -> dict:
-        from research.self_play.discovery.qwen_adapter import (  # type: ignore
+        from forge.self_play.discovery.qwen_adapter import (  # type: ignore
             TOOL_CALL_START, TOOL_CALL_END,
             qwen_parse_tool_calls, qwen_render_messages,
         )

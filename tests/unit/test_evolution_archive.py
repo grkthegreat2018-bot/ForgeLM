@@ -8,7 +8,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import pytest
 import numpy as np
-from research.evolution.archive import MapElitesArchive, ArchiveEntry
+from forge.evolution.archive import MapElitesArchive, ArchiveEntry
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────

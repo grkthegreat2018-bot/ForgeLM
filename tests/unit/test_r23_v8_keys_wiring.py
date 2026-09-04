@@ -20,7 +20,7 @@ def _tiny_v8_config(**extra_overrides):
     V10 is a plain GQA port — V8 features (QSA, gated residual, ngram,
     hashed NLRQ) must be explicitly enabled via overrides.
     """
-    from research.config import get_config
+    from forge.config import get_config
     overrides = dict(
         vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
         intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
@@ -61,7 +61,7 @@ def test_v8_config_builds():
 
 def test_v8_model_builds():
     """ConfigurableResearchLLM with tiny V8 config should build without raising."""
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg)
     assert model is not None, "Model should be created"
@@ -75,7 +75,7 @@ def test_v8_model_builds():
 
 def test_v8_model_forward():
     """Forward pass should produce correct shape and finite output."""
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg).to(_DEV)
     model.eval()
@@ -97,8 +97,8 @@ def test_v8_model_forward():
 
 def test_v8_qsa_wired():
     """use_qsa=True should produce QSALayer modules; False should not."""
-    from research.model_loader import ConfigurableResearchLLM
-    from research.keys.attention.qsa_key import QSALayer
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.keys.attention.qsa_key import QSALayer
 
     # With QSA enabled
     cfg_on = _tiny_v8_config(use_qsa=True)
@@ -121,8 +121,8 @@ def test_v8_qsa_wired():
 
 def test_v8_gated_residual_wired():
     """use_gated_residual=True should produce GatedResidualLayer modules."""
-    from research.model_loader import ConfigurableResearchLLM
-    from research.keys.architecture.gated_residual_key import GatedResidualLayer
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.keys.architecture.gated_residual_key import GatedResidualLayer
 
     # With GatedResidual enabled
     cfg_on = _tiny_v8_config(use_gated_residual=True)
@@ -145,8 +145,8 @@ def test_v8_gated_residual_wired():
 
 def test_v8_ngram_embedding_wired():
     """use_ngram_embedding=True should produce NGramEmbeddingLayer modules."""
-    from research.model_loader import ConfigurableResearchLLM
-    from research.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
 
     # With NgramEmbedding enabled (host=False for CPU)
     cfg_on = _tiny_v8_config(use_ngram_embedding=True, ngram_host=False)
@@ -169,9 +169,9 @@ def test_v8_ngram_embedding_wired():
 
 def test_v8_hashed_nlrq_wired():
     """use_hashed_nlrq=True should produce HashedNLRQ in FFN; False → NLRQLinear."""
-    from research.model_loader import ConfigurableResearchLLM
-    from research.training.optim.r21_cross_domain import HashedNLRQ
-    from research.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.training.optim.r21_cross_domain import HashedNLRQ
+    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
 
     # With HashedNLRQ enabled
     cfg_on = _tiny_v8_config(use_hashed_nlrq=True)
@@ -196,7 +196,7 @@ def test_v8_hashed_nlrq_wired():
 
 def test_v8_backward():
     """Forward + backward should compute gradients (at least one non-None grad)."""
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg).to(_DEV)
     model.train()
@@ -223,8 +223,8 @@ def test_v8_backward():
 
 def test_v8_loss_decreases():
     """10 steps of BAdam on tiny V8 should decrease loss."""
-    from research.model_loader import ConfigurableResearchLLM
-    from research.training.training_utils import configure_optimizer
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.training.training_utils import configure_optimizer
 
     torch.manual_seed(42)
     cfg = _tiny_v8_config()
@@ -265,7 +265,7 @@ def test_v8_keys_lossless_at_init():
     - Gated Residual: gate = 1.0 (identity)
     - N-gram Embedding: table = all zeros (additive zero)
     """
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
 
     torch.manual_seed(42)
     B, T = 2, 16

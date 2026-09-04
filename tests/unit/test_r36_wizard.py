@@ -59,7 +59,7 @@ def test_use_case_labels_shape():
 def test_use_case_configs_only_valid_activation_fields():
     """Every key in each use-case config must be a real ActivationConfig field."""
     from dataclasses import fields as dc_fields
-    from research.inference.activation import ActivationConfig
+    from forge.engine.activation import ActivationConfig
 
     valid = {f.name for f in dc_fields(ActivationConfig)}
     for uc in wiz.USE_CASES:
@@ -105,7 +105,7 @@ def test_format_config_summary_handles_none():
 ])
 def test_apply_produces_valid_activation_config(key):
     """Each use-case config must round-trip into an ActivationConfig."""
-    from research.inference.activation import ActivationConfig
+    from forge.engine.activation import ActivationConfig
 
     cfg = wiz.use_case_config(key)
     ac = ActivationConfig.from_kwargs(**cfg)

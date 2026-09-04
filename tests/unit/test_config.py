@@ -2,7 +2,7 @@
 
 import pytest
 
-from research.config import MODEL_CONFIGS, ModelConfig, get_config
+from forge.config import MODEL_CONFIGS, ModelConfig, get_config
 
 
 class TestModelConfigDefaults:

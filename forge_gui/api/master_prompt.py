@@ -159,7 +159,7 @@ def get_default_prompt_for_config(config_name: str,
     Convenience wrapper that loads the config and calls generate_master_prompt.
     """
     try:
-        from research.config import get_config
+        from forge.config import get_config
         config = get_config(config_name)
         return generate_master_prompt(config, config_name,
                                       tools_enabled, thinking_enabled)

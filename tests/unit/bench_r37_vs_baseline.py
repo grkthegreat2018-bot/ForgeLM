@@ -25,12 +25,12 @@ from dataclasses import fields as dataclass_fields
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from research.keys.architecture.mamba3_key import Mamba3Key, MAMBA3_PASSTHROUGH, MAMBA3_COMPLEX_NORMS
-from research.keys.architecture.kronecker_embed_key import KroneckerEmbedKey, KroneckerEmbedding
-from research.keys.architecture.pit_tying_key import PITKey
-from research.keys.attention.outro_key import OutRoKey
-from research.keys.architecture.forge_hybrid_key import ForgeHybridKey
-from research.config import get_config, MODEL_CONFIGS
+from forge.keys.architecture.mamba3_key import Mamba3Key, MAMBA3_PASSTHROUGH, MAMBA3_COMPLEX_NORMS
+from forge.keys.architecture.kronecker_embed_key import KroneckerEmbedKey, KroneckerEmbedding
+from forge.keys.architecture.pit_tying_key import PITKey
+from forge.keys.attention.outro_key import OutRoKey
+from forge.keys.architecture.forge_hybrid_key import ForgeHybridKey
+from forge.config import get_config, MODEL_CONFIGS
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

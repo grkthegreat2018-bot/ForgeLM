@@ -153,7 +153,7 @@ def get_testable_keys():
 
     # RoPE Buffer Sharing
     def apply_rope_share(model):
-        from research.keys.position.rope_share_key import RoPEShareKey
+        from forge.keys.position.rope_share_key import RoPEShareKey
         k = RoPEShareKey()
         k.apply(model)
         return k
@@ -161,7 +161,7 @@ def get_testable_keys():
 
     # WiSparse
     def apply_wisparse(model):
-        from research.keys.compression.wisparse_key import WiSparseKey
+        from forge.keys.compression.wisparse_key import WiSparseKey
         k = WiSparseKey()
         k.apply(model)
         return k
@@ -169,21 +169,21 @@ def get_testable_keys():
 
     # Per-Query Temperature
     def apply_per_query_temp(model):
-        from research.keys.training.per_query_temp_key import apply_per_query_temp as _apply
+        from forge.keys.training.per_query_temp_key import apply_per_query_temp as _apply
         _apply(model)
         return None
     keys.append(("per_query_temp", apply_per_query_temp, None))
 
     # Norm-Gated MoD
     def apply_norm_gated_mod(model):
-        from research.keys.normalization.norm_gated_mod_key import apply_norm_gated_mod as _apply
+        from forge.keys.normalization.norm_gated_mod_key import apply_norm_gated_mod as _apply
         _apply(model)
         return None
     keys.append(("norm_gated_mod", apply_norm_gated_mod, None))
 
     # Logit Cap (runtime flag, no apply method — uses forward)
     def apply_logit_cap(model):
-        from research.keys.training.logit_cap_key import LogitCapKey
+        from forge.keys.training.logit_cap_key import LogitCapKey
         k = LogitCapKey()
         # LogitCap patches the model's forward via monkey-patching
         if hasattr(k, 'apply'):
@@ -195,7 +195,7 @@ def get_testable_keys():
 
     # MAC-Attention
     def apply_mac_attn(model):
-        from research.keys.attention.attn_reuse_key import AttnReuseKey
+        from forge.keys.attention.attn_reuse_key import AttnReuseKey
         k = AttnReuseKey(max_entries=16, match_threshold=0.85)
         k.apply(model)
         return k
@@ -203,7 +203,7 @@ def get_testable_keys():
 
     # Speculative Attention
     def apply_spec_attn(model):
-        from research.keys.speculative.speculative_keys import SpeculativeAttentionKey
+        from forge.keys.speculative.speculative_keys import SpeculativeAttentionKey
         k = SpeculativeAttentionKey(draft_rank=32)
         k.apply(model)
         return k
@@ -226,8 +226,8 @@ def main():
     print("ForgeLM Key Ablation Benchmark")
     print("=" * 70)
 
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
     from transformers import AutoTokenizer
 
     device = "cuda"

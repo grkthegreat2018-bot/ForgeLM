@@ -1,10 +1,10 @@
 """Test all quant simulators + JSON specs for bit-exact match."""
 import torch, numpy as np, json
-from research.evolution.domains.quant_domains import (
+from forge.evolution.domains.quant_domains import (
     W8A8Quant, Nvfp4Quant, BitnetConfig, SharqQuant, MosaicQuant,
     AaacQuant, OffqQuant, GroupQuant, MixedPrecision, ActivationQuant,
 )
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 tests = [
     ('W8A8Quant', W8A8Quant, 'w8a8_quant',

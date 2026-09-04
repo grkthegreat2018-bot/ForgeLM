@@ -3,10 +3,10 @@ import os, sys, torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["FORGE_NO_COMPILE"] = "1"
 
-from research.config import get_config
-from research.model_loader import ModelLoader
+from forge.config import get_config
+from forge.model_loader import ModelLoader
 from research.tokenizer_cache import get_tokenizer
-from research.inference.forge_engine import ForgeEngine
+from forge.engine.forge_engine import ForgeEngine
 
 CHECKPOINT = "research/checkpoints/Jamba_Reasoning_3B.safetensors"
 TOKENIZER = "research/checkpoints/forgelm_v2_tokenizer"
@@ -27,7 +27,7 @@ model = ModelLoader.build_model_fast(
     cfg, checkpoint_path=CHECKPOINT, dtype=torch.bfloat16, fast_load=True)
 
 print("Quantizing to INT4 on CPU...")
-from research.quantization.inference_quant import quantize_model_int4
+from forge.quant.inference_quant import quantize_model_int4
 quantize_model_int4(model, group_size=128)
 
 print("Moving to GPU...")

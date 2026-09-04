@@ -290,7 +290,7 @@ def main():
     ckpt = args.resume_from or str(R30_CHECKPOINT)
     print(f"  Base: {ckpt}")
 
-    from research.inference.forge_engine import ForgeEngine
+    from forge.engine.forge_engine import ForgeEngine
     engine = ForgeEngine.from_checkpoint(
         ckpt, config_name="forgelm_v2_light",
         device="cuda", auto_activate=False
@@ -299,7 +299,7 @@ def main():
     model.eval()
 
     # Add LoRA adapters — FFN + attention (attention needed for tool-name copying from system prompt)
-    from research.training.bitnet_lora import add_lora_adapters, merge_lora_adapters
+    from forge.training.bitnet_lora import add_lora_adapters, merge_lora_adapters
     n_adapters, lora_params_list = add_lora_adapters(
         model, rank=args.max_rank, alpha=args.max_rank * 2,
         target_modules=["w_gate", "w_up", "w_down", "q_proj", "v_proj", "out_proj", "in_proj"]

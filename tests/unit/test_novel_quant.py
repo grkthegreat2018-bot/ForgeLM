@@ -12,16 +12,16 @@ import torch.nn as nn
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32  # compute in fp32 for accuracy, regardless of device
 
-from research.inference.quant.nvfp4_quant import (
+from forge.engine.quant.nvfp4_quant import (
     NVFP4Linear, quantize_model_nvfp4, _quantize_to_fp4, _dequantize_fp4,
 )
-from research.inference.quant.novel_quant import (
+from forge.engine.quant.novel_quant import (
     ASFP4Linear, ResidualFP4Linear,
     _optimal_fp4_scale, _quantize_to_fp4_adaptive, _quantize_to_fp4_residual,
     quantize_model_asfp4, quantize_model_residual_fp4,
 )
 # Round 15 novel algorithms
-from research.inference.quant.novel_quant import (
+from forge.engine.quant.novel_quant import (
     quantize_hw_fp4, quantize_tsd_fp4, quantize_sr_fp4,
     quantize_oc_hybrid, quantize_hpr_fp4, quantize_bn_fp4,
     quantize_saas_fp4, quantize_awr_fp4, quantize_iri_fp4,
@@ -546,7 +546,7 @@ def test_r15_hadamard_invariance():
     print("-" * 78)
     W = _make_llm_weights(512, 1024, outlier_frac=0.02, outlier_mult=8.0, std=0.05)
     # Per-block kurtosis before and after rotation
-    from research.inference.quant.novel_quant import _hadamard_matrix
+    from forge.engine.quant.novel_quant import _hadamard_matrix
     Q = _hadamard_matrix(1024, W.device, W.dtype)
     g = torch.Generator(device=W.device).manual_seed(42)
     signs = torch.where(torch.rand(1024, generator=g, device=W.device) > 0.5, 1.0, -1.0)
@@ -584,7 +584,7 @@ def test_r15_combined():
 
     # Stack: HPR (rotation) + HW-FP4 (Hessian scale) + SAAS (mean-sub)
     # Apply rotation, then HW-FP4 with mean-subtraction on rotated weights
-    from research.inference.quant.novel_quant import _hadamard_matrix
+    from forge.engine.quant.novel_quant import _hadamard_matrix
     Q = _hadamard_matrix(1024, W.device, W.dtype)
     g = torch.Generator(device=W.device).manual_seed(42)
     signs = torch.where(torch.rand(1024, generator=g, device=W.device) > 0.5, 1.0, -1.0)
@@ -753,7 +753,7 @@ def test_r16_multiscale_benchmark():
               f"{cfg['vocab']:>7} {params/1e9:>10.2f}B {bf16_vram:>9.2f} GB")
 
     # Algorithms to test (functions that take W and return dequantized W)
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_hw_fp4, quantize_tsd_fp4, quantize_sr_fp4,
         quantize_oc_hybrid, quantize_hpr_fp4, quantize_bn_fp4,
         quantize_saas_fp4, quantize_awr_fp4, quantize_iri_fp4,
@@ -892,7 +892,7 @@ def test_r16_pareto_frontier():
     total_params = _model_param_count(cfg)
     bf16_vram = total_params * 2 / (1024**3)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_sr_fp4, quantize_tsd_fp4, quantize_hpr_fp4,
         quantize_saas_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
     )
@@ -968,7 +968,7 @@ def main_r16():
 #   4. AdaptivePerLayer selection
 # ===========================================================================
 
-from research.inference.quant.novel_quant import (
+from forge.engine.quant.novel_quant import (
     quantize_hw_fp4_v2, compute_hessian_proxy,
     HWFP4CalibratedLinear, calibrate_hw_fp4_model, quantize_model_hw_fp4_v2,
     quantize_hpr_iri_fp4, HPRIRIFP4Linear,
@@ -1099,7 +1099,7 @@ def test_r17_optimal_sign_hadamard():
     W = _make_llm_weights(256, 256, outlier_frac=0.03, outlier_mult=10.0, std=0.05)
 
     # Random signs
-    from research.inference.quant.novel_quant import _hadamard_matrix
+    from forge.engine.quant.novel_quant import _hadamard_matrix
     Q_rand = _hadamard_matrix(256, W.device, W.dtype)
     g = torch.Generator(device=DEV).manual_seed(42)
     signs_rand = torch.where(torch.rand(256, generator=g, device=DEV) > 0.5, 1.0, -1.0).to(W.dtype)
@@ -1202,7 +1202,7 @@ def test_r17_adaptive_per_layer():
     model_uniform[4].weight.data = _make_llm_weights(256, 512, outlier_frac=0.01, outlier_mult=5.0, std=0.05)
     model_uniform = model_uniform.to(DEV)
 
-    from research.inference.quant.novel_quant import quantize_model_asfp4
+    from forge.engine.quant.novel_quant import quantize_model_asfp4
     quantize_model_asfp4(model_uniform, verbose=False)
     model_uniform = model_uniform.to(DEV)
     with torch.no_grad():
@@ -1219,7 +1219,7 @@ def test_r17_multiscale():
     print("  R&D 17: Multi-scale benchmark (R17 algorithms)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_hpr_iri_fp4, quantize_hw_fp4_v2,
     )
 
@@ -1285,7 +1285,7 @@ def test_r18_mixed_codebook_iri():
     print("  R&D 18a: Mixed-Codebook IRI (FP4+INT4 alternating)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_mixed_iri_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
     )
 
@@ -1328,7 +1328,7 @@ def test_r18_adaptive_iri():
     print("  R&D 18b: Adaptive IRI (per-block round allocation)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_adaptive_iri_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
     )
 
@@ -1363,7 +1363,7 @@ def test_r18_learned_codebook():
     print("  R&D 18c: Learned FP4 Codebook (Lloyd-Max)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_learned_codebook_fp4, quantize_asfp4_dequant,
     )
 
@@ -1400,7 +1400,7 @@ def test_r18_sr_fp4_kv_cache():
     print("  R&D 18d: SR-FP4 KV Cache")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import SRFP4KVCache
+    from forge.engine.quant.novel_quant import SRFP4KVCache
 
     n_heads, head_dim, max_seq = 8, 64, 256
     cache = SRFP4KVCache(n_heads, head_dim, max_seq, block_size=32,
@@ -1444,7 +1444,7 @@ def test_r18_gradient_fp4():
     print("  R&D 18e: Gradient-Optimized FP4 (QuIP#-style)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_gradient_fp4, quantize_asfp4_dequant, quantize_hw_fp4,
     )
 
@@ -1486,7 +1486,7 @@ def test_r18_multiscale():
     print("  R&D 18: Multi-scale benchmark (R18 vs R17)")
     print("-" * 90)
 
-    from research.inference.quant.novel_quant import (
+    from forge.engine.quant.novel_quant import (
         quantize_mixed_iri_fp4, quantize_adaptive_iri_fp4,
         quantize_learned_codebook_fp4, quantize_gradient_fp4,
         quantize_iri_fp4, quantize_hpr_iri_fp4, quantize_asfp4_dequant,

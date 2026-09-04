@@ -16,7 +16,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from research.decoding.peagle import PEAGLEDraftHead, PEAGLEDraftHeadTied
+from forge.decoding.peagle import PEAGLEDraftHead, PEAGLEDraftHeadTied
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 DEVICE = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
@@ -384,7 +384,7 @@ class TestMemory:
 class TestSpeculatorCompat:
     def test_speculator_accepts_tied(self, head_tied, sample_input):
         """PEAGLESpeculator should accept PEAGLEDraftHeadTied."""
-        from research.decoding.peagle import PEAGLESpeculator
+        from forge.decoding.peagle import PEAGLESpeculator
 
         # Minimal dummy model that returns (logits, hidden)
         class DummyModel(nn.Module):

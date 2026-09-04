@@ -177,7 +177,7 @@ def tokenize_all(examples: list[dict], tokenizer, max_seq_len: int,
     cache = None
     if use_disk_cache:
         try:
-            from research.training.data.efficient_pipeline import DiskTokenCache
+            from forge.training.data.efficient_pipeline import DiskTokenCache
             cache = DiskTokenCache(str(CACHE_DIR))
         except Exception:
             pass
@@ -324,7 +324,7 @@ def restore_ema(ema: dict, model: nn.Module):
 
 def load_v10_quantized(device: str = "cuda"):
     """Load V10 with IRI-FP4 quantized weights via ForgeEngine."""
-    from research.inference.forge_engine import ForgeEngine
+    from forge.engine.forge_engine import ForgeEngine
     engine = ForgeEngine.from_checkpoint(
         str(V10_CHECKPOINT), config_name="forgelm_v2_light",
         device=device, auto_activate=False,
@@ -340,7 +340,7 @@ def load_v10_quantized(device: str = "cuda"):
 
 def add_qlora(model: nn.Module, rank: int, alpha: int = None) -> tuple:
     """Add QLoRA adapters to V10 FFN-trio at all 16 layers."""
-    from research.training.bitnet_lora import add_lora_adapters
+    from forge.training.bitnet_lora import add_lora_adapters
     if alpha is None:
         alpha = rank * 2
     n_adapters, lora_params = add_lora_adapters(
@@ -407,7 +407,7 @@ def train_qlora(
     # ── Curriculum ordering ──
     if curriculum != "none":
         try:
-            from research.training.data.curriculum_augment import CurriculumScheduler
+            from forge.training.data.curriculum_augment import CurriculumScheduler
             scheduler = CurriculumScheduler(strategy=curriculum)
             texts = [ex.get('prompt', '') + ' ' + ex.get('response', '') for ex in examples]
             order = scheduler.build_curriculum(texts)
@@ -442,7 +442,7 @@ def train_qlora(
     # ── Sequential freeze schedule ──
     schedule = None
     if sequential_freeze > 0:
-        from research.training.bitnet_lora import compute_phase_schedule, freeze_unfreeze_lora
+        from forge.training.bitnet_lora import compute_phase_schedule, freeze_unfreeze_lora
         schedule = compute_phase_schedule(
             V10_N_FFN_LAYERS, sequential_freeze, total_steps, final_finetune_steps)
         print(f"  Sequential freeze: {sequential_freeze} phases, "
@@ -464,7 +464,7 @@ def train_qlora(
     # ── Optimizer ──
     if optimizer_type == "cpu_offload":
         try:
-            from research.training.optim.hybrid_offload import CPUAdamW
+            from forge.training.optim.hybrid_offload import CPUAdamW
             optimizer = CPUAdamW(lora_params, lr=lr, weight_decay=0.01,
                                  betas=(0.9, 0.95))
             print(f"  Optimizer: CPUAdamW (offloaded states)")
@@ -500,7 +500,7 @@ def train_qlora(
     prefetcher = None
     if use_async_prefetch:
         try:
-            from research.training.data.efficient_pipeline import AsyncPrefetcher
+            from forge.training.data.efficient_pipeline import AsyncPrefetcher
             prefetcher = AsyncPrefetcher(
                 dataset, batch_size=batch_size, device=device,
                 collate_fn=lambda batch, pad_id, dev: collate_batch(batch, pad_id, dev),
@@ -523,7 +523,7 @@ def train_qlora(
     val_losses = []
     pad_id = tokenizer.pad_token_id
 
-    from research.training.bitnet_lora import freeze_unfreeze_lora, get_active_lora_params
+    from forge.training.bitnet_lora import freeze_unfreeze_lora, get_active_lora_params
 
     for epoch in range(epochs):
         # ── Build batch iterator for this epoch ──
@@ -641,7 +641,7 @@ def train_qlora(
             # ── Checkpoint ──
             if save_every > 0 and save_path and step % save_every == 0 and step < total_steps:
                 ckpt_path = save_path.replace(".safetensors", f"_step{step}.safetensors")
-                from research.training.bitnet_lora import merge_lora_adapters
+                from forge.training.bitnet_lora import merge_lora_adapters
                 # Save LoRA-only checkpoint (don't merge yet)
                 lora_state = {}
                 for name, p in model.named_parameters():
@@ -671,7 +671,7 @@ def train_qlora(
 
     # ── Merge LoRA into IRI-FP4 ──
     if save_path:
-        from research.training.bitnet_lora import merge_lora_adapters
+        from forge.training.bitnet_lora import merge_lora_adapters
         n_merged = merge_lora_adapters(model)
         print(f"  Merged {n_merged} LoRA adapters into IRI-FP4 weights")
         save_checkpoint(model, save_path)

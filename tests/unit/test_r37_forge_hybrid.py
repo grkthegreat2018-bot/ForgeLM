@@ -4,8 +4,8 @@ from __future__ import annotations
 import torch
 import pytest
 
-from research.keys.architecture.forge_hybrid_key import ForgeHybridKey
-from research.keys.misc.base import KeyClass
+from forge.keys.architecture.forge_hybrid_key import ForgeHybridKey
+from forge.keys.misc.base import KeyClass
 
 
 class TestForgeHybridKey:
@@ -172,7 +172,7 @@ class TestForgeHybridKey:
 
     def test_cross_arch_with_mamba(self):
         """Cross-arch should work with other BI keys."""
-        from research.keys.architecture.mamba_key import MambaKey
+        from forge.keys.architecture.mamba_key import MambaKey
         hybrid = ForgeHybridKey(d_model=64, d_state=8)
         mamba = MambaKey()
         # Can't do real cross-arch without proper Mamba weights,

@@ -6,7 +6,7 @@ Uses CPU-only small configs for fast testing.
 import pytest
 import torch
 
-from research.config import ModelConfig, get_config
+from forge.config import ModelConfig, get_config
 
 
 # ── V11 config ──────────────────────────────────────────────────────────

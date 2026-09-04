@@ -20,12 +20,12 @@ class TestSnapKV4BitCache:
     """Test the combined SnapKV eviction + Hadamard INT4 quantization cache."""
 
     def test_factory_creates_snapkv_4bit(self):
-        from research.inference.kv_backend import build_kv_cache, SnapKV4BitCache
+        from forge.engine.kv_backend import build_kv_cache, SnapKV4BitCache
         cache = build_kv_cache("snapkv_4bit")
         assert isinstance(cache, SnapKV4BitCache)
 
     def test_init_and_append(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=256, device="cpu", dtype=torch.float32)
@@ -36,7 +36,7 @@ class TestSnapKV4BitCache:
         assert cache.seq_len == 4
 
     def test_get_returns_correct_shape(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=256, device="cpu", dtype=torch.float32)
@@ -48,7 +48,7 @@ class TestSnapKV4BitCache:
         assert v_out.shape == (1, 2, 8, 64)
 
     def test_eviction_triggers_at_capacity(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         # Small budget to trigger eviction quickly
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
@@ -67,7 +67,7 @@ class TestSnapKV4BitCache:
         assert cache.seq_len <= cache.max_capacity
 
     def test_info_reports_compression(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=256, device="cpu", dtype=torch.float32)
@@ -82,7 +82,7 @@ class TestSnapKV4BitCache:
         assert "bit_ratio" in info
 
     def test_clear(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=256, device="cpu", dtype=torch.float32)
@@ -101,8 +101,8 @@ class TestGoldenTrajectoryInjection:
 
     def test_replay_buffer_accepted_in_constructor(self):
         """GRPOTrainer should accept a replay_buffer parameter."""
-        from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         # Create dummy model, tokenizer, ref_model
         model = torch.nn.Linear(10, 10)
@@ -119,8 +119,8 @@ class TestGoldenTrajectoryInjection:
 
     def test_inject_golden_replays_skips_small_buffer(self):
         """Should not inject when buffer is below min size."""
-        from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
@@ -145,8 +145,8 @@ class TestGoldenTrajectoryInjection:
 
     def test_inject_golden_replays_adds_trajectories(self):
         """Should inject golden trajectories when buffer is large enough."""
-        from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
@@ -178,8 +178,8 @@ class TestGoldenTrajectoryInjection:
 
     def test_record_golden_trajectories(self):
         """Should record successful trajectories into replay buffer."""
-        from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
@@ -210,32 +210,32 @@ class TestEloTracker:
     """Test the ELO matchmaking system."""
 
     def test_initial_state(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         assert elo.model_rating == 1200.0
         assert len(elo.prompt_ratings) == 0
 
     def test_register_prompt(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker()
         elo.register_prompt("task_1")
         assert "task_1" in elo.prompt_ratings
         assert elo.prompt_ratings["task_1"].rating == 1200.0
 
     def test_expected_win_prob_equal_rating(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         prob = elo.expected_win_prob(1200.0)
         assert abs(prob - 0.5) < 1e-6  # equal rating = 50%
 
     def test_expected_win_prob_higher_model(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1400.0)  # model is 200 points higher
         prob = elo.expected_win_prob(1200.0)
         assert prob > 0.5  # model favored
 
     def test_update_model_rating_success(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         elo.update_model_rating("task_1", success=True)
@@ -245,7 +245,7 @@ class TestEloTracker:
         assert elo.prompt_ratings["task_1"].rating < 1200.0
 
     def test_update_model_rating_failure(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         elo.update_model_rating("task_1", success=False)
@@ -255,7 +255,7 @@ class TestEloTracker:
         assert elo.prompt_ratings["task_1"].rating > 1200.0
 
     def test_zero_sum_update(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         initial_sum = elo.model_rating + elo.prompt_ratings["task_1"].rating
@@ -264,7 +264,7 @@ class TestEloTracker:
         assert abs(final_sum - initial_sum) < 1e-4  # zero-sum
 
     def test_select_prompts_goldilocks(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         # Register prompts at various difficulty levels
         for i, rating in enumerate([800, 1000, 1200, 1400, 1600]):
@@ -275,7 +275,7 @@ class TestEloTracker:
         assert "task_2" in selected  # rating 1200 = exact match
 
     def test_select_mixed_prompts(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         for i in range(20):
             elo.register_prompt(f"task_{i}", rating=1000 + i * 50)
@@ -283,7 +283,7 @@ class TestEloTracker:
         assert len(selected) == 10
 
     def test_k_factor_decreases_with_attempts(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0, k_factor=32.0, k_factor_min=8.0)
         elo.register_prompt("task_1", rating=1200.0)
         # First attempt: full K-factor
@@ -296,7 +296,7 @@ class TestEloTracker:
         assert k20 == 8.0  # fully decayed
 
     def test_domain_stats(self):
-        from research.self_play.elo_tracker import EloTracker
+        from forge.self_play.elo_tracker import EloTracker
         elo = EloTracker(initial_rating=1200.0)
         for i in range(5):
             elo.register_prompt(f"task_{i}", rating=1200.0 + i * 50)
@@ -315,7 +315,7 @@ class TestFusedQKNormRoPE:
     def test_pytorch_fallback_matches_separate_ops(self):
         """The PyTorch fallback should produce the same result as separate
         RMSNorm + RoPE ops."""
-        from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
+        from forge.decoding.fused_rope_qknorm import fused_qk_norm_rope
 
         B, n_heads, T, head_dim = 2, 4, 8, 64
         q = torch.randn(B, n_heads, T, head_dim)
@@ -351,7 +351,7 @@ class TestFusedQKNormRoPE:
     def test_identity_weights_preserve_input_up_to_rope(self):
         """With identity RMSNorm weights (all 1.0), the norm should just
         scale by 1/rms, then RoPE is applied."""
-        from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
+        from forge.decoding.fused_rope_qknorm import fused_qk_norm_rope
 
         B, n_heads, T, head_dim = 1, 2, 4, 64
         q = torch.randn(B, n_heads, T, head_dim)
@@ -373,7 +373,7 @@ class TestFusedQKNormRoPE:
 
     def test_non_identity_weights(self):
         """Non-identity weights should scale the normed output."""
-        from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
+        from forge.decoding.fused_rope_qknorm import fused_qk_norm_rope
 
         B, n_heads, T, head_dim = 1, 2, 4, 64
         q = torch.randn(B, n_heads, T, head_dim)
@@ -393,7 +393,7 @@ class TestFusedQKNormRoPE:
 
     def test_single_tensor_wrapper(self):
         """fused_norm_rope_single should work for a single tensor."""
-        from research.decoding.fused_rope_qknorm import fused_norm_rope_single
+        from forge.decoding.fused_rope_qknorm import fused_norm_rope_single
 
         B, n_heads, T, head_dim = 1, 4, 8, 64
         x = torch.randn(B, n_heads, T, head_dim)
@@ -410,7 +410,7 @@ class TestFusedQKNormRoPE:
     def test_head_dim_must_be_power_of_2(self):
         """Triton path requires power-of-2 head_dim. PyTorch path works
         with any head_dim."""
-        from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
+        from forge.decoding.fused_rope_qknorm import fused_qk_norm_rope
 
         # head_dim=48 (not power of 2) — should work with PyTorch fallback
         B, n_heads, T, head_dim = 1, 2, 4, 48
@@ -479,7 +479,7 @@ class _EngineModel(torch.nn.Module):
 
 
 def _make_engine():
-    from research.inference.forge_engine import ForgeEngine
+    from forge.engine.forge_engine import ForgeEngine
 
     return ForgeEngine(_EngineModel(), _EngineTokenizer(), device="cpu")
 
@@ -502,7 +502,7 @@ class TestForgeEngineRefactor:
         assert stream_engine.total_tokens_generated == 3
 
     def test_learned_prefix_cache_uses_its_native_interface(self):
-        from research.inference.kv.learned_prefix_cache import LearnedPrefixCache
+        from forge.engine.kv.learned_prefix_cache import LearnedPrefixCache
 
         engine = _make_engine()
         engine._prefix_cache = LearnedPrefixCache(max_entries=2)
@@ -533,9 +533,9 @@ class TestForgeEngineRefactor:
 
     def test_level_two_wake_re_activates_strategies(self, monkeypatch):
         """Level 2 wake should re-activate strategies after model reload."""
-        import research.inference.forge_engine as fe_mod
-        from research.inference.prefix_cache import LRUPrefixCache
-        from research.model_loader import ModelLoader
+        import forge.engine.forge_engine as fe_mod
+        from forge.engine.prefix_cache import LRUPrefixCache
+        from forge.model_loader import ModelLoader
 
         engine = _make_engine()
         engine.checkpoint_path = "fake.safetensors"
@@ -564,7 +564,7 @@ class TestForgeEngineRefactor:
         assert isinstance(engine._prefix_cache, LRUPrefixCache)
 
     def test_activate_initializes_core_strategies_on_cpu(self):
-        from research.inference.prefix_cache import LRUPrefixCache
+        from forge.engine.prefix_cache import LRUPrefixCache
 
         engine = _make_engine()
         engine.activate(kv_cache="standard", decoding="standard",

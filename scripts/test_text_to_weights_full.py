@@ -7,9 +7,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 def log(m): print(m, flush=True)
 
 def main():
-    from research.keys.architecture.text_to_weights_key import TextToWeightsKey
-    from research.config import get_config
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.keys.architecture.text_to_weights_key import TextToWeightsKey
+    from forge.config import get_config
+    from forge.model_loader import ConfigurableResearchLLM
     from research.tokenizer_cache import get_tokenizer_no_wrap as load_tokenizer
 
     # Use the full 1.2B config
@@ -92,7 +92,7 @@ def main():
 
     # Build model and load weights using fast build
     log("\n=== Building model ===")
-    from research.model_loader import load_default_model
+    from forge.model_loader import load_default_model
     model, _ = load_default_model("forgelm_v2_light",
                                    checkpoint_path=out_path,
                                    device="cuda", dtype=torch.bfloat16)

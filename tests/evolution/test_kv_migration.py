@@ -3,17 +3,17 @@ import torch, numpy as np, os, sys, importlib
 os.environ['PYTHONUTF8'] = '1'
 sys.path.insert(0, r'D:\windsurf\ForgeAI')
 
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 domains = [
-    ('RotorQuantKV', 'rotor_quant_kv', 'research.evolution.domains.kv_domains'),
-    ('HadamardKV', 'hadamard_kv', 'research.evolution.domains.kv_domains'),
-    ('StreamingKV', 'streaming_kv', 'research.evolution.domains.kv_domains'),
-    ('KvZipKV', 'kvzip_kv', 'research.evolution.domains.kv_domains'),
-    ('XQuantKV', 'xquant_kv', 'research.evolution.domains.kv_domains'),
-    ('KvRecompute', 'kv_recompute', 'research.evolution.domains.kv_domains'),
-    ('CrossLayerKV', 'cross_layer_kv', 'research.evolution.domains.kv_domains'),
-    ('PagedEvictKV', 'paged_evict_kv', 'research.evolution.domains.kv_domains'),
+    ('RotorQuantKV', 'rotor_quant_kv', 'forge.evolution.domains.kv_domains'),
+    ('HadamardKV', 'hadamard_kv', 'forge.evolution.domains.kv_domains'),
+    ('StreamingKV', 'streaming_kv', 'forge.evolution.domains.kv_domains'),
+    ('KvZipKV', 'kvzip_kv', 'forge.evolution.domains.kv_domains'),
+    ('XQuantKV', 'xquant_kv', 'forge.evolution.domains.kv_domains'),
+    ('KvRecompute', 'kv_recompute', 'forge.evolution.domains.kv_domains'),
+    ('CrossLayerKV', 'cross_layer_kv', 'forge.evolution.domains.kv_domains'),
+    ('PagedEvictKV', 'paged_evict_kv', 'forge.evolution.domains.kv_domains'),
 ]
 
 

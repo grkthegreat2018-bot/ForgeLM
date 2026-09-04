@@ -4,7 +4,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from research.inference.quant.grinqh import (
+from forge.engine.quant.grinqh import (
     GRINQHQuantizer, GRINQHLinear, quantize_model_grinqh,
     _assign_precision_tiers,
 )

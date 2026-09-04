@@ -7,14 +7,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from research.inference.kv.spectral_kv import (
+from forge.engine.kv.spectral_kv import (
     SpectralKVCache,
     SpectralPreAllocatedCache,
     _fourier_basis,
     _fit_fourier,
 )
-from research.inference.kv_backend import build_kv_cache
-from research.keys.quantization.bitnet_residual_key import (
+from forge.engine.kv_backend import build_kv_cache
+from forge.keys.quantization.bitnet_residual_key import (
     BitNetResidualLinear,
     BitNetResidualKey,
     compute_residual,
@@ -284,7 +284,7 @@ class TestBitNetResidualKey:
     def test_key_properties(self):
         key = BitNetResidualKey(residual_frac=0.10)
         assert key.name == "bitnet_residual"
-        assert key.key_class() == __import__("research.keys.misc.base", fromlist=["KeyClass"]).KeyClass.PARTIAL
+        assert key.key_class() == __import__("forge.keys.misc.base", fromlist=["KeyClass"]).KeyClass.PARTIAL
 
     def test_forward(self):
         key = BitNetResidualKey(residual_frac=0.10)

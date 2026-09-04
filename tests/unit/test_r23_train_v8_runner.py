@@ -21,7 +21,7 @@ def _tiny_v8_config(**extra):
 
     V10 is a plain GQA port — V8 features (MTP, etc.) must be explicitly enabled.
     """
-    from research.config import get_config
+    from forge.config import get_config
     overrides = dict(
         vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
         intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
@@ -43,7 +43,7 @@ def _tiny_v8_config(**extra):
 
 def _build_tiny_v8(**extra):
     """Build a tiny V8 model + config."""
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v8_config(**extra)
     model = ConfigurableResearchLLM(cfg)
     return model, cfg
@@ -62,7 +62,7 @@ def _manual_ce_loss(model, ids, vocab_size):
 
 def test_train_v8_imports():
     """train_v8 module should expose parse_args() and run() functions."""
-    import research.training.runners.train_v8 as mod
+    import forge.training.runners.train_v8 as mod
 
     assert hasattr(mod, "parse_args"), "train_v8 should have parse_args()"
     assert hasattr(mod, "run"), "train_v8 should have run()"
@@ -75,7 +75,7 @@ def test_train_v8_imports():
 
 def test_train_v8_modes():
     """parse_args should accept --mode with all 5 warm-start choices."""
-    import research.training.runners.train_v8 as mod
+    import forge.training.runners.train_v8 as mod
 
     valid_modes = ["scratch", "lora-seed", "dlora-warmstart", "hypercloning", "ligo"]
     for mode in valid_modes:
@@ -93,7 +93,7 @@ def test_train_v8_modes():
 
 def test_train_v8_eta_projection():
     """ETA projection should compute remaining time from step_times + tokens."""
-    from research.training.runners.train_v8 import project_eta
+    from forge.training.runners.train_v8 import project_eta
 
     # 100 steps at 1s each, 50 done → 50s remaining
     step_times = [1.0] * 50
@@ -113,7 +113,7 @@ def test_train_v8_eta_projection():
 
 def test_train_v8_rolling_checkpoints():
     """Rolling retention should keep only the last N step checkpoints."""
-    from research.training.runners.train_v8 import CheckpointWriter
+    from forge.training.runners.train_v8 import CheckpointWriter
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_dir = os.path.join(tmpdir, "ckpts")
@@ -146,7 +146,7 @@ def test_train_v8_rolling_checkpoints():
 
 def test_train_v8_resume_bundle():
     """Resume bundle should save and restore step, BAdam state, RNG, best_val."""
-    from research.training.runners.train_v8 import save_resume_bundle, load_resume_bundle
+    from forge.training.runners.train_v8 import save_resume_bundle, load_resume_bundle
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create a fake resume bundle
@@ -175,12 +175,12 @@ def test_train_v8_resume_bundle():
 
 def test_train_v8_vram_preflight():
     """preflight_vram_check should return dict with ok, est_inc_gb, available_gb."""
-    from research.training.runners.train_v8 import preflight_vram_check
-    from research.training.optim.badam import BAdam
+    from forge.training.runners.train_v8 import preflight_vram_check
+    from forge.training.optim.badam import BAdam
     from types import SimpleNamespace
 
     model, cfg = _build_tiny_v8()
-    from research.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.runners.train_8b_all import freeze_dead_params_
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
@@ -201,9 +201,9 @@ def test_train_v8_vram_preflight():
 
 def test_train_v8_nan_guard():
     """NaN guard should skip a step when loss is NaN instead of crashing."""
-    from research.training.runners.train_v8 import nan_guard_step
-    from research.training.optim.badam import BAdam
-    from research.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.runners.train_v8 import nan_guard_step
+    from forge.training.optim.badam import BAdam
+    from forge.training.runners.train_8b_all import freeze_dead_params_
 
     model, cfg = _build_tiny_v8()
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
@@ -246,7 +246,7 @@ def test_train_v8_nan_guard():
 
 def test_train_v8_dead_param_freeze():
     """freeze_dead_params_ should freeze MTP params when mtp_weight=0."""
-    from research.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.runners.train_8b_all import freeze_dead_params_
 
     model, cfg = _build_tiny_v8(mtp_weight=0.0)
     mtp = getattr(model, "mtp_module", None)
@@ -275,8 +275,8 @@ def test_train_v8_dead_param_freeze():
 
 def test_train_v8_loss_decreases():
     """10 training steps with BAdam on tiny V8 should decrease loss."""
-    from research.training.optim.badam import BAdam
-    from research.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.optim.badam import BAdam
+    from forge.training.runners.train_8b_all import freeze_dead_params_
 
     model, cfg = _build_tiny_v8()
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
@@ -304,8 +304,8 @@ def test_train_v8_loss_decreases():
 
 def test_train_v8_checkpoint_roundtrip():
     """Save checkpoint, load into new model, forward pass should match."""
-    from research.training.runners.train_8b_all import snapshot_state
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.training.runners.train_8b_all import snapshot_state
+    from forge.model_loader import ConfigurableResearchLLM
 
     model, cfg = _build_tiny_v8()
     ids = torch.randint(0, cfg.vocab_size, (1, 16))

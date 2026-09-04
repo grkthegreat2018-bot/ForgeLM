@@ -1,4 +1,4 @@
-"""Tests for research.evolution.database — FindingsDB SQLite persistence."""
+"""Tests for forge.evolution.database — FindingsDB SQLite persistence."""
 
 import sys
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from research.evolution.database import FindingsDB
+from forge.evolution.database import FindingsDB
 
 
 # ---------------------------------------------------------------------------

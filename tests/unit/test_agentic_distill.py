@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from research.distillation.agentic_distill import (
+from forge.distillation.agentic_distill import (
     AgenticDistillClient,
     AgenticTrajectory,
     _schemas_to_openai_tools,
     _is_filler_task,
 )
-from research.distillation.distill_client import DistillModel, MODEL_POOL
+from forge.distillation.distill_client import DistillModel, MODEL_POOL
 
 
 # ── Schema conversion tests ──────────────────────────────────────────────

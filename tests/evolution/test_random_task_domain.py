@@ -9,9 +9,9 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
 
-from research.evolution.domains.random_task_domain import RandomTaskDomain
-from research.evolution.simulators import get_simulator, list_simulators
-from research.evolution.domain_spec import load_spec, list_specs
+from forge.evolution.domains.random_task_domain import RandomTaskDomain
+from forge.evolution.simulators import get_simulator, list_simulators
+from forge.evolution.domain_spec import load_spec, list_specs
 
 
 def make_correct_solver(domain):
@@ -117,7 +117,7 @@ def main():
     assert m["correct"] == 0.0  # real_answer is NaN → not correct
 
     print("\n=== Domain registry discovery ===")
-    from research.evolution.domains import DOMAINS
+    from forge.evolution.domains import DOMAINS
     assert "RandomTaskDomain" in DOMAINS, "RandomTaskDomain not auto-discovered"
     print(f"  RandomTaskDomain in DOMAINS registry: True")
     print(f"  JSON domain classes: {[k for k in DOMAINS if k.startswith('Random') and k != 'RandomTaskDomain']}")

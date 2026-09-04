@@ -6,7 +6,7 @@ Run with:
 """
 import pytest
 
-from research.evolution.checker_model import (
+from forge.evolution.checker_model import (
     HeuristicChecker,
     SharedCheckerModel,
     _parse_score,
@@ -282,7 +282,7 @@ class TestSingleton:
     def test_reset_clears_instance(self):
         """reset_checker() clears the singleton reference."""
         reset_checker()
-        import research.evolution.checker_model as cm
+        import forge.evolution.checker_model as cm
         assert cm._checker_instance is None
 
 

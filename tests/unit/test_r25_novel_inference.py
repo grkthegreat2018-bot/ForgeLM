@@ -19,7 +19,7 @@ class TestMinPSampling:
 
     def _make_engine(self):
         """Create a minimal mock engine with _sample_next_token."""
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         # We test the method directly without full engine init.
         # _sample_next_token is an instance method but doesn't use self
         # except for the method itself, so we can call it unbound.
@@ -77,14 +77,14 @@ class TestMinKSampling:
 
     def test_min_k_disabled(self):
         """min_k=0 should not filter any tokens."""
-        from research.inference.forge_engine import _min_k_filter
+        from forge.engine.forge_engine import _min_k_filter
         logits = torch.randn(2, 100)
         result = _min_k_filter(logits, 0.0)
         assert torch.equal(result, logits)
 
     def test_min_k_filters_tail(self):
         """min_k > 0 should filter long-tail tokens."""
-        from research.inference.forge_engine import _min_k_filter
+        from forge.engine.forge_engine import _min_k_filter
         # Create logits with a clear cliff: top 10 are high, rest are low.
         logits = torch.full((1, 100), -5.0)
         logits[0, :10] = 5.0
@@ -95,7 +95,7 @@ class TestMinKSampling:
 
     def test_min_k_preserves_top_tokens(self):
         """min_k should preserve the highest-confidence tokens."""
-        from research.inference.forge_engine import _min_k_filter
+        from forge.engine.forge_engine import _min_k_filter
         logits = torch.randn(1, 50)
         result = _min_k_filter(logits, 0.3)
         # The top token should never be filtered.
@@ -104,7 +104,7 @@ class TestMinKSampling:
 
     def test_min_k_temperature_invariance(self):
         """min_k should be temperature-invariant (operates on relative dynamics)."""
-        from research.inference.forge_engine import _min_k_filter
+        from forge.engine.forge_engine import _min_k_filter
         logits = torch.randn(1, 50)
         # min_k operates on relative logit differences, not absolute values.
         # Scaling logits by a constant (temperature effect) should not change
@@ -119,7 +119,7 @@ class TestMinKSampling:
 
     def test_min_k_batch(self):
         """min_k should work with batched logits."""
-        from research.inference.forge_engine import _min_k_filter
+        from forge.engine.forge_engine import _min_k_filter
         logits = torch.randn(4, 100)
         result = _min_k_filter(logits, 0.5)
         assert result.shape == logits.shape
@@ -132,7 +132,7 @@ class TestIntraExpertSparsity:
 
     def test_expert_with_sparsity_disabled(self):
         """Expert with intra_sparsity=0 should produce same as dense."""
-        from research.moe import Expert
+        from forge.moe import Expert
         expert = Expert(d_model=64, d_ff=128, intra_sparsity=0.0)
         expert.eval()
         x = torch.randn(4, 64)
@@ -141,7 +141,7 @@ class TestIntraExpertSparsity:
 
     def test_expert_with_sparsity_enabled(self):
         """Expert with intra_sparsity > 0 should still produce valid output."""
-        from research.moe import Expert
+        from forge.moe import Expert
         expert = Expert(d_model=64, d_ff=128, intra_sparsity=0.1)
         expert.eval()
         x = torch.randn(4, 64)
@@ -151,7 +151,7 @@ class TestIntraExpertSparsity:
 
     def test_sparsity_zeroes_inactive_neurons(self):
         """With high sparsity, some intermediate neurons should be zeroed."""
-        from research.moe import Expert
+        from forge.moe import Expert
         # Use very high sparsity to make effect visible.
         expert = Expert(d_model=32, d_ff=64, intra_sparsity=0.9)
         expert.eval()
@@ -162,7 +162,7 @@ class TestIntraExpertSparsity:
 
     def test_sparsity_not_active_in_training(self):
         """Intra-expert sparsity should not be applied during training."""
-        from research.moe import Expert
+        from forge.moe import Expert
         expert = Expert(d_model=32, d_ff=64, intra_sparsity=0.5)
         expert.train()  # training mode
         x = torch.randn(2, 32)
@@ -177,7 +177,7 @@ class TestIntraExpertSparsity:
 
     def test_set_intra_expert_sparsity(self):
         """set_intra_expert_sparsity should update all experts."""
-        from research.moe import MoELayer, set_intra_expert_sparsity
+        from forge.moe import MoELayer, set_intra_expert_sparsity
         moe = MoELayer(d_model=32, n_experts=4, top_k=2, d_ff=64,
                        shared_expert=True, intra_sparsity=0.0)
 
@@ -194,7 +194,7 @@ class TestIntraExpertSparsity:
 
     def test_moe_layer_forward_with_sparsity(self):
         """MoELayer forward should work with intra_sparsity enabled."""
-        from research.moe import MoELayer
+        from forge.moe import MoELayer
         moe = MoELayer(d_model=32, n_experts=4, top_k=2, d_ff=64,
                        shared_expert=True, intra_sparsity=0.2)
         moe.eval()
@@ -211,7 +211,7 @@ class TestShortcutDecoder:
 
     def test_should_not_terminate_before_min_steps(self):
         """Should not terminate before min_steps."""
-        from research.inference.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
         decoder = ShortcutDecoder(ShortcutConfig(
             min_steps=3, entropy_threshold=0.5, entropy_window=2))
         logits = torch.randn(1, 100)
@@ -226,7 +226,7 @@ class TestShortcutDecoder:
 
     def test_high_entropy_does_not_terminate(self):
         """High entropy (uncertain) should not trigger termination."""
-        from research.inference.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
         decoder = ShortcutDecoder(ShortcutConfig(min_steps=2, entropy_threshold=0.5))
         # Uniform logits = high entropy.
         logits = torch.zeros(1, 100)
@@ -235,7 +235,7 @@ class TestShortcutDecoder:
 
     def test_reset(self):
         """reset() should clear internal state."""
-        from research.inference.reasoning import ShortcutDecoder
+        from forge.engine.reasoning import ShortcutDecoder
         decoder = ShortcutDecoder()
         logits = torch.randn(1, 50)
         for step in range(10):
@@ -246,7 +246,7 @@ class TestShortcutDecoder:
 
     def test_stats(self):
         """stats should return valid statistics."""
-        from research.inference.reasoning import ShortcutDecoder
+        from forge.engine.reasoning import ShortcutDecoder
         decoder = ShortcutDecoder()
         logits = torch.randn(1, 50)
         for step in range(5):
@@ -258,7 +258,7 @@ class TestShortcutDecoder:
 
     def test_answer_trigger_tokens(self):
         """Answer trigger tokens should cause immediate termination."""
-        from research.inference.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
         decoder = ShortcutDecoder(ShortcutConfig(
             min_steps=2, answer_trigger_tokens={42}))
         logits = torch.randn(1, 100)
@@ -272,7 +272,7 @@ class TestSyncThinkTerminator:
 
     def test_should_not_terminate_before_min_steps(self):
         """Should not terminate before min_steps."""
-        from research.inference.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
         terminator = SyncThinkTerminator(SyncThinkConfig(min_steps=5))
         attn = torch.randn(1, 100)
         for step in range(5):
@@ -280,7 +280,7 @@ class TestSyncThinkTerminator:
 
     def test_boundary_attention_triggers_termination(self):
         """High attention on boundary positions should trigger termination."""
-        from research.inference.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
         terminator = SyncThinkTerminator(SyncThinkConfig(
             min_steps=2, boundary_attention_threshold=0.3))
         # Create attention where most mass is on position 0 (boundary).
@@ -294,7 +294,7 @@ class TestSyncThinkTerminator:
 
     def test_low_boundary_attention_does_not_terminate(self):
         """Low attention on boundary should not trigger termination."""
-        from research.inference.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
         terminator = SyncThinkTerminator(SyncThinkConfig(
             min_steps=2, boundary_attention_threshold=0.5))
         # Attention spread evenly (low boundary mass).
@@ -304,7 +304,7 @@ class TestSyncThinkTerminator:
 
     def test_multi_head_attention(self):
         """Should handle (n_heads, seq_len) attention shape."""
-        from research.inference.reasoning import SyncThinkTerminator
+        from forge.engine.reasoning import SyncThinkTerminator
         terminator = SyncThinkTerminator()
         attn = torch.randn(4, 100)  # 4 heads
         # Should not crash.
@@ -313,7 +313,7 @@ class TestSyncThinkTerminator:
 
     def test_3d_attention(self):
         """Should handle (n_heads, seq_len, seq_len) attention shape."""
-        from research.inference.reasoning import SyncThinkTerminator
+        from forge.engine.reasoning import SyncThinkTerminator
         terminator = SyncThinkTerminator()
         attn = torch.randn(4, 50, 50)  # 4 heads, 50x50
         result = terminator.should_terminate(10, attn)
@@ -321,7 +321,7 @@ class TestSyncThinkTerminator:
 
     def test_reset(self):
         """reset() should clear internal state."""
-        from research.inference.reasoning import SyncThinkTerminator
+        from forge.engine.reasoning import SyncThinkTerminator
         terminator = SyncThinkTerminator()
         attn = torch.randn(1, 50)
         for step in range(10):
@@ -336,7 +336,7 @@ class TestStepEntropy:
 
     def test_compute_step_entropy(self):
         """compute_step_entropy should return a float."""
-        from research.inference.reasoning.shortcut import compute_step_entropy
+        from forge.engine.reasoning.shortcut import compute_step_entropy
         logits = torch.randn(100)
         entropy = compute_step_entropy(logits)
         assert isinstance(entropy, float)
@@ -344,7 +344,7 @@ class TestStepEntropy:
 
     def test_detect_reasoning_saturation(self):
         """detect_reasoning_saturation should detect flat entropy."""
-        from research.inference.reasoning.shortcut import detect_reasoning_saturation
+        from forge.engine.reasoning.shortcut import detect_reasoning_saturation
         # Entropy that's flat (saturated).
         history = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
         assert detect_reasoning_saturation(history, patience=3)
@@ -354,7 +354,7 @@ class TestStepEntropy:
 
     def test_detect_saturation_too_short(self):
         """Should return False if history is too short."""
-        from research.inference.reasoning.shortcut import detect_reasoning_saturation
+        from forge.engine.reasoning.shortcut import detect_reasoning_saturation
         assert not detect_reasoning_saturation([1.0, 2.0], patience=3)
 
 
@@ -365,7 +365,7 @@ class TestReasoningBudgetController:
 
     def test_predict_budget_default(self):
         """Should predict a budget within configured range."""
-        from research.inference.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
         controller = ReasoningBudgetController(BudgetConfig(
             min_budget=128, max_budget=4096, gamma_shape=2.0, gamma_scale=512.0))
         budget = controller.predict_budget()
@@ -373,7 +373,7 @@ class TestReasoningBudgetController:
 
     def test_predict_budget_with_difficulty(self):
         """Harder questions should get larger budgets."""
-        from research.inference.reasoning import ReasoningBudgetController
+        from forge.engine.reasoning import ReasoningBudgetController
         controller = ReasoningBudgetController()
         easy_budget = controller.predict_budget(difficulty=0.0)
         controller.reset()
@@ -382,7 +382,7 @@ class TestReasoningBudgetController:
 
     def test_predict_difficulty_from_logits(self):
         """Should predict difficulty from first token logits."""
-        from research.inference.reasoning import ReasoningBudgetController
+        from forge.engine.reasoning import ReasoningBudgetController
         controller = ReasoningBudgetController()
         # Low entropy (peaked) = easy.
         easy_logits = torch.full((100,), -10.0)
@@ -395,7 +395,7 @@ class TestReasoningBudgetController:
 
     def test_apply_guidance_before_start(self):
         """Guidance should not be applied before start fraction."""
-        from research.inference.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
         controller = ReasoningBudgetController(BudgetConfig(
             guidance_start_fraction=0.8, guidance_strength=0.3))
         controller.predict_budget(difficulty=0.5)
@@ -407,7 +407,7 @@ class TestReasoningBudgetController:
 
     def test_apply_guidance_near_budget(self):
         """Guidance should be applied near the budget."""
-        from research.inference.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
         controller = ReasoningBudgetController(BudgetConfig(
             guidance_start_fraction=0.5, guidance_strength=0.5,
             min_budget=100, max_budget=200))
@@ -423,7 +423,7 @@ class TestReasoningBudgetController:
 
     def test_reset(self):
         """reset() should clear state."""
-        from research.inference.reasoning import ReasoningBudgetController
+        from forge.engine.reasoning import ReasoningBudgetController
         controller = ReasoningBudgetController()
         controller.predict_budget(difficulty=0.5)
         assert controller._predicted_budget is not None
@@ -432,7 +432,7 @@ class TestReasoningBudgetController:
 
     def test_stats(self):
         """stats should return valid statistics."""
-        from research.inference.reasoning import ReasoningBudgetController
+        from forge.engine.reasoning import ReasoningBudgetController
         controller = ReasoningBudgetController()
         controller.predict_budget(difficulty=0.5)
         stats = controller.stats
@@ -447,7 +447,7 @@ class TestResidualStreamCache:
 
     def test_init(self):
         """Cache should initialize correctly."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=512, device="cpu", dtype=torch.float32)
@@ -458,7 +458,7 @@ class TestResidualStreamCache:
 
     def test_append_residual(self):
         """Should store residual vectors."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=512, device="cpu", dtype=torch.float32)
@@ -469,7 +469,7 @@ class TestResidualStreamCache:
 
     def test_append_residuals_batch(self):
         """Should store multiple residuals at once."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=512, device="cpu", dtype=torch.float32)
@@ -479,7 +479,7 @@ class TestResidualStreamCache:
 
     def test_regenerate_kv(self):
         """Should regenerate K,V from residuals via projection weights."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         n_heads, head_dim, n_kv = 8, 64, 2
         d_model = n_heads * head_dim  # 512
@@ -502,7 +502,7 @@ class TestResidualStreamCache:
 
         This is the core KV-Direct claim: K = residual @ W_K^T is exact.
         """
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache(compression_dtype=torch.float32)
         n_heads, head_dim, n_kv = 4, 32, 2
         d_model = n_heads * head_dim  # 128
@@ -525,7 +525,7 @@ class TestResidualStreamCache:
 
     def test_memory_savings(self):
         """Memory savings should be > 1 for GQA models."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache(compression_dtype=torch.float16)
         # GQA: n_kv < n_heads → d_model > 2 * n_kv * head_dim in float16
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
@@ -539,7 +539,7 @@ class TestResidualStreamCache:
 
     def test_info(self):
         """info() should return valid statistics."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=512, device="cpu", dtype=torch.float32)
@@ -553,7 +553,7 @@ class TestResidualStreamCache:
 
     def test_clear(self):
         """clear() should reset the cache."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
                    max_seq_len=512, device="cpu", dtype=torch.float32)
@@ -564,13 +564,13 @@ class TestResidualStreamCache:
 
     def test_build_kv_cache_factory(self):
         """build_kv_cache should create ResidualStreamCache."""
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("residual_stream")
         assert cache.__class__.__name__ == "ResidualStreamCache"
 
     def test_interface_compatibility(self):
         """append() with K,V should be a no-op (interface compat)."""
-        from research.inference.kv.residual_cache import ResidualStreamCache
+        from forge.engine.kv.residual_cache import ResidualStreamCache
         cache = ResidualStreamCache()
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2,
                    max_seq_len=128, device="cpu", dtype=torch.float32)

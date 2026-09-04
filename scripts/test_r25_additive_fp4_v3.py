@@ -28,8 +28,8 @@ DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
 CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
-from research.inference.quant.nvfp4_quant import _FP4_MAGNITUDES, _FP4_BOUNDARIES
-from research.inference.quant.novel_quant import _optimal_fp4_scale, quantize_iri_fp4
+from forge.engine.quant.nvfp4_quant import _FP4_MAGNITUDES, _FP4_BOUNDARIES
+from forge.engine.quant.novel_quant import _optimal_fp4_scale, quantize_iri_fp4
 
 
 def frob_err(ref, q):

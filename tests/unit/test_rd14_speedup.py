@@ -31,7 +31,7 @@ class TestTritonRMSNorm:
 
     def test_rms_norm_cpu_fallback(self):
         """On CPU, triton_rms_norm should fall back to F.rms_norm."""
-        from research.decoding.triton_train_kernels import triton_rms_norm
+        from forge.decoding.triton_train_kernels import triton_rms_norm
         x = torch.randn(4, 128, dtype=torch.float32)
         weight = torch.ones(128, dtype=torch.float32)
         out = triton_rms_norm(x, weight, eps=1e-6)
@@ -41,7 +41,7 @@ class TestTritonRMSNorm:
 
     def test_rms_norm_numerical_match(self):
         """Triton RMSNorm should match F.rms_norm within tolerance."""
-        from research.decoding.triton_train_kernels import triton_rms_norm
+        from forge.decoding.triton_train_kernels import triton_rms_norm
         x = torch.randn(2, 64, 128, dtype=torch.float32, device=DEVICE)
         weight = torch.randn(128, dtype=torch.float32, device=DEVICE)
         out = triton_rms_norm(x, weight, eps=1e-6)
@@ -50,7 +50,7 @@ class TestTritonRMSNorm:
 
     def test_rms_norm_preserves_dtype(self):
         """RMSNorm should preserve input dtype."""
-        from research.decoding.triton_train_kernels import triton_rms_norm
+        from forge.decoding.triton_train_kernels import triton_rms_norm
         for dt in [torch.float32, torch.bfloat16]:
             if dt == torch.bfloat16 and not CUDA_AVAILABLE:
                 continue  # bf16 CPU RMSNorm may differ
@@ -65,7 +65,7 @@ class TestTritonSwiGLU:
 
     def test_swiglu_cpu_fallback(self):
         """On CPU, triton_swiglu_act should fall back to F.silu(gate)*up."""
-        from research.decoding.triton_train_kernels import triton_swiglu_act
+        from forge.decoding.triton_train_kernels import triton_swiglu_act
         gate = torch.randn(4, 256, dtype=torch.float32)
         up = torch.randn(4, 256, dtype=torch.float32)
         out = triton_swiglu_act(gate, up)
@@ -74,7 +74,7 @@ class TestTritonSwiGLU:
 
     def test_swiglu_numerical_match(self):
         """Triton SwiGLU should match F.silu(gate)*up within tolerance."""
-        from research.decoding.triton_train_kernels import triton_swiglu_act
+        from forge.decoding.triton_train_kernels import triton_swiglu_act
         gate = torch.randn(2, 64, 512, dtype=torch.float32, device=DEVICE)
         up = torch.randn(2, 64, 512, dtype=torch.float32, device=DEVICE)
         out = triton_swiglu_act(gate, up)
@@ -83,7 +83,7 @@ class TestTritonSwiGLU:
 
     def test_swiglu_shape_mismatch_raises(self):
         """SwiGLU should assert on shape mismatch (GPU path only)."""
-        from research.decoding.triton_train_kernels import triton_swiglu_act
+        from forge.decoding.triton_train_kernels import triton_swiglu_act
         if not CUDA_AVAILABLE:
             print("SKIP: shape mismatch assert only triggers on GPU path")
             return
@@ -100,7 +100,7 @@ class TestVarlenAttention:
 
     def test_block_diag_mask_no_cross_contamination(self):
         """Block-diagonal causal mask should prevent cross-example attention."""
-        from research.model_loader import _build_block_diag_causal_mask
+        from forge.model_loader import _build_block_diag_causal_mask
         # Two examples: lengths 4 and 4, total T=8
         cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.long)
         mask = _build_block_diag_causal_mask(cu_seqlens, 8, torch.device("cpu"), torch.float32)
@@ -114,7 +114,7 @@ class TestVarlenAttention:
 
     def test_block_diag_mask_unequal_lengths(self):
         """Block-diagonal mask with unequal example lengths."""
-        from research.model_loader import _build_block_diag_causal_mask
+        from forge.model_loader import _build_block_diag_causal_mask
         cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.long)  # ex1=3, ex2=5
         mask = _build_block_diag_causal_mask(cu_seqlens, 8, torch.device("cpu"), torch.float32)
         # Example 1: positions 0-2
@@ -126,7 +126,7 @@ class TestVarlenAttention:
 
     def test_varlen_attention_matches_manual(self):
         """Varlen attention output should match manual block-diagonal attention."""
-        from research.model_loader import varlen_attention, _build_block_diag_causal_mask
+        from forge.model_loader import varlen_attention, _build_block_diag_causal_mask
         if not CUDA_AVAILABLE:
             print("SKIP: varlen attention GPU test requires CUDA")
             return
@@ -155,7 +155,7 @@ class TestPackedSequenceCuSeqlens:
 
     def test_cu_seqlens_emitted(self):
         """Dataset should emit cu_seqlens when emit_cu_seqlens=True."""
-        from research.training.data.efficient_pipeline import PackedSequenceDataset
+        from forge.training.data.efficient_pipeline import PackedSequenceDataset
         # Two examples: lengths 4 and 4, seq_len=8
         dataset = [
             {"input_ids": [1, 2, 3, 4], "labels": [1, 2, 3, 4]},
@@ -171,7 +171,7 @@ class TestPackedSequenceCuSeqlens:
 
     def test_cu_seqlens_not_emitted_by_default(self):
         """Dataset should NOT emit cu_seqlens by default (backward compat)."""
-        from research.training.data.efficient_pipeline import PackedSequenceDataset
+        from forge.training.data.efficient_pipeline import PackedSequenceDataset
         dataset = [{"input_ids": [1, 2, 3, 4], "labels": [1, 2, 3, 4]}]
         packed = PackedSequenceDataset(dataset, seq_len=8)
         item = packed[0]
@@ -179,7 +179,7 @@ class TestPackedSequenceCuSeqlens:
 
     def test_cu_seqlens_three_examples(self):
         """cu_seqlens with three examples packed into one sequence."""
-        from research.training.data.efficient_pipeline import PackedSequenceDataset
+        from forge.training.data.efficient_pipeline import PackedSequenceDataset
         dataset = [
             {"input_ids": [1, 2], "labels": [1, 2]},
             {"input_ids": [3, 4], "labels": [3, 4]},
@@ -198,7 +198,7 @@ class TestAPOLLO:
 
     def test_apollo_convergence(self):
         """APOLLO should converge on a simple quadratic loss."""
-        from research.training.optim.apollo import APOLLO
+        from forge.training.optim.apollo import APOLLO
         torch.manual_seed(42)
         # Simple 2D param with quadratic loss
         p = nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
@@ -217,7 +217,7 @@ class TestAPOLLO:
 
     def test_apollo_1d_params_adamw(self):
         """1D params should use standard AdamW path."""
-        from research.training.optim.apollo import APOLLO
+        from forge.training.optim.apollo import APOLLO
         p = nn.Parameter(torch.randn(64, dtype=torch.float32, device=DEVICE))
         target = torch.randn(64, dtype=torch.float32, device=DEVICE)
         opt = APOLLO([p], lr=0.1, rank=4)
@@ -230,7 +230,7 @@ class TestAPOLLO:
 
     def test_apollo_memory_savings(self):
         """APOLLO should use less memory than AdamW for 2D params."""
-        from research.training.optim.apollo import APOLLO
+        from forge.training.optim.apollo import APOLLO
         p = nn.Parameter(torch.randn(64, 128, dtype=torch.float32, device=DEVICE))
         opt = APOLLO([p], lr=0.01, rank=4)
         # Initialize states
@@ -252,7 +252,7 @@ class TestBREAD:
 
     def test_bread_disabled_is_vanilla_badam(self):
         """BREAD disabled should behave like vanilla BAdam."""
-        from research.training.optim.badam import BAdam
+        from forge.training.optim.badam import BAdam
         model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
         opt = BAdam(model, lr=0.01, switch_every=1, bread_sgd_correction="disabled")
         assert opt.bread_sgd_correction == "disabled"
@@ -260,7 +260,7 @@ class TestBREAD:
 
     def test_bread_partial_mode(self):
         """BREAD partial mode should track visited blocks."""
-        from research.training.optim.badam import BAdam
+        from forge.training.optim.badam import BAdam
         model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
         opt = BAdam(model, lr=0.01, switch_every=1, bread_sgd_correction="partial",
                     bread_sgd_lr_scale=5.0)
@@ -269,7 +269,7 @@ class TestBREAD:
 
     def test_bread_correction_applied(self):
         """BREAD should apply SGD correction to visited inactive blocks."""
-        from research.training.optim.badam import BAdam
+        from forge.training.optim.badam import BAdam
         # BAdam partitions by "blocks.N.*" pattern with child modules.
         # Each block needs a sub-module (not a direct Linear) so the
         # partitioner can find params under blocks.N.*.
@@ -312,7 +312,7 @@ class TestFlashOptim:
 
     def test_flashoptim_step(self):
         """FlashOptim should perform optimizer steps without error."""
-        from research.training.optim.flashoptim import FlashOptimAdamW
+        from forge.training.optim.flashoptim import FlashOptimAdamW
         p = nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
         target = torch.randn(4, 8, dtype=torch.float32, device=DEVICE)
         opt = FlashOptimAdamW([p], lr=0.01, weight_decay=0.0, bits=8)
@@ -325,7 +325,7 @@ class TestFlashOptim:
 
     def test_flashoptim_state_is_int8(self):
         """FlashOptim optimizer states should be int8 (1 byte/param)."""
-        from research.training.optim.flashoptim import FlashOptimAdamW
+        from forge.training.optim.flashoptim import FlashOptimAdamW
         p = nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
         opt = FlashOptimAdamW([p], lr=0.01, bits=8)
         p.grad = torch.randn_like(p)
@@ -337,7 +337,7 @@ class TestFlashOptim:
 
     def test_flashoptim_memory_savings(self):
         """FlashOptim should use less state memory than AdamW."""
-        from research.training.optim.flashoptim import FlashOptimAdamW
+        from forge.training.optim.flashoptim import FlashOptimAdamW
         p = nn.Parameter(torch.randn(64, 128, dtype=torch.float32, device=DEVICE))
         opt = FlashOptimAdamW([p], lr=0.01, bits=8)
         p.grad = torch.randn_like(p)
@@ -354,7 +354,7 @@ class TestFlashOptim:
 
     def test_companding_roundtrip(self):
         """Companding + quantization round-trip should preserve values approximately."""
-        from research.training.optim.flashoptim import _compand, _decompand, _quantize_to_uint8, _dequantize_from_uint8
+        from forge.training.optim.flashoptim import _compand, _decompand, _quantize_to_uint8, _dequantize_from_uint8
         x = torch.randn(128, dtype=torch.float32) * 0.1  # small values (like early momentum)
         scale = x.abs().max().clamp(min=1e-12)
         companded = _compand(x, scale)
@@ -372,7 +372,7 @@ class TestConfigFields:
 
     def test_config_defaults(self):
         """New config fields should have correct defaults."""
-        from research.config import ModelConfig
+        from forge.config import ModelConfig
         cfg = ModelConfig()
         assert cfg.use_varlen == False
         assert cfg.use_triton_kernels == False
@@ -386,7 +386,7 @@ class TestConfigFields:
 
     def test_v10_preset_has_speedup_features(self):
         """V10 preset should have use_varlen and use_triton_kernels available."""
-        from research.config import MODEL_CONFIGS
+        from forge.config import MODEL_CONFIGS
         for name in ["forgelm_v2_light"]:
             if name in MODEL_CONFIGS:
                 cfg = MODEL_CONFIGS[name]
@@ -402,7 +402,7 @@ class TestOptimizerWiring:
 
     def test_apollo_wired(self):
         """configure_optimizer should accept 'apollo'."""
-        from research.training.training_utils import configure_optimizer
+        from forge.training.training_utils import configure_optimizer
         model = nn.Sequential(nn.Linear(16, 16))
         opt = configure_optimizer(model, max_lr=0.01, weight_decay=0.01, optimizer_name="apollo")
         assert opt is not None
@@ -414,7 +414,7 @@ class TestOptimizerWiring:
 
     def test_flashoptim_wired(self):
         """configure_optimizer should accept 'flashoptim'."""
-        from research.training.training_utils import configure_optimizer
+        from forge.training.training_utils import configure_optimizer
         model = nn.Sequential(nn.Linear(16, 16))
         opt = configure_optimizer(model, max_lr=0.01, weight_decay=0.01, optimizer_name="flashoptim")
         assert opt is not None
@@ -425,7 +425,7 @@ class TestOptimizerWiring:
 
     def test_badam_bread_wired(self):
         """configure_optimizer should accept 'badam' with BREAD config."""
-        from research.training.training_utils import configure_optimizer
+        from forge.training.training_utils import configure_optimizer
         model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
         # Without config on model, BREAD defaults to disabled
         opt = configure_optimizer(model, max_lr=0.01, weight_decay=0.01, optimizer_name="badam")

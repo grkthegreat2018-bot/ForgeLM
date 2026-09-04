@@ -4,7 +4,7 @@ Left: dataset sources — rated chat exports (data/sft/*.jsonl) and any other
 JSONL under data/. Multi-select with example counts.
 
 Right: the full trainer surface, mirroring every important flag of
-research/training/runners/sft_train.py — base model, LoRA vs full FT
+forge/training/runners/sft_train.py — base model, LoRA vs full FT
 (with adapter-only save for the LoRA Manager), schedule, optimizer, loss
 function, curriculum, EMA/validation — plus a live command preview so
 what you see is exactly what launches. Runs land on the Tasks page with

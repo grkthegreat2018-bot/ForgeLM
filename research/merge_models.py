@@ -37,7 +37,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import torch
 
-from research.checkpoint_io import load_checkpoint, save_checkpoint
+from forge.checkpoint_io import load_checkpoint, save_checkpoint
 
 
 # ---------------------------------------------------------------------------

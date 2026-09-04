@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from research.training.forge_adapter import (
+from forge.training.forge_adapter import (
     ForgeAdapter,
     ForgeAdapterForLinear,
     apply_forge_adapter_to_model,

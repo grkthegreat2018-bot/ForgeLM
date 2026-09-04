@@ -31,7 +31,7 @@ from research.merge_models import (
     _n_blocks,
     _non_block_keys,
 )
-from research.checkpoint_io import save_checkpoint, load_checkpoint
+from forge.checkpoint_io import save_checkpoint, load_checkpoint
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -665,7 +665,7 @@ class TestForgeEngineMergeCheckpoints:
     def test_unknown_method_raises(self, forge_engine, parent_a, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         save_checkpoint(parent_a, path_a)
-        from research.inference.errors import ConfigurationError
+        from forge.engine.errors import ConfigurationError
         with pytest.raises(ConfigurationError):
             forge_engine.merge_checkpoints(
                 [path_a], method="nonexistent_method",
@@ -736,7 +736,7 @@ class TestForgeEngineEvolveMerge:
                                            tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         save_checkpoint(parent_a, path_a)
-        from research.inference.errors import ConfigurationError
+        from forge.engine.errors import ConfigurationError
         with pytest.raises(ConfigurationError):
             forge_engine.evolve_merge([path_a], n_generations=1)
 

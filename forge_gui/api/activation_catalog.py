@@ -1,5 +1,5 @@
 """Activation catalog — the complete, data-driven inventory of every
-ForgeEngine activation feature (mirrors ``research/inference/activation.py``).
+ForgeEngine activation feature (mirrors ``forge/engine/activation.py``).
 
 Pure python (no Qt / torch imports) so it can be unit-tested on any machine
 and shared by the Engine page, presets, and validation. Every field of

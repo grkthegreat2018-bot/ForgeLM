@@ -506,7 +506,7 @@ def test_build_remote_train_cmd_forwards_args(connector):
         },
     )
     cmd = connector._build_remote_train_cmd(spec)
-    assert "research.training.runners.sft_train" in cmd
+    assert "forge.training.runners.sft_train" in cmd
     assert "--config forgelm_v2_light" in cmd
     assert "--max-steps 500" in cmd
     assert "--lora" not in cmd

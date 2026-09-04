@@ -69,7 +69,7 @@ class _EngineChatWorker(QThread):
 
     def run(self) -> None:
         try:
-            from research.self_play.discovery.qwen_adapter import (
+            from forge.self_play.discovery.qwen_adapter import (
                 qwen_render_messages,
             )
             rendered = qwen_render_messages(self.messages, add_generation_prompt=True)
@@ -129,7 +129,7 @@ class _EngineChatToolWorker(QThread):
 
     def run(self) -> None:
         try:
-            from research.self_play.discovery.qwen_adapter import (
+            from forge.self_play.discovery.qwen_adapter import (
                 qwen_parse_tool_calls, qwen_render_messages,
             )
             import json as _json
@@ -872,7 +872,7 @@ class ChatPage(QWidget):
                     info = self.runtime.info
                     cfg_name = info.get("config_name", "")
                     if cfg_name:
-                        from research.config import get_config
+                        from forge.config import get_config
                         cfg = get_config(cfg_name)
                         parts.append(generate_master_prompt(
                             cfg, cfg_name,

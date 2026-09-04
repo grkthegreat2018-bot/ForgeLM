@@ -17,7 +17,7 @@ _DTYPE = torch.float32
 
 def test_qsa_identity_warm_start():
     """QSA with budget=all blocks should match full attention at init."""
-    from research.keys.attention.qsa_key import QSALayer
+    from forge.keys.attention.qsa_key import QSALayer
 
     torch.manual_seed(42)
     d_model, n_heads, n_kv_heads, head_dim = 256, 8, 2, 32
@@ -41,7 +41,7 @@ def test_qsa_identity_warm_start():
 
 def test_qsa_sparse_vs_full():
     """QSA with budget < all blocks should produce different (sparse) output."""
-    from research.keys.attention.qsa_key import QSALayer
+    from forge.keys.attention.qsa_key import QSALayer
 
     torch.manual_seed(42)
     d_model, n_heads, n_kv_heads, head_dim = 256, 8, 2, 32
@@ -75,7 +75,7 @@ def test_qsa_sparse_vs_full():
 
 def test_qsa_key_forward_reverse():
     """QSA key forward produces weights, reverse drops indexer."""
-    from research.keys.attention.qsa_key import QSAKey
+    from forge.keys.attention.qsa_key import QSAKey
 
     key = QSAKey(block_size=4, budget_blocks=512)
     result = key.forward({
@@ -98,7 +98,7 @@ def test_qsa_key_forward_reverse():
 
 def test_gated_residual_identity_warm_start():
     """GR at init should be near-identity (branch 0 active, others disabled)."""
-    from research.keys.architecture.gated_residual_key import GatedResidualLayer
+    from forge.keys.architecture.gated_residual_key import GatedResidualLayer
 
     torch.manual_seed(42)
     d_model, n_branches, rank = 256, 4, 64
@@ -125,7 +125,7 @@ def test_gated_residual_identity_warm_start():
 
 def test_gated_residual_branches_active():
     """After perturbing write gates, all branches should contribute."""
-    from research.keys.architecture.gated_residual_key import GatedResidualLayer
+    from forge.keys.architecture.gated_residual_key import GatedResidualLayer
 
     torch.manual_seed(42)
     d_model, n_branches, rank = 256, 4, 64
@@ -156,7 +156,7 @@ def test_gated_residual_branches_active():
 
 def test_gated_residual_key():
     """GR key forward produces weights for all branches."""
-    from research.keys.architecture.gated_residual_key import GatedResidualKey
+    from forge.keys.architecture.gated_residual_key import GatedResidualKey
 
     key = GatedResidualKey(n_branches=4, bottleneck_rank=64)
     result = key.forward({"d_model": 256})
@@ -173,7 +173,7 @@ def test_gated_residual_key():
 
 def test_ngram_embedding_identity_warm_start():
     """N-gram embedding at init (all zeros) should not change token embeddings."""
-    from research.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
+    from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
 
     vocab_size, d_model, n_gram, table_size = 1000, 256, 2, 10000
     B, T = 2, 32
@@ -198,7 +198,7 @@ def test_ngram_embedding_identity_warm_start():
 
 def test_ngram_embedding_nonzero():
     """After filling table, n-gram embedding should change the output."""
-    from research.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
+    from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
 
     vocab_size, d_model, n_gram, table_size = 1000, 256, 2, 10000
     B, T = 2, 32
@@ -225,7 +225,7 @@ def test_ngram_embedding_nonzero():
 
 def test_ngram_embedding_host_offload():
     """N-gram embedding with host_table=True should work (CPU table, GPU output)."""
-    from research.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
+    from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
 
     vocab_size, d_model, n_gram, table_size = 1000, 256, 2, 10000
     B, T = 2, 32
@@ -259,7 +259,7 @@ def test_ngram_embedding_host_offload():
 
 def test_ngram_embedding_key():
     """N-gram key forward produces zero table, reverse drops it."""
-    from research.keys.knowledge.ngram_embedding_key import NGramEmbeddingKey
+    from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingKey
 
     key = NGramEmbeddingKey(n_gram=2, table_size=10000)
     result = key.forward({"vocab_size": 1000, "d_model": 256})

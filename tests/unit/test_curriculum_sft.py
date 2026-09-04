@@ -2,7 +2,7 @@
 import sys, os, tempfile, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from research.training.runners.curriculum_sft import (
+from forge.training.runners.curriculum_sft import (
     ngram_repetition_ratio,
     is_doom_loop,
     filter_doom_loops,

@@ -22,13 +22,13 @@ class TestCheckpointCacheThreadSafety:
     """The module-level caches must be guarded by a lock."""
 
     def test_lock_exists(self):
-        from research.inference import forge_engine
+        from forge.engine import forge_engine
         assert hasattr(forge_engine, "_ckpt_cache_lock")
         assert isinstance(forge_engine._ckpt_cache_lock, type(threading.Lock()))
 
     def test_concurrent_cache_access_no_crash(self, tmp_path):
         """Multiple threads writing to _checkpoint_size_cache simultaneously."""
-        from research.inference import forge_engine
+        from forge.engine import forge_engine
         # Clear cache for clean test
         with forge_engine._ckpt_cache_lock:
             forge_engine._checkpoint_size_cache.clear()
@@ -64,7 +64,7 @@ class TestClearCudaCache:
     """_clear_cuda_cache helper should exist and be callable."""
 
     def test_helper_exists(self):
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         assert hasattr(ForgeEngine, "_clear_cuda_cache")
 
     def test_safe_on_cpu(self, forge_engine_fixture):
@@ -78,7 +78,7 @@ class TestReleaseAccelerationResources:
     """_release_acceleration_resources should nil out all acceleration slots."""
 
     def test_helper_exists(self):
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         assert hasattr(ForgeEngine, "_release_acceleration_resources")
 
     def test_releases_all_slots(self, forge_engine_fixture):
@@ -130,7 +130,7 @@ class TestReadCheckpointMetadataGraceful:
     """_read_checkpoint_metadata should handle missing/corrupt files."""
 
     def test_missing_file_returns_empty(self):
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         metadata = ForgeEngine._read_checkpoint_metadata("nonexistent_file.safetensors")
         assert isinstance(metadata, dict)
         assert len(metadata) == 0  # empty dict, not crash
@@ -140,7 +140,7 @@ class TestContinueSessionNoDirHack:
     """continue_session should not use 'generated_ids' in dir() hack."""
 
     def test_no_dir_hack_in_source(self):
-        path = Path(__file__).parent.parent.parent / "research" / "inference" / "forge_engine.py"
+        path = Path(__file__).parent.parent.parent / "forge" / "engine" / "forge_engine.py"
         source = path.read_text(encoding="utf-8")
         assert "'generated_ids' in dir()" not in source, (
             "The 'generated_ids' in dir() hack should have been removed in the refactor"
@@ -156,9 +156,9 @@ def forge_engine_fixture():
 
     Uses a mock tokenizer to avoid filesystem dependency on tokenizer location.
     """
-    from research.config import get_config
-    from research.model_loader import ConfigurableResearchLLM
-    from research.inference.forge_engine import ForgeEngine
+    from forge.config import get_config
+    from forge.model_loader import ConfigurableResearchLLM
+    from forge.engine.forge_engine import ForgeEngine
 
     cfg = get_config("lfm25_tiny")
     cfg.vocab_size = 256

@@ -73,7 +73,7 @@ class _LoadWorker(QThread):
                 _set_no_compile(self.use_compile if self.use_compile is not None
                                 else False)
             self.progress.emit("importing torch / ForgeEngine…")
-            from research.inference.forge_engine import ForgeEngine  # type: ignore
+            from forge.engine.forge_engine import ForgeEngine  # type: ignore
             root = project_root()
             ckpt = self.checkpoint
             if not ckpt:

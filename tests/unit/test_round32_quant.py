@@ -20,7 +20,7 @@ class TestNF4QLoRA:
     """NF4 (NormalFloat 4-bit) QLoRA — industry-standard QLoRA path."""
 
     def test_nf4_quantize_dequantize_roundtrip(self):
-        from research.training.bitnet_lora import NF4Linear
+        from forge.training.bitnet_lora import NF4Linear
         lin = NF4Linear(128, 64, bias=False, group_size=32)
         w = torch.randn(64, 128) * 0.1
         lin.load_from_weight(w)
@@ -30,7 +30,7 @@ class TestNF4QLoRA:
         assert rel_err < 0.20, f"NF4 roundtrip error too high: {rel_err:.4f}"
 
     def test_nf4_forward_pass(self):
-        from research.training.bitnet_lora import NF4Linear
+        from forge.training.bitnet_lora import NF4Linear
         lin = NF4Linear(64, 32, bias=True, group_size=32)
         lin.load_from_weight(torch.randn(32, 64) * 0.1)
         lin.bias.data = torch.randn(32) * 0.01
@@ -39,7 +39,7 @@ class TestNF4QLoRA:
         assert out.shape == (2, 4, 32), f"Wrong output shape: {out.shape}"
 
     def test_nf4_convert_model(self):
-        from research.training.bitnet_lora import convert_to_nf4_qlora
+        from forge.training.bitnet_lora import convert_to_nf4_qlora
         model = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -50,7 +50,7 @@ class TestNF4QLoRA:
         assert n_skip == 0
 
     def test_nf4_lora_adapter(self):
-        from research.training.bitnet_lora import NF4Linear, LoRAAdapter
+        from forge.training.bitnet_lora import NF4Linear, LoRAAdapter
         lin = NF4Linear(64, 32, bias=False, group_size=32)
         lin.load_from_weight(torch.randn(32, 64) * 0.1)
         lora = LoRAAdapter(64, 32, rank=4, alpha=8)
@@ -60,7 +60,7 @@ class TestNF4QLoRA:
         assert out.shape == (1, 4, 32)
 
     def test_nf4_merge_lora(self):
-        from research.training.bitnet_lora import NF4Linear, LoRAAdapter
+        from forge.training.bitnet_lora import NF4Linear, LoRAAdapter
         lin = NF4Linear(64, 32, bias=False, group_size=32)
         w_orig = torch.randn(32, 64) * 0.1
         lin.load_from_weight(w_orig)
@@ -71,7 +71,7 @@ class TestNF4QLoRA:
         assert lin.lora_adapter is None
 
     def test_nf4_skip_small_layers(self):
-        from research.training.bitnet_lora import convert_to_nf4_qlora
+        from forge.training.bitnet_lora import convert_to_nf4_qlora
         model = nn.Sequential(nn.Linear(32, 16), nn.Linear(16, 8))
         n_conv, n_skip = convert_to_nf4_qlora(model, min_size=64)
         assert n_conv == 0, f"Should skip small layers, got {n_conv}"
@@ -83,20 +83,20 @@ class TestGRINQH:
     """GRINQH — effective 2-bit weight quantization with dynamic per-channel precision."""
 
     def test_grinqh_forward_pass(self):
-        from research.inference.quant.grinqh import GRINQHLinear
+        from forge.engine.quant.grinqh import GRINQHLinear
         lin = GRINQHLinear.from_linear(nn.Linear(128, 64, bias=False), group_size=32)
         x = torch.randn(2, 4, 128)
         out = lin(x)
         assert out.shape == (2, 4, 64)
 
     def test_grinqh_quantize_model(self):
-        from research.inference.quant.grinqh import quantize_model_grinqh
+        from forge.engine.quant.grinqh import quantize_model_grinqh
         model = nn.Sequential(nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 32))
         n = quantize_model_grinqh(model, group_size=64, target_effective_bits=2.5)
         assert n == 2, f"Expected 2 quantized, got {n}"
 
     def test_grinqh_effective_bits(self):
-        from research.inference.quant.grinqh import GRINQHLinear
+        from forge.engine.quant.grinqh import GRINQHLinear
         lin = GRINQHLinear.from_linear(nn.Linear(128, 64, bias=False), group_size=32)
         x = torch.randn(1, 128)
         out = lin(x)
@@ -110,7 +110,7 @@ class TestMixLLM:
     """MixLLM — global mixed-precision across output features."""
 
     def test_mixllm_forward_pass(self):
-        from research.inference.quant.mixllm import MixLLMLinear
+        from forge.engine.quant.mixllm import MixLLMLinear
         high_mask = torch.zeros(64, dtype=torch.bool)
         high_mask[:6] = True  # top 10% are high precision
         lin = MixLLMLinear.from_linear(nn.Linear(128, 64, bias=False), high_mask, group_size=32)
@@ -119,13 +119,13 @@ class TestMixLLM:
         assert out.shape == (2, 4, 64)
 
     def test_mixllm_quantize_model(self):
-        from research.inference.quant.mixllm import quantize_model_mixllm
+        from forge.engine.quant.mixllm import quantize_model_mixllm
         model = nn.Sequential(nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 32))
         n = quantize_model_mixllm(model, group_size=64, high_fraction=0.1)
         assert n == 2, f"Expected 2 quantized, got {n}"
 
     def test_mixllm_global_importance(self):
-        from research.inference.quant.mixllm import quantize_model_mixllm
+        from forge.engine.quant.mixllm import quantize_model_mixllm
         # Two layers with different weight scales
         model = nn.Sequential(
             nn.Linear(64, 64),
@@ -149,7 +149,7 @@ class TestHyQuantKV:
     """HyQuant — pattern-aware KV cache quantization."""
 
     def test_hyquant_init_append_get(self):
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         cache = HyQuantKVCache(window_size=4, vertical_ratio=0.2)
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.bfloat16)
@@ -166,7 +166,7 @@ class TestHyQuantKV:
         assert v_out.shape == (1, 2, 4, 32)
 
     def test_hyquant_window_is_high_precision(self):
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         cache = HyQuantKVCache(window_size=4, vertical_ratio=0.0)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -184,7 +184,7 @@ class TestHyQuantKV:
         assert n_high >= 4, f"Last 4 tokens should be high precision, got {n_high}"
 
     def test_hyquant_attention_hints(self):
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         cache = HyQuantKVCache(window_size=4, vertical_ratio=0.2)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -196,7 +196,7 @@ class TestHyQuantKV:
         assert 2 in cache._vertical_indices, "Token 2 should be in vertical indices"
 
     def test_hyquant_clear(self):
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         cache = HyQuantKVCache(window_size=4, vertical_ratio=0.2)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -207,7 +207,7 @@ class TestHyQuantKV:
         assert len(cache._is_high) == 0
 
     def test_hyquant_info(self):
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         cache = HyQuantKVCache(window_size=4, vertical_ratio=0.2)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -225,14 +225,14 @@ class TestACBQ:
     """ACBQ — adaptive cross-block quantization."""
 
     def test_acbq_forward_pass(self):
-        from research.inference.quant.acbq import ACBQLinear
+        from forge.engine.quant.acbq import ACBQLinear
         lin = ACBQLinear.from_linear(nn.Linear(128, 64, bias=False), group_size=32)
         x = torch.randn(2, 4, 128)
         out = lin(x)
         assert out.shape == (2, 4, 64)
 
     def test_acbq_quantize_model(self):
-        from research.inference.quant.acbq import quantize_model_acbq
+        from forge.engine.quant.acbq import quantize_model_acbq
         # ACBQ classifies by module name — use realistic names
         model = nn.Module()
         model.q_proj = nn.Linear(128, 64)
@@ -241,7 +241,7 @@ class TestACBQ:
         assert n == 2, f"Expected 2 quantized, got {n}"
 
     def test_acbq_mixed_precision(self):
-        from research.inference.quant.acbq import quantize_model_acbq
+        from forge.engine.quant.acbq import quantize_model_acbq
         model = nn.Module()
         model.q_proj = nn.Linear(128, 64)
         model.w_down = nn.Linear(64, 128)
@@ -258,7 +258,7 @@ class TestForgeQuant:
     """ForgeQuant — novel SM120-tuned INT4 dense + 2-bit sparse."""
 
     def test_forge_quant_roundtrip(self):
-        from research.inference.quant.forge_quant import ForgeQuantLinear
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
         lin = ForgeQuantLinear(128, 64, bias=False, group_size=32, sparse_ratio=0.1)
         w = torch.randn(64, 128) * 0.1
         lin.load_from_weight(w)
@@ -269,7 +269,7 @@ class TestForgeQuant:
         assert rel_err < 0.35, f"ForgeQuant roundtrip error too high: {rel_err:.4f}"
 
     def test_forge_quant_forward_pass(self):
-        from research.inference.quant.forge_quant import ForgeQuantLinear
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
         lin = ForgeQuantLinear(64, 32, bias=True, group_size=32, sparse_ratio=0.1)
         lin.load_from_weight(torch.randn(32, 64) * 0.1)
         lin.bias.data = torch.randn(32) * 0.01
@@ -279,7 +279,7 @@ class TestForgeQuant:
 
     def test_forge_quant_outlier_preservation(self):
         """ForgeQuant should preserve outlier channels better than pure INT4."""
-        from research.inference.quant.forge_quant import ForgeQuantLinear
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
         lin = ForgeQuantLinear(64, 32, bias=False, group_size=32, sparse_ratio=0.2)
         # Create weights with clear outliers
         w = torch.randn(32, 64) * 0.05
@@ -295,14 +295,14 @@ class TestForgeQuant:
         assert err_0 < avg_err * 1.5, f"Outlier ch0 error {err_0:.4f} > avg {avg_err:.4f}*1.5"
 
     def test_forge_quant_quantize_model(self):
-        from research.inference.quant.forge_quant import quantize_model_forge_quant
+        from forge.engine.quant.forge_quant import quantize_model_forge_quant
         model = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 128))
         n = quantize_model_forge_quant(model, group_size=64, sparse_ratio=0.1)
         assert n == 2, f"Expected 2 quantized, got {n}"
 
     def test_forge_quant_lora_merge(self):
-        from research.inference.quant.forge_quant import ForgeQuantLinear
-        from research.training.bitnet_lora import LoRAAdapter
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
+        from forge.training.bitnet_lora import LoRAAdapter
         lin = ForgeQuantLinear(64, 32, bias=False, group_size=32, sparse_ratio=0.1)
         lin.load_from_weight(torch.randn(32, 64) * 0.1)
         lora = LoRAAdapter(64, 32, rank=4, alpha=8)
@@ -318,7 +318,7 @@ class TestForgeQuant:
         faster than fp4), not necessarily better perplexity. This test verifies
         ForgeQuant doesn't degrade quality vs INT4 by more than 2x.
         """
-        from research.inference.quant.forge_quant import ForgeQuantLinear
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
         # Create a weight matrix with outliers
         w = torch.randn(64, 256) * 0.02
         # Add outliers to 10% of channels
@@ -354,7 +354,7 @@ class TestEngineDispatch:
     """Verify new quantization modes are wired into ForgeEngine dispatch."""
 
     def test_quant_fallback_chain_has_new_modes(self):
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         chain = ForgeEngine._QUANT_FALLBACK_CHAIN
         assert "forge_quant" in chain, "forge_quant not in fallback chain"
         assert "grinqh" in chain, "grinqh not in fallback chain"
@@ -362,13 +362,13 @@ class TestEngineDispatch:
         assert "acbq" in chain, "acbq not in fallback chain"
 
     def test_kv_dispatch_has_hyquant(self):
-        from research.inference.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("hyquant")
-        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        from forge.engine.kv.hyquant_kv import HyQuantKVCache
         assert isinstance(cache, HyQuantKVCache), "hyquant dispatch failed"
 
     def test_build_kv_cache_unknown_falls_back(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv_backend import StandardKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv_backend import StandardKVCache
         cache = build_kv_cache("nonexistent_strategy")
         assert isinstance(cache, StandardKVCache)

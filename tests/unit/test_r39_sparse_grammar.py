@@ -13,8 +13,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from research.inference.structured.xgrammar import XGrammarConstrainer
-from research.inference.decoding import (
+from forge.engine.structured.xgrammar import XGrammarConstrainer
+from forge.engine.decoding import (
     SelfSpeculativeSparse,
     StandardDecoding,
     build_decoding,
@@ -628,7 +628,7 @@ class TestXGrammarEngineIntegration:
             callable_tok: if True, use _CallableMockTokenizer (needed for
                 generate()/generate_raw() which call the tokenizer).
         """
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
 
         tok_cls = _CallableMockTokenizer if callable_tok else MockTokenizer
         tok = tok_cls(vocab_chars)

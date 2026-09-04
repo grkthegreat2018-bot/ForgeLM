@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from research.config import get_config, MODEL_CONFIGS
+from forge.config import get_config, MODEL_CONFIGS
 
 
 class TestV12Preset:

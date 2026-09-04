@@ -10,9 +10,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from research.config import ModelConfig
-from research.model_loader import ConfigurableResearchLLM
-from research.inference.forge_engine import ForgeEngine
+from forge.config import ModelConfig
+from forge.model_loader import ConfigurableResearchLLM
+from forge.engine.forge_engine import ForgeEngine
 
 
 def main():
@@ -111,7 +111,7 @@ def main():
 
     # Test with chat template
     print("=== Chat Template Test ===\n")
-    from research.self_play.discovery.chat_template import apply_chat_template
+    from forge.self_play.discovery.chat_template import apply_chat_template
     messages = [
         {"role": "system", "content": "You are a helpful coding assistant."},
         {"role": "user", "content": "What is 2+2?"},

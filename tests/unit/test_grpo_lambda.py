@@ -14,8 +14,8 @@ Covers:
 import pytest
 import torch
 
-from research.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
-from research.evaluation.goal_scorer import GoalScorer
+from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+from forge.evaluation.goal_scorer import GoalScorer
 
 
 def _make_trainer(config=None):

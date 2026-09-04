@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from research.training.runners.rlvr_train import (
+from forge.training.runners.rlvr_train import (
     extract_math_answer,
     normalize_answer,
     math_verify,
@@ -10,7 +10,7 @@ from research.training.runners.rlvr_train import (
     load_math_tasks,
     VerifiableTask,
 )
-from research.training.runners.curriculum_sft import is_doom_loop
+from forge.training.runners.curriculum_sft import is_doom_loop
 
 
 def test_extract_math_answer_gsm8k():
@@ -130,7 +130,7 @@ def test_verifiable_task_dataclass():
 
 def test_repetition_penalty_integration():
     """Verify that the GRPO config has repetition penalty fields."""
-    from research.self_play.grpo_trainer import GRPOConfig
+    from forge.self_play.grpo_trainer import GRPOConfig
     config = GRPOConfig()
     assert hasattr(config, "use_repetition_penalty")
     assert hasattr(config, "repetition_n")

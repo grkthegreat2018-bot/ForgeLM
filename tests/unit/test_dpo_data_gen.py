@@ -2,13 +2,13 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from research.training.runners.dpo_data_gen import (
+from forge.training.runners.dpo_data_gen import (
     Candidate,
     construct_preference_pair,
     load_prompts,
     JUDGE_SYSTEM_PROMPT,
 )
-from research.training.runners.curriculum_sft import ngram_repetition_ratio
+from forge.training.runners.curriculum_sft import ngram_repetition_ratio
 
 
 def test_candidate_dataclass():

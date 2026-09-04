@@ -276,7 +276,7 @@ class _LoraMergeWorker(QThread):
         engine = None
         try:
             self.status.emit("loading base model on CPU…")
-            from research.inference.forge_engine import ForgeEngine  # type: ignore
+            from forge.engine.forge_engine import ForgeEngine  # type: ignore
             root = project_root()
             base = self.base
             if base and not Path(base).is_absolute():
@@ -290,11 +290,11 @@ class _LoraMergeWorker(QThread):
             engine.load_lora(self.adapter, rank=self.rank, alpha=self.alpha)
 
             self.status.emit("merging adapters into base weights…")
-            from research.training.bitnet_lora import merge_lora_adapters  # type: ignore
+            from forge.training.bitnet_lora import merge_lora_adapters  # type: ignore
             n = merge_lora_adapters(engine.model)
 
             self.status.emit("saving merged checkpoint…")
-            from research.checkpoint_io import save_training_checkpoint  # type: ignore
+            from forge.checkpoint_io import save_training_checkpoint  # type: ignore
             cfg = getattr(engine, "config", None)
             meta = {"lora_merged": True, "adapter": Path(self.adapter).name,
                     "merged_adapters": n, "t": time.strftime("%Y-%m-%d %H:%M")}

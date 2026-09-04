@@ -7,11 +7,11 @@ side-effecting requests, no auth, no dependencies.
 
 The search/fetch primitives reuse the proven DuckDuckGo-HTML / Wikipedia /
 arXiv / tag-stripping implementation from
-``research/self_play/discovery/discovery_tools.py`` (battle-tested in the
+``forge/self_play/discovery/discovery_tools.py`` (battle-tested in the
 self-play discovery loop). They are duplicated here rather than imported
 because the discovery versions are private (``_``-prefixed) and coupled to
 the self-play DB emit pattern; the agent harness is a separate subsystem
-(``forge_gui/api/``) that must not depend on ``research/self_play/``.
+(``forge_gui/api/``) that must not depend on ``forge/self_play/``.
 
 Safety:
 - Only ``http``/``https`` URLs are accepted for ``web_fetch`` —

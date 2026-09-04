@@ -33,15 +33,20 @@ unsloth_compiled_cache/
 checkpoints/
 research/checkpoints/
 research/cache/
+forge/checkpoints/
+forge/cache/
 
 # Training data & task outputs
 data/
 research/data/
 research/tasks/
-research/runtime/tasks/
-research/runtime/graph_templates/
-research/runtime/compile_mode_cache.json
+forge/data/
+forge/tasks/
+forge/runtime/tasks/
+forge/runtime/graph_templates/
+forge/runtime/compile_mode_cache.json
 research/distillation/hf_datasets/
+forge/distillation/hf_datasets/
 wandb/
 runs/
 
@@ -110,6 +115,12 @@ research/results/*.db-wal
 research/results/*.db-shm
 research/results/*.db.backup_*
 research/results/*.db.bak_*
+forge/results/*.db
+forge/results/*.db-journal
+forge/results/*.db-wal
+forge/results/*.db-shm
+forge/results/*.db.backup_*
+forge/results/*.db.bak_*
 tests/integration/*.db
 tests/integration/*.db-journal
 *.db

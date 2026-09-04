@@ -3,8 +3,8 @@ import os, sys, torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["FORGE_NO_COMPILE"] = "1"
 
-from research.config import get_config
-from research.model_loader import ModelLoader, unpack_output_with_kv
+from forge.config import get_config
+from forge.model_loader import ModelLoader, unpack_output_with_kv
 from research.tokenizer_cache import get_tokenizer
 
 CHECKPOINT = "research/checkpoints/Jamba_Reasoning_3B.safetensors"

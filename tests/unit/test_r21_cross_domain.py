@@ -14,7 +14,7 @@ _DTYPE = torch.float32
 
 def test_hypernet_bitnet_generates_ternary():
     """HyperNet-BitNet should generate ternary weights {-1, 0, +1}."""
-    from research.training.optim.r21_cross_domain import HyperNetBitNet
+    from forge.training.optim.r21_cross_domain import HyperNetBitNet
 
     hnb = HyperNetBitNet(64, 64, hidden_dim=32, layer_id=0).to(_DEV)
     # At init (zero output), all weights should be 0 (threshold > 0)
@@ -32,7 +32,7 @@ def test_hypernet_bitnet_generates_ternary():
 
 def test_hypernet_bitnet_trainable():
     """HyperNet-BitNet should train via STE."""
-    from research.training.optim.r21_cross_domain import HyperNetBitNet
+    from forge.training.optim.r21_cross_domain import HyperNetBitNet
 
     torch.manual_seed(42)
     hnb = HyperNetBitNet(64, 64, hidden_dim=32, layer_id=0).to(_DEV)
@@ -56,7 +56,7 @@ def test_hypernet_bitnet_trainable():
 
 def test_hashed_nlrq_compression():
     """HashedNLRQ should achieve higher compression than NLRQ alone."""
-    from research.training.optim.r21_cross_domain import HashedNLRQ
+    from forge.training.optim.r21_cross_domain import HashedNLRQ
 
     out_f, in_f, rank = 256, 256, 64
     for hc in [4, 8, 16]:
@@ -72,7 +72,7 @@ def test_hashed_nlrq_compression():
 
 def test_hashed_nlrq_trainable():
     """HashedNLRQ should be trainable."""
-    from research.training.optim.r21_cross_domain import HashedNLRQ
+    from forge.training.optim.r21_cross_domain import HashedNLRQ
 
     torch.manual_seed(42)
     hn = HashedNLRQ(64, 64, rank=16, hash_compression=4).to(_DEV)
@@ -96,7 +96,7 @@ def test_hashed_nlrq_trainable():
 
 def test_wavelet_round_trip():
     """Wavelet transform should be perfectly invertible (orthogonal)."""
-    from research.training.optim.r21_cross_domain import WaveletWeight
+    from forge.training.optim.r21_cross_domain import WaveletWeight
 
     N = 64
     W = WaveletWeight._haar_basis(N, levels=3)
@@ -118,7 +118,7 @@ def test_wavelet_round_trip():
 
 def test_wavelet_reconstruction():
     """Wavelet should reconstruct LLM-like weights better than DCT."""
-    from research.training.optim.r21_cross_domain import WaveletWeight
+    from forge.training.optim.r21_cross_domain import WaveletWeight
 
     torch.manual_seed(42)
     N = 128
@@ -158,7 +158,7 @@ def test_wavelet_reconstruction():
 
 def test_wavelet_trainable():
     """Wavelet coefficients should be trainable."""
-    from research.training.optim.r21_cross_domain import WaveletWeight
+    from forge.training.optim.r21_cross_domain import WaveletWeight
 
     ww = WaveletWeight(32, 32, compression_ratio=4).to(_DEV)
     x = torch.randn(4, 32, device=_DEV)
@@ -181,7 +181,7 @@ def test_wavelet_trainable():
 
 def test_fp8_activation_linear():
     """FP8 activation linear should produce correct output in eval mode."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     lin = FP8ActivationLinear(64, 32, bias=True).to(_DEV)
     lin.eval()  # No FP8 compression in eval
@@ -200,7 +200,7 @@ def test_fp8_activation_linear():
 
 def test_fp8_activation_training_mode():
     """FP8 activation in training mode should compress activations."""
-    from research.training.optim.r21_cross_domain import FP8ActivationLinear
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear
 
     lin = FP8ActivationLinear(64, 32, bias=True).to(_DEV)
     lin.train()
@@ -229,7 +229,7 @@ def test_fp8_activation_training_mode():
 
 def test_grad_topk():
     """Top-K gradient optimizer should train and sparsify gradients."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     torch.manual_seed(42)
     model = nn.Linear(128, 128, bias=False).to(_DEV)
@@ -258,7 +258,7 @@ def test_grad_topk():
 
 def test_grad_topk_ef_convergence():
     """Top-K with and without error feedback should both converge."""
-    from research.training.optim.r21_cross_domain import TopKGradientOptimizer
+    from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
 
     torch.manual_seed(42)
     x = torch.randn(16, 64, device=_DEV)
@@ -302,7 +302,7 @@ def test_grad_topk_ef_convergence():
 
 def test_benchmark_r21():
     """Benchmark all R21 approaches."""
-    from research.training.optim.r21_cross_domain import benchmark_r21
+    from forge.training.optim.r21_cross_domain import benchmark_r21
 
     print("\n  R21 benchmark (256x256, LLM-like weights):")
     print("  " + "=" * 70)

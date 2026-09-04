@@ -22,11 +22,11 @@ class TestLoadAnchorCached:
     """Shared load_anchor_cached in training_utils with LRU eviction."""
 
     def test_function_exists(self):
-        from research.training.training_utils import load_anchor_cached
+        from forge.training.training_utils import load_anchor_cached
         assert callable(load_anchor_cached)
 
     def test_caches_by_path_mtime(self, tmp_path):
-        from research.training.training_utils import load_anchor_cached, _ANCHOR_CACHE
+        from forge.training.training_utils import load_anchor_cached, _ANCHOR_CACHE
         from safetensors.torch import save_file
 
         # Create a fake anchor checkpoint
@@ -47,7 +47,7 @@ class TestLoadAnchorCached:
 
     def test_lru_eviction(self, tmp_path):
         """Cache should evict oldest entries when over _ANCHOR_CACHE_MAX."""
-        from research.training.training_utils import (
+        from forge.training.training_utils import (
             load_anchor_cached, _ANCHOR_CACHE, _ANCHOR_CACHE_MAX
         )
         from safetensors.torch import save_file
@@ -72,11 +72,11 @@ class TestRestoreEmaImportable:
     """restore_ema should be importable from training_utils (used by CPT now)."""
 
     def test_importable(self):
-        from research.training.training_utils import restore_ema
+        from forge.training.training_utils import restore_ema
         assert callable(restore_ema)
 
     def test_restores_weights(self):
-        from research.training.training_utils import restore_ema
+        from forge.training.training_utils import restore_ema
 
         model = torch.nn.Linear(4, 4)
         # Save current weights as "EMA"
@@ -97,7 +97,7 @@ class TestRpoZeroGradAfterOom:
 
     def test_zero_grad_present_after_skip(self):
         """Verify the source code has optimizer.zero_grad() in the skip branch."""
-        path = Path(__file__).parent.parent.parent / "research" / "training" / "runners" / "rpo_train.py"
+        path = Path(__file__).parent.parent.parent / "forge" / "training" / "runners" / "rpo_train.py"
         source = path.read_text(encoding="utf-8")
         # The skip branch should contain zero_grad
         assert "self.optimizer.zero_grad()" in source, (
@@ -110,7 +110,7 @@ class TestForgeHookOrdering:
 
     def test_hook_registration_after_optimizer(self):
         """Verify the source code registers hooks after configure_optimizer."""
-        path = Path(__file__).parent.parent.parent / "research" / "training" / "runners" / "sft_train.py"
+        path = Path(__file__).parent.parent.parent / "forge" / "training" / "runners" / "sft_train.py"
         source = path.read_text(encoding="utf-8")
         # Find the positions
         optimizer_pos = source.find("optimizer = configure_optimizer(")
@@ -128,8 +128,8 @@ class TestGradientCheckpointingWarning:
 
     def test_warns_on_unknown_strategy(self):
         import warnings
-        from research.model_loader import ConfigurableResearchLLM
-        from research.config import get_config
+        from forge.model_loader import ConfigurableResearchLLM
+        from forge.config import get_config
 
         cfg = get_config("lfm25_tiny")
         cfg.vocab_size = 64
@@ -153,8 +153,8 @@ class TestGradientCheckpointingWarning:
 
     def test_no_warning_on_valid_strategy(self):
         import warnings
-        from research.model_loader import ConfigurableResearchLLM
-        from research.config import get_config
+        from forge.model_loader import ConfigurableResearchLLM
+        from forge.config import get_config
 
         cfg = get_config("lfm25_tiny")
         cfg.vocab_size = 64

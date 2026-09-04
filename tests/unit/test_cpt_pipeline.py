@@ -3,7 +3,7 @@ import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
-from research.training.runners.cpt_train import (
+from forge.training.runners.cpt_train import (
     load_jsonl_examples,
     render_cpt_text,
     tokenize_and_pack,

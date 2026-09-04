@@ -7,7 +7,7 @@ import os, sys, torch, torch.nn as nn, torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from safetensors.torch import load_file
-from research.keys.architecture.mamba_probe import MambaLayer
+from forge.keys.architecture.mamba_probe import MambaLayer
 
 CKPT = "research/checkpoints/Jamba_Reasoning_3B.safetensors"
 LAYER = 0  # Mamba layer

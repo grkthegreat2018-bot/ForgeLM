@@ -33,15 +33,15 @@ DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
 CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
-from research.inference.quant.nvfp4_quant import (
+from forge.engine.quant.nvfp4_quant import (
     _quantize_to_fp4, _dequantize_fp4,
 )
-from research.inference.quant.novel_quant import (
+from forge.engine.quant.novel_quant import (
     _optimal_fp4_scale, _quantize_to_fp4_adaptive,
     quantize_asfp4_dequant, quantize_sr_fp4, quantize_iri_fp4,
     quantize_tsd_fp4, quantize_hpr_fp4,
 )
-from research.keys.quantization.bitnet_residual_key import ternary_quantize
+from forge.keys.quantization.bitnet_residual_key import ternary_quantize
 
 
 # ──────────────────────────────────────────────────────────────────────────

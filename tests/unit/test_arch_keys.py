@@ -6,21 +6,21 @@ All run on GPU (CUDA) with bf16. CPU fallback only if CUDA unavailable.
 import pytest
 import torch
 
-from research.config import ModelConfig, get_config
-from research.keys.architecture.mod_router_key import ModRouter, ModRouterKey
-from research.keys.architecture.titan_memory_key import TitanMemory, TitanMemoryKey
-from research.keys.attention.differential_attn_key import (
+from forge.config import ModelConfig, get_config
+from forge.keys.architecture.mod_router_key import ModRouter, ModRouterKey
+from forge.keys.architecture.titan_memory_key import TitanMemory, TitanMemoryKey
+from forge.keys.attention.differential_attn_key import (
     DifferentialAttention,
     DifferentialAttentionKey,
     paper_lambda_init,
 )
-from research.keys.quantization.bitnet_b158_key import (
+from forge.keys.quantization.bitnet_b158_key import (
     BitNetLinear,
     BitNetB158Key,
     apply_bitnet_b158,
     ternary_quantize,
 )
-from research.model_loader import ConfigurableResearchLLM, create_kv_cache
+from forge.model_loader import ConfigurableResearchLLM, create_kv_cache
 
 _CUDA = torch.cuda.is_available()
 _DEV = "cuda" if _CUDA else "cpu"
@@ -130,7 +130,7 @@ class TestBitNet:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
     def test_int8_kernel_matches_fp_path(self):
         """Integer tensor-core GEMM ≈ fp ternary path (a4.8 activation q)."""
-        from research.keys.quantization.bitnet_b158_key import (
+        from forge.keys.quantization.bitnet_b158_key import (
             _int8_ternary_linear,
         )
         torch.manual_seed(0)
@@ -147,7 +147,7 @@ class TestBitNet:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
     def test_triton_add_kernel_matches_fp(self):
         """b1.58 add-only Triton kernel (fp activations) ≈ fp ternary path."""
-        from research.keys.quantization.bitnet_b158_key import (
+        from forge.keys.quantization.bitnet_b158_key import (
             _HAS_TRITON,
             _triton_ternary_linear,
         )
@@ -164,7 +164,7 @@ class TestBitNet:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
     def test_triton_path_trains(self):
         """FORGE_BITNET_KERNEL=triton: end-to-end QAT step on the kernel."""
-        from research.keys.quantization.bitnet_b158_key import _HAS_TRITON
+        from forge.keys.quantization.bitnet_b158_key import _HAS_TRITON
         if not _HAS_TRITON:
             pytest.skip("triton not installed")
         import os

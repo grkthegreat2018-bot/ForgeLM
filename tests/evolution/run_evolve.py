@@ -34,16 +34,16 @@ import numpy as np
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
-from research.evolution import ForgeEvolve, ForgeEvolveConfig
-from research.evolution.domains import DOMAINS, list_domains
-from research.evolution.database import FindingsDB
-from research.evolution.domain_factory import DomainFactory
-from research.evolution.topic_scanner import TopicScanner
-from research.evolution.revisit_scheduler import DomainRevisitScheduler
-from research.evolution.llm_domain_gen import LLMDomainGenerator, GenericDomain
+from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+from forge.evolution.domains import DOMAINS, list_domains
+from forge.evolution.database import FindingsDB
+from forge.evolution.domain_factory import DomainFactory
+from forge.evolution.topic_scanner import TopicScanner
+from forge.evolution.revisit_scheduler import DomainRevisitScheduler
+from forge.evolution.llm_domain_gen import LLMDomainGenerator, GenericDomain
 
 # Pre-load simulators before any threading to avoid race conditions
-from research.evolution.simulators import _ensure_loaded
+from forge.evolution.simulators import _ensure_loaded
 _ensure_loaded()
 
 CONFIG_DIR = Path(__file__).parent / "configs"

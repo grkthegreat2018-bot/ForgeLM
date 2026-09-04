@@ -26,7 +26,7 @@ def _make_tiny_model(d=64, n_layers=3):
 
 def test_nvme_muon_4bit_registered():
     """configure_optimizer should return an optimizer for 'nvme_muon_4bit'."""
-    from research.training.training_utils import configure_optimizer
+    from forge.training.training_utils import configure_optimizer
 
     model = _make_tiny_model(d=64, n_layers=2)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -43,7 +43,7 @@ def test_nvme_muon_4bit_registered():
 
 def test_nvme_muon_4bit_reduces_loss():
     """NvmeMuon4Bit should reduce MSE loss over 20 training steps."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3)
@@ -73,7 +73,7 @@ def test_nvme_muon_4bit_reduces_loss():
 
 def test_nvme_muon_4bit_nvme_storage():
     """Optimizer states should be stored in NVMe files after a step."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3)
@@ -103,7 +103,7 @@ def test_nvme_muon_4bit_nvme_storage():
 
 def test_nvme_muon_4bit_one_block_in_ram():
     """Only the active block's optimizer states should be in CPU RAM."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=4)
@@ -139,7 +139,7 @@ def test_nvme_muon_4bit_one_block_in_ram():
 
 def test_nvme_muon_4bit_4bit_quantization():
     """4-bit momentum quantization should round-trip with <15% error."""
-    from research.training.optim.r20_memory_optimizers import (
+    from forge.training.optim.r20_memory_optimizers import (
         _quantize_4bit, _dequantize_4bit)
 
     torch.manual_seed(42)
@@ -165,7 +165,7 @@ def test_nvme_muon_4bit_4bit_quantization():
 
 def test_nvme_muon_4bit_newton_schulz():
     """Muon Newton-Schulz orthogonalization should be applied during step."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=2)
@@ -211,7 +211,7 @@ def test_nvme_muon_4bit_newton_schulz():
 
 def test_nvme_muon_4bit_memory_budget():
     """V8 budget: active block < 1GB RAM, NVMe storage proportional to params."""
-    from research.training.optim.r20_memory_optimizers import _quantize_4bit
+    from forge.training.optim.r20_memory_optimizers import _quantize_4bit
 
     # Simulate V8-8B scale: 8.05B params, 32 layers
     total_params = 8.05e9
@@ -266,7 +266,7 @@ def test_nvme_muon_4bit_memory_budget():
 
 def test_nvme_muon_4bit_block_switching():
     """Optimizer should switch blocks after switch_every steps."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=4)
@@ -310,7 +310,7 @@ def test_nvme_muon_4bit_block_switching():
 
 def test_nvme_muon_4bit_resume():
     """Save optimizer state, create new optimizer, load state, verify restored."""
-    from research.training.optim.r20_memory_optimizers import NvmeMuon4Bit
+    from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3)

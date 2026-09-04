@@ -5,7 +5,7 @@ CPU-only with tiny dims (d_model=64) to stay fast and GPU-independent.
 
 import torch
 
-from research.moe import MoELayer, Router
+from forge.moe import MoELayer, Router
 
 # ── Router ───────────────────────────────────────────────────────────────────
 

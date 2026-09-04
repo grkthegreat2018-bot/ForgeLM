@@ -3,7 +3,7 @@
 Pure-python (no Qt) so it is trivially unit-testable and reusable from
 worker threads. Conversations live in ``data/chats/conversations.json``;
 training-data exports are written to ``data/sft/*.jsonl`` in the exact
-format ``research/training/runners/sft_train.py:load_examples`` consumes
+format ``forge/training/runners/sft_train.py:load_examples`` consumes
 (``{"messages": [{role, content}, ...]}`` per line).
 
 Rating model (drives what becomes training data):

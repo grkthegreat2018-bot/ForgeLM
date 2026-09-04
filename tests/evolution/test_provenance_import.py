@@ -10,8 +10,8 @@ import tempfile
 
 sys.path.insert(0, "D:/windsurf/ForgeAI")
 
-from research.evolution.database import FindingsDB
-from research.evolution.curriculum_finetuner import CurriculumFineTuner
+from forge.evolution.database import FindingsDB
+from forge.evolution.curriculum_finetuner import CurriculumFineTuner
 
 
 def test_schema_migration():

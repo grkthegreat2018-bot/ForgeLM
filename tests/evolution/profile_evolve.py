@@ -31,7 +31,7 @@ import torch
 import numpy as np
 from pathlib import Path
 
-from research.evolution.domains import DOMAINS, list_domains
+from forge.evolution.domains import DOMAINS, list_domains
 
 CONFIG_DIR = Path(__file__).parent / "configs"
 

@@ -15,14 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
 
-from research.inference.prefix_cache import (
+from forge.engine.prefix_cache import (
     ChunkedPrefixCache,
     _chunk_hash,
     _prefix_hash,
     _slice_past_kv,
 )
-from research.inference.kv.cpu_kv_offload import DiskKVCache
-from research.inference.kv.cacheblend import (
+from forge.engine.kv.cpu_kv_offload import DiskKVCache
+from forge.engine.kv.cacheblend import (
     CacheBlend,
     ChunkStore,
     RangeMatcher,
@@ -197,9 +197,9 @@ def test_disk_kv_cache_persistence(tmp_path):
 
 def test_disk_kv_cache_factory():
     """build_kv_cache('disk_offload') returns a DiskKVCache."""
-    from research.inference.kv_backend import build_kv_cache
+    from forge.engine.kv_backend import build_kv_cache
     cache = build_kv_cache("disk_offload")
-    from research.inference.kv.cpu_kv_offload import DiskKVCache as DKC
+    from forge.engine.kv.cpu_kv_offload import DiskKVCache as DKC
     assert isinstance(cache, DKC)
 
 

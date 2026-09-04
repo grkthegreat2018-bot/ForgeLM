@@ -46,7 +46,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
-from research.inference.forge_engine import ForgeEngine
+from forge.engine.forge_engine import ForgeEngine
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32

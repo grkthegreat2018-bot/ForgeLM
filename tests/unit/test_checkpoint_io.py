@@ -1,4 +1,4 @@
-"""Tests for research.checkpoint_io — save/load with safetensors and .pt formats."""
+"""Tests for forge.checkpoint_io — save/load with safetensors and .pt formats."""
 
 import json
 import os
@@ -6,7 +6,7 @@ import os
 import pytest
 import torch
 
-from research.checkpoint_io import (
+from forge.checkpoint_io import (
     _is_safetensors_path,
     _jsonable,
     load_checkpoint,

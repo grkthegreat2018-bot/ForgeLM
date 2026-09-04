@@ -123,15 +123,15 @@ EDGE_CONFIGS = {
 
 
 def run_test():
-    from research.evolution.domains.attention_domains import (
+    from forge.evolution.domains.attention_domains import (
         RopeConfig, DiffAttnConfig, CsaAttention, GlaAttention,
         GtaAttention, QkNormConfig, AttnResidual, MhcConfig,
         SlidingWindow, LocalGlobal,
     )
-    from research.evolution.domains.arch_domains import (
+    from forge.evolution.domains.arch_domains import (
         MoeRouting, FactorizedEmbed, TitanMemory, FfnSkip, ConvConfig,
     )
-    from research.evolution.domain_spec import JSONSpecDomain
+    from forge.evolution.domain_spec import JSONSpecDomain
 
     DOMAIN_CLASSES = {
         "RopeConfig": RopeConfig, "DiffAttnConfig": DiffAttnConfig,

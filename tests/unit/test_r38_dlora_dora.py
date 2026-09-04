@@ -9,8 +9,8 @@ import math
 import torch
 from torch import nn
 
-from research.training.dlora import DLoRAAdapter, DLoRA, apply_to_model as dlora_apply
-from research.training.dora import DoRALinear, DoRA, apply_to_model as dora_apply
+from forge.training.dlora import DLoRAAdapter, DLoRA, apply_to_model as dlora_apply
+from forge.training.dora import DoRALinear, DoRA, apply_to_model as dora_apply
 
 
 # ── helpers ───────────────────────────────────────────────────────────────

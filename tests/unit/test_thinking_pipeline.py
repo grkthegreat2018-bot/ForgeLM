@@ -2,7 +2,7 @@
 import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from research.self_play.infinite_loop import (
+from forge.self_play.infinite_loop import (
     ThinkingPipeline, ThinkingPipelineConfig,
     LoopConfig, InfiniteSelfPlayLoop,
 )

@@ -15,7 +15,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 import pytest
 import torch
 import torch.nn as nn
-from research.training.optim.hybrid_offload import CPUAdamW
+from forge.training.optim.hybrid_offload import CPUAdamW
 
 
 def main():

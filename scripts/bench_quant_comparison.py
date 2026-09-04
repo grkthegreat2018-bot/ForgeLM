@@ -46,7 +46,7 @@ def bench_nvfp4(w, gs=32):
 
 
 def bench_nf4(w, gs=64):
-    from research.training.bitnet_lora import NF4Linear
+    from forge.training.bitnet_lora import NF4Linear
     nf4 = NF4Linear(w.shape[1], w.shape[0], bias=False, group_size=gs)
     nf4.load_from_weight(w)
     w_dq = nf4._dequantize_weight(torch.float32, cache=False)
@@ -56,7 +56,7 @@ def bench_nf4(w, gs=64):
 
 
 def bench_forge_quant(w, gs=128, sr=0.10):
-    from research.inference.quant.forge_quant import ForgeQuantLinear
+    from forge.engine.quant.forge_quant import ForgeQuantLinear
     fq = ForgeQuantLinear(w.shape[1], w.shape[0], bias=False, group_size=gs, sparse_ratio=sr)
     fq.load_from_weight(w)
     w_dq = fq._dequantize_weight(torch.float32, cache=False)
@@ -66,7 +66,7 @@ def bench_forge_quant(w, gs=128, sr=0.10):
 
 
 def bench_grinqh(w, gs=128, target=2.5):
-    from research.inference.quant.grinqh import GRINQHLinear
+    from forge.engine.quant.grinqh import GRINQHLinear
     lin = nn.Linear(w.shape[1], w.shape[0], bias=False)
     lin.weight.data = w.clone()
     gl = GRINQHLinear.from_linear(lin, group_size=gs, target_effective_bits=target)
@@ -77,7 +77,7 @@ def bench_grinqh(w, gs=128, target=2.5):
 
 
 def bench_mixllm(w, gs=128, hf=0.10):
-    from research.inference.quant.mixllm import MixLLMLinear
+    from forge.engine.quant.mixllm import MixLLMLinear
     high_mask = torch.zeros(w.shape[0], dtype=torch.bool)
     norms = w.norm(dim=1)
     topk = norms.topk(int(w.shape[0] * hf)).indices
@@ -92,7 +92,7 @@ def bench_mixllm(w, gs=128, hf=0.10):
 
 
 def bench_acbq(w, gs=128):
-    from research.inference.quant.acbq import ACBQLinear
+    from forge.engine.quant.acbq import ACBQLinear
     lin = nn.Linear(w.shape[1], w.shape[0], bias=False)
     lin.weight.data = w.clone()
     al = ACBQLinear.from_linear(lin, group_size=gs, bits=4)

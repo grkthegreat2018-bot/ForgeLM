@@ -11,7 +11,7 @@ Verifies:
 import pytest
 import torch
 
-from research.keys.compression.nlrq_ffn_key import (
+from forge.keys.compression.nlrq_ffn_key import (
     NLRQLinear,
     _hadamard_matrix,
     _apply_hadamard,

@@ -12,10 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ["FORGE_NO_COMPILE"] = "1"
 
-from research.config import get_config
-from research.model_loader import ModelLoader
+from forge.config import get_config
+from forge.model_loader import ModelLoader
 from research.tokenizer_cache import get_tokenizer
-from research.inference.forge_engine import ForgeEngine
+from forge.engine.forge_engine import ForgeEngine
 
 CHECKPOINT = "research/checkpoints/Jamba_Reasoning_3B.safetensors"
 TOKENIZER = "research/checkpoints/forgelm_v2_tokenizer"
@@ -30,7 +30,7 @@ def apply_v12_keys(model, v2_cfg, v12_cfg):
     with identity/zero-init so the output is unchanged (lossless).
     """
     from torch import nn
-    from research.keys.misc.pit_key import PITEmbedding, PITLMHead
+    from forge.keys.misc.pit_key import PITEmbedding, PITLMHead
 
     # PIT: replace standard embed/head with PIT embed/head
     if getattr(v12_cfg, 'use_pit', False):
@@ -89,7 +89,7 @@ def load_and_generate(config_name: str, label: str) -> str:
         print(f"Model loaded: {sum(p.numel() for p in model.parameters())/1e9:.2f}B params")
 
     # Quantize on CPU (avoids GPU OOM during conversion)
-    from research.quantization.inference_quant import quantize_model_int4
+    from forge.quant.inference_quant import quantize_model_int4
     print("Quantizing to INT4 on CPU...")
     quantize_model_int4(model, group_size=128)
     print("INT4 quantization complete")

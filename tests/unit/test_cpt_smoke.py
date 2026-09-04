@@ -3,13 +3,13 @@ import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
-from research.config import get_config
-from research.model_loader import ModelLoader
+from forge.config import get_config
+from forge.model_loader import ModelLoader
 from research.tokenizer_cache import get_tokenizer
-from research.training.runners.cpt_train import (
+from forge.training.runners.cpt_train import (
     load_jsonl_examples, tokenize_and_pack, MixedDataSampler,
 )
-from research.training.optim.hybrid_offload import CPUAdamW
+from forge.training.optim.hybrid_offload import CPUAdamW
 import torch.nn.functional as F
 
 

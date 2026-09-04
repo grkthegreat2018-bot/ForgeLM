@@ -19,12 +19,12 @@ class TestTriLens:
     """TriLens — per-layer logit-lens entropy trajectory."""
 
     def test_init(self):
-        from research.inference.safety.trilens import TriLensDetector
+        from forge.engine.safety.trilens import TriLensDetector
         det = TriLensDetector(n_layers=4, vocab_size=1000)
         assert det.n_layers == 4
 
     def test_record_and_trajectory(self):
-        from research.inference.safety.trilens import TriLensDetector
+        from forge.engine.safety.trilens import TriLensDetector
         det = TriLensDetector(n_layers=4, vocab_size=100)
         det.set_unembedding(torch.randn(100, 32))
         hidden = torch.randn(32)
@@ -34,7 +34,7 @@ class TestTriLens:
         assert traj.shape[0] == 12  # 3 * 4 layers
 
     def test_detect(self):
-        from research.inference.safety.trilens import TriLensDetector
+        from forge.engine.safety.trilens import TriLensDetector
         det = TriLensDetector(n_layers=4, vocab_size=100)
         det.set_unembedding(torch.randn(100, 32))
         hidden = torch.randn(32)
@@ -44,7 +44,7 @@ class TestTriLens:
         assert 0.0 <= score <= 1.0
 
     def test_reset(self):
-        from research.inference.safety.trilens import TriLensDetector
+        from forge.engine.safety.trilens import TriLensDetector
         det = TriLensDetector(n_layers=4, vocab_size=100)
         det.set_unembedding(torch.randn(100, 32))
         det.record_layer(0, torch.randn(32), torch.randn(32), torch.randn(32))
@@ -59,12 +59,12 @@ class TestPoP:
     """PoP — prediction-of-prediction inter-layer fusion."""
 
     def test_init(self):
-        from research.inference.safety.trilens import PoPDetector
+        from forge.engine.safety.trilens import PoPDetector
         det = PoPDetector(n_layers=4, hidden_dim=64)
         assert det.n_layers == 4
 
     def test_record_and_fuse(self):
-        from research.inference.safety.trilens import PoPDetector
+        from forge.engine.safety.trilens import PoPDetector
         det = PoPDetector(n_layers=4, hidden_dim=64)
         for i in range(4):
             det.record_layer(i, torch.randn(64))
@@ -72,7 +72,7 @@ class TestPoP:
         assert fused.shape[0] == 4
 
     def test_detect(self):
-        from research.inference.safety.trilens import PoPDetector
+        from forge.engine.safety.trilens import PoPDetector
         det = PoPDetector(n_layers=4, hidden_dim=64)
         for i in range(4):
             det.record_layer(i, torch.randn(64))
@@ -80,7 +80,7 @@ class TestPoP:
         assert 0.0 <= score <= 1.0
 
     def test_ensemble(self):
-        from research.inference.safety.trilens import TriLensPoPEnsemble
+        from forge.engine.safety.trilens import TriLensPoPEnsemble
         ens = TriLensPoPEnsemble(n_layers=4, vocab_size=100, hidden_dim=32)
         ens.set_unembedding(torch.randn(100, 32))
         hidden = torch.randn(32)
@@ -96,13 +96,13 @@ class TestSyncThink:
     """SyncThink — reasoning saturation detection."""
 
     def test_init(self):
-        from research.inference.reasoning.syncthink import SyncThinkMonitor
+        from forge.engine.reasoning.syncthink import SyncThinkMonitor
         mon = SyncThinkMonitor(window_size=16, transition_threshold=0.15,
                                min_reasoning_tokens=64)
         assert mon.window_size == 16
 
     def test_update_and_signal(self):
-        from research.inference.reasoning.syncthink import SyncThinkMonitor
+        from forge.engine.reasoning.syncthink import SyncThinkMonitor
         mon = SyncThinkMonitor(window_size=8, min_reasoning_tokens=4)
         # Simulate attention scores: (n_heads, seq_len)
         for i in range(10):
@@ -112,7 +112,7 @@ class TestSyncThink:
         assert isinstance(signal, float)
 
     def test_should_terminate(self):
-        from research.inference.reasoning.syncthink import SyncThinkMonitor
+        from forge.engine.reasoning.syncthink import SyncThinkMonitor
         mon = SyncThinkMonitor(window_size=4, transition_threshold=0.1,
                                min_reasoning_tokens=4)
         # Simulate transition: early tokens attend broadly, later focus on recent
@@ -126,7 +126,7 @@ class TestSyncThink:
         assert mon.should_terminate() in (True, False)
 
     def test_min_tokens_gate(self):
-        from research.inference.reasoning.syncthink import SyncThinkMonitor
+        from forge.engine.reasoning.syncthink import SyncThinkMonitor
         mon = SyncThinkMonitor(window_size=4, transition_threshold=0.01,
                                min_reasoning_tokens=100)
         for i in range(10):
@@ -136,7 +136,7 @@ class TestSyncThink:
         assert not mon.should_terminate(), "Should not terminate before min_tokens"
 
     def test_reset(self):
-        from research.inference.reasoning.syncthink import SyncThinkMonitor
+        from forge.engine.reasoning.syncthink import SyncThinkMonitor
         mon = SyncThinkMonitor()
         mon.update(0, torch.rand(1, 5), 0)
         mon.reset()
@@ -150,14 +150,14 @@ class TestAgentSelfCorrector:
     """SPOC/MIRROR — agent self-correction & rollback."""
 
     def test_detect_error(self):
-        from research.inference.safety.agent_corrector import SPOCCorrector
+        from forge.engine.safety.agent_corrector import SPOCCorrector
         spoc = SPOCCorrector()
         assert spoc.detect_error({"error": "file not found"})[0] is True
         assert spoc.detect_error({"ok": False, "error": "bad args"})[0] is True
         assert spoc.detect_error({"result": "success"})[0] is False
 
     def test_reflection_prompt(self):
-        from research.inference.safety.agent_corrector import SPOCCorrector
+        from forge.engine.safety.agent_corrector import SPOCCorrector
         spoc = SPOCCorrector()
         prompt = spoc.build_reflection_prompt(
             {"name": "read_file", "arguments": {"path": "/bad"}},
@@ -166,7 +166,7 @@ class TestAgentSelfCorrector:
         assert "File not found" in prompt
 
     def test_checkpoint_and_rollback(self):
-        from research.inference.safety.agent_corrector import MIRRORCorrector
+        from forge.engine.safety.agent_corrector import MIRRORCorrector
         mir = MIRRORCorrector()
         msgs = [{"role": "user", "content": "test"}]
         mir.checkpoint(msgs, [], [], 0)
@@ -176,7 +176,7 @@ class TestAgentSelfCorrector:
         assert len(rb.messages) == 1  # original state
 
     def test_escalation(self):
-        from research.inference.safety.agent_corrector import MIRRORCorrector
+        from forge.engine.safety.agent_corrector import MIRRORCorrector
         mir = MIRRORCorrector(error_window=3)
         mir.record_error("read_file", "error 1")
         mir.record_error("read_file", "error 2")
@@ -185,7 +185,7 @@ class TestAgentSelfCorrector:
         assert mir.should_escalate("read_file")
 
     def test_agent_self_corrector(self):
-        from research.inference.safety.agent_corrector import AgentSelfCorrector
+        from forge.engine.safety.agent_corrector import AgentSelfCorrector
         cor = AgentSelfCorrector()
         calls = [{"name": "read_file", "arguments": {}}]
         results = [{"error": "not found"}]
@@ -195,7 +195,7 @@ class TestAgentSelfCorrector:
         assert "read_file" in reflection
 
     def test_no_correction_on_success(self):
-        from research.inference.safety.agent_corrector import AgentSelfCorrector
+        from forge.engine.safety.agent_corrector import AgentSelfCorrector
         cor = AgentSelfCorrector()
         calls = [{"name": "read_file", "arguments": {}}]
         results = [{"content": "file contents"}]
@@ -204,7 +204,7 @@ class TestAgentSelfCorrector:
         assert reflection is None
 
     def test_stats(self):
-        from research.inference.safety.agent_corrector import AgentSelfCorrector
+        from forge.engine.safety.agent_corrector import AgentSelfCorrector
         cor = AgentSelfCorrector()
         cor.maybe_correct(
             [], [{"name": "test", "arguments": {}}], [{"error": "fail"}], 0)
@@ -218,12 +218,12 @@ class TestVRAMMonitor:
     """VRAM pressure monitor for proactive OOM resilience."""
 
     def test_init(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         mon = VRAMPressureMonitor(budget_bytes=12 * 1024**3)
         assert mon.budget == 12 * 1024**3
 
     def test_get_level(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         mon = VRAMPressureMonitor()
         assert mon.get_level(0.5) == mon.LEVEL_NORMAL
         assert mon.get_level(0.75) == mon.LEVEL_COMPRESSED
@@ -232,7 +232,7 @@ class TestVRAMMonitor:
         assert mon.get_level(0.97) == mon.LEVEL_CRITICAL
 
     def test_callback_registration(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         mon = VRAMPressureMonitor()
         called = []
         mon.register_callback(mon.LEVEL_COMPRESSED,
@@ -244,7 +244,7 @@ class TestVRAMMonitor:
         assert len(called) == 1
 
     def test_stats(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         mon = VRAMPressureMonitor()
         stats = mon.stats()
         assert "pressure" in stats
@@ -252,14 +252,14 @@ class TestVRAMMonitor:
         assert "level_name" in stats
 
     def test_reset(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         mon = VRAMPressureMonitor()
         mon._current_level = mon.LEVEL_CRITICAL
         mon.reset()
         assert mon._current_level == mon.LEVEL_NORMAL
 
     def test_level_name(self):
-        from research.inference.safety.vram_monitor import VRAMPressureMonitor
+        from forge.engine.safety.vram_monitor import VRAMPressureMonitor
         assert VRAMPressureMonitor.level_name(0) == "normal"
         assert VRAMPressureMonitor.level_name(4) == "critical"
 
@@ -270,12 +270,12 @@ class TestSIREN:
     """SIREN — streaming safety guardrails."""
 
     def test_init(self):
-        from research.inference.safety.siren import SIRENGuard
+        from forge.engine.safety.siren import SIRENGuard
         guard = SIRENGuard(n_layers=4, hidden_dim=64)
         assert guard.n_layers == 4
 
     def test_evaluate_no_probes(self):
-        from research.inference.safety.siren import SIRENGuard
+        from forge.engine.safety.siren import SIRENGuard
         guard = SIRENGuard(n_layers=4, hidden_dim=64)
         for i in range(4):
             guard.record_layer(i, torch.randn(64))
@@ -285,7 +285,7 @@ class TestSIREN:
             assert cat == 0.0
 
     def test_evaluate_with_probes(self):
-        from research.inference.safety.siren import SIRENGuard
+        from forge.engine.safety.siren import SIRENGuard
         guard = SIRENGuard(n_layers=4, hidden_dim=64,
                            categories=["harmful", "safe"])
         probes = {
@@ -302,7 +302,7 @@ class TestSIREN:
             assert 0.0 <= v <= 1.0
 
     def test_check_token(self):
-        from research.inference.safety.siren import SIRENGuard
+        from forge.engine.safety.siren import SIRENGuard
         guard = SIRENGuard(n_layers=4, hidden_dim=64,
                            categories=["harmful"])
         guard.set_probes({"harmful": torch.randn(4, 64) * 10})
@@ -311,7 +311,7 @@ class TestSIREN:
         assert isinstance(is_safe, bool)
 
     def test_reset(self):
-        from research.inference.safety.siren import SIRENGuard
+        from forge.engine.safety.siren import SIRENGuard
         guard = SIRENGuard(n_layers=4, hidden_dim=64)
         guard.record_layer(0, torch.randn(64))
         guard.reset()
@@ -321,7 +321,7 @@ class TestSIREN:
             assert v == 0.0
 
     def test_stream_wrapper(self):
-        from research.inference.safety.siren import SIRENGuard, SIRENStreamWrapper
+        from forge.engine.safety.siren import SIRENGuard, SIRENStreamWrapper
 
         def gen():
             yield "hello"

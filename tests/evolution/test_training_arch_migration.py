@@ -3,43 +3,43 @@ import torch, numpy as np, os, sys, importlib
 os.environ['PYTHONUTF8'] = '1'
 sys.path.insert(0, r'D:\windsurf\ForgeAI')
 
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 training_domains = [
-    ('OptimizerConfig', 'optimizer_config', 'research.evolution.domains.training_domains'),
-    ('SchedulerConfig', 'scheduler_config', 'research.evolution.domains.training_domains'),
-    ('LossConfig', 'loss_config', 'research.evolution.domains.training_domains'),
-    ('MuonConfig', 'muon_config', 'research.evolution.domains.training_domains'),
-    ('CpuAdamwConfig', 'cpu_adamw_config', 'research.evolution.domains.training_domains'),
-    ('GradAccumConfig', 'grad_accum_config', 'research.evolution.domains.training_domains'),
-    ('Fp8TrainingConfig', 'fp8_training_config', 'research.evolution.domains.training_domains'),
-    ('ModConfig', 'mod_config', 'research.evolution.domains.training_domains'),
-    ('ApolloConfig', 'apollo_config', 'research.evolution.domains.training_domains'),
-    ('BreadConfig', 'bread_config', 'research.evolution.domains.training_domains'),
-    ('FlashOptimConfig', 'flashoptim_config', 'research.evolution.domains.training_domains'),
-    ('TritonKernelConfig', 'triton_kernel_config', 'research.evolution.domains.training_domains'),
-    ('VarlenConfig', 'varlen_config', 'research.evolution.domains.training_domains'),
+    ('OptimizerConfig', 'optimizer_config', 'forge.evolution.domains.training_domains'),
+    ('SchedulerConfig', 'scheduler_config', 'forge.evolution.domains.training_domains'),
+    ('LossConfig', 'loss_config', 'forge.evolution.domains.training_domains'),
+    ('MuonConfig', 'muon_config', 'forge.evolution.domains.training_domains'),
+    ('CpuAdamwConfig', 'cpu_adamw_config', 'forge.evolution.domains.training_domains'),
+    ('GradAccumConfig', 'grad_accum_config', 'forge.evolution.domains.training_domains'),
+    ('Fp8TrainingConfig', 'fp8_training_config', 'forge.evolution.domains.training_domains'),
+    ('ModConfig', 'mod_config', 'forge.evolution.domains.training_domains'),
+    ('ApolloConfig', 'apollo_config', 'forge.evolution.domains.training_domains'),
+    ('BreadConfig', 'bread_config', 'forge.evolution.domains.training_domains'),
+    ('FlashOptimConfig', 'flashoptim_config', 'forge.evolution.domains.training_domains'),
+    ('TritonKernelConfig', 'triton_kernel_config', 'forge.evolution.domains.training_domains'),
+    ('VarlenConfig', 'varlen_config', 'forge.evolution.domains.training_domains'),
 ]
 
 attention_domains = [
-    ('RopeConfig', 'rope_config', 'research.evolution.domains.attention_domains'),
-    ('DiffAttnConfig', 'diff_attn', 'research.evolution.domains.attention_domains'),
-    ('CsaAttention', 'csa_attention', 'research.evolution.domains.attention_domains'),
-    ('GlaAttention', 'gla_attention', 'research.evolution.domains.attention_domains'),
-    ('GtaAttention', 'gta_attention', 'research.evolution.domains.attention_domains'),
-    ('QkNormConfig', 'qk_norm_config', 'research.evolution.domains.attention_domains'),
-    ('AttnResidual', 'attn_residual', 'research.evolution.domains.attention_domains'),
-    ('MhcConfig', 'mhc_config', 'research.evolution.domains.attention_domains'),
-    ('SlidingWindow', 'sliding_window', 'research.evolution.domains.attention_domains'),
-    ('LocalGlobal', 'local_global', 'research.evolution.domains.attention_domains'),
+    ('RopeConfig', 'rope_config', 'forge.evolution.domains.attention_domains'),
+    ('DiffAttnConfig', 'diff_attn', 'forge.evolution.domains.attention_domains'),
+    ('CsaAttention', 'csa_attention', 'forge.evolution.domains.attention_domains'),
+    ('GlaAttention', 'gla_attention', 'forge.evolution.domains.attention_domains'),
+    ('GtaAttention', 'gta_attention', 'forge.evolution.domains.attention_domains'),
+    ('QkNormConfig', 'qk_norm_config', 'forge.evolution.domains.attention_domains'),
+    ('AttnResidual', 'attn_residual', 'forge.evolution.domains.attention_domains'),
+    ('MhcConfig', 'mhc_config', 'forge.evolution.domains.attention_domains'),
+    ('SlidingWindow', 'sliding_window', 'forge.evolution.domains.attention_domains'),
+    ('LocalGlobal', 'local_global', 'forge.evolution.domains.attention_domains'),
 ]
 
 arch_domains = [
-    ('MoeRouting', 'moe_routing', 'research.evolution.domains.arch_domains'),
-    ('FactorizedEmbed', 'factorized_embed', 'research.evolution.domains.arch_domains'),
-    ('TitanMemory', 'titan_memory', 'research.evolution.domains.arch_domains'),
-    ('FfnSkip', 'ffn_skip', 'research.evolution.domains.arch_domains'),
-    ('ConvConfig', 'conv_config', 'research.evolution.domains.arch_domains'),
+    ('MoeRouting', 'moe_routing', 'forge.evolution.domains.arch_domains'),
+    ('FactorizedEmbed', 'factorized_embed', 'forge.evolution.domains.arch_domains'),
+    ('TitanMemory', 'titan_memory', 'forge.evolution.domains.arch_domains'),
+    ('FfnSkip', 'ffn_skip', 'forge.evolution.domains.arch_domains'),
+    ('ConvConfig', 'conv_config', 'forge.evolution.domains.arch_domains'),
 ]
 
 all_domains = training_domains + attention_domains + arch_domains

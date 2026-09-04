@@ -1,15 +1,26 @@
-"""ForgeAI main package — re-exports from research/ during R40 migration.
+"""ForgeAI main package — model architecture, training, and inference.
 
-This is the Phase 1 skeleton of the forge/ package. During the R40
-restructuring, code will be migrated from research/ to forge/ in phases.
-This file currently re-exports from the existing research/ paths so that
-`from forge import X` works alongside `from research import X`.
-
-Phase 1: Create skeleton (this file) — no code moved, just wrappers.
-Phase 2: Move engine files (research/inference/ → forge/engine/).
-Phase 3: Move keys, training, quantization, etc.
-Phase 4: Move GUI (forge_gui/ → gui/).
-Phase 5: Clean up scripts and root.
-Phase 6: Remove compatibility shims.
+Subpackages:
+    config          — ModelConfig, presets
+    model_loader    — ModelLoader, ConfigurableResearchLLM, ModularBlock
+    checkpoint_io   — checkpoint I/O, cleanup
+    engine          — ForgeEngine, KV backend, attention, schedulers
+    keys            — 75+ weight transform and runtime keys
+    training        — SFT/DPO/RLVR runners, optimizers, losses
+    decoding        — Medusa, Eagle, MTP speculative decoding
+    quant           — RotorQuant, FP8, INT4, KV compress
+    moe             — MoE layer, AirMoE infinite expert library
+    self_play       — GRPO, discovery loop, infinite curriculum
+    evolution       — ForgeEvolve engine, domains, simulators
+    runtime         — VRAM manager, CUDA graphs, forward cache
+    distillation    — agentic distillation, distill client
+    evaluation      — checkpoint testing, goal scoring
 """
 from __future__ import annotations
+
+# Clean up orphaned .tmp checkpoint files from crashed writes.
+try:
+    from forge.checkpoint_io import cleanup_orphaned_tmp
+    cleanup_orphaned_tmp()
+except Exception:
+    pass

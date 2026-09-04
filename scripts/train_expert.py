@@ -503,8 +503,8 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
 
     Works for ANY domain: math, science, history, code, etc.
     """
-    from research.config import get_config
-    from research.model_loader import ModelLoader
+    from forge.config import get_config
+    from forge.model_loader import ModelLoader
     from transformers import AutoTokenizer
 
     print("=" * 70)
@@ -603,7 +603,7 @@ def train_selfplay(topic: str, v4_dir: str, epochs: int, n_tasks: int,
                    rounds: int, **kwargs):
     """Train via self-play (delegates to existing system)."""
     # Build argv for the existing script
-    argv = ["-u", "-m", "research.training.self_play_expert_training",
+    argv = ["-u", "-m", "forge.training.self_play_expert_training",
             "--topics", topic, "--epochs", str(epochs),
             "--n-tasks", str(n_tasks), "--rounds", str(rounds)]
     print(f"  Delegating to self-play: {' '.join(argv)}")

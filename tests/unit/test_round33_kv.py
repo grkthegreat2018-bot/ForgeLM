@@ -19,7 +19,7 @@ class TestEvoSparse:
     """EvoSparse — evolving token importance with cross-step + cross-layer accumulation."""
 
     def test_init_append_get(self):
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = EvoSparseKVCache(keep_ratio=0.5, decay=0.95, n_layers=4)
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.bfloat16)
@@ -36,7 +36,7 @@ class TestEvoSparse:
         assert k_out.shape[3] == 32
 
     def test_update_importance(self):
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = EvoSparseKVCache(keep_ratio=0.5, n_layers=2)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -50,7 +50,7 @@ class TestEvoSparse:
         assert cache.importance[0, 3] > cache.importance[0, 0]
 
     def test_eviction_when_full(self):
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = EvoSparseKVCache(keep_ratio=0.25, n_layers=1)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=16,
                    device='cpu', dtype=torch.bfloat16)
@@ -61,7 +61,7 @@ class TestEvoSparse:
         assert info["n_evicted"] > 0, "Should have evicted some positions"
 
     def test_clear(self):
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = EvoSparseKVCache(keep_ratio=0.5)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -71,7 +71,7 @@ class TestEvoSparse:
         assert cache.seq_len == 0
 
     def test_info(self):
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = EvoSparseKVCache(keep_ratio=0.5, n_layers=4)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -89,7 +89,7 @@ class TestVegas:
     """Vegas — verification-guided KV selection."""
 
     def test_init_append_get(self):
-        from research.inference.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv.vegas_kv import VegasKVCache
         cache = VegasKVCache(keep_ratio=0.5)
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.bfloat16)
@@ -103,7 +103,7 @@ class TestVegas:
         assert k_out.shape[3] == 32
 
     def test_attention_hints(self):
-        from research.inference.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv.vegas_kv import VegasKVCache
         cache = VegasKVCache(keep_ratio=0.5)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -117,7 +117,7 @@ class TestVegas:
         assert info["has_hints"] is True
 
     def test_fallback_sliding_window(self):
-        from research.inference.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv.vegas_kv import VegasKVCache
         cache = VegasKVCache(keep_ratio=0.5)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=16,
                    device='cpu', dtype=torch.bfloat16)
@@ -130,7 +130,7 @@ class TestVegas:
         assert info["has_hints"] is False
 
     def test_clear(self):
-        from research.inference.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv.vegas_kv import VegasKVCache
         cache = VegasKVCache(keep_ratio=0.5)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -146,7 +146,7 @@ class TestHiSparse:
     """HiSparse — hierarchical HBM-DRAM KV management."""
 
     def test_init_append_get(self):
-        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv.hisparse_kv import HiSparseKVCache
         cache = HiSparseKVCache(gpu_cache_size=8)
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.bfloat16)
@@ -157,7 +157,7 @@ class TestHiSparse:
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_gpu_cache_overflow_to_cpu(self):
-        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv.hisparse_kv import HiSparseKVCache
         cache = HiSparseKVCache(gpu_cache_size=4)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -167,7 +167,7 @@ class TestHiSparse:
         assert info["cpu_cached_count"] > 0, "Should have CPU-cached positions"
 
     def test_hit_rate(self):
-        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv.hisparse_kv import HiSparseKVCache
         cache = HiSparseKVCache(gpu_cache_size=8)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -179,7 +179,7 @@ class TestHiSparse:
         assert hr > 0.0, "Should have some hits"
 
     def test_info(self):
-        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv.hisparse_kv import HiSparseKVCache
         cache = HiSparseKVCache(gpu_cache_size=8)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -196,7 +196,7 @@ class TestCapture:
     """Capture — activation cache (store input, recompute KV)."""
 
     def test_kv_mode_fallback(self):
-        from research.inference.kv.capture_kv import CaptureKVCache
+        from forge.engine.kv.capture_kv import CaptureKVCache
         cache = CaptureKVCache(mode="act")
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.bfloat16)
@@ -208,7 +208,7 @@ class TestCapture:
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_act_mode_with_projections(self):
-        from research.inference.kv.capture_kv import CaptureKVCache
+        from forge.engine.kv.capture_kv import CaptureKVCache
         cache = CaptureKVCache(mode="act")
         cache.init(n_heads=4, head_dim=16, n_kv_heads=2, max_seq_len=64,
                    device='cpu', dtype=torch.float32)
@@ -227,7 +227,7 @@ class TestCapture:
         assert v_out.shape == (1, 2, 4, 16)
 
     def test_info(self):
-        from research.inference.kv.capture_kv import CaptureKVCache
+        from forge.engine.kv.capture_kv import CaptureKVCache
         cache = CaptureKVCache(mode="kv")
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -244,7 +244,7 @@ class TestVToken:
     """vToken — token-level virtualization for reclaimable KV."""
 
     def test_init_append_get(self):
-        from research.inference.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv.vtoken_kv import VTokenKVCache
         cache = VTokenKVCache(block_size=4, max_blocks=8)
         cache.init(n_heads=4, head_dim=32, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -256,7 +256,7 @@ class TestVToken:
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_mark_dead_and_repack(self):
-        from research.inference.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv.vtoken_kv import VTokenKVCache
         cache = VTokenKVCache(block_size=4, max_blocks=8)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -272,7 +272,7 @@ class TestVToken:
         assert info_after["n_dead_tokens"] == 0, "Dead tokens should be reclaimed"
 
     def test_info(self):
-        from research.inference.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv.vtoken_kv import VTokenKVCache
         cache = VTokenKVCache(block_size=4, max_blocks=8)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -285,7 +285,7 @@ class TestVToken:
         assert "reclaim_efficiency" in info
 
     def test_clear(self):
-        from research.inference.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv.vtoken_kv import VTokenKVCache
         cache = VTokenKVCache(block_size=4, max_blocks=8)
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -302,7 +302,7 @@ class TestAutoContext:
     """AutoContext — automatic context window management."""
 
     def test_entropy_to_task_type(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager(vram_budget_gb=10.0)
         # High entropy (>2.5 nats) → coding
         high_entropy = [3.0, 3.2, 2.8, 3.1]
@@ -312,7 +312,7 @@ class TestAutoContext:
         assert mgr.entropy_to_task_type(low_entropy) == "chat"
 
     def test_select_strategy_short_context(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         # Short context with neutral entropy → standard (or streaming if chat override)
         strategy = mgr.select_strategy(
@@ -321,7 +321,7 @@ class TestAutoContext:
         assert strategy in ("standard", "streaming"), f"Short context got {strategy}"
 
     def test_select_strategy_medium_context(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         # Use coding entropy (high) so task override → snapkv
         strategy = mgr.select_strategy(
@@ -329,14 +329,14 @@ class TestAutoContext:
         assert "snapkv" in strategy or "s4r" in strategy, f"Medium context should use snapkv/s4r, got {strategy}"
 
     def test_select_strategy_long_context(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         strategy = mgr.select_strategy(
             context_length=10000, entropy_trajectory=[3.0, 3.0, 3.0, 3.0], vram_pressure=0.3)
         assert "cpu_offload" in strategy, f"Long context should use cpu_offload, got {strategy}"
 
     def test_select_strategy_vram_pressure(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         # At medium context with high VRAM pressure, should use s4r or cpu_offload
         # Use task_type="auto" but with coding entropy — coding override only
@@ -348,7 +348,7 @@ class TestAutoContext:
             f"Critical VRAM should force cpu_offload, got {strategy}")
 
     def test_select_strategy_critical_vram(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         strategy = mgr.select_strategy(
             context_length=512, entropy_trajectory=[3.0, 3.0, 3.0, 3.0], vram_pressure=0.95)
@@ -356,7 +356,7 @@ class TestAutoContext:
             f"Critical VRAM should force cpu_offload, got {strategy}")
 
     def test_maybe_switch(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         new_strategy = mgr.maybe_switch(
             current_strategy="standard",
@@ -366,7 +366,7 @@ class TestAutoContext:
         assert new_strategy is not None, "Should switch from standard at medium context"
 
     def test_maybe_switch_no_change(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         # Already on streaming (chat override for short context)
         new_strategy = mgr.maybe_switch(
@@ -377,7 +377,7 @@ class TestAutoContext:
         assert new_strategy is None, "Should not switch when already optimal"
 
     def test_predict_growth(self):
-        from research.inference.kv.auto_context import AutoContextManager
+        from forge.engine.kv.auto_context import AutoContextManager
         mgr = AutoContextManager()
         mgr.record_turn(100)
         mgr.record_turn(200)
@@ -386,7 +386,7 @@ class TestAutoContext:
         assert growth > 0, "Should detect positive growth"
 
     def test_auto_context_kv_cache_wrapper(self):
-        from research.inference.kv.auto_context import AutoContextKVCache
+        from forge.engine.kv.auto_context import AutoContextKVCache
         cache = AutoContextKVCache()
         cache.init(n_heads=2, head_dim=16, n_kv_heads=2, max_seq_len=32,
                    device='cpu', dtype=torch.bfloat16)
@@ -403,43 +403,43 @@ class TestKVDispatch:
     """Verify new KV strategies are wired into the dispatch."""
 
     def test_build_evo_sparse(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.evo_sparse import EvoSparseKVCache
         cache = build_kv_cache("evo_sparse")
         assert isinstance(cache, EvoSparseKVCache)
 
     def test_build_vegas(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.vegas_kv import VegasKVCache
         cache = build_kv_cache("vegas")
         assert isinstance(cache, VegasKVCache)
 
     def test_build_hisparse(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.hisparse_kv import HiSparseKVCache
         cache = build_kv_cache("hisparse")
         assert isinstance(cache, HiSparseKVCache)
 
     def test_build_capture(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.capture_kv import CaptureKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.capture_kv import CaptureKVCache
         cache = build_kv_cache("capture")
         assert isinstance(cache, CaptureKVCache)
 
     def test_build_vtoken(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.vtoken_kv import VTokenKVCache
         cache = build_kv_cache("vtoken")
         assert isinstance(cache, VTokenKVCache)
 
     def test_build_auto_context(self):
-        from research.inference.kv_backend import build_kv_cache
-        from research.inference.kv.auto_context import AutoContextKVCache
+        from forge.engine.kv_backend import build_kv_cache
+        from forge.engine.kv.auto_context import AutoContextKVCache
         cache = build_kv_cache("auto_context")
         assert isinstance(cache, AutoContextKVCache)
 
     def test_engine_fallback_chain_has_new_strategies(self):
-        from research.inference.forge_engine import ForgeEngine
+        from forge.engine.forge_engine import ForgeEngine
         chain = ForgeEngine._KV_FALLBACK_CHAIN
         for name in ["evo_sparse", "vegas", "hisparse", "capture", "vtoken", "auto_context"]:
             assert name in chain, f"{name} not in fallback chain"

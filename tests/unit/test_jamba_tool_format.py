@@ -6,7 +6,7 @@ Jamba's JSON tool call format with  /  markers.
 import json
 import pytest
 
-from research.self_play.discovery.chat_template import (
+from forge.self_play.discovery.chat_template import (
     render_tool_calls, parse_tool_calls, apply_chat_template,
     TOOL_CALL_START, TOOL_CALL_END,
     TOOL_RESP_START, TOOL_RESP_END,

@@ -119,7 +119,7 @@ def generate_with_cache(
     Returns:
         (generated_text, logprobs_or_None).
     """
-    from research.model_loader import create_kv_cache
+    from forge.model_loader import create_kv_cache
 
     model.eval()
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)

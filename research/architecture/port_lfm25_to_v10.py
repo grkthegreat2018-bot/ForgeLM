@@ -39,14 +39,14 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from research.inference.quant.novel_quant import (
+from forge.engine.quant.novel_quant import (
     _optimal_fp4_scale,
     _fp4_quant_dequant_block,
     _pack_fp4_round,
     _dequantize_fp4,
     quantize_iri_fp4,
 )
-from research.inference.quant.nvfp4_quant import _FP8_DTYPE
+from forge.engine.quant.nvfp4_quant import _FP8_DTYPE
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -331,8 +331,8 @@ def verify_v9_v10(v9_path: str, v10_path: str, device: str = "cpu",
     Loads both checkpoints, reconstructs V10 weights from IRI-FP4 packed data,
     and compares per-tensor weight error + a small forward pass.
     """
-    from research.config import get_config
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.config import get_config
+    from forge.model_loader import ConfigurableResearchLLM
 
     print(f"\n{'='*60}")
     print(f"Verification: V9 vs V10 forward pass")

@@ -3,19 +3,19 @@ import torch, numpy as np, os, sys, importlib
 os.environ['PYTHONUTF8'] = '1'
 sys.path.insert(0, r'D:\windsurf\ForgeAI')
 
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 domains = [
-    ('HybridOffload', 'hybrid_offload', 'research.evolution.domains.memory_domains'),
-    ('CpuKvOffload', 'cpu_kv_offload', 'research.evolution.domains.memory_domains'),
-    ('ExpertHotload', 'expert_hotload', 'research.evolution.domains.memory_domains'),
-    ('MemoryBudget', 'memory_budget', 'research.evolution.domains.memory_domains'),
-    ('CheckpointRecompute', 'checkpoint_recompute', 'research.evolution.domains.memory_domains'),
-    ('SpeculativeDecode', 'speculative_decode', 'research.evolution.domains.decoding_domains'),
-    ('MtpConfig', 'mtp_config', 'research.evolution.domains.decoding_domains'),
-    ('BatchedDecode', 'batched_decode', 'research.evolution.domains.decoding_domains'),
-    ('SamplingConfig', 'sampling_config', 'research.evolution.domains.decoding_domains'),
-    ('BeamSearch', 'beam_search', 'research.evolution.domains.decoding_domains'),
+    ('HybridOffload', 'hybrid_offload', 'forge.evolution.domains.memory_domains'),
+    ('CpuKvOffload', 'cpu_kv_offload', 'forge.evolution.domains.memory_domains'),
+    ('ExpertHotload', 'expert_hotload', 'forge.evolution.domains.memory_domains'),
+    ('MemoryBudget', 'memory_budget', 'forge.evolution.domains.memory_domains'),
+    ('CheckpointRecompute', 'checkpoint_recompute', 'forge.evolution.domains.memory_domains'),
+    ('SpeculativeDecode', 'speculative_decode', 'forge.evolution.domains.decoding_domains'),
+    ('MtpConfig', 'mtp_config', 'forge.evolution.domains.decoding_domains'),
+    ('BatchedDecode', 'batched_decode', 'forge.evolution.domains.decoding_domains'),
+    ('SamplingConfig', 'sampling_config', 'forge.evolution.domains.decoding_domains'),
+    ('BeamSearch', 'beam_search', 'forge.evolution.domains.decoding_domains'),
 ]
 
 

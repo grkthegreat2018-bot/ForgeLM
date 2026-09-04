@@ -11,7 +11,7 @@ All tests are CPU-only and don't make real API calls. They test:
 import os
 import pytest
 
-from research.distillation.distill_client import (
+from forge.distillation.distill_client import (
     DistillationClient, DistillModel, MODEL_POOL, DistillResult,
 )
 
@@ -90,7 +90,7 @@ class TestModelPoolSafety:
 
     def test_no_nvidia_own_models(self):
         """NVIDIA's own models (Nemotron etc.) are BANNED per Eval Agreement §2.6."""
-        from research.distillation.distill_client import _nvidia_filter, DistillModel
+        from forge.distillation.distill_client import _nvidia_filter, DistillModel
         # NVIDIA's own model should be filtered out
         nemotron = DistillModel(
             "nvidia", "nvidia/nemotron-3-super-120b", "NVIDIA-Eval", 131072,
@@ -387,7 +387,7 @@ class TestResultProcessing:
 class TestReplayBufferIntegration:
     def test_distill_into_buffer(self):
         """distill_into_buffer should store verified results in the buffer."""
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         # Mock verify function: returns True for solutions containing "correct"
         def verify_fn(solution, test_cases):
@@ -424,7 +424,7 @@ class TestReplayBufferIntegration:
 
     def test_distill_into_buffer_filters_errors(self):
         """Results with errors should not be stored."""
-        from research.self_play.replay_buffer import ReplayBuffer
+        from forge.self_play.replay_buffer import ReplayBuffer
 
         client = DistillationClient()
 

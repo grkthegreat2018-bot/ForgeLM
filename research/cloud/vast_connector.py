@@ -81,7 +81,7 @@ quantization. The connector is the bridge.
 
 ## Usage (via sft_train.py)
 
-    python -m research.training.runners.sft_train \\
+    python -m forge.training.runners.sft_train \\
         --data research/data/finetune/tool_use_fc_70.jsonl \\
         --remote-vast --gpu-filter "gpu_name=RTX_4090" --max-price 0.5 \\
         --max-steps 500 --no-lora --no-bitnet-everywhere
@@ -134,113 +134,113 @@ REMOTE_PROVISION_HASH = f"{REMOTE_ROOT}/.provision_hash"
 REMOTE_EXIT_CODE = f"{REMOTE_ROOT}/exit_code"
 
 # ─── Critical files for training (minimal upload set) ──────────────────────
-# Only these files are synced to the remote — NOT the entire research/ tree.
+# Only these files are synced to the remote — NOT the entire forge/ tree.
 # Derived by tracing sft_train.py's import tree for the forgelm_v2_light config.
 # Adding a new training dependency? Add its path here.
 CRITICAL_SOURCE_FILES: list[str] = [
     # Core
     "research/paths.py",
-    "research/config.py",
-    "research/checkpoint_io.py",
-    "research/model_loader.py",
+    "forge/config.py",
+    "forge/checkpoint_io.py",
+    "forge/model_loader.py",
     "research/tokenizer_cache.py",
     # ForgeEngine + inference
-    "research/inference/forge_engine.py",
-    "research/inference/activation.py",
-    "research/inference/airllm_streamer.py",
-    "research/inference/crash_recovery.py",
-    "research/inference/decoding.py",
-    "research/inference/diagnostics.py",
-    "research/inference/engine_tools.py",
-    "research/inference/errors.py",
-    "research/inference/hotswap.py",
-    "research/inference/innovations.py",
-    "research/inference/kv_backend.py",
-    "research/inference/library.py",
-    "research/inference/prefix_cache.py",
-    "research/inference/session_cache.py",
-    "research/inference/tool_security.py",
+    "forge/engine/forge_engine.py",
+    "forge/engine/activation.py",
+    "forge/engine/airllm_streamer.py",
+    "forge/engine/crash_recovery.py",
+    "forge/engine/decoding.py",
+    "forge/engine/diagnostics.py",
+    "forge/engine/engine_tools.py",
+    "forge/engine/errors.py",
+    "forge/engine/hotswap.py",
+    "forge/engine/innovations.py",
+    "forge/engine/kv_backend.py",
+    "forge/engine/library.py",
+    "forge/engine/prefix_cache.py",
+    "forge/engine/session_cache.py",
+    "forge/engine/tool_security.py",
     # Architecture keys
-    "research/keys/misc/base.py",
-    "research/keys/misc/pit_key.py",
-    "research/keys/misc/embedding_key.py",
-    "research/keys/misc/keystack.py",
-    "research/keys/misc/linear_key.py",
-    "research/keys/misc/lm_head_tied_key.py",
-    "research/keys/architecture/attn_residual_key.py",
-    "research/keys/architecture/factorized_embed_key.py",
-    "research/keys/architecture/hyperloop_key.py",
-    "research/keys/architecture/mhc_key.py",
-    "research/keys/architecture/mod_router_key.py",
-    "research/keys/architecture/titan_memory_key.py",
-    "research/keys/attention/attn_scale_fold_key.py",
-    "research/keys/attention/causal_mask_key.py",
-    "research/keys/attention/csa_key.py",
-    "research/keys/attention/differential_attn_key.py",
-    "research/keys/attention/gla_key.py",
-    "research/keys/attention/gta_key.py",
-    "research/keys/attention/lisa_key.py",
-    "research/keys/compression/dead_weight_key.py",
-    "research/keys/compression/kron_ffn_key.py",
-    "research/keys/compression/monarch_ffn_key.py",
-    "research/keys/compression/nlrq_ffn_key.py",
-    "research/keys/compression/tensor_dedup_key.py",
-    "research/keys/compression/tt_ffn_key.py",
-    "research/keys/normalization/norm_gated_mod_key.py",
-    "research/keys/normalization/rmsnorm_key.py",
-    "research/keys/position/lerope_key.py",
-    "research/keys/position/rope_key.py",
-    "research/keys/position/rope_share_key.py",
-    "research/keys/quantization/bitnet_b158_key.py",
-    "research/keys/quantization/fused_gemm_key.py",
-    "research/keys/quantization/slicegpt_key.py",
-    "research/keys/cache/streaming_key.py",
-    "research/keys/activation/swiglu_key.py",
-    "research/keys/moe/expert_tying_key.py",
+    "forge/keys/misc/base.py",
+    "forge/keys/misc/pit_key.py",
+    "forge/keys/misc/embedding_key.py",
+    "forge/keys/misc/keystack.py",
+    "forge/keys/misc/linear_key.py",
+    "forge/keys/misc/lm_head_tied_key.py",
+    "forge/keys/architecture/attn_residual_key.py",
+    "forge/keys/architecture/factorized_embed_key.py",
+    "forge/keys/architecture/hyperloop_key.py",
+    "forge/keys/architecture/mhc_key.py",
+    "forge/keys/architecture/mod_router_key.py",
+    "forge/keys/architecture/titan_memory_key.py",
+    "forge/keys/attention/attn_scale_fold_key.py",
+    "forge/keys/attention/causal_mask_key.py",
+    "forge/keys/attention/csa_key.py",
+    "forge/keys/attention/differential_attn_key.py",
+    "forge/keys/attention/gla_key.py",
+    "forge/keys/attention/gta_key.py",
+    "forge/keys/attention/lisa_key.py",
+    "forge/keys/compression/dead_weight_key.py",
+    "forge/keys/compression/kron_ffn_key.py",
+    "forge/keys/compression/monarch_ffn_key.py",
+    "forge/keys/compression/nlrq_ffn_key.py",
+    "forge/keys/compression/tensor_dedup_key.py",
+    "forge/keys/compression/tt_ffn_key.py",
+    "forge/keys/normalization/norm_gated_mod_key.py",
+    "forge/keys/normalization/rmsnorm_key.py",
+    "forge/keys/position/lerope_key.py",
+    "forge/keys/position/rope_key.py",
+    "forge/keys/position/rope_share_key.py",
+    "forge/keys/quantization/bitnet_b158_key.py",
+    "forge/keys/quantization/fused_gemm_key.py",
+    "forge/keys/quantization/slicegpt_key.py",
+    "forge/keys/cache/streaming_key.py",
+    "forge/keys/activation/swiglu_key.py",
+    "forge/keys/moe/expert_tying_key.py",
     # MoE
-    "research/moe/moe.py",
+    "forge/moe/moe.py",
     # Runtime
-    "research/runtime/task_logger.py",
+    "forge/runtime/task_logger.py",
     # Training
-    "research/training/bitnet_lora.py",
-    "research/training/training_utils.py",
-    "research/training/data/curriculum_augment.py",
-    "research/training/data/efficient_pipeline.py",
-    "research/training/data/parquet_dataset.py",
-    "research/training/optim/advanced_norm.py",
-    "research/training/optim/badam.py",
-    "research/training/runners/sft_train.py",
-    "research/training/runners/lazy_train.py",
-    "research/training/runners/oomb_trainer.py",
-    "research/training/runners/optimal_checkpoint.py",
+    "forge/training/bitnet_lora.py",
+    "forge/training/training_utils.py",
+    "forge/training/data/curriculum_augment.py",
+    "forge/training/data/efficient_pipeline.py",
+    "forge/training/data/parquet_dataset.py",
+    "forge/training/optim/advanced_norm.py",
+    "forge/training/optim/badam.py",
+    "forge/training/runners/sft_train.py",
+    "forge/training/runners/lazy_train.py",
+    "forge/training/runners/oomb_trainer.py",
+    "forge/training/runners/optimal_checkpoint.py",
     # Sandbox (from-scratch 8B init functions)
     "research/sandbox/train_8b_all.py",
     # Compression key (NLRQ FFN, needed by from-scratch init)
-    "research/keys/compression/nlrq_ffn_key.py",
+    "forge/keys/compression/nlrq_ffn_key.py",
 ]
 
 # __init__.py files needed for each package in the tree
 CRITICAL_INIT_FILES: list[str] = [
     "research/__init__.py",
-    "research/inference/__init__.py",
-    "research/keys/__init__.py",
-    "research/keys/architecture/__init__.py",
-    "research/keys/attention/__init__.py",
-    "research/keys/misc/__init__.py",
-    "research/keys/quantization/__init__.py",
-    "research/keys/compression/__init__.py",
-    "research/keys/normalization/__init__.py",
-    "research/keys/position/__init__.py",
-    "research/keys/cache/__init__.py",
-    "research/keys/activation/__init__.py",
-    "research/keys/moe/__init__.py",
-    "research/moe/__init__.py",
-    "research/runtime/__init__.py",
+    "forge/engine/__init__.py",
+    "forge/keys/__init__.py",
+    "forge/keys/architecture/__init__.py",
+    "forge/keys/attention/__init__.py",
+    "forge/keys/misc/__init__.py",
+    "forge/keys/quantization/__init__.py",
+    "forge/keys/compression/__init__.py",
+    "forge/keys/normalization/__init__.py",
+    "forge/keys/position/__init__.py",
+    "forge/keys/cache/__init__.py",
+    "forge/keys/activation/__init__.py",
+    "forge/keys/moe/__init__.py",
+    "forge/moe/__init__.py",
+    "forge/runtime/__init__.py",
     "research/sandbox/__init__.py",
-    "research/training/__init__.py",
-    "research/training/data/__init__.py",
-    "research/training/optim/__init__.py",
-    "research/training/runners/__init__.py",
+    "forge/training/__init__.py",
+    "forge/training/data/__init__.py",
+    "forge/training/optim/__init__.py",
+    "forge/training/runners/__init__.py",
 ]
 
 # Default CUDA image. PyTorch 2.4 + CUDA 12.1 + cuDNN 9.
@@ -1817,12 +1817,12 @@ class VastConnector:
             logger.info("Remote data wiped (venv + repo preserved).")
 
     def _build_remote_train_cmd(self, spec: RemoteTrainingSpec) -> str:
-        """Construct the remote ``python -m research.training.runners.sft_train ...`` line."""
+        """Construct the remote ``python -m forge.training.runners.sft_train ...`` line."""
         setup = [
             f". {REMOTE_VENV}/bin/activate",
             f"cd {REMOTE_REPO}",
         ]
-        train_parts = ["python -m research.training.runners.sft_train"]
+        train_parts = ["python -m forge.training.runners.sft_train"]
         for key, val in spec.train_args.items():
             if val is None or val is False:
                 continue

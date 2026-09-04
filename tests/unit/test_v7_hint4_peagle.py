@@ -1,7 +1,7 @@
 """Integration test: config fields for HINT4-NLRQ + Tied PEAGLE."""
 import pytest
 import torch
-from research.config import get_config
+from forge.config import get_config
 
 class TestNewTech:
     def test_config_has_new_fields(self):
@@ -30,7 +30,7 @@ class TestNewTech:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_builds_with_new_config(self):
         """Model should build without errors with new config fields."""
-        from research.model_loader import ConfigurableResearchLLM
+        from forge.model_loader import ConfigurableResearchLLM
         cfg = get_config("forgelm_v2_light")
         cfg.n_layers = 12  # need > hyperloop_begin + hyperloop_end (4+4=8)
         cfg.d_model = 256  # small for fast test
@@ -58,7 +58,7 @@ class TestNewTech:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_hint4_builds(self):
         """HINT4 (INT4 + Hadamard) should build on GPU."""
-        from research.model_loader import ConfigurableResearchLLM
+        from forge.model_loader import ConfigurableResearchLLM
         cfg = get_config("forgelm_v2_light")
         cfg.n_layers = 12
         cfg.d_model = 256

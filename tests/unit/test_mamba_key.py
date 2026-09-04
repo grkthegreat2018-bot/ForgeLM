@@ -21,12 +21,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from research.keys.architecture.mamba_probe import MambaLayer
-from research.keys.architecture.mamba_key import (
+from forge.keys.architecture.mamba_probe import MambaLayer
+from forge.keys.architecture.mamba_key import (
     MambaKey, Mamba2Key, Mamba1To2Key,
     MAMBA1_WEIGHTS, MAMBA2_EXTRA_WEIGHTS,
 )
-from research.keys.misc.base import KeyClass
+from forge.keys.misc.base import KeyClass
 
 
 class TestMambaLayerWeights:
@@ -338,8 +338,8 @@ class TestMambaLayerIntegration:
 
     def test_layer_type_mamba(self):
         """ModularBlock creates MambaLayer when layer_types=['mamba']."""
-        from research.model_loader import ModularBlock
-        from research.config import ModelConfig
+        from forge.model_loader import ModularBlock
+        from forge.config import ModelConfig
 
         config = ModelConfig(
             d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
@@ -356,8 +356,8 @@ class TestMambaLayerIntegration:
 
     def test_layer_type_attention_still_works(self):
         """ModularBlock still creates attention when layer_types=['attention']."""
-        from research.model_loader import ModularBlock
-        from research.config import ModelConfig
+        from forge.model_loader import ModularBlock
+        from forge.config import ModelConfig
 
         config = ModelConfig(
             d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
@@ -370,8 +370,8 @@ class TestMambaLayerIntegration:
 
     def test_mixed_layer_types(self):
         """ModularBlock handles mixed mamba/attention layers."""
-        from research.model_loader import ModularBlock
-        from research.config import ModelConfig
+        from forge.model_loader import ModularBlock
+        from forge.config import ModelConfig
 
         config = ModelConfig(
             d_model=64, n_layers=4, n_heads=8, n_kv_heads=4,

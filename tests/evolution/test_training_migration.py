@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 import torch
 
-from research.evolution.domains.training_domains import (
+from forge.evolution.domains.training_domains import (
     OptimizerConfig, SchedulerConfig, LossConfig, MuonConfig,
     CpuAdamwConfig, GradAccumConfig, Fp8TrainingConfig, ModConfig,
     ApolloConfig, BreadConfig, FlashOptimConfig, TritonKernelConfig,
     VarlenConfig,
 )
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 # (old_class, spec_name, config_dict, description)
 TESTS = [

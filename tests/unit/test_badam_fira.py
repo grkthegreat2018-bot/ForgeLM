@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 import torch.nn as nn
 
-from research.training.optim.badam import BAdam
+from forge.training.optim.badam import BAdam
 
 
 class TinyLayer(nn.Module):
@@ -108,8 +108,8 @@ def test_badam_state_dict_roundtrip_restores_schedule():
 
 
 def test_fira_nlrq_steps_on_nlrq_model():
-    from research.keys.compression.nlrq_ffn_key import NLRQLinear
-    from research.training.optim.fira_nlrq import FiraNLRQ
+    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.training.optim.fira_nlrq import FiraNLRQ
 
     model = nn.Sequential(NLRQLinear(8, 8, rank=4), nn.Linear(8, 4))
     opt = FiraNLRQ(model, lr=1e-3, verbose=False)
@@ -126,8 +126,8 @@ def test_fira_nlrq_steps_on_nlrq_model():
 
 def test_fira_nlrq_reduces_loss():
     torch.manual_seed(0)
-    from research.keys.compression.nlrq_ffn_key import NLRQLinear
-    from research.training.optim.fira_nlrq import FiraNLRQ
+    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.training.optim.fira_nlrq import FiraNLRQ
 
     layer = NLRQLinear(16, 16, rank=8)
     opt = FiraNLRQ(layer, lr=1e-2, verbose=False)
@@ -195,7 +195,7 @@ def test_badam_slim_state_roundtrip():
         opt.zero_grad()
         _loss(model).backward()
         opt.step()
-    from research.training.runners.train_8b_all import slim_badam_state
+    from forge.training.runners.train_8b_all import slim_badam_state
     slim = slim_badam_state(opt)
     keep_blocks = {opt._block_idx, (opt._block_idx - 1) % opt._n_blocks}
     keep_ids = {id(p) for i in keep_blocks for p in opt._blocks[i]["params"]}
@@ -217,7 +217,7 @@ def test_badam_slim_state_roundtrip():
 # ── NLRQ factor training (STE) ───────────────────────────────────────────
 
 def _tiny_nlrq():
-    from research.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
     torch.manual_seed(3)
     return NLRQLinear(12, 10, rank=4)
 
@@ -259,7 +259,7 @@ def test_nlrq_export_roundtrip():
 
 
 def test_nlrq_state_dict_strips_masters_via_snapshot():
-    from research.training.runners.train_8b_all import snapshot_state
+    from forge.training.runners.train_8b_all import snapshot_state
     model = nn.Sequential(_tiny_nlrq(), nn.Linear(10, 4))
     model[0].enable_factor_training_()
     state = snapshot_state(model, step=7)
@@ -271,7 +271,7 @@ def test_nlrq_state_dict_strips_masters_via_snapshot():
 # ── trainer utilities ────────────────────────────────────────────────────
 
 def test_lr_schedules():
-    from research.training.runners.train_8b_all import lr_at
+    from forge.training.runners.train_8b_all import lr_at
     assert lr_at(0, 1.0, 10, 100) == 0.0
     assert abs(lr_at(5, 1.0, 10, 100) - 0.5) < 1e-9
     assert lr_at(10, 1.0, 10, 100) == 1.0
@@ -285,7 +285,7 @@ def test_lr_schedules():
 
 
 def test_chunked_ce_matches_full_ce():
-    from research.training.runners.train_8b_all import chunked_next_token_ce
+    from forge.training.runners.train_8b_all import chunked_next_token_ce
     torch.manual_seed(1)
 
     class M(nn.Module):
@@ -313,7 +313,7 @@ def test_chunked_ce_matches_full_ce():
 
 
 def test_epoch_sampler_uniform_covers_all():
-    from research.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
+    from forge.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
     ds = [PackedDataset("a", torch.zeros(10, 4, dtype=torch.long),
                         torch.zeros(1, 4, dtype=torch.long)),
           PackedDataset("b", torch.zeros(6, 4, dtype=torch.long),
@@ -326,7 +326,7 @@ def test_epoch_sampler_uniform_covers_all():
 
 
 def test_epoch_sampler_stratified_upweights():
-    from research.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
+    from forge.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
     ds = [PackedDataset("v7", torch.zeros(10, 4, dtype=torch.long),
                         torch.zeros(1, 4, dtype=torch.long)),
           PackedDataset("lfm", torch.zeros(30, 4, dtype=torch.long),
@@ -341,7 +341,7 @@ def test_epoch_sampler_stratified_upweights():
 
 
 def test_freeze_dead_params_finds_unused_module():
-    from research.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.runners.train_8b_all import freeze_dead_params_
 
     class M(nn.Module):
         def __init__(self):
@@ -374,7 +374,7 @@ def test_freeze_dead_params_finds_unused_module():
 def test_normalize_logit_scale_fixes_confidently_wrong_init():
     import math as _math
     from types import SimpleNamespace
-    from research.training.runners.train_8b_all import forward_model, normalize_logit_scale_
+    from forge.training.runners.train_8b_all import forward_model, normalize_logit_scale_
     import torch.nn.functional as F
 
     torch.manual_seed(5)

@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from research.inference.attention.fused_qk_norm_rope_cache import (
+from forge.engine.attention.fused_qk_norm_rope_cache import (
     FusedQKNormRopeCacheWrapper,
 )
 

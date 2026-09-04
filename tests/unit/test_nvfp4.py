@@ -5,7 +5,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
 import torch.nn as nn
-from research.inference.quant.nvfp4_quant import (
+from forge.engine.quant.nvfp4_quant import (
     NVFP4Linear, quantize_model_nvfp4, _quantize_to_fp4, _dequantize_fp4,
 )
 

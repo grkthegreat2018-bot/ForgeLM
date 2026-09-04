@@ -15,7 +15,7 @@ from research.training_free.bake import (
 
 
 def _save_ckpt(path, tensors: dict):
-    from research.checkpoint_io import save_checkpoint
+    from forge.checkpoint_io import save_checkpoint
     save_checkpoint(dict(tensors), path)
 
 
@@ -35,7 +35,7 @@ class TestBakeTaskVector:
 
         bake_task_vector(str(tp), str(fp), str(bp), alpha=0.5, out_path=out)
 
-        from research.checkpoint_io import load_checkpoint
+        from forge.checkpoint_io import load_checkpoint
         merged = load_checkpoint(out, map_location="cpu")
         # target + 0.5 * (ft - base) = [10,20,30] + 0.5*[2,2,2]
         expected = torch.tensor([11.0, 21.0, 31.0])
@@ -53,7 +53,7 @@ class TestBakeTaskVector:
         out = str(tmp_path / "o.safetensors")
         bake_task_vector(paths[2], paths[1], paths[0], alpha=0.0, out_path=out)
 
-        from research.checkpoint_io import load_checkpoint
+        from forge.checkpoint_io import load_checkpoint
         merged = load_checkpoint(out, map_location="cpu")
         assert torch.allclose(merged["w"].float(), target["w"].float())
 
@@ -125,7 +125,7 @@ class TestFuseLora:
         out = str(tmp_path / "fused.safetensors")
         fuse_lora(base_path, adapter_dir, out_path=out)
 
-        from research.checkpoint_io import load_checkpoint
+        from forge.checkpoint_io import load_checkpoint
         fused = load_checkpoint(out, map_location="cpu")
         expected = w + 2.0 * (b @ a)
         assert torch.allclose(fused["lin.weight"].float(), expected, atol=1e-5)
@@ -141,6 +141,6 @@ class TestFuseLora:
         out = str(tmp_path / "fused.safetensors")
         fuse_lora(base_path, adapter_dir, out_path=out, alpha_override=2.0)
 
-        from research.checkpoint_io import load_checkpoint
+        from forge.checkpoint_io import load_checkpoint
         fused = load_checkpoint(out, map_location="cpu")
         assert torch.allclose(fused["lin.weight"].float(), b @ a, atol=1e-5)

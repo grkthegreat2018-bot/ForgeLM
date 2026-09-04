@@ -137,7 +137,7 @@ class SubAgentManager(QObject):
             messages.append({"role": "user", "content": task.prompt})
 
             # render via qwen adapter
-            from research.self_play.discovery.qwen_adapter import (
+            from forge.self_play.discovery.qwen_adapter import (
                 qwen_render_messages,
             )
             rendered = qwen_render_messages(messages, add_generation_prompt=True)

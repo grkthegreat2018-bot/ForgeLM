@@ -33,7 +33,7 @@ FORGE_ENGINE_PUBLIC_METHODS = [
 
 def _get_forge_engine_methods():
     """Get the set of public method names on ForgeEngine (lazy import)."""
-    from research.inference.forge_engine import ForgeEngine
+    from forge.engine.forge_engine import ForgeEngine
     methods = set()
     for name in dir(ForgeEngine):
         if name.startswith("_"):

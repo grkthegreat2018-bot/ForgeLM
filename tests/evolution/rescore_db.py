@@ -58,8 +58,8 @@ def load_domain(domain_name: str):
     Tries JSON spec first (canonical source of truth), falls back to Python
     class lookup for domains without JSON specs.
     """
-    from research.evolution.domains import DOMAINS
-    from research.evolution.domain_spec import list_specs, load_spec, JSONSpecDomain
+    from forge.evolution.domains import DOMAINS
+    from forge.evolution.domain_spec import list_specs, load_spec, JSONSpecDomain
 
     # Check if a JSON spec exists for this domain name
     # Domain names in DB may have _refine_dN suffix — strip it
@@ -246,7 +246,7 @@ def main():
         conn_tmp.close()
     else:
         # Default: all domains that have JSON specs
-        from research.evolution.domain_spec import list_specs, load_spec
+        from forge.evolution.domain_spec import list_specs, load_spec
         domains = []
         for spec_name in list_specs():
             try:

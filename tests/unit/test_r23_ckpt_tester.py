@@ -22,7 +22,7 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def _tiny_v8_config(**extra):
     """Create a tiny V8-8B config that builds on CPU in <1s."""
-    from research.config import get_config
+    from forge.config import get_config
     overrides = dict(
         vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
         intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
@@ -40,7 +40,7 @@ def _tiny_v8_config(**extra):
 
 def _build_tiny_v8(**extra):
     """Build a tiny V8 model + config."""
-    from research.model_loader import ConfigurableResearchLLM
+    from forge.model_loader import ConfigurableResearchLLM
     cfg = _tiny_v8_config(**extra)
     model = ConfigurableResearchLLM(cfg)
     return model, cfg
@@ -50,7 +50,7 @@ def _build_tiny_v8(**extra):
 
 def test_ckpt_tester_imports():
     """ckpt_tester module should expose CheckpointTester class or run_test()."""
-    import research.evaluation.ckpt_tester as mod
+    import forge.evaluation.ckpt_tester as mod
 
     has_class = hasattr(mod, "CheckpointTester")
     has_func = hasattr(mod, "run_test")
@@ -67,7 +67,7 @@ def test_ckpt_tester_imports():
 
 def test_ckpt_tester_question_count():
     """The question bank should have exactly 50 questions (10 per category)."""
-    from research.evaluation.ckpt_tester import QUESTION_BANK
+    from forge.evaluation.ckpt_tester import QUESTION_BANK
 
     assert isinstance(QUESTION_BANK, (list, dict)), \
         "QUESTION_BANK should be a list or dict"
@@ -84,7 +84,7 @@ def test_ckpt_tester_question_count():
 
 def test_ckpt_tester_categories():
     """The 5 categories (math, logic, code, recall, format) should each have 10."""
-    from research.evaluation.ckpt_tester import QUESTION_BANK
+    from forge.evaluation.ckpt_tester import QUESTION_BANK
 
     expected_cats = {"math", "logic", "code", "recall", "format"}
     if isinstance(QUESTION_BANK, dict):
@@ -111,7 +111,7 @@ def test_ckpt_tester_categories():
 
 def test_ckpt_tester_runs_with_model():
     """Tester should run on a tiny V8 model and return per-category scores."""
-    from research.evaluation.ckpt_tester import CheckpointTester
+    from forge.evaluation.ckpt_tester import CheckpointTester
 
     model, cfg = _build_tiny_v8()
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))
@@ -133,7 +133,7 @@ def test_ckpt_tester_runs_with_model():
 
 def test_ckpt_tester_regression_detection():
     """Degrading model weights should produce val_loss_delta > 0 (regression)."""
-    from research.evaluation.ckpt_tester import CheckpointTester
+    from forge.evaluation.ckpt_tester import CheckpointTester
 
     model, cfg = _build_tiny_v8()
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))
@@ -163,7 +163,7 @@ def test_ckpt_tester_regression_detection():
 
 def test_ckpt_tester_no_regression():
     """Running tester twice on same model should give val_loss_delta ≈ 0."""
-    from research.evaluation.ckpt_tester import CheckpointTester
+    from forge.evaluation.ckpt_tester import CheckpointTester
 
     model, cfg = _build_tiny_v8()
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))
@@ -185,7 +185,7 @@ def test_ckpt_tester_no_regression():
 
 def test_ckpt_tester_report_format():
     """Report dict should have all required keys."""
-    from research.evaluation.ckpt_tester import CheckpointTester
+    from forge.evaluation.ckpt_tester import CheckpointTester
 
     model, cfg = _build_tiny_v8()
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))
@@ -215,7 +215,7 @@ def test_ckpt_tester_report_format():
 
 def test_ckpt_tester_math_questions():
     """Math questions should test arithmetic and evaluate model output correctly."""
-    from research.evaluation.ckpt_tester import QUESTION_BANK, evaluate_answer
+    from forge.evaluation.ckpt_tester import QUESTION_BANK, evaluate_answer
 
     # Get math questions
     if isinstance(QUESTION_BANK, dict):
@@ -253,7 +253,7 @@ def test_ckpt_tester_math_questions():
 
 def test_ckpt_tester_format_questions():
     """Format questions should test JSON validity, markdown structure, tool-use."""
-    from research.evaluation.ckpt_tester import QUESTION_BANK, evaluate_answer
+    from forge.evaluation.ckpt_tester import QUESTION_BANK, evaluate_answer
 
     if isinstance(QUESTION_BANK, dict):
         format_qs = QUESTION_BANK["format"]
@@ -297,7 +297,7 @@ def test_ckpt_tester_format_questions():
 
 def test_ckpt_tester_blocking_on_critical():
     """When regression_flag=True AND val_loss_delta > 0.05, tester should block."""
-    from research.evaluation.ckpt_tester import CheckpointTester
+    from forge.evaluation.ckpt_tester import CheckpointTester
 
     model, cfg = _build_tiny_v8()
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))

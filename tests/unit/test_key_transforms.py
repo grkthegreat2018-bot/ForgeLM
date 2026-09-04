@@ -63,7 +63,7 @@ class TestPITKey:
 
     def test_identity_init_forward(self, small_model, test_input_ids):
         """PIT with L=I should produce identical output to standard tying."""
-        pit = _load_module("pit_test", r"D:\windsurf\ForgeAI\research\keys\misc\pit_key.py")
+        pit = _load_module("pit_test", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
 
         original_out = small_model(test_input_ids).clone()
 
@@ -82,7 +82,7 @@ class TestPITKey:
 
     def test_T_is_spd(self):
         """T = L @ L^T should always be symmetric positive definite."""
-        pit = _load_module("pit_test2", r"D:\windsurf\ForgeAI\research\keys\misc\pit_key.py")
+        pit = _load_module("pit_test2", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
         embed = pit.PITEmbedding(50, 16, init="standard")
 
         # Random L (lower triangular)
@@ -98,7 +98,7 @@ class TestPITKey:
 
     def test_key_roundtrip(self):
         """PITKey forward then reverse should recover the original weight."""
-        pit = _load_module("pit_test3", r"D:\windsurf\ForgeAI\research\keys\misc\pit_key.py")
+        pit = _load_module("pit_test3", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
         key = pit.PITKey()
 
         original_weight = torch.randn(50, 16)
@@ -118,7 +118,7 @@ class TestLeRoPEKey:
 
     def test_identity_init(self):
         """LeRoPE with freq_scale=1 should match standard RoPE."""
-        lr = _load_module("lerope_test", r"D:\windsurf\ForgeAI\research\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
 
         dim = 16
         max_seq = 32
@@ -135,7 +135,7 @@ class TestLeRoPEKey:
 
     def test_finiteness(self):
         """All RoPE outputs should be finite."""
-        lr = _load_module("lerope_test2", r"D:\windsurf\ForgeAI\research\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test2", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
         lerope = lr.LeRoPEEmbedding(dim=16, max_seq_len=32)
 
         x = torch.randn(2, 4, 16, 16)
@@ -150,7 +150,7 @@ class TestLeRoPEKey:
 
     def test_adarope_per_head_differentiation(self):
         """AdaRoPE should allow per-head different frequencies."""
-        lr = _load_module("lerope_test3", r"D:\windsurf\ForgeAI\research\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test3", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
         adarope = lr.AdaRoPEEmbedding(dim=16, n_heads=4, max_seq_len=32)
 
         # At init, all heads should be the same
@@ -172,7 +172,7 @@ class TestAttnResKey:
 
     def test_identity_init_zero_gates(self):
         """AttnRes gates should be 0 at init (lossless)."""
-        ar = _load_module("attnres_test", r"D:\windsurf\ForgeAI\research\keys\architecture\attn_residual_key.py")
+        ar = _load_module("attnres_test", r"D:\windsurf\ForgeAI\forge\keys\architecture\attn_residual_key.py")
         module = ar.AttnResModule(64, 8, k=4, n_heads=4)
         assert (module.gates == 0).all()
 
@@ -184,7 +184,7 @@ class TestAttnResKey:
 
     def test_finiteness_with_nonzero_gate(self):
         """AttnRes output should be finite even with non-zero gates."""
-        ar = _load_module("attnres_test2", r"D:\windsurf\ForgeAI\research\keys\architecture\attn_residual_key.py")
+        ar = _load_module("attnres_test2", r"D:\windsurf\ForgeAI\forge\keys\architecture\attn_residual_key.py")
         module = ar.AttnResModule(64, 8, k=4, n_heads=4)
         module.gates.data.fill_(1.0)
 
@@ -201,7 +201,7 @@ class TestMHCKey:
 
     def test_identity_init_standard_residual(self):
         """mHC with gate=0 should be standard residual."""
-        mhc = _load_module("mhc_test", r"D:\windsurf\ForgeAI\research\keys\architecture\mhc_key.py")
+        mhc = _load_module("mhc_test", r"D:\windsurf\ForgeAI\forge\keys\architecture\mhc_key.py")
         module = mhc.MHCModule(64, rank=16)
         assert module.gate.item() == 0.0
 
@@ -212,7 +212,7 @@ class TestMHCKey:
 
     def test_T_spd_property(self):
         """U @ V^T should produce valid projections."""
-        mhc = _load_module("mhc_test2", r"D:\windsurf\ForgeAI\research\keys\architecture\mhc_key.py")
+        mhc = _load_module("mhc_test2", r"D:\windsurf\ForgeAI\forge\keys\architecture\mhc_key.py")
         module = mhc.MHCModule(64, rank=16)
 
         # The projection W = U @ V^T
@@ -228,7 +228,7 @@ class TestSafetyFramework:
 
     def test_safe_apply_catches_nan(self):
         """safe_apply should catch NaN corruption and rollback."""
-        safety = _load_module("safety_test", r"D:\windsurf\ForgeAI\research\keys\safety.py")
+        safety = _load_module("safety_test", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -253,7 +253,7 @@ class TestSafetyFramework:
 
     def test_safe_apply_catches_identity_violation(self):
         """safe_apply should catch identity-init violations."""
-        safety = _load_module("safety_test2", r"D:\windsurf\ForgeAI\research\keys\safety.py")
+        safety = _load_module("safety_test2", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -275,7 +275,7 @@ class TestSafetyFramework:
 
     def test_verify_model_integrity_healthy(self):
         """verify_model_integrity should pass for a healthy model."""
-        safety = _load_module("safety_test3", r"D:\windsurf\ForgeAI\research\keys\safety.py")
+        safety = _load_module("safety_test3", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -291,7 +291,7 @@ class TestSafetyFramework:
 
     def test_verify_model_integrity_corrupted(self):
         """verify_model_integrity should detect NaN corruption."""
-        safety = _load_module("safety_test4", r"D:\windsurf\ForgeAI\research\keys\safety.py")
+        safety = _load_module("safety_test4", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):

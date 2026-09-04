@@ -29,7 +29,7 @@ def _make_tiny_model(d=128, n_layers=4, ternary=False):
 
 def test_adamw4bit_basic():
     """4-bit AdamW should reduce loss on a simple task."""
-    from research.training.optim.r20_memory_optimizers import AdamW4Bit
+    from forge.training.optim.r20_memory_optimizers import AdamW4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3)
@@ -53,7 +53,7 @@ def test_adamw4bit_basic():
 
 def test_adamw4bit_memory():
     """Verify 4-bit states use ~1.25 bytes/param."""
-    from research.training.optim.r20_memory_optimizers import AdamW4Bit, _quantize_4bit
+    from forge.training.optim.r20_memory_optimizers import AdamW4Bit, _quantize_4bit
 
     n = 10000
     t = torch.randn(n)
@@ -77,7 +77,7 @@ def test_adamw4bit_memory():
 
 
 def _dequantize_4bit(packed, scales, shape, block_size=128):
-    from research.training.optim.r20_memory_optimizers import _dequantize_4bit as _dq
+    from forge.training.optim.r20_memory_optimizers import _dequantize_4bit as _dq
     return _dq(packed, scales, shape, block_size)
 
 
@@ -85,7 +85,7 @@ def _dequantize_4bit(packed, scales, shape, block_size=128):
 
 def test_nvme_streamed_badam():
     """NVMe-streamed BAdam should train and cycle through blocks."""
-    from research.training.optim.r20_memory_optimizers import NVMeStreamedBAdam
+    from forge.training.optim.r20_memory_optimizers import NVMeStreamedBAdam
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=4)
@@ -120,7 +120,7 @@ def test_nvme_streamed_badam():
 
 def test_muon_bitnet_4bit():
     """Muon with 4-bit momentum should reduce loss."""
-    from research.training.optim.r20_memory_optimizers import MuonBitNet4Bit
+    from forge.training.optim.r20_memory_optimizers import MuonBitNet4Bit
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3)
@@ -144,7 +144,7 @@ def test_muon_bitnet_4bit():
 
 def test_muon_bitnet_memory():
     """Verify Muon 4-bit uses ~0.625 bytes/param (single buffer)."""
-    from research.training.optim.r20_memory_optimizers import _quantize_4bit
+    from forge.training.optim.r20_memory_optimizers import _quantize_4bit
 
     n = 10000
     t = torch.randn(n)
@@ -163,7 +163,7 @@ def test_muon_bitnet_memory():
 
 def test_ternary_optimizer():
     """Ternary optimizer should work with BitNet ternary weights."""
-    from research.training.optim.r20_memory_optimizers import TernaryOptimizer
+    from forge.training.optim.r20_memory_optimizers import TernaryOptimizer
 
     torch.manual_seed(42)
     model = _make_tiny_model(d=64, n_layers=3, ternary=True)
@@ -196,7 +196,7 @@ def test_ternary_optimizer():
 
 def test_ternary_memory():
     """Verify 2-bit ternary states use ~0.25 bytes/param."""
-    from research.training.optim.r20_memory_optimizers import TernaryOptimizer
+    from forge.training.optim.r20_memory_optimizers import TernaryOptimizer
 
     n = 10000
     # 2-bit packed: 4 values per byte

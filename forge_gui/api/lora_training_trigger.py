@@ -161,7 +161,7 @@ class LoraTrainingTrigger:
         # build training command
         venv_py = str(Path("venv/Scripts/python.exe"))
         cmd = [
-            venv_py, "-u", "-m", "research.training.runners.sft_train",
+            venv_py, "-u", "-m", "forge.training.runners.sft_train",
             "--checkpoint", self.checkpoint,
             "--data", str(data_path),
             "--save-lora-adapter",

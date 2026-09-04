@@ -27,8 +27,8 @@ def tmp_db(tmp_path):
 
 def test_synthetic(tmp_db):
     """Compare ForgeEvolve vs random search vs grid search on synthetic function."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.synthetic import SyntheticDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.synthetic import SyntheticDomain
 
     print("=" * 70)
     print("  Test 1: Synthetic Domain (validates the loop)")
@@ -152,8 +152,8 @@ def test_synthetic(tmp_db):
 
 def test_quant():
     """Test ForgeEvolve on real quantization parameter search."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.quant import QuantDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.quant import QuantDomain
 
     print()
     print("=" * 70)
@@ -234,8 +234,8 @@ def test_quant():
 
 def test_surrogate_learning(tmp_db):
     """Verify that the surrogate filter improves over generations."""
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig
-    from research.evolution.domains.synthetic import SyntheticDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig
+    from forge.evolution.domains.synthetic import SyntheticDomain
 
     print()
     print("=" * 70)

@@ -237,7 +237,7 @@ class SelfPlayPage(QWidget):
                 except OSError:
                     pass
 
-        cmd = [venv_py, "-u", "-m", "research.self_play.infinite_loop",
+        cmd = [venv_py, "-u", "-m", "forge.self_play.infinite_loop",
                "--checkpoint", str(root / "research" / "checkpoints"
                                     / "ForgeLM_V2_Light.safetensors"),
                "--config", "forgelm_v2_light",

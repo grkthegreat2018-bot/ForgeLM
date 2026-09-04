@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 import pytest
 
-from research.inference.compat.arch_adapters import (
+from forge.engine.compat.arch_adapters import (
     convert_qwen3_checkpoint,
     convert_gemma3_checkpoint,
     convert_llama4_checkpoint,
@@ -17,7 +17,7 @@ from research.inference.compat.arch_adapters import (
     convert_checkpoint,
     gemma3_layer_types,
 )
-from research.moe.routers import LASERRouter, METRORouter
+from forge.moe.routers import LASERRouter, METRORouter
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

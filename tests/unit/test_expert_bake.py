@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from research.checkpoint_io import load_checkpoint, save_checkpoint
+from forge.checkpoint_io import load_checkpoint, save_checkpoint
 from research.training_free.expert_bake import (
     _layer_from_filename,
     bake_expert,

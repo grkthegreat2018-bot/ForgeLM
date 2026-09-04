@@ -16,8 +16,8 @@ from pathlib import Path
 DB_PATH = r"D:\windsurf\ForgeAI\research\results\forge_evolve_test.db"
 
 def main():
-    from research.evolution import ForgeEvolve, ForgeEvolveConfig, FindingsDB
-    from research.evolution.domains.quant import QuantDomain
+    from forge.evolution import ForgeEvolve, ForgeEvolveConfig, FindingsDB
+    from forge.evolution.domains.quant import QuantDomain
 
     # Clean start
     if os.path.exists(DB_PATH):

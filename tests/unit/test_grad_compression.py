@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import pytest
 import torch
 
-from research.training.optim.hybrid_offload import (
+from forge.training.optim.hybrid_offload import (
     _compress_grad_int4,
     _decompress_grad_int4,
 )
@@ -345,7 +345,7 @@ class TestCPUAdamWIntegration:
         CPU params don't use compression (they're already on CPU), but the
         optimizer should not crash when grad_compression='int4' is set.
         """
-        from research.training.optim.hybrid_offload import CPUAdamW
+        from forge.training.optim.hybrid_offload import CPUAdamW
 
         p = torch.nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
         opt = CPUAdamW([p], lr=0.01, grad_compression="int4", verbose=False)
@@ -360,7 +360,7 @@ class TestCPUAdamWIntegration:
 
     def test_compression_cleanup(self):
         """Verify cleanup_compression frees ef_error buffers."""
-        from research.training.optim.hybrid_offload import CPUAdamW
+        from forge.training.optim.hybrid_offload import CPUAdamW
 
         p = torch.nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
         opt = CPUAdamW([p], lr=0.01, grad_compression="int4", verbose=False)

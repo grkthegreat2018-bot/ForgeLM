@@ -14,7 +14,7 @@ from forge_gui.api import activation_catalog as cat
 
 def _activation_config_fields():
     """Get ActivationConfig field names (import lazily — pulls in torch)."""
-    from research.inference.activation import ActivationConfig
+    from forge.engine.activation import ActivationConfig
     return {f.name for f in dataclasses.fields(ActivationConfig)}
 
 

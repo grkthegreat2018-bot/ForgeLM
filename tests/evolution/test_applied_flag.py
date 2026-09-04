@@ -3,7 +3,7 @@ import sys, os, json
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 os.environ['PYTHONUTF8'] = '1'
 
-from research.evolution.database import FindingsDB
+from forge.evolution.database import FindingsDB
 
 
 def test_applied_flag(tmp_path):

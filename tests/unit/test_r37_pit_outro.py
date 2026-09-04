@@ -10,9 +10,9 @@ All tests run on CPU with small shapes for speed.
 import pytest
 import torch
 
-from research.keys.architecture.pit_tying_key import PITKey
-from research.keys.attention.outro_key import OutRoKey
-from research.keys.misc.base import KeyClass
+from forge.keys.architecture.pit_tying_key import PITKey
+from forge.keys.attention.outro_key import OutRoKey
+from forge.keys.misc.base import KeyClass
 
 # Small shapes for fast CPU tests.
 V = 128

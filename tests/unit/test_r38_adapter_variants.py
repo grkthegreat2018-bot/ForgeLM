@@ -17,7 +17,7 @@ import math
 import torch
 import torch.nn as nn
 
-from research.training.adapter_variants import (
+from forge.training.adapter_variants import (
     PiSSAInitializer,
     AdaLoRAClass,
     rsLoRALinear,

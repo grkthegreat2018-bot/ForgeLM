@@ -1,4 +1,4 @@
-"""Tests for research.model_loader — core components and forward pass.
+"""Tests for forge.model_loader — core components and forward pass.
 
 These tests run on CPU with the tiny_test config to stay fast and GPU-independent.
 """
@@ -7,8 +7,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from research.config import ModelConfig, get_config
-from research.model_loader import (
+from forge.config import ModelConfig, get_config
+from forge.model_loader import (
     ConfigurableResearchLLM,
     ModularBlock,
     PreAllocatedKVCache,

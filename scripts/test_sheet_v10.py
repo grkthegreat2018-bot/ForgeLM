@@ -48,9 +48,9 @@ def check_answer(response, expected):
     return expected.lower() in response.lower()
 
 def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
-    from research.inference.forge_engine import ForgeEngine
-    from research.model_loader import load_default_model
-    from research.config import get_config
+    from forge.engine.forge_engine import ForgeEngine
+    from forge.model_loader import load_default_model
+    from forge.config import get_config
     from research.paths import V10_CHECKPOINT
 
     log("=" * 70)
@@ -223,7 +223,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"TEST 5: KV cache comparison")
     log("=" * 50)
 
-    from research.config import get_config
+    from forge.config import get_config
     cfg = get_config("forgelm_v2_light")
     n_kv = cfg.n_kv_heads
     head_dim = cfg.d_model // cfg.n_heads

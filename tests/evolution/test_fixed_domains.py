@@ -4,7 +4,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 os.environ["PYTHONUTF8"] = "1"
 
 import torch
-from research.evolution.domain_spec import JSONSpecDomain
+from forge.evolution.domain_spec import JSONSpecDomain
 
 domains_to_test = [
     "quant_domain",

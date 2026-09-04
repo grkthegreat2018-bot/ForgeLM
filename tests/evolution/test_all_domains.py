@@ -4,7 +4,7 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 import pytest
 import torch
 import numpy as np
-from research.evolution.domains import DOMAINS, list_domains, get_domain
+from forge.evolution.domains import DOMAINS, list_domains, get_domain
 
 
 @pytest.mark.parametrize("name", list_domains())

@@ -9,9 +9,9 @@ import json
 
 import pytest
 
-from research.moe.airmoe_hotswap import TopicRouter
-from research.moe.airmoe_infinite import ExpertRouter
-from research.moe.routers import KeywordRouter
+from forge.moe.airmoe_hotswap import TopicRouter
+from forge.moe.airmoe_infinite import ExpertRouter
+from forge.moe.routers import KeywordRouter
 
 # ── KeywordRouter base ───────────────────────────────────────────────────────
 
