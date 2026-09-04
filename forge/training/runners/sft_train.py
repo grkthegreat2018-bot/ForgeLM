@@ -535,7 +535,9 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
 
 def compute_loss(model, input_ids, labels, attn_mask,
                  entropy_alpha: float = 0.0,
-                 sample_weights: torch.Tensor | None = None) -> torch.Tensor:
+                 sample_weights: torch.Tensor | None = None,
+                 sigreg_weight: float = 0.0,
+                 sigreg_threshold: float = 1.0) -> torch.Tensor:
     """Completion-only cross-entropy loss with optional anti-regression techniques.
 
     The model's forward(targets=...) computes mean CE over ALL non-ignored
@@ -557,7 +559,15 @@ def compute_loss(model, input_ids, labels, attn_mask,
       - Easy Sample Upweighting (ICML 2025): when sample_weights is provided
         (pre-computed from base model loss), per-example loss is scaled by
         weight = 1/(1+base_loss), so easy samples get higher weight.
+
+    SIGReg (LeWM/LeCun et al.): when sigreg_weight > 0, collects per-layer
+    hidden states and adds a spectral norm regularization penalty to prevent
+    hidden-state collapse.
     """
+    from forge.training.losses.sigreg import SIGRegLoss
+    _sigreg = SIGRegLoss(threshold=sigreg_threshold) if sigreg_weight > 0.0 else None
+    _need_hidden = _sigreg is not None
+
     # ── Fast path: chunked CE (no logits materialization) ──
     # Used when no per-example sample weighting is needed. The model's
     # forward(targets=labels) computes the loss internally via
@@ -575,8 +585,15 @@ def compute_loss(model, input_ids, labels, attn_mask,
             device_type="cuda", dtype=torch.bfloat16,
             enabled=input_ids.is_cuda,
         ):
-            out = model(input_ids, attention_mask=attn_mask, targets=shift_labels)
-        if isinstance(out, tuple):
+            out = model(input_ids, attention_mask=attn_mask, targets=shift_labels,
+                        return_hidden_states=_need_hidden)
+        # Unpack output — may include hidden_states_list when SIGReg is active.
+        hidden_states_list = None
+        if _need_hidden and isinstance(out, tuple):
+            # (logits, loss, hidden_states_list)
+            *rest, hidden_states_list = out
+            loss = rest[1] if len(rest) > 1 and rest[1] is not None else rest[0]
+        elif isinstance(out, tuple):
             loss = out[1] if out[1] is not None else out[0]
         else:
             loss = out
@@ -590,6 +607,9 @@ def compute_loss(model, input_ids, labels, attn_mask,
                     f"Non-finite training loss ({loss.item()}). "
                     f"Check for NaN in inputs, exploding gradients, or lr too high."
                 )
+            if _sigreg is not None and hidden_states_list is not None:
+                sigreg_loss = _sigreg(hidden_states_list, threshold=sigreg_threshold)
+                loss = loss + sigreg_weight * sigreg_loss
             return loss
 
     # ── Manual path: full logits for sample weighting ──
@@ -599,8 +619,15 @@ def compute_loss(model, input_ids, labels, attn_mask,
         device_type="cuda", dtype=torch.bfloat16,
         enabled=input_ids.is_cuda,
     ):
-        out = model(input_ids, attention_mask=attn_mask)
-    logits = out[0] if isinstance(out, tuple) else out  # [B, T, V]
+        out = model(input_ids, attention_mask=attn_mask,
+                    return_hidden_states=_need_hidden)
+    # Unpack — may include hidden_states_list when SIGReg is active.
+    hidden_states_list = None
+    if _need_hidden and isinstance(out, tuple):
+        *rest_m, hidden_states_list = out
+        logits = rest_m[0]
+    else:
+        logits = out[0] if isinstance(out, tuple) else out  # [B, T, V]
     if logits is None:
         raise RuntimeError("model returned None logits; pass targets manually")
     # Shift: predict token t+1 from position t.
@@ -652,6 +679,9 @@ def compute_loss(model, input_ids, labels, attn_mask,
             f"Non-finite training loss ({loss.item()}). "
             f"Check for NaN in inputs, exploding gradients, or lr too high."
         )
+    if _sigreg is not None and hidden_states_list is not None:
+        sigreg_loss = _sigreg(hidden_states_list, threshold=sigreg_threshold)
+        loss = loss + sigreg_weight * sigreg_loss
     return loss
 
 
@@ -909,6 +939,13 @@ def main():
     p.add_argument("--l2-lambda", type=float, default=0.01,
                    help="L2-SP regularization lambda (NeurIPS 2024). "
                         "Lower layers get 10x this value. Default 0.01")
+    p.add_argument("--sigreg-weight", type=float, default=0.0,
+                   help="SIGReg spectral regularization weight (LeWM/LeCun et al.). "
+                        "Penalizes hidden-state spectral norms below threshold to prevent "
+                        "collapse. 0 = disabled (default). Typical: 0.01-0.1.")
+    p.add_argument("--sigreg-threshold", type=float, default=1.0,
+                   help="SIGReg spectral norm threshold. Hidden states with largest "
+                        "singular value below this are penalized. Default 1.0.")
     p.add_argument("--sample-weighting", action="store_true", default=False,
                    help="Enable easy sample upweighting (ICML 2025). "
                         "Pre-computes base model loss per example; easy samples get higher weight.")
@@ -1712,7 +1749,9 @@ def main():
                     with log.time_phase("forward"):
                         ce_loss = compute_loss(model, input_ids, labels, attn_mask,
                                                entropy_alpha=args.entropy_alpha,
-                                               sample_weights=sw)
+                                               sample_weights=sw,
+                                               sigreg_weight=args.sigreg_weight,
+                                               sigreg_threshold=args.sigreg_threshold)
 
                     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
                     # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
@@ -1759,7 +1798,9 @@ def main():
                         msw = sample_weights[mixup_idx].to(device) if sample_weights is not None else None
                         mce = compute_loss(model, mi, ml, mm,
                                            entropy_alpha=args.entropy_alpha,
-                                           sample_weights=msw)
+                                           sample_weights=msw,
+                                           sigreg_weight=args.sigreg_weight,
+                                           sigreg_threshold=args.sigreg_threshold)
                         if anchor_named_params is not None:
                             mloss = mce + compute_l2_sp_loss(model, anchor_named_params, args.l2_lambda)
                         else:

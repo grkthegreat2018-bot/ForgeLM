@@ -903,8 +903,18 @@ class ModularBlock(nn.Module):
         self.layer_idx = layer_idx
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         _use_triton = getattr(config, 'use_triton_kernels', False)
-        if norm is RMSNorm:
-            self.ln1 = RMSNorm(config.d_model, eps=getattr(config, 'norm_eps', 1e-6),
+        # AdaLN-zero conditioning (DiT): when cond_dim is set, use AdaLNZero
+        # instead of standard norm. Zero-init modulation → identity at start.
+        _cond_dim = getattr(config, 'cond_dim', None)
+        self._use_adaln = _cond_dim is not None
+        _norm_type = getattr(config, 'norm_type', 'rmsnorm')
+        _norm_eps = getattr(config, 'norm_eps', 1e-6)
+        if self._use_adaln:
+            from forge.training.losses.adaln_zero import AdaLNZero
+            self.ln1 = AdaLNZero(config.d_model, _cond_dim,
+                                 norm_type=_norm_type, eps=_norm_eps)
+        elif norm is RMSNorm:
+            self.ln1 = RMSNorm(config.d_model, eps=_norm_eps,
                               use_triton=_use_triton)
         else:
             self.ln1 = norm(config.d_model)
@@ -937,8 +947,12 @@ class ModularBlock(nn.Module):
             )
         else:
             self.attn = build_attention(config)
-        if norm is RMSNorm:
-            self.ln2 = RMSNorm(config.d_model, eps=getattr(config, 'norm_eps', 1e-6),
+        if self._use_adaln:
+            from forge.training.losses.adaln_zero import AdaLNZero
+            self.ln2 = AdaLNZero(config.d_model, _cond_dim,
+                                 norm_type=_norm_type, eps=_norm_eps)
+        elif norm is RMSNorm:
+            self.ln2 = RMSNorm(config.d_model, eps=_norm_eps,
                               use_triton=_use_triton)
         else:
             self.ln2 = norm(config.d_model)
@@ -1000,6 +1014,18 @@ class ModularBlock(nn.Module):
                 rank=mhc_rank if mhc_rank > 0 else None)
             self._mhc_gate_zero: bool | None = None
 
+    def _norm1(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply ln1, passing cond when AdaLN-zero is active."""
+        if self._use_adaln:
+            return self.ln1(x, cond)
+        return self.ln1(x)
+
+    def _norm2(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply ln2, passing cond when AdaLN-zero is active."""
+        if self._use_adaln:
+            return self.ln2(x, cond)
+        return self.ln2(x)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1013,6 +1039,8 @@ class ModularBlock(nn.Module):
         # shift_mlp, scale_mlp, gate_mlp) — 6 * d_model values
         modulation: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
+        # AdaLN-zero conditioning (DiT): cond embedding for adaptive layer norm.
+        cond: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, KVCache | None]:
         x0 = x  # pre-update residual (for TITAN read + MoD gating)
 
@@ -1025,7 +1053,7 @@ class ModularBlock(nn.Module):
                 and self._mod.keep_fraction < 1.0
                 and attention_bias is None and position_ids is None):
             return self._forward_mod_skip(
-                x, layer_idx, attention_bias, position_ids), None
+                x, layer_idx, attention_bias, position_ids, cond), None
 
         # Activation checkpointing: recompute forward during backward to save VRAM.
         # Only applies during training (use_cache=False); inference materializes normally.
@@ -1033,9 +1061,9 @@ class ModularBlock(nn.Module):
             strategy = self._gradient_checkpointing_strategy
             if strategy == "all":
                 def custom_forward(x_inner):
-                    attn_out, present = self.attn(self.ln1(x_inner), past_key_value=past_key_value, use_cache=False, cu_seqlens=cu_seqlens)
+                    attn_out, present = self.attn(self._norm1(x_inner, cond), past_key_value=past_key_value, use_cache=False, cu_seqlens=cu_seqlens)
                     x_inner = x_inner + attn_out
-                    ffn_out = self.ffn(self.ln2(x_inner))
+                    ffn_out = self.ffn(self._norm2(x_inner, cond))
                     aux = None
                     if isinstance(ffn_out, tuple):
                         aux = ffn_out[1]
@@ -1049,20 +1077,20 @@ class ModularBlock(nn.Module):
                 # recompute only the FFN (hidden_dim >> d_model) during backward.
                 if preallocated_cache is not None and self._supports_prealloc_cache:
                     attn_out, present = self.attn(
-                        self.ln1(x), past_key_value=past_key_value, use_cache=False,
+                        self._norm1(x, cond), past_key_value=past_key_value, use_cache=False,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
                         cu_seqlens=cu_seqlens,
                     )
                 else:
                     attn_out, present = self.attn(
-                        self.ln1(x), past_key_value=past_key_value, use_cache=False,
+                        self._norm1(x, cond), past_key_value=past_key_value, use_cache=False,
                         attention_bias=attention_bias, position_ids=position_ids,
                         cu_seqlens=cu_seqlens,
                     )
                 x = x + attn_out
                 ffn_out = torch.utils.checkpoint.checkpoint(
-                    self.ffn, self.ln2(x), use_reentrant=False)
+                    self.ffn, self._norm2(x, cond), use_reentrant=False)
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
@@ -1077,9 +1105,9 @@ class ModularBlock(nn.Module):
                         layer_idx=layer_idx, attention_bias=attention_bias,
                         position_ids=position_ids, cu_seqlens=cu_seqlens)
                 attn_out, present = torch.utils.checkpoint.checkpoint(
-                    _attn_forward, self.ln1(x), use_reentrant=False)
+                    _attn_forward, self._norm1(x, cond), use_reentrant=False)
                 x = x + attn_out
-                ffn_out = self.ffn(self.ln2(x))
+                ffn_out = self.ffn(self._norm2(x, cond))
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
@@ -1088,19 +1116,19 @@ class ModularBlock(nn.Module):
             else:  # "none" — no recomputation this block
                 if preallocated_cache is not None and self._supports_prealloc_cache:
                     attn_out, present = self.attn(
-                        self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                        self._norm1(x, cond), past_key_value=past_key_value, use_cache=use_cache,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
                         cu_seqlens=cu_seqlens,
                     )
                 else:
                     attn_out, present = self.attn(
-                        self.ln1(x), past_key_value=past_key_value, use_cache=use_cache,
+                        self._norm1(x, cond), past_key_value=past_key_value, use_cache=use_cache,
                         attention_bias=attention_bias, position_ids=position_ids,
                         cu_seqlens=cu_seqlens,
                     )
                 x = x + attn_out
-                ffn_out = self.ffn(self.ln2(x))
+                ffn_out = self.ffn(self._norm2(x, cond))
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
@@ -1117,7 +1145,7 @@ class ModularBlock(nn.Module):
                 shift_msa, scale_msa, shift_mlp, scale_mlp = chunks
 
             # Attention path
-            attn_in = self.ln1(x)
+            attn_in = self._norm1(x, cond)
             if shift_msa is not None:
                 attn_in = attn_in * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
             # Inference path: wrappers (SeqSplit, FusedQKNormRopeCache, etc.)
@@ -1153,7 +1181,7 @@ class ModularBlock(nn.Module):
                 ffn_out = torch.zeros_like(x)
                 self._last_aux_loss = None
             else:
-                ffn_in = self.ln2(x)
+                ffn_in = self._norm2(x, cond)
                 if shift_mlp is not None:
                     ffn_in = ffn_in * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
                 ffn_out = self.ffn(ffn_in)
@@ -1208,7 +1236,8 @@ class ModularBlock(nn.Module):
 
     def _forward_mod_skip(self, x: torch.Tensor, layer_idx: int,
                           attention_bias: torch.Tensor | None,
-                          position_ids: torch.Tensor | None
+                          position_ids: torch.Tensor | None,
+                          cond: torch.Tensor | None = None,
                           ) -> torch.Tensor:
         """Run the block only on router-kept tokens (per batch row).
 
@@ -1224,11 +1253,11 @@ class ModularBlock(nn.Module):
             idx = mask[b].nonzero(as_tuple=False).squeeze(-1)
             x_k = x[b][idx].unsqueeze(0)  # (1, T_k, D)
             attn_out, _ = self.attn(
-                self.ln1(x_k), past_key_value=None, use_cache=False,
+                self._norm1(x_k, cond), past_key_value=None, use_cache=False,
                 preallocated_cache=None, layer_idx=layer_idx,
                 attention_bias=attention_bias, position_ids=position_ids)
             h = x_k + attn_out
-            ffn_out = self.ffn(self.ln2(h))
+            ffn_out = self.ffn(self._norm2(h, cond))
             self._last_aux_loss = None
             if isinstance(ffn_out, tuple):
                 self._last_aux_loss = ffn_out[1]
@@ -1966,6 +1995,10 @@ class ConfigurableResearchLLM(nn.Module):
         modulation: torch.Tensor | None = None,
         # Varlen attention (R&D round 14): cu_seqlens for packed sequences.
         cu_seqlens: torch.Tensor | None = None,
+        # AdaLN-zero conditioning (DiT): cond embedding for adaptive layer norm.
+        cond: torch.Tensor | None = None,
+        # SIGReg: return per-layer hidden states for spectral regularization.
+        return_hidden_states: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[KVCache | None]]:
         # FP8 training autocast: wrap forward in FP8 for 2x throughput on
         # Hopper/Blackwell. Falls back to BF16 on older GPUs.
@@ -1975,11 +2008,13 @@ class ConfigurableResearchLLM(nn.Module):
                 return self._forward_impl(
                     idx, targets, past_key_values, use_cache, return_hidden,
                     preallocated_cache, attention_mask, layer_indices,
-                    noisy_embeds, modulation, cu_seqlens)
+                    noisy_embeds, modulation, cu_seqlens, cond,
+                    return_hidden_states)
         return self._forward_impl(
             idx, targets, past_key_values, use_cache, return_hidden,
             preallocated_cache, attention_mask, layer_indices,
-            noisy_embeds, modulation, cu_seqlens)
+            noisy_embeds, modulation, cu_seqlens, cond,
+            return_hidden_states)
 
     def _forward_impl(
         self,
@@ -1994,6 +2029,8 @@ class ConfigurableResearchLLM(nn.Module):
         noisy_embeds: torch.Tensor | None = None,
         modulation: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
+        cond: torch.Tensor | None = None,
+        return_hidden_states: bool = False,
     ):
         position_ids = None
         attention_bias = None  # additive mask for SDPA: (B, 1, T, total_len)
@@ -2080,6 +2117,8 @@ class ConfigurableResearchLLM(nn.Module):
                     block.attn._conv_state_reset = True
                 if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state'):
                     block.attn._ssm_state = None  # reset Mamba recurrent state
+        # SIGReg: collect per-layer hidden states for spectral regularization.
+        hidden_states_list: list[torch.Tensor] = [] if return_hidden_states else None
         for i, block in enumerate(self.blocks):
             # DiffusionBlocks: skip layers not in the active set
             if active_layers is not None and i not in active_layers:
@@ -2106,7 +2145,10 @@ class ConfigurableResearchLLM(nn.Module):
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
                                attention_bias=attention_bias, position_ids=position_ids,
-                               modulation=modulation, cu_seqlens=cu_seqlens)
+                               modulation=modulation, cu_seqlens=cu_seqlens, cond=cond)
+            # SIGReg: collect hidden state after this block.
+            if hidden_states_list is not None:
+                hidden_states_list.append(x)
             # Capture V_0 from layer 0 after its first forward (for training).
             if self._use_value_residual and i == 0 and self._v0 is None and not use_cache:
                 attn = block.attn
@@ -2203,6 +2245,15 @@ class ConfigurableResearchLLM(nn.Module):
             if mtp_loss is not None and loss is not None:
                 loss = loss + mtp_loss
 
+        if return_hidden_states:
+            # SIGReg: return per-layer hidden states alongside standard outputs.
+            if return_hidden:
+                if use_cache:
+                    return logits, loss, presents, hidden, hidden_states_list
+                return logits, loss, hidden, hidden_states_list
+            if use_cache:
+                return logits, loss, presents, hidden_states_list
+            return logits, loss, hidden_states_list
         if return_hidden:
             if use_cache:
                 return logits, loss, presents, hidden
@@ -2262,7 +2313,8 @@ class ModelLoader:
                    f"he{getattr(config, 'hyperloop_end', 2)}_"
                    f"hi{getattr(config, 'hyperloop_loop_iters', 3)}_"
                    f"li{getattr(config, 'use_lisa', False)}_"
-                   f"lc{getattr(config, 'lisa_compress', 6)}")
+                   f"lc{getattr(config, 'lisa_compress', 6)}_"
+                   f"cd{getattr(config, 'cond_dim', None)}")
         return f"{config.d_model}_{config.n_layers}_{config.attn_type}_{config.ffn_type}_{config.norm_type}_{getattr(config, 'kv_compression_dim', 0)}_{getattr(config, 'n_kv_heads', 0)}_{getattr(config, 'attn_bias', False)}_{layer_types_sig}_{mtp_sig}_{arch_sig}_{v51_sig}"
 
     @staticmethod

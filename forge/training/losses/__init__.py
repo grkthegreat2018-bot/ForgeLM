@@ -1,2 +1,2 @@
-"""Loss functions (chunked CE, improved losses, RL losses).
+"""Loss functions (chunked CE, improved losses, RL losses, SIGReg, AdaLN-zero).
 """

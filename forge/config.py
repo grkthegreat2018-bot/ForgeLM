@@ -395,6 +395,12 @@ class ModelConfig:
     use_gvpo: bool = False
     gvpo_lambda: float = 0.3
 
+    # === AdaLN-zero conditioning (DiT — Diffusion Transformers) ===
+    # When set, transformer blocks use AdaLNZero instead of standard LayerNorm.
+    # The modulation MLP is zero-init → identity at start (lossless).
+    # cond_dim=None means no conditioning (standard LayerNorm) — backward compat.
+    cond_dim: int | None = None
+
     # === Legacy compat (kept for keys that reference these) ===
     kv_compression_dim: int = 128  # used by MLA keys (no longer in core)
     enable_draft_head: bool = False

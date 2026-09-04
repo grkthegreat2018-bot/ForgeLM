@@ -78,6 +78,7 @@ class ActivationConfig:
     use_moment_kv: bool = False
     use_kvpop: bool = False
     use_conf_kv: bool = False
+    use_matryoshka_kv: bool = False
     use_jet_long: bool = False
     use_rope_id: bool = False
     use_lerope: bool = False

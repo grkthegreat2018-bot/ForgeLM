@@ -1,13 +1,17 @@
-"""DPO/ORPO alignment for the ForgeAI research model.
+"""DPO/ORPO/KTO alignment for the ForgeAI research model.
 
 Minimal standalone implementation that works with our custom nn.Module model
 (no HF PreTrainedModel wrapping required). Uses TRL only for dataset loading
-conventions; the DPO/ORPO loss is computed directly.
+conventions; the DPO/ORPO/KTO loss is computed directly.
 
 DPO loss (Rafailov et al. 2023):
     L = -log sigmoid(beta * ((logp_w - logp_l) - (logp_w_ref - logp_l_ref)))
 ORPO loss (Hong et al. 2024):
     L = NLL(chosen) + lambda * log_odds_ratio_penalty(chosen, rejected)
+KTO loss (Ethayarajh et al. 2024, arXiv:2402.01306):
+    Good:  L = -log sigmoid(beta * (log_ratio - KL_ref))
+    Bad:   L = -log sigmoid(beta * (KL_ref - log_ratio))
+    KTO needs only binary good/bad labels — no paired preference data.
 """
 import argparse
 import json
@@ -145,6 +149,95 @@ def orpo_loss(chosen_logp, rejected_logp, chosen_nll, lam=1.0):
     return chosen_nll + lam * penalty
 
 
+class KLReferencePoint:
+    """Running EMA of log-ratios for KTO (the 'KL reference point').
+
+    KTO (arXiv:2402.01306) uses a running average of log(pi/pi_ref) as the
+    reference point that defines gains/losses in the prospect-theory loss.
+    Updated once per training step with the detached batch-mean log-ratio.
+    """
+
+    def __init__(self, ema_beta=0.95):
+        self.ema_beta = ema_beta
+        self.value = 0.0
+        self.initialized = False
+
+    def update(self, log_ratio):
+        """Update EMA with current log-ratios (detached). Returns new value."""
+        with torch.no_grad():
+            batch_mean = log_ratio.detach().float().mean().item()
+            if not self.initialized:
+                self.value = batch_mean
+                self.initialized = True
+            else:
+                self.value = (self.ema_beta * self.value
+                              + (1.0 - self.ema_beta) * batch_mean)
+        return self.value
+
+
+def kto_loss(policy_logp, ref_logp, labels, beta=0.1, kl_ref=0.0):
+    """Kahneman-Tversky Optimization loss (arXiv:2402.01306, ICML 2024).
+
+    Unlike DPO, KTO needs only binary good/bad labels — no paired preference
+    data.  Each example is (prompt, response, label).
+
+    For desirable (good, label=True) outputs:
+        L = -log sigmoid(beta * (log_ratio - KL_ref))
+    For undesirable (bad, label=False) outputs:
+        L = -log sigmoid(beta * (KL_ref - log_ratio))
+
+    Args:
+        policy_logp: sum log p(y|x) under policy  [N]
+        ref_logp:    sum log p(y|x) under reference (detached) [N]
+        labels:      bool tensor, True=desirable / False=undesirable [N]
+        beta:        temperature parameter (default 0.1)
+        kl_ref:      running EMA of log-ratios (scalar KL reference point)
+
+    Returns:
+        scalar mean loss.
+    """
+    log_ratio = policy_logp - ref_logp  # [N]
+    lbl = labels.to(log_ratio.dtype)
+    # label=1 (good): factor = +1  -> beta * (log_ratio - kl_ref)
+    # label=0 (bad):  factor = -1  -> beta * (kl_ref  - log_ratio)
+    x = beta * (log_ratio - kl_ref) * (2.0 * lbl - 1.0)
+    return -F.logsigmoid(x).mean()
+
+
+def build_kto_sample(tokenizer, prompt, response, label, max_length,
+                     use_chat_template=True):
+    """Tokenize one KTO example into (ids, comp_start, label).
+
+    KTO data format: {"prompt": ..., "response": ..., "label": true/false}
+    Unlike build_preference_sample, there is no chosen/rejected pair — just
+    a single response with a binary good/bad label.
+    """
+    if use_chat_template:
+        prompt_msgs = [{"role": "user", "content": prompt}]
+        prompt_text = tokenizer.apply_chat_template(
+            prompt_msgs, tokenize=False, add_generation_prompt=True
+        )
+        p_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        full_msgs = prompt_msgs + [{"role": "assistant", "content": response}]
+        full_text = tokenizer.apply_chat_template(
+            full_msgs, tokenize=False, add_generation_prompt=False
+        )
+        full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"][:max_length]
+    else:
+        p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        r_ids = tokenizer(response, add_special_tokens=False)["input_ids"]
+        if tokenizer.eos_token_id is not None:
+            r_ids = r_ids + [tokenizer.eos_token_id]
+        full_ids = (p_ids + r_ids)[:max_length]
+
+    comp_start = min(len(p_ids), len(full_ids) - 1)
+    return {
+        "ids": full_ids,
+        "comp_start": comp_start,
+        "label": bool(label),
+    }
+
+
 def self_reward_generate(model, tokenizer, prompts, n_samples=2,
                          max_new_tokens=128, device="cuda", use_chat_template=True):
     """Generate self-rewarding preference pairs via LLM-as-judge.
@@ -276,7 +369,14 @@ def main():
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--method", choices=["dpo", "orpo", "self-reward"], default="orpo",
                    help="ORPO needs no reference model; self-reward uses LLM-as-judge (no preference data needed)")
+    p.add_argument("--loss-type", choices=["dpo", "kto"], default=None,
+                   help="Loss function override: 'dpo' (paired) or 'kto' (binary labels, arXiv:2402.01306). "
+                        "When set, takes precedence over --method for loss computation.")
     p.add_argument("--beta", type=float, default=0.1)
+    p.add_argument("--kto-beta", type=float, default=0.1,
+                   help="KTO temperature parameter (default 0.1)")
+    p.add_argument("--kto-kl-ema", type=float, default=0.95,
+                   help="EMA decay for KTO KL reference point (default 0.95)")
     p.add_argument("--lambda-orpo", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=5e-7)
     p.add_argument("--optimizer", default="bnb",
@@ -312,9 +412,12 @@ def main():
     for p_ in model.parameters():
         p_.requires_grad_(True)
 
-    # Reference model for DPO (frozen, no grads).
+    # Resolve effective loss type: --loss-type takes precedence over --method.
+    effective_loss = args.loss_type if args.loss_type else args.method
+
+    # Reference model for DPO/KTO (frozen, no grads).
     ref_model = None
-    if args.method == "dpo":
+    if effective_loss in ("dpo", "kto"):
         ref_model = ModelLoader.build_model(cfg, checkpoint_path=args.checkpoint).to(device).eval()
         for p_ in ref_model.parameters():
             p_.requires_grad_(False)
@@ -379,8 +482,49 @@ def main():
         # Switch to ORPO for actual training (no reference model needed).
         args.method = "orpo"
     else:
+        # ── KTO data loading (binary labels: prompt, response, label) ──
+        if effective_loss == "kto":
+            kto_samples = []
+            if args.data:
+                print(f"Loading local KTO data: {args.data}")
+                with open(args.data, encoding="utf-8") as f:
+                    content = f.read()
+                for i, line in enumerate(content.splitlines()):
+                    if i >= args.max_samples:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    prompt = obj.get("prompt", "")
+                    response = obj.get("response", "")
+                    label = obj.get("label", None)
+                    if not prompt or not response or label is None:
+                        continue
+                    kto_samples.append(build_kto_sample(
+                        tokenizer, prompt, response, label,
+                        args.max_seq_length,
+                        use_chat_template=args.use_chat_template))
+                print(f"  Loaded {len(kto_samples)} KTO examples from local file")
+            else:
+                print("KTO requires --data with {prompt, response, label} JSONL; using synthetic smoke-test.")
+            if not kto_samples:
+                kto_samples = [
+                    build_kto_sample(tokenizer, "The sky is", " blue.", True, args.max_seq_length,
+                                     use_chat_template=args.use_chat_template),
+                    build_kto_sample(tokenizer, "The sky is", " green.", False, args.max_seq_length,
+                                     use_chat_template=args.use_chat_template),
+                    build_kto_sample(tokenizer, "2 + 2 =", " 4.", True, args.max_seq_length,
+                                     use_chat_template=args.use_chat_template),
+                    build_kto_sample(tokenizer, "2 + 2 =", " 5.", False, args.max_seq_length,
+                                     use_chat_template=args.use_chat_template),
+                ]
+            samples = kto_samples
         # ── Local JSONL data (from dpo_data_gen.py) takes priority ──
-        if args.data:
+        elif args.data:
             print(f"Loading local preference data: {args.data}")
             samples = []
             with open(args.data, encoding="utf-8") as f:
@@ -433,7 +577,7 @@ def main():
                     samples.append(build_preference_sample(tokenizer, prompt, chosen, rejected,
                                                           args.max_seq_length,
                                                           use_chat_template=args.use_chat_template))
-    if not samples:
+    if not samples and effective_loss != "kto":
         print("No usable samples; using synthetic smoke-test samples.")
         samples = [
             build_preference_sample(tokenizer, "The sky is", " blue.", " green.", args.max_seq_length,
@@ -444,9 +588,14 @@ def main():
                                     use_chat_template=args.use_chat_template),
         ]
 
-    print(f"Prepared {len(samples)} preference samples. Training {args.method} for {args.max_steps} steps.")
+    # Recompute effective loss after data loading (self-reward switches to orpo).
+    effective_loss = args.loss_type if args.loss_type else args.method
+
+    print(f"Prepared {len(samples)} samples. Training {effective_loss} for {args.max_steps} steps.")
 
     aborted = False
+    # KTO KL reference point (running EMA of log-ratios).
+    kl_ref_point = KLReferencePoint(ema_beta=args.kto_kl_ema) if effective_loss == "kto" else None
     with task_scope("dpo") as log:
         step = start_step
         for epoch in range(100):
@@ -459,26 +608,39 @@ def main():
                     aborted = True
                     break
                 current["step"] = step
-                chosen_ids = torch.tensor(s["chosen_ids"], dtype=torch.long)
-                rejected_ids = torch.tensor(s["rejected_ids"], dtype=torch.long)
 
                 with oom_guard(str(device), label="dpo_fwd") as safe:
-                    chosen_logp = _logp_for_completion(model, chosen_ids, s["chosen_start"], device)
-                    rejected_logp = _logp_for_completion(model, rejected_ids, s["rejected_start"], device)
-
-                    if args.method == "dpo":
+                    if effective_loss == "kto":
+                        # KTO: single (prompt, response, label) example.
+                        ids = torch.tensor(s["ids"], dtype=torch.long)
+                        policy_logp = _logp_for_completion(model, ids, s["comp_start"], device)
                         with torch.no_grad():
-                            chosen_ref = _logp_for_completion(ref_model, chosen_ids, s["chosen_start"], device)
-                            rejected_ref = _logp_for_completion(ref_model, rejected_ids, s["rejected_start"], device)
-                        loss = dpo_loss(chosen_logp, rejected_logp, chosen_ref, rejected_ref, beta=args.beta)
+                            ref_logp = _logp_for_completion(ref_model, ids, s["comp_start"], device)
+                        label_t = torch.tensor([s["label"]], dtype=torch.bool, device=device)
+                        loss = kto_loss(
+                            policy_logp.unsqueeze(0), ref_logp.unsqueeze(0),
+                            label_t, beta=args.kto_beta, kl_ref=kl_ref_point.value)
+                        # Update KL reference point with detached log-ratio.
+                        kl_ref_point.update(policy_logp - ref_logp)
                     else:
-                        # ORPO: per-token average logp + NLL on chosen.
-                        comp_len_c = max(1, len(s["chosen_ids"]) - s["chosen_start"])
-                        comp_len_r = max(1, len(s["rejected_ids"]) - s["rejected_start"])
-                        chosen_logp_pt = chosen_logp / comp_len_c
-                        rejected_logp_pt = rejected_logp / comp_len_r
-                        chosen_nll = -chosen_logp / comp_len_c
-                        loss = orpo_loss(chosen_logp_pt, rejected_logp_pt, chosen_nll, lam=args.lambda_orpo)
+                        chosen_ids = torch.tensor(s["chosen_ids"], dtype=torch.long)
+                        rejected_ids = torch.tensor(s["rejected_ids"], dtype=torch.long)
+                        chosen_logp = _logp_for_completion(model, chosen_ids, s["chosen_start"], device)
+                        rejected_logp = _logp_for_completion(model, rejected_ids, s["rejected_start"], device)
+
+                        if effective_loss == "dpo":
+                            with torch.no_grad():
+                                chosen_ref = _logp_for_completion(ref_model, chosen_ids, s["chosen_start"], device)
+                                rejected_ref = _logp_for_completion(ref_model, rejected_ids, s["rejected_start"], device)
+                            loss = dpo_loss(chosen_logp, rejected_logp, chosen_ref, rejected_ref, beta=args.beta)
+                        else:
+                            # ORPO: per-token average logp + NLL on chosen.
+                            comp_len_c = max(1, len(s["chosen_ids"]) - s["chosen_start"])
+                            comp_len_r = max(1, len(s["rejected_ids"]) - s["rejected_start"])
+                            chosen_logp_pt = chosen_logp / comp_len_c
+                            rejected_logp_pt = rejected_logp / comp_len_r
+                            chosen_nll = -chosen_logp / comp_len_c
+                            loss = orpo_loss(chosen_logp_pt, rejected_logp_pt, chosen_nll, lam=args.lambda_orpo)
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -503,12 +665,13 @@ def main():
                     cleanup_step_checkpoints(args.save, args.keep_checkpoints)
 
                 if step % 5 == 0 or step == args.max_steps - 1:
-                    msg = f"Step {step+1}/{args.max_steps} | {args.method} loss {loss.item():.4f} | lr {lr:.2e} | vram {torch.cuda.memory_allocated()/1e9:.2f} GB"
+                    kl_str = f" | kl_ref {kl_ref_point.value:.4f}" if kl_ref_point is not None else ""
+                    msg = f"Step {step+1}/{args.max_steps} | {effective_loss} loss {loss.item():.4f}{kl_str} | lr {lr:.2e} | vram {torch.cuda.memory_allocated()/1e9:.2f} GB"
                     print(msg)
                     log.log(msg)
                     write_status_json(args.status_file, {
                         "step": step + 1, "max_steps": args.max_steps,
-                        "loss": loss.item(), "lr": lr, "method": args.method,
+                        "loss": loss.item(), "lr": lr, "method": effective_loss,
                     })
                     write_heartbeat(args.heartbeat_file)
                 step += 1

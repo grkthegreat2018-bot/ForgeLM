@@ -415,6 +415,9 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     if strategy == "auto_context":
         from forge.engine.kv.auto_context import AutoContextKVCache
         return AutoContextKVCache()
+    if strategy == "matryoshka":
+        from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
+        return MatryoshkaKVCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()

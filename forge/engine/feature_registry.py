@@ -246,6 +246,14 @@ def _h_conf_kv(eng, _flags):
     return "CONF-KV: confidence-aware budget + mixed FP16/INT8 storage"
 
 
+def _h_matryoshka_kv(eng, _flags):
+    from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
+    n_kv, head_dim = _kv_dims(eng)
+    eng._matryoshka_kv = MatryoshkaKVCache(
+        n_levels=3, importance_metric="norm")
+    return "MatryoshkaKV: nested-granularity KV compression (fp16→bf16→fp8)"
+
+
 # ── Position features ────────────────────────────────────────────────────────
 
 def _h_jet_long(eng, _flags):
@@ -434,6 +442,7 @@ _FEATURE_REGISTRY: list[FeatureSpec] = [
     FeatureSpec("use_moment_kv", _h_moment_kv),
     FeatureSpec("use_kvpop", _h_kvpop),
     FeatureSpec("use_conf_kv", _h_conf_kv),
+    FeatureSpec("use_matryoshka_kv", _h_matryoshka_kv),
     # Position
     FeatureSpec("use_jet_long", _h_jet_long),
     FeatureSpec("use_rope_id", _h_rope_id),
