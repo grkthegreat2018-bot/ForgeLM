@@ -15,6 +15,176 @@ import torch
 import torch.nn as nn
 
 
+# ── NF4 (NormalFloat 4-bit) QLoRA ────────────────────────────────────────
+# R32-1: Proper NF4 QLoRA path for standard nn.Linear models.
+# Paper: QLoRA (Dettmers et al. NeurIPS 2023) — NF4 is the information-
+# theoretically optimal 4-bit normal float distribution for weights that
+# follow a normal distribution. Unlike the existing IRIFP4 QLoRA which
+# only works on IRIFP4Linear layers, NF4 QLoRA works on ANY nn.Linear.
+# The NF4 grid is fixed (not learned) and has 16 levels optimized for
+# the normal distribution of pre-trained LLM weights.
+#
+# VRAM: 4-bit base weights (frozen) + bf16 LoRA adapters (trainable).
+# For V10 (1.2B): ~600MB base (4-bit) + ~50MB LoRA (r=32) = ~650MB total.
+
+_NF4_LEVELS = torch.tensor([
+    -1.0, -0.6961928009986832, -0.5250730514526367, -0.39491748809814453,
+    -0.28444141149520874, -0.18477343022823334, -0.09105003625154495, 0.0,
+    0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
+    0.44070982933044434, 0.5626170048713684, 0.7229568362236023, 1.0,
+], dtype=torch.float32)
+
+
+class NF4Linear(nn.Module):
+    """NF4 quantized linear layer with optional LoRA adapter (QLoRA).
+
+    Stores weights in NF4 (4-bit normal float) with per-group absmax scale.
+    Dequantizes to bf16 for computation. LoRA adapter is optional and trainable.
+
+    Source: QLoRA paper (Dettmers et al. NeurIPS 2023, arXiv 2305.14314)
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False,
+                 group_size: int = 64):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        self.group_size = group_size
+        # Packed: 2 values per int8 byte → (out, in // 2)
+        self.weight_packed = nn.Parameter(
+            torch.zeros(out_features, (in_features + 1) // 2, dtype=torch.uint8),
+            requires_grad=False)
+        # Per-group scales: (out, n_groups)
+        n_groups = (in_features + group_size - 1) // group_size
+        self.weight_scales = nn.Parameter(
+            torch.zeros(out_features, n_groups, dtype=torch.float16),
+            requires_grad=False)
+        self._cached_weight: torch.Tensor | None = None
+        self.lora_adapter: nn.Module | None = None
+
+    @torch.no_grad()
+    def load_from_weight(self, w: torch.Tensor):
+        """Quantize a float weight tensor into NF4 packed format."""
+        assert w.shape == (self.out_features, self.in_features)
+        device = w.device
+        gs = self.group_size
+        n_groups = (self.in_features + gs - 1) // gs
+        # Pad to multiple of group_size
+        pad = n_groups * gs - self.in_features
+        if pad > 0:
+            w = torch.nn.functional.pad(w, (0, pad))
+        # Reshape to (out, n_groups, gs)
+        w_grouped = w.reshape(self.out_features, n_groups, gs)
+        # Per-group absmax scale
+        scales = w_grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+        # Normalize to [-1, 1]
+        w_norm = w_grouped / scales
+        # Quantize to NF4: find nearest level
+        levels = _NF4_LEVELS.to(device)
+        # (out, n_groups, gs, 1) vs (16, 1) → argmin
+        w_exp = w_norm.unsqueeze(-1)  # (out, n_groups, gs, 1)
+        dist = (w_exp - levels.unsqueeze(0).unsqueeze(0).unsqueeze(0)).abs()
+        idx = dist.argmin(dim=-1)  # (out, n_groups, gs)
+        # Pack: 2 indices per byte (each 0-15 → 4 bits)
+        idx_flat = idx.reshape(self.out_features, -1).to(torch.uint8)
+        packed = idx_flat[:, ::2] | (idx_flat[:, 1::2] << 4)
+        self.weight_packed.data = packed.to('cpu')
+        self.weight_scales.data = scales.squeeze(-1).to(torch.float16).to('cpu')
+        self._cached_weight = None
+
+    def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16,
+                           cache: bool = False) -> torch.Tensor:
+        if self._cached_weight is not None:
+            return self._cached_weight.to(dtype)
+        packed = self.weight_packed.data
+        scales = self.weight_scales.data.to(torch.float32)
+        # Unpack: low 4 bits = even idx, high 4 bits = odd idx
+        low = (packed & 0x0F).to(torch.long)
+        high = (packed >> 4).to(torch.long)
+        idx = torch.stack([low, high], dim=-1).reshape(self.out_features, -1)
+        # Trim to in_features
+        idx = idx[:, :self.in_features]
+        # Lookup NF4 levels
+        levels = _NF4_LEVELS.to(idx.device)
+        w_norm = levels[idx]  # (out, in)
+        # Apply per-group scales
+        gs = self.group_size
+        n_groups = scales.shape[1]
+        w_grouped = w_norm.reshape(self.out_features, n_groups, -1)
+        w_scaled = w_grouped * scales.unsqueeze(-1)
+        w = w_scaled.reshape(self.out_features, -1)[:, :self.in_features]
+        if cache:
+            self._cached_weight = w.to(torch.bfloat16)
+        return w.to(dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self._dequantize_weight(x.dtype, cache=True)
+        bias = self.bias.to(x.dtype) if self.bias is not None else None
+        out = torch.nn.functional.linear(x, w, bias)
+        if self.lora_adapter is not None:
+            out = out + self.lora_adapter(x)
+        return out
+
+    @torch.no_grad()
+    def merge_lora(self) -> bool:
+        """Merge LoRA adapter into NF4 weights (QLoRA merge)."""
+        if self.lora_adapter is None:
+            return False
+        lora = self.lora_adapter
+        w = self._dequantize_weight(torch.float32, cache=False)
+        delta = lora.scale * (lora.lora_B @ lora.lora_A)
+        w = w + delta.to(torch.float32)
+        self.load_from_weight(w)
+        self.lora_adapter = None
+        self._cached_weight = None
+        return True
+
+    def extra_repr(self) -> str:
+        return (f"in_features={self.in_features}, "
+                f"out_features={self.out_features}, "
+                f"bias={self.bias is not None}, "
+                f"group_size={self.group_size}, nf4=True")
+
+
+def convert_to_nf4_qlora(model: nn.Module, group_size: int = 64,
+                         target_modules: list[str] | None = None,
+                         min_size: int = 64) -> tuple[int, int]:
+    """Replace nn.Linear with NF4Linear (frozen 4-bit base for QLoRA).
+
+    Does NOT add LoRA adapters — call add_lora_adapters() after this.
+    Returns (n_converted, n_skipped).
+    """
+    n_conv = 0
+    n_skip = 0
+
+    def convert(module, prefix=""):
+        nonlocal n_conv, n_skip
+        for name, child in list(module.named_children()):
+            full_name = f"{prefix}.{name}" if prefix else name
+            is_target = True
+            if target_modules is not None:
+                is_target = any(t in full_name for t in target_modules)
+            if isinstance(child, nn.Linear) and is_target:
+                if child.in_features < min_size or child.out_features < min_size:
+                    n_skip += 1
+                    convert(child, full_name)
+                    continue
+                nf4 = NF4Linear(child.in_features, child.out_features,
+                                bias=child.bias is not None, group_size=group_size)
+                nf4.load_from_weight(child.weight.data)
+                if child.bias is not None:
+                    nf4.bias.data.copy_(child.bias.data)
+                nf4 = nf4.to(child.weight.device)
+                setattr(module, name, nf4)
+                n_conv += 1
+            else:
+                convert(child, full_name)
+
+    convert(model)
+    return n_conv, n_skip
+
+
 # ── BitNet-everywhere ────────────────────────────────────────────────────
 
 def convert_to_bitnet_everywhere(model: nn.Module) -> tuple[int, int]:
@@ -99,10 +269,10 @@ def add_lora_adapters(
     n_adapters = 0
     lora_params = []
 
-    # Check for IRIFP4Linear without importing (avoid circular deps)
-    def is_iri_fp4_linear(mod):
+    # Check for IRIFP4Linear/NF4Linear without importing (avoid circular deps)
+    def is_quant_linear(mod):
         cls = type(mod).__name__
-        return cls == "IRIFP4Linear"
+        return cls in ("IRIFP4Linear", "NF4Linear")
 
     def find_and_add(module, prefix=""):
         nonlocal n_adapters
@@ -110,10 +280,10 @@ def add_lora_adapters(
             full_name = f"{prefix}.{name}" if prefix else name
             has_weight = isinstance(getattr(child, 'weight', None), nn.Parameter)
             has_dims = hasattr(child, 'in_features') and hasattr(child, 'out_features')
-            is_iri = is_iri_fp4_linear(child)
+            is_quant = is_quant_linear(child)
 
-            # Valid target: has dims + (has Parameter weight OR is IRIFP4Linear)
-            if has_dims and (has_weight or is_iri):
+            # Valid target: has dims + (has Parameter weight OR is quantized linear)
+            if has_dims and (has_weight or is_quant):
                 is_target = True
                 if target_modules is not None:
                     is_target = any(t in full_name for t in target_modules)
@@ -122,15 +292,15 @@ def add_lora_adapters(
 
                 if is_target:
                     lora = LoRAAdapter(child.in_features, child.out_features, rank=rank, alpha=alpha)
-                    # Use bfloat16 for LoRA params on IRIFP4 (base is bf16 dequantized)
-                    lora_dtype = torch.bfloat16 if is_iri else (
+                    # Use bfloat16 for LoRA params on quantized linears (base is bf16 dequantized)
+                    lora_dtype = torch.bfloat16 if is_quant else (
                         child.weight.dtype if child.weight.dtype != torch.float32 else torch.bfloat16)
-                    lora = lora.to(child.weight_packed.device if is_iri else child.weight.device).to(lora_dtype)
+                    lora = lora.to(child.weight_packed.device if is_quant else child.weight.device).to(lora_dtype)
                     setattr(child, 'lora_adapter', lora)
 
-                    # For IRIFP4Linear, forward() already checks for lora_adapter
+                    # For IRIFP4Linear/NF4Linear, forward() already checks for lora_adapter
                     # For BitNetLinear/nn.Linear, we need to wrap forward
-                    if not is_iri:
+                    if not is_quant:
                         orig_forward = child.forward
                         child._lora_orig_forward = orig_forward  # save for unload
                         def make_new_forward(orig_fwd, lora_mod):
@@ -161,7 +331,7 @@ def merge_lora_adapters(model: nn.Module) -> int:
     """Merge LoRA adapters into base weights: W += scale * B @ A.
 
     For nn.Linear/BitNetLinear: directly adds delta to weight Parameter.
-    For IRIFP4Linear: dequantizes → adds delta → re-quantizes to IRI-FP4.
+    For IRIFP4Linear/NF4Linear: dequantizes → adds delta → re-quantizes.
     Call before saving checkpoint so output is standalone (no LoRA dependency).
     Returns n_merged.
     """
@@ -169,7 +339,7 @@ def merge_lora_adapters(model: nn.Module) -> int:
     for module in model.modules():
         if hasattr(module, 'lora_adapter') and isinstance(module.lora_adapter, LoRAAdapter):
             cls_name = type(module).__name__
-            if cls_name == "IRIFP4Linear":
+            if cls_name in ("IRIFP4Linear", "NF4Linear"):
                 # QLoRA merge: dequant → merge → re-quantize
                 if module.merge_lora():
                     n_merged += 1

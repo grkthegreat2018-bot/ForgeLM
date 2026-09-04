@@ -183,6 +183,183 @@ class SemanticRouter:
         best_topic, best_sim = max(sims.items(), key=lambda kv: kv[1])
         return best_topic if best_sim >= LOW_CONF_THRESHOLD else "general"
 
+
+# ── R39-7: LASER — Plug-and-Play Expert Routing ──────────────────────────
+
+class LASERRouter:
+    """LASER: Layer-Selective Expert Routing.
+
+    Plug-and-play routing algorithm that modifies expert selection at
+    inference time without retraining. The key insight: not all layers
+    need the same number of active experts. Early layers benefit from
+    more experts (feature extraction), later layers need fewer (reasoning).
+
+    Args:
+        n_experts: Total number of experts per layer.
+        n_layers: Number of MoE layers.
+        default_top_k: Default number of experts to activate.
+        layer_k_overrides: Dict of {layer_idx: top_k} to override defaults.
+    """
+
+    def __init__(self, n_experts: int = 8, n_layers: int = 32,
+                 default_top_k: int = 2,
+                 layer_k_overrides: dict[int, int] | None = None):
+        self.n_experts = n_experts
+        self.n_layers = n_layers
+        self.default_top_k = default_top_k
+        self.layer_k_overrides = layer_k_overrides or {}
+        # Default: early layers get more experts, later layers fewer
+        if not self.layer_k_overrides:
+            for i in range(n_layers):
+                if i < n_layers // 3:
+                    self.layer_k_overrides[i] = min(default_top_k + 1, n_experts)
+                elif i > 2 * n_layers // 3:
+                    self.layer_k_overrides[i] = max(default_top_k - 1, 1)
+                else:
+                    self.layer_k_overrides[i] = default_top_k
+
+    def get_top_k(self, layer_idx: int) -> int:
+        """Get the number of experts to activate for a given layer."""
+        return self.layer_k_overrides.get(layer_idx, self.default_top_k)
+
+    def route(self, router_logits: torch.Tensor, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Route tokens to experts based on layer-specific top-k.
+
+        Args:
+            router_logits: (batch * seq_len, n_experts) raw router logits.
+            layer_idx: Index of the MoE layer.
+
+        Returns:
+            (expert_indices, expert_weights) — top-k experts per token.
+        """
+        top_k = self.get_top_k(layer_idx)
+        probs = F.softmax(router_logits, dim=-1)
+        topk_probs, topk_indices = probs.topk(top_k, dim=-1)
+        # Normalize selected expert weights
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return topk_indices, topk_probs
+
+    def get_config(self) -> dict:
+        """Return the routing configuration for logging."""
+        return {
+            "algorithm": "LASER",
+            "n_experts": self.n_experts,
+            "n_layers": self.n_layers,
+            "default_top_k": self.default_top_k,
+            "layer_overrides": dict(self.layer_k_overrides),
+        }
+
+
+# ── R39-7: METRO — Memory-Efficient Expert Routing ───────────────────────
+
+class METRORouter:
+    """METRO: Memory-Efficient Throughput-Routing.
+
+    Balances activated experts at inference time to reduce decode latency
+    in the memory-bound regime (which is the case for 12GB VRAM).
+
+    Key insight: in the memory-bound regime, decode latency is dominated
+    by expert weight loading, not compute. Balancing expert activation
+    reduces the number of unique experts loaded per batch, improving
+    cache hit rate.
+
+    Args:
+        n_experts: Total number of experts.
+        top_k: Number of experts to activate per token.
+        balance_threshold: Maximum allowed load imbalance ratio.
+            If max_expert_load / mean_expert_load > threshold, rebalance.
+        history_window: Number of recent tokens to track for load balancing.
+    """
+
+    def __init__(self, n_experts: int = 8, top_k: int = 2,
+                 balance_threshold: float = 1.5,
+                 history_window: int = 256):
+        self.n_experts = n_experts
+        self.top_k = top_k
+        self.balance_threshold = balance_threshold
+        self.history_window = history_window
+        # Track expert activation counts
+        self.expert_counts = torch.zeros(n_experts)
+        self.total_tokens = 0
+
+    def route(self, router_logits: torch.Tensor, layer_idx: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        """Route tokens to experts with load balancing.
+
+        If the current expert load is imbalanced, applies a correction
+        factor to the router logits to encourage underutilized experts.
+
+        Args:
+            router_logits: (batch * seq_len, n_experts) raw router logits.
+            layer_idx: Layer index (unused, for API compatibility).
+
+        Returns:
+            (expert_indices, expert_weights) — top-k experts per token.
+        """
+        # Compute current load ratios
+        if self.total_tokens > 0:
+            mean_load = self.expert_counts.mean().clamp(min=1.0)
+            max_load = self.expert_counts.max().clamp(min=1.0)
+            imbalance = max_load / mean_load
+        else:
+            imbalance = 1.0
+
+        # Apply correction if imbalanced
+        if imbalance > self.balance_threshold:
+            # Boost underutilized experts by adding a bonus to their logits
+            mean_load_val = mean_load.item()
+            load_ratio = self.expert_counts / max(mean_load_val, 1.0)
+            # Bonus for underutilized experts (load_ratio < 1), penalty for overused
+            # Scale by imbalance factor for stronger correction when very imbalanced
+            correction_strength = (imbalance - 1.0) * 3.0
+            correction = torch.clamp(
+                (1.0 - load_ratio) * correction_strength, min=-5.0, max=10.0
+            ).to(router_logits.dtype)
+            corrected_logits = router_logits + correction.unsqueeze(0)
+        else:
+            corrected_logits = router_logits
+
+        probs = F.softmax(corrected_logits, dim=-1)
+        topk_probs, topk_indices = probs.topk(self.top_k, dim=-1)
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        # Update expert counts
+        with torch.no_grad():
+            for idx in topk_indices.flatten():
+                self.expert_counts[idx] += 1
+            self.total_tokens += topk_indices.shape[0]
+            # Trim history
+            if self.total_tokens > self.history_window:
+                decay = self.history_window / self.total_tokens
+                self.expert_counts *= decay
+                self.total_tokens = int(self.total_tokens * decay)
+
+        return topk_indices, topk_probs
+
+    def get_load_balance(self) -> float:
+        """Return the current load balance ratio (1.0 = perfectly balanced)."""
+        if self.total_tokens == 0:
+            return 1.0
+        mean_load = self.expert_counts.mean().clamp(min=1.0)
+        max_load = self.expert_counts.max().clamp(min=1.0)
+        min_load = self.expert_counts.min()
+        return (max_load / mean_load).item()
+
+    def reset_stats(self) -> None:
+        """Reset expert load tracking."""
+        self.expert_counts.zero_()
+        self.total_tokens = 0
+
+    def get_config(self) -> dict:
+        """Return the routing configuration for logging."""
+        return {
+            "algorithm": "METRO",
+            "n_experts": self.n_experts,
+            "top_k": self.top_k,
+            "balance_threshold": self.balance_threshold,
+            "history_window": self.history_window,
+            "current_balance": self.get_load_balance(),
+        }
+
     def classify_multi(self, query: str, top_n: int = 2) -> list[str]:
         sims = self._similarities(query)
         ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)

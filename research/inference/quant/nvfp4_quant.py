@@ -326,6 +326,7 @@ def quantize_model_nvfp4(model: nn.Module, block_size: int = 32,
     skip_names = ("embed", "head", "lm_head", "output")
 
     n_quantized = 0
+    n_skipped = 0
     total_orig_bytes = 0
     total_quant_bytes = 0
 
@@ -346,6 +347,7 @@ def quantize_model_nvfp4(model: nn.Module, block_size: int = 32,
                 total_quant_bytes += quantized.weight_packed.numel()  # 0.5 bytes/weight
                 total_quant_bytes += quantized.weight_scales.numel()  # 1 byte/scale (FP8)
             except Exception as e:
+                n_skipped += 1
                 if verbose:
                     print(f"  [NVFP4] Skipped {name}: {e}")
 
@@ -355,4 +357,12 @@ def quantize_model_nvfp4(model: nn.Module, block_size: int = 32,
               f"(block_size={block_size}, w4a8={w4a8})")
         print(f"  [NVFP4] weight memory: {total_quant_bytes/1024**2:.1f} MB "
               f"(was {total_orig_bytes/1024**2:.1f} MB, {compression:.1f}x compression)")
+
+    # If too many layers were skipped due to OOM, raise so the fallback chain
+    # can try a lighter quantization (w8a8, int8, int4) instead of leaving
+    # the model in a half-quantized state that will OOM during generation.
+    if n_skipped > 0 and n_skipped >= n_quantized:
+        raise torch.cuda.OutOfMemoryError(
+            f"NVFP4 skipped {n_skipped}/{n_quantized + n_skipped} layers due to OOM. "
+            f"Falling back to lighter quantization.")
     return n_quantized

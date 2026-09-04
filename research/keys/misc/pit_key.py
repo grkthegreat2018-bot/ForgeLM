@@ -101,9 +101,21 @@ class PITEmbedding(nn.Module):
         self.register_buffer("tril_mask", torch.tril(torch.ones(d_model, d_model)),
                              persistent=False)
 
-    def get_T(self) -> torch.Tensor:
-        """Compute T = L · L^T (SPD transform)."""
-        L = self.L * self.tril_mask  # enforce lower-triangular
+    def get_T(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Compute T = L · L^T (SPD transform).
+
+        Args:
+            dtype: if given, cast L and tril_mask to this dtype before
+                computing T. This prevents dtype mismatch when L is bf16
+                but tril_mask is float32 (type promotion would make T
+                float32, breaking bf16 matmuls downstream).
+        """
+        L = self.L
+        mask = self.tril_mask
+        if dtype is not None:
+            L = L.to(dtype)
+            mask = mask.to(dtype)
+        L = L * mask  # enforce lower-triangular
         return L @ L.transpose(-1, -2)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -115,8 +127,6 @@ class PITEmbedding(nn.Module):
         Returns:
             (B, seq_len, d_model) embedded vectors.
         """
-        L = self.L * self.tril_mask  # [D, D], lower-triangular
-
         # M[token]: (B, seq_len, D)
         embed = F.embedding(input_ids, self.memory, padding_idx=self.padding_idx)
         # embed: (B, seq_len, D)
@@ -131,12 +141,19 @@ class PITEmbedding(nn.Module):
         B, S, D = embed.shape
         x = embed.reshape(-1, D).unsqueeze(-1)  # (B*S, D, 1)
 
-        # solve(L, x): solves L · y = x
-        y = torch.linalg.solve_triangular(L, x, upper=False)
-        # solve(L^T, y): solves L^T · z = y
-        z = torch.linalg.solve_triangular(L.transpose(-1, -2), y, upper=True)
+        # triangular_solve_cuda not implemented for BFloat16 on CUDA —
+        # upcast to float32 for the solve, then cast back.
+        orig_dtype = x.dtype
+        L = self.L * self.tril_mask  # enforce lower-triangular
+        L_f = L.float() if L.dtype != torch.float32 else L
+        x_f = x.float() if x.dtype != torch.float32 else x
 
-        z = z.squeeze(-1).reshape(B, S, D)
+        # solve(L, x): solves L · y = x
+        y = torch.linalg.solve_triangular(L_f, x_f, upper=False)
+        # solve(L^T, y): solves L^T · z = y
+        z = torch.linalg.solve_triangular(L_f.transpose(-1, -2), y, upper=True)
+
+        z = z.squeeze(-1).reshape(B, S, D).to(orig_dtype)
         return z
 
 
@@ -166,9 +183,20 @@ class PITLMHead(nn.Module):
         """Create a PITLMHead sharing parameters with a PITEmbedding."""
         return cls(embed.memory, embed.L, embed.tril_mask, bias=bias)
 
-    def get_T(self) -> torch.Tensor:
-        """Compute T = L · L^T."""
-        L = self.L * self.tril_mask
+    def get_T(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Compute T = L · L^T.
+
+        Args:
+            dtype: if given, cast L and tril_mask to this dtype before
+                computing T. Prevents dtype mismatch when tril_mask is
+                float32 but L/model is bf16.
+        """
+        L = self.L
+        mask = self.tril_mask
+        if dtype is not None:
+            L = L.to(dtype)
+            mask = mask.to(dtype)
+        L = L * mask
         return L @ L.transpose(-1, -2)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -180,7 +208,7 @@ class PITLMHead(nn.Module):
         Returns:
             (B, seq_len, V) logits.
         """
-        T = self.get_T()  # [D, D]
+        T = self.get_T(dtype=hidden.dtype)  # [D, D], matches hidden dtype
         # Apply T to hidden: h_T = h @ T  (T is symmetric, so T·h = h·T^T = h·T)
         h_transformed = hidden @ T  # (B, seq_len, D)
         # Project to vocab: logits = h_T @ M^T

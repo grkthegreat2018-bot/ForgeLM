@@ -861,6 +861,13 @@ def main():
     p.add_argument("--manual-lora", action="store_true",
                    help="Use manual LoRA adapters (BitNet-compatible, unlike PEFT). "
                         "Works with BitNetLinear. Auto-enabled with --bitnet-everywhere.")
+    p.add_argument("--qlora-nf4", action="store_true",
+                   help="R32-1: NF4 QLoRA — quantize base weights to NF4 (4-bit normal float) "
+                        "and train LoRA adapters on top. Works on standard nn.Linear models "
+                        "(no BitNet needed). Industry-standard QLoRA path (Dettmers et al. 2023). "
+                        "Use with --no-bitnet-everywhere. LoRA is auto-enabled.")
+    p.add_argument("--nf4-group-size", type=int, default=64,
+                   help="NF4 group size for per-group scaling (default 64)")
     p.add_argument("--save-lora-adapter", action="store_true",
                    help="Additionally save ONLY the trained LoRA tensors to "
                         "'<save-stem>.lora.safetensors' (small file, hot-loadable "
@@ -1205,9 +1212,23 @@ def main():
         n_conv, n_already = convert_to_bitnet_everywhere(model)
         print(f"BitNet-everywhere: {n_conv} Linear → BitNetLinear, {n_already} already BitNet")
 
+    # ── R32-1: NF4 QLoRA — quantize base to NF4, then add LoRA adapters ──
+    if args.qlora_nf4:
+        from research.training.bitnet_lora import convert_to_nf4_qlora
+        target_mods = ["q_proj", "k_proj", "v_proj", "out_proj",
+                       "w_gate", "w_up", "w_down"]
+        n_conv, n_skip = convert_to_nf4_qlora(
+            model, group_size=args.nf4_group_size, target_modules=target_mods)
+        print(f"NF4 QLoRA: {n_conv} Linear → NF4Linear ({n_skip} skipped), "
+              f"group_size={args.nf4_group_size}")
+        # Force manual LoRA (NF4Linear needs manual adapters, PEFT can't handle it)
+        args.lora = True
+        args.manual_lora = True
+
     # ── LoRA ──
-    # Use manual LoRA if --bitnet-everywhere or --manual-lora (PEFT can't handle BitNetLinear).
-    # Use PEFT LoRA only for --lora on non-BitNet models.
+    # Use manual LoRA if --bitnet-everywhere or --manual-lora or --qlora-nf4
+    # (PEFT can't handle BitNetLinear or NF4Linear).
+    # Use PEFT LoRA only for --lora on non-BitNet, non-NF4 models.
     use_manual_lora = args.manual_lora or (args.bitnet_everywhere and args.lora)
 
     if use_manual_lora:

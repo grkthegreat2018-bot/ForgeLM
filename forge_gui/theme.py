@@ -11,7 +11,11 @@ if TYPE_CHECKING:
 
 
 class Palette:
-    """Central color tokens (hex strings + QColor)."""
+    """Central color tokens (hex strings + QColor).
+
+    R36-1: Now supports theme switching. The class attributes are the
+    ACTIVE theme's values. Use ``ThemeManager.apply()`` to switch themes.
+    """
 
     bg = "#090c12"
     bg_alt = "#0e121b"
@@ -43,6 +47,154 @@ class Palette:
     @classmethod
     def qcolor(cls, name: str) -> QColor:
         return QColor(getattr(cls, name))
+
+
+# ── R36-1: Light theme palette ─────────────────────────────────────────────
+
+_LIGHT_TOKENS = {
+    "bg":           "#f5f7fa",
+    "bg_alt":       "#eaeef3",
+    "panel":        "#ffffff",
+    "panel_alt":    "#f0f3f8",
+    "border":       "#d0d8e4",
+    "border_hi":    "#b0bcd0",
+    "text":         "#1a2332",
+    "text_dim":     "#4a5a72",
+    "text_faint":   "#8090a8",
+    "accent":       "#4a6fe3",
+    "accent_hi":    "#3a5fd0",
+    "accent_dim":   "#a0b8f0",
+    "accent2":      "#1ab8a8",
+    "ok":           "#2a9a3e",
+    "warn":         "#b88200",
+    "err":           "#d63838",
+    "grad_a":       "#4a6fe3",
+    "grad_b":        "#8a4fe3",
+    "card_hover":    "#8aa0c8",
+    "surface_hover": "#e8edf5",
+    "chart_grid":    "#e0e8f0",
+    "chart_loss":    "#d63838",
+    "chart_lr":      "#b88200",
+    "chart_reward":  "#2a9a3e",
+    "chart_kl":      "#8a4fe3",
+    "chart_div":     "#4a6fe3",
+}
+
+_DARK_TOKENS = {
+    "bg":           "#090c12",
+    "bg_alt":       "#0e121b",
+    "panel":        "#161b28",
+    "panel_alt":    "#1d2432",
+    "border":       "#232b3c",
+    "border_hi":    "#313c55",
+    "text":         "#e8edf5",
+    "text_dim":     "#93a0b4",
+    "text_faint":   "#5d687c",
+    "accent":       "#8aa3ff",
+    "accent_hi":    "#aebdff",
+    "accent_dim":   "#40508a",
+    "accent2":      "#3ad9c9",
+    "ok":           "#3fb950",
+    "warn":         "#d29922",
+    "err":          "#f85149",
+    "grad_a":       "#8aa3ff",
+    "grad_b":       "#a06bff",
+    "card_hover":   "#3b4a6b",
+    "surface_hover":"#1d2432",
+    "chart_grid":   "#1c2333",
+    "chart_loss":   "#f85149",
+    "chart_lr":     "#d29922",
+    "chart_reward": "#3fb950",
+    "chart_kl":     "#a06bff",
+    "chart_div":    "#8aa3ff",
+}
+
+
+class ThemeManager:
+    """R36-1: Manages dark/light theme switching + font scaling (R36-4)."""
+
+    THEMES = ("dark", "light")
+    FONT_SIZES = {"small": 9, "medium": 10, "large": 12, "xl": 14}
+    _current_theme = "dark"
+    _current_font_size = "medium"
+    _app = None
+
+    @classmethod
+    def init(cls, app: "QApplication") -> None:
+        """Initialize from QSettings."""
+        from PySide6.QtCore import QSettings
+        cls._app = app
+        s = QSettings("ForgeAI", "ForgeGUI")
+        cls._current_theme = s.value("theme", "dark")
+        cls._current_font_size = s.value("fontSize", "medium")
+
+    @classmethod
+    def current_theme(cls) -> str:
+        return cls._current_theme
+
+    @classmethod
+    def current_font_size(cls) -> str:
+        return cls._current_font_size
+
+    @classmethod
+    def toggle_theme(cls) -> str:
+        """Switch to the other theme. Returns the new theme name."""
+        cls._current_theme = "light" if cls._current_theme == "dark" else "dark"
+        cls.apply(cls._app)
+        return cls._current_theme
+
+    @classmethod
+    def set_theme(cls, theme: str) -> None:
+        if theme not in cls.THEMES:
+            return
+        cls._current_theme = theme
+        cls.apply(cls._app)
+
+    @classmethod
+    def set_font_size(cls, size: str) -> None:
+        if size not in cls.FONT_SIZES:
+            return
+        cls._current_font_size = size
+        cls.apply(cls._app)
+
+    @classmethod
+    def apply(cls, app: "QApplication") -> None:
+        """Apply current theme + font size to the application."""
+        if app is None:
+            return
+        tokens = _LIGHT_TOKENS if cls._current_theme == "light" else _DARK_TOKENS
+        # Update Palette class attributes
+        for k, v in tokens.items():
+            setattr(Palette, k, v)
+        # Apply QSS
+        app.setStyleSheet(QSS.substitute(**tokens))
+        # Apply QPalette
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(tokens["bg"]))
+        pal.setColor(QPalette.ColorRole.Base, QColor(tokens["bg_alt"]))
+        pal.setColor(QPalette.ColorRole.Text, QColor(tokens["text"]))
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(tokens["text_faint"]))
+        pal.setColor(QPalette.ColorRole.Button, QColor(tokens["panel_alt"]))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor(tokens["text"]))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(tokens["accent_dim"]))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(tokens["text"]))
+        app.setPalette(pal)
+        # R36-4: Font scaling
+        f = QFont()
+        fam = QFontDatabase.families()
+        for preferred in ("Inter", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Roboto"):
+            if preferred in fam:
+                f.setFamily(preferred)
+                break
+        else:
+            f.setFamilies(["Inter", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Roboto"])
+        f.setPointSize(cls.FONT_SIZES.get(cls._current_font_size, 10))
+        app.setFont(f)
+        # Persist
+        from PySide6.QtCore import QSettings
+        s = QSettings("ForgeAI", "ForgeGUI")
+        s.setValue("theme", cls._current_theme)
+        s.setValue("fontSize", cls._current_font_size)
 
 
 def _palette_tokens() -> dict[str, str]:
@@ -332,25 +484,10 @@ QTabBar::tab:hover { color: #e8edf5; }
 
 
 def apply_theme(app: "QApplication") -> None:
-    """Apply the ForgeAI dark theme to the application."""
-    app.setStyleSheet(QSS.substitute(**_palette_tokens()))
-    pal = QPalette()
-    pal.setColor(QPalette.ColorRole.Window, Palette.qcolor("bg"))
-    pal.setColor(QPalette.ColorRole.Base, Palette.qcolor("bg_alt"))
-    pal.setColor(QPalette.ColorRole.Text, Palette.qcolor("text"))
-    pal.setColor(QPalette.ColorRole.PlaceholderText, Palette.qcolor("text_faint"))
-    pal.setColor(QPalette.ColorRole.Button, Palette.qcolor("panel_alt"))
-    pal.setColor(QPalette.ColorRole.ButtonText, Palette.qcolor("text"))
-    pal.setColor(QPalette.ColorRole.Highlight, Palette.qcolor("accent_dim"))
-    pal.setColor(QPalette.ColorRole.HighlightedText, Palette.qcolor("text"))
-    app.setPalette(pal)
-    f = QFont()
-    fam = QFontDatabase.families()
-    for preferred in ("Inter", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Roboto"):
-        if preferred in fam:
-            f.setFamily(preferred)
-            break
-    else:
-        f.setFamilies(["Inter", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Roboto"])
-    f.setPointSize(10)
-    app.setFont(f)
+    """Apply the ForgeAI theme to the application.
+
+    R36-1: Now delegates to ThemeManager which respects the persisted
+    theme (dark/light) and font size (R36-4) from QSettings.
+    """
+    ThemeManager.init(app)
+    ThemeManager.apply(app)

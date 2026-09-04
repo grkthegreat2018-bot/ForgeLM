@@ -205,15 +205,20 @@ class MambaLayer(nn.Module):
         # Conv1d (depthwise causal)
         # For incremental decoding (T=1), use conv state
         if T == 1 and past_key_value is not None and 'conv_state' in past_key_value:
-            # Incremental: roll the conv state buffer
+            # Incremental: causal conv with kernel d_conv.
+            # conv_state = [x[t-d_conv+1], ..., x[t-1]]  (d_conv-1 elements)
+            # new input = x[t]
+            # Causal conv (PyTorch cross-correlation with left padding):
+            #   y[t] = w[0]*x[t-d_conv+1] + w[1]*x[t-d_conv+2] + ... + w[d_conv-1]*x[t]
             conv_state = past_key_value['conv_state']  # (B, d_inner, d_conv-1)
             x_t = x.transpose(1, 2)  # (B, d_inner, 1)
-            # New conv state = shift left, append new input
+            # Full input: [old_state ..., new_input]  → (B, d_inner, d_conv)
+            full_input = torch.cat([conv_state, x_t], dim=-1)
+            # New conv state for next step = shift left, append new input
             new_conv_state = torch.cat([conv_state[:, :, 1:], x_t], dim=-1)
-            # Compute conv output manually: sum(weight * state) + bias
-            # conv1d.weight shape: (d_inner, 1, d_conv)
+            # Compute conv output: apply ALL d_conv weights to full_input
             w = self.conv1d.weight.squeeze(1)  # (d_inner, d_conv)
-            conv_out = (w[:, :d_conv-1] * new_conv_state).sum(dim=-1, keepdim=True)
+            conv_out = (w * full_input).sum(dim=-1, keepdim=True)  # (B, d_inner, 1)
             if self.conv1d.bias is not None:
                 conv_out = conv_out + self.conv1d.bias.unsqueeze(0).unsqueeze(-1)
             x = conv_out.transpose(1, 2)  # (B, 1, d_inner)

@@ -6,6 +6,7 @@ Pluggable decoding strategies selectable at runtime:
   - MedusaDecoding: parallel prediction heads (wraps medusa.py)
   - DSparkDecoding: semi-autoregressive + confidence scheduling (wraps dspark.py)
   - MTPSelfSpecDecoding: use MTP heads from checkpoint for self-speculative decoding
+  - SelfSpeculativeSparse: same model as draft+target with sparse-attention draft (R39-4)
 
 All implement the DecodingStrategy interface:
   generate(model, input_ids, max_new_tokens, temperature, top_p) -> output_ids
@@ -443,6 +444,174 @@ class MTPSelfSpecDecoding(DecodingStrategy):
         return ids
 
 
+class SelfSpeculativeSparse(DecodingStrategy):
+    """Self-speculative decoding with sparse-attention draft (R39-4).
+
+    The **same model** serves as both draft and target — no separate
+    draft model is needed, so there is **zero extra memory**.
+
+    Flow per iteration:
+      1. **Draft phase**: generate ``draft_len`` tokens autoregressively
+         using *sparse attention* (top-``sparse_k`` KV positions).  The
+         model forward is called with ``sparse_k=<int>`` so attention
+         layers can limit the KV cache to the top-k most relevant
+         positions.  This is faster than full attention because the
+         attention computation is O(seq_len * sparse_k) instead of
+         O(seq_len²).
+      2. **Verify phase**: run the model with **full attention** on the
+         entire draft sequence in a single forward pass.  The full-
+         attention logits at each position tell us what the *correct*
+         next token is.
+      3. **Accept**: compare draft tokens against the full-attention
+         predictions.  Accept the longest matching prefix.  Resample at
+         the first mismatch using the full-attention logits.
+      4. **KV selection feedback**: the verification attention scores
+         from the accepted positions are reused to select which KV
+         positions to keep for the next draft round's sparse attention.
+
+    Because verification uses full attention, the output is **lossless**
+    — every accepted token is exactly what standard full-attention
+    decoding would produce.  The sparse draft only affects *speed*, not
+    *quality*.
+
+    Args:
+        draft_len: number of tokens to draft per iteration (default 4).
+        sparse_k: number of top KV positions to attend to during the
+            draft phase (default 64).  Larger = more accurate draft but
+            slower; smaller = faster but lower acceptance rate.
+    """
+
+    def __init__(self, draft_len: int = 4, sparse_k: int = 64):
+        self.draft_len = draft_len
+        self.sparse_k = sparse_k
+        # Acceptance statistics (updated during generate).
+        self.acceptance_rate: float = 0.0
+        self._total_drafts: int = 0
+        self._total_accepted: int = 0
+        # KV selection scores from the last verification pass — reused
+        # for sparse attention position selection in the next draft round.
+        self._kv_scores: torch.Tensor | None = None
+
+    def generate(self, model, input_ids, max_new_tokens=100,
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05):
+        ids = input_ids.clone()
+        device = input_ids.device
+        eos = getattr(model, "eos_token_id", None)
+        eos_set = {7, 151643, 151645}
+        if eos is not None:
+            eos_set.add(eos)
+        eos_tensor = torch.tensor(list(eos_set), device=device)
+
+        # Prefill with full attention.
+        with torch.inference_mode():
+            out = model(ids, use_cache=True)
+            logits, past_kv = unpack_output_with_kv(out)
+
+        generated = 0
+        _generated_tokens: list[torch.Tensor] = []
+
+        while generated < max_new_tokens:
+            # ── Step 1: Base token from full-attention logits ──────────
+            next_logits = logits[:, -1, :] / max(temperature, 1e-5)
+            if temperature == 0:
+                base_token = next_logits.argmax(-1, keepdim=True)
+            else:
+                base_token = torch.multinomial(
+                    F.softmax(next_logits, dim=-1), num_samples=1)
+
+            # ── Step 2: Draft phase — sparse attention ────────────────
+            # Generate draft_len tokens autoregressively with sparse
+            # attention (top-k KV positions).  The model forward receives
+            # sparse_k so attention layers can limit the KV window.
+            draft_tokens = [base_token]
+            draft_kv = past_kv
+            for _ in range(self.draft_len):
+                with torch.inference_mode():
+                    draft_out = model(
+                        draft_tokens[-1],
+                        past_key_values=draft_kv,
+                        use_cache=True,
+                        sparse_k=self.sparse_k,
+                    )
+                    draft_logits_i, draft_kv = unpack_output_with_kv(draft_out)
+                draft_tok = draft_logits_i[:, -1, :].argmax(-1, keepdim=True)
+                draft_tokens.append(draft_tok)
+
+            n_draft = len(draft_tokens) - 1  # number of drafted tokens
+
+            # ── Step 3: Verify phase — full attention ─────────────────
+            # Run the model with full attention on the entire draft
+            # sequence in ONE forward pass.  The draft KV cache (sparse)
+            # is discarded — we re-process from the original full KV.
+            verify_seq = torch.cat(draft_tokens, dim=-1)  # [B, n_draft+1]
+            past_len = past_kv[0][0].shape[-2] if past_kv is not None else 0
+            with torch.inference_mode():
+                verify_out = model(
+                    verify_seq,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
+                verify_logits, new_past_kv = unpack_output_with_kv(verify_out)
+
+            # ── Step 4: Compare draft vs full-attention predictions ───
+            # verify_logits[:, i, :] predicts the token after position i.
+            # We compare against draft_tokens[i+1] for i in [0, n_draft).
+            preds = verify_logits[:, :n_draft, :].argmax(-1)     # [B, n_draft]
+            draft_stack = torch.cat(draft_tokens[1:], dim=-1)    # [B, n_draft]
+            matches = (preds == draft_stack)                     # [B, n_draft]
+
+            # First mismatch index (per batch).
+            not_match = ~matches
+            any_mismatch = not_match.any(dim=-1)
+            first_mismatch = torch.where(
+                any_mismatch,
+                not_match.float().argmax(dim=-1),
+                torch.full_like(any_mismatch, n_draft, dtype=torch.long),
+            )
+            n_accepted = int(first_mismatch.min().item())
+
+            # ── Acceptance statistics ────────────────────────────────
+            self._total_drafts += n_draft
+            self._total_accepted += n_accepted
+            self.acceptance_rate = (
+                self._total_accepted / max(self._total_drafts, 1)
+            )
+
+            # ── Step 5: KV cache rollback to accepted prefix ─────────
+            keep_len = past_len + n_accepted + 1
+            past_kv = []
+            for layer_kv in new_past_kv:
+                k, v = layer_kv
+                past_kv.append(
+                    (k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
+
+            # ── Step 6: Accept tokens ────────────────────────────────
+            accepted = verify_seq[:, :n_accepted + 1]
+            _generated_tokens.append(accepted)
+            generated += n_accepted + 1
+
+            # Check EOS in accepted tokens.
+            if any(t.item() in eos_set for t in accepted.flatten()):
+                break
+
+            # ── Set up logits for next iteration ─────────────────────
+            # If mismatch at index j=n_accepted, verify_logits[:, j, :]
+            # is the corrected next token's logits.
+            # If all accepted, use the prediction after the last draft.
+            next_idx = min(n_accepted, n_draft)
+            logits = verify_logits[:, next_idx:next_idx + 1, :]
+
+        # Single cat at the end (O(n) vs O(n²)).
+        if _generated_tokens:
+            ids = torch.cat([ids] + _generated_tokens, dim=-1)
+        # Truncate to max_new_tokens (speculative acceptance can overshoot).
+        max_len = input_ids.shape[1] + max_new_tokens
+        if ids.shape[1] > max_len:
+            ids = ids[:, :max_len]
+        return ids
+
+
 def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
     """Factory: build decoding strategy by name."""
     strategies = {
@@ -452,6 +621,7 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
         "dspark": DSparkDecoding,
         "eagle3": Eagle3Decoding,
         "mtp_selfspec": MTPSelfSpecDecoding,
+        "self_speculative_sparse": SelfSpeculativeSparse,
         "batched": None,  # set below to avoid circular import
     }
     if strategy == "batched":

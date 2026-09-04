@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QSplashScreen,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -49,7 +50,7 @@ from .pages.models import ModelsPage
 from .pages.selfplay import SelfPlayPage
 from .pages.tasks import TasksPage
 from .pages.training import TrainingPage
-from .theme import Palette, apply_theme
+from .theme import Palette, ThemeManager, apply_theme
 from .widgets.sidebar import NavSidebar
 
 logger = logging.getLogger(__name__)
@@ -138,39 +139,21 @@ class MainWindow(QMainWindow):
         self.sidebar = NavSidebar(PAGES)
         self.sidebar.page_changed.connect(self._on_page_changed)
 
-        # ---- pages ----
-        # Order MUST match PAGES (excluding section headers).
+        # ---- pages (lazy construction) ----
+        # R35-1: Pages are constructed on first visit, not at startup.
+        # This reduces boot time and memory — most users don't visit all 14 pages.
         self.pages = QStackedWidget(); self.pages.setObjectName("pages")
-        self.page_dashboard = DashboardPage(self.gpu, self.status_reader, self.models_index)
-        self.page_chat = ChatPage(self.chat_store, self.engine_runtime,
-                                  self.models_index, self.lorebook,
-                                  self.lora_harness, self.tool_harness)
-        self.page_agent = AgentPage(self.engine_runtime, self.tool_harness,
-                                    self.lorebook)
-        self.page_generations = GenerationsPage(self.engine_runtime, self.models_index)
-        self.page_engine = EnginePage(self.engine_runtime, self.models_index)
-        self.page_models = ModelsPage(self.models_index, self.engine_runtime)
-        self.page_lora = LoraPage(self.engine_runtime, self.lora_mgr,
-                                  self.models_index)
-        self.page_finetune = FineTunePage(self.chat_store, self.proc_mgr)
-        self.page_selfplay = SelfPlayPage(self.status_reader, self.proc_mgr)
-        self.page_training = TrainingPage(self.status_reader)
-        self.page_launch = LaunchPage(self.proc_mgr)
-        self.page_tasks = TasksPage(self.proc_mgr, self.status_reader)
-        self.page_compute = ComputePage(self.gpu)
-        self.page_logs = LogsPage(self.log_tailer)
-        for p in (self.page_dashboard, self.page_chat, self.page_agent,
-                  self.page_generations, self.page_engine, self.page_models,
-                  self.page_lora, self.page_finetune, self.page_selfplay,
-                  self.page_training, self.page_launch, self.page_tasks,
-                  self.page_compute, self.page_logs):
-            self.pages.addWidget(p)
+        self._page_factories = self._build_page_factories()
+        self._page_cache: dict[int, QWidget] = {}
+        # Pre-construct only the Dashboard (first visible page)
+        self._page_cache[0] = self._page_factories[0]()
+        self.pages.addWidget(self._page_cache[0])
+        # Add placeholder widgets for remaining pages (replaced on first visit)
+        for i in range(1, len(self._page_factories)):
+            ph = QWidget()  # lightweight placeholder
+            self.pages.addWidget(ph)
 
-        # cross-page navigation signals
-        self.page_models.request_open.connect(self._navigate_to)
-        self.page_lora.request_open.connect(
-            lambda idx: self._navigate_to(_PAGE_INDEX["Fine-Tune"])
-            if idx < 0 else self._navigate_to(idx))
+        # cross-page navigation signals (connected on first page construction)
 
         # ---- topbar ----
         topbar = QFrame(); topbar.setObjectName("topbar"); topbar.setFixedHeight(64)
@@ -184,6 +167,17 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.live_dot)
         self.clock = QLabel("--:--:--"); self.clock.setObjectName("clock")
         tb.addWidget(self.clock)
+        # R36-1: Theme toggle button
+        from PySide6.QtWidgets import QPushButton
+        self.theme_btn = QPushButton("◐"); self.theme_btn.setFixedSize(32, 32)
+        self.theme_btn.setToolTip("Toggle light/dark theme")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        tb.addWidget(self.theme_btn)
+        # R36-4: Font size button
+        self.font_btn = QPushButton("A"); self.font_btn.setFixedSize(32, 32)
+        self.font_btn.setToolTip("Cycle font size (S/M/L/XL)")
+        self.font_btn.clicked.connect(self._cycle_font_size)
+        tb.addWidget(self.font_btn)
 
         # ---- layout ----
         central = QWidget(); central.setObjectName("root")
@@ -233,9 +227,20 @@ class MainWindow(QMainWindow):
         self.page_subtitle.setText(_SUBTITLES.get(_name, ""))
         QTimer.singleShot(0, lambda: self.sidebar.select_page(last_page))
 
+        # R36-2: First-run onboarding (deferred so window appears first)
+        QTimer.singleShot(500, self._maybe_show_onboarding)
+
         # NOTE: no eager _refresh_slow()/_refresh_fast() here — the timers
         # (started above) fire on the next event-loop tick after win.show(),
         # so the window appears before GPU/CUDA init or page scans run.
+
+    def _maybe_show_onboarding(self) -> None:
+        """R36-2: Show onboarding dialog on first run."""
+        try:
+            from .widgets.onboarding import maybe_show_onboarding
+            maybe_show_onboarding(self)
+        except Exception as e:
+            logger.debug("onboarding skipped: %s", e)
 
     def _setup_shortcuts(self) -> None:
         # Ctrl+1..N switch pages (N = number of selectable pages)
@@ -248,6 +253,36 @@ class MainWindow(QMainWindow):
         # Ctrl+B toggle sidebar collapse
         sc_sidebar = QShortcut(QKeySequence("Ctrl+B"), self)
         sc_sidebar.activated.connect(self.sidebar.toggle_collapse)
+        # R36-3: Ctrl+K command palette
+        sc_palette = QShortcut(QKeySequence("Ctrl+K"), self)
+        sc_palette.activated.connect(self._open_command_palette)
+        # R36-1: Ctrl+Shift+T toggle theme
+        sc_theme = QShortcut(QKeySequence("Ctrl+Shift+T"), self)
+        sc_theme.activated.connect(self._toggle_theme)
+        # R36-4: Ctrl+Shift+F cycle font size
+        sc_font = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        sc_font.activated.connect(self._cycle_font_size)
+
+    def _toggle_theme(self) -> None:
+        """R36-1: Toggle between dark and light themes."""
+        new_theme = ThemeManager.toggle_theme()
+        self.theme_btn.setText("◑" if new_theme == "light" else "◐")
+
+    def _cycle_font_size(self) -> None:
+        """R36-4: Cycle through font sizes S→M→L→XL→S."""
+        sizes = list(ThemeManager.FONT_SIZES.keys())
+        current = ThemeManager.current_font_size()
+        idx = sizes.index(current) if current in sizes else 1
+        next_size = sizes[(idx + 1) % len(sizes)]
+        ThemeManager.set_font_size(next_size)
+        self.font_btn.setText(f"A{next_size[0].upper()}")
+
+    def _open_command_palette(self) -> None:
+        """R36-3: Open the command palette dialog."""
+        from .widgets.command_palette import CommandPalette
+        palette = CommandPalette(self, _INDEX_TO_NAME)
+        palette.page_selected.connect(self._navigate_to)
+        palette.exec()
 
     def _force_refresh(self) -> None:
         page = self.pages.currentWidget()
@@ -275,6 +310,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
     def _on_page_changed(self, idx: int) -> None:
+        self._ensure_page_constructed(idx)
         self.pages.setCurrentIndex(idx)
         name = _INDEX_TO_NAME.get(idx, "")
         self.page_title.setText(name)
@@ -285,6 +321,50 @@ class MainWindow(QMainWindow):
         page = self.pages.widget(idx)
         if hasattr(page, "refresh"):
             page.refresh()
+
+    def _ensure_page_constructed(self, idx: int) -> None:
+        """R35-1: Lazily construct a page on first visit."""
+        if idx in self._page_cache:
+            return
+        if idx < 0 or idx >= len(self._page_factories):
+            return
+        page = self._page_factories[idx]()
+        self._page_cache[idx] = page
+        # Replace the placeholder widget in the stacked widget
+        old_widget = self.pages.widget(idx)
+        self.pages.removeWidget(old_widget)
+        old_widget.deleteLater()
+        self.pages.insertWidget(idx, page)
+        # Connect cross-page navigation signals
+        if hasattr(page, "request_open"):
+            page.request_open.connect(self._navigate_to)
+        if idx == _PAGE_INDEX.get("LoRA", -1):
+            page.request_open.connect(
+                lambda i: self._navigate_to(_PAGE_INDEX["Fine-Tune"])
+                if i < 0 else self._navigate_to(i))
+
+    def _build_page_factories(self) -> list:
+        """R35-1: Factory closures for lazy page construction."""
+        return [
+            lambda: DashboardPage(self.gpu, self.status_reader, self.models_index),
+            lambda: ChatPage(self.chat_store, self.engine_runtime,
+                             self.models_index, self.lorebook,
+                             self.lora_harness, self.tool_harness),
+            lambda: AgentPage(self.engine_runtime, self.tool_harness,
+                              self.lorebook),
+            lambda: GenerationsPage(self.engine_runtime, self.models_index),
+            lambda: EnginePage(self.engine_runtime, self.models_index),
+            lambda: ModelsPage(self.models_index, self.engine_runtime),
+            lambda: LoraPage(self.engine_runtime, self.lora_mgr,
+                             self.models_index),
+            lambda: FineTunePage(self.chat_store, self.proc_mgr),
+            lambda: SelfPlayPage(self.status_reader, self.proc_mgr),
+            lambda: TrainingPage(self.status_reader),
+            lambda: LaunchPage(self.proc_mgr),
+            lambda: TasksPage(self.proc_mgr, self.status_reader),
+            lambda: ComputePage(self.gpu),
+            lambda: LogsPage(self.log_tailer),
+        ]
 
     def _navigate_to(self, idx: int) -> None:
         """Programmatic page switch (from cross-page signals)."""
@@ -351,8 +431,21 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("ForgeAI Control Center")
     apply_theme(app)
+
+    # R35-2: Splash screen during startup
+    splash = QSplashScreen()
+    splash_msg = "Loading ForgeAI…"
+    splash.setStyleSheet(
+        "QSplashScreen { background: #1a1a2e; color: #e0e0e0; }"
+        "QLabel { color: #e0e0e0; font-size: 14px; padding: 20px; }"
+    )
+    splash.showMessage(splash_msg, 0x84)  # AlignBottom | AlignHCenter
+    splash.show()
+    app.processEvents()
+
     win = MainWindow()
     win.show()
+    splash.finish(win)
     return app.exec()
 
 

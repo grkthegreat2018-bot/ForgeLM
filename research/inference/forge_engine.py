@@ -173,7 +173,46 @@ from research.inference.session_cache import SessionCacheManager
 from research.inference.hotswap import HotSwapManager, EngineSettings
 from research.inference.library import Library
 from research.inference.engine_tools import EngineToolRegistry
+from research.inference.test_time_scaling import (
+    BeamSearch,
+    FirstFinishSearch,
+    MCTSDecoder,
+)
+from research.inference.cascade import ModelCascade
 from research.model_loader import unpack_output_with_kv
+
+
+class _ScalingModelAdapter:
+    """Adapter wrapping a ``ForgeEngine`` in the string-based
+    ``generate(prompt, **kwargs) -> str`` interface that the test-time
+    scaling strategies (:class:`FirstFinishSearch`, :class:`BeamSearch`,
+    :class:`MCTSDecoder`) and :class:`ModelCascade` expect.
+
+    The scaling/cascade classes call ``model.generate(prompt,
+    max_new_tokens=..., temperature=..., top_p=...)``.  ``ForgeEngine``
+    already accepts those kwargs, but this adapter also:
+
+    * forwards any default kwargs captured at construction time (so the
+      caller can pin ``temperature`` / ``top_p`` once for all sub-calls),
+    * exposes ``self.tokenizer`` so :class:`BeamSearch` can decode token
+      ids when real log-probs are available,
+    * exposes a no-op ``seed(s)`` so :class:`FirstFinishSearch` can
+      attempt seeding without crashing.
+    """
+
+    def __init__(self, engine: "ForgeEngine", **default_kwargs):
+        self._engine = engine
+        self._default_kwargs = default_kwargs
+        # Expose tokenizer for BeamSearch._token_to_str.
+        self.tokenizer = getattr(engine, "tokenizer", None)
+
+    def seed(self, s: int) -> None:
+        """No-op seed hook (FFS calls this if present)."""
+        pass
+
+    def generate(self, prompt: str, **kwargs: object) -> str:
+        merged = {**self._default_kwargs, **kwargs}
+        return self._engine.generate(prompt, **merged)
 
 
 class ForgeEngine:
@@ -612,11 +651,42 @@ class ForgeEngine:
         # Only skip if the model is already BitNet (ternary) or explicitly
         # configured to use a different quant.
         if is_blackwell:
+            # ForgeQuant (R32-6) is the best quantization for SM120 (RTX 5070):
+            # INT4 dense + INT8 sparse outliers, ~3.6 effective bits, better
+            # quality than NVFP4 due to outlier preservation, and lower
+            # conversion memory overhead (processes layers one at a time).
+            # NVFP4 requires holding original + quantized weights simultaneously,
+            # which OOMs on 12GB for models >2B params.
             try:
-                from research.inference.quant.nvfp4_quant import quantize_model_nvfp4  # noqa
-                return "nvfp4"
+                from research.inference.quant.forge_quant import quantize_model_forge_quant  # noqa
+                # Check VRAM: ForgeQuant processes per-layer (lower overhead
+                # than NVFP4 which needs full model + quantized copy).
+                n_params = sum(p.numel() for p in self.model.parameters())
+                model_bytes_bf16 = n_params * 2
+                vram_free, _ = self._memory_info(self.device)
+                # ForgeQuant conversion: model in VRAM + per-layer temp (~1.3x)
+                if vram_free > model_bytes_bf16 * 1.3:
+                    return "forge_quant"
+                # Model barely fits — use int4 (minimal conversion overhead)
+                self._log(
+                    f"ForgeQuant skipped: model {model_bytes_bf16/1e9:.1f}GB "
+                    f"would exceed {vram_free/1e9:.1f}GB free VRAM",
+                    level="warn")
+                return "int4"
             except ImportError:
                 pass
+
+            # Fallback to NVFP4 if ForgeQuant unavailable (ample VRAM only)
+            n_params = sum(p.numel() for p in self.model.parameters())
+            model_bytes_bf16 = n_params * 2
+            vram_free, _ = self._memory_info(self.device)
+            if vram_free > model_bytes_bf16 * 2.5:
+                try:
+                    from research.inference.quant.nvfp4_quant import quantize_model_nvfp4  # noqa
+                    return "nvfp4"
+                except ImportError:
+                    pass
+
             try:
                 from research.quantization.fp8_infer import quantize_model_fp8  # noqa
                 return "fp8"
@@ -1024,9 +1094,13 @@ class ForgeEngine:
         Common args:
             kv_cache: "standard", "paged", "rotorquant", "hadamard_int4", "compressed",
                       "streaming", "snapkv", "snapkv_4bit", "paged_eviction", "xquant",
-                      "cpu_offload", "s4r", "hqe_kv"
-            decoding: "standard", "speculative", "medusa", "dspark", "eagle3", "mtp_selfspec"
-            quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4"
+                      "cpu_offload", "s4r", "hqe_kv", "hyquant",
+                      "evo_sparse", "vegas", "hisparse", "capture",
+                      "vtoken", "auto_context"
+            decoding: "standard", "speculative", "medusa", "dspark", "eagle3", "mtp_selfspec",
+                      "self_speculative_sparse"
+            quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
+                      "forge_quant", "grinqh", "mixllm", "acbq"
             acceleration: None, "cuda_graph", "airllm_streaming", "megakernel", "flex_decoding"
             mrl_keep_ratio: if set (e.g. 0.75), truncate to that fraction of dims
             kv_bits: 4 or 8, for KV cache quantization
@@ -1096,6 +1170,31 @@ class ForgeEngine:
             self.progressive_kv = ProgressiveKV(anchor_bits=8, residual_bits=8)
             self._log(f"ProgressiveKV active: {self.progressive_kv.info()}")
 
+        # 6. R35: AVMP — Asymmetric virtual memory paging for hybrid models
+        if feature_flags.get("use_avmp"):
+            try:
+                from research.inference.memory.avmp import AVMPManager
+                gpu_budget = 12 * 1024**3  # 12GB default
+                if self.device.type == "cuda":
+                    gpu_budget = torch.cuda.get_device_properties(0).total_memory
+                self.avmp = AVMPManager(gpu_budget_bytes=gpu_budget, kv_ratio=0.6)
+                self._log(f"AVMP active: KV/SSM pools, "
+                          f"{gpu_budget // (1024**2)}GB GPU budget")
+            except Exception as e:
+                self._log(f"AVMP init failed: {e}", level="warn")
+
+        # 7. R35: Virtual tensor pool for elastic GPU/CPU memory
+        if feature_flags.get("use_virtual_tensor"):
+            try:
+                from research.inference.memory.virtual_tensor import VirtualTensorPool
+                budget = 10 * 1024**3  # 10GB default, leave room for weights
+                if self.device.type == "cuda":
+                    budget = int(torch.cuda.get_device_properties(0).total_memory * 0.8)
+                self.vtensor_pool = VirtualTensorPool(gpu_budget_bytes=budget)
+                self._log(f"VirtualTensorPool active: {budget // (1024**2)}GB budget")
+            except Exception as e:
+                self._log(f"VirtualTensorPool init failed: {e}", level="warn")
+
     # Fallback order for KV cache init failures (OOM, unsupported backend, etc.)
     _KV_FALLBACK_CHAIN = {
         "rotorquant": ["s4r", "hadamard_int4", "standard", "cpu_offload"],
@@ -1109,6 +1208,13 @@ class ForgeEngine:
         "hqe_kv": ["s4r", "standard", "cpu_offload"],
         "spectral": ["s4r", "standard", "cpu_offload"],
         "residual_stream": ["s4r", "standard", "cpu_offload"],
+        "hyquant": ["s4r", "hadamard_int4", "standard", "cpu_offload"],
+        "evo_sparse": ["snapkv", "s4r", "standard", "cpu_offload"],
+        "vegas": ["snapkv", "s4r", "standard", "cpu_offload"],
+        "hisparse": ["cpu_offload", "s4r", "standard"],
+        "capture": ["cpu_offload", "s4r", "standard"],
+        "vtoken": ["paged_eviction", "snapkv", "standard", "cpu_offload"],
+        "auto_context": ["s4r", "standard", "cpu_offload"],
         "s4r": ["standard", "cpu_offload"],
         "standard": ["cpu_offload"],
         "cpu_offload": [],
@@ -1198,6 +1304,13 @@ class ForgeEngine:
                     decode_kwargs["eagle_head"] = head
                     self._log(f"EAGLE-3 head loaded from {eagle_path}")
             decode_kwargs.setdefault("draft_length", 4)
+        elif decoding == "self_speculative_sparse":
+            # R39-4: same model as draft+target with sparse attention.
+            # Defaults: draft_len=4, sparse_k=64. Can be overridden via
+            # engine.activate(decoding="self_speculative_sparse",
+            #                  draft_len=8, sparse_k=128).
+            decode_kwargs.setdefault("draft_len", 4)
+            decode_kwargs.setdefault("sparse_k", 64)
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 
@@ -1351,6 +1464,10 @@ class ForgeEngine:
     # Fallback order: if a quantization mode fails, try the next lower one.
     _QUANT_FALLBACK_CHAIN = {
         "nvfp4": ["w8a8", "fp8", "int8", "int4", None],
+        "forge_quant": ["nvfp4", "w8a8", "int8", "int4", None],
+        "grinqh": ["forge_quant", "int4", None],
+        "mixllm": ["forge_quant", "int8", "int4", None],
+        "acbq": ["int4", None],
         "w8a8": ["fp8", "int8", "int4", None],
         "fp8": ["int8", "int4", None],
         "int8": ["int4", None],
@@ -1422,11 +1539,47 @@ class ForgeEngine:
             quantize_model_nvfp4(self.model, block_size=block_size, w4a8=w4a8)
             self._log(f"NVFP4 quantization: active (Blackwell native FP4, "
                       f"block={block_size}, w4a8={w4a8})")
+        elif mode == "forge_quant":
+            from research.inference.quant.forge_quant import quantize_model_forge_quant
+            cfg = getattr(self.model, 'config', None)
+            gs = getattr(cfg, 'forge_quant_group_size', 128) if cfg else 128
+            sr = getattr(cfg, 'forge_quant_sparse_ratio', 0.10) if cfg else 0.10
+            n_q = quantize_model_forge_quant(self.model, group_size=gs, sparse_ratio=sr)
+            self._log(f"ForgeQuant: {n_q} layers quantized (INT4 dense + 2-bit sparse, "
+                      f"group={gs}, sparse_ratio={sr}). SM120-tuned.")
+        elif mode == "grinqh":
+            from research.inference.quant.grinqh import quantize_model_grinqh
+            cfg = getattr(self.model, 'config', None)
+            gs = getattr(cfg, 'grinqh_group_size', 128) if cfg else 128
+            target_bits = getattr(cfg, 'grinqh_target_bits', 2.5) if cfg else 2.5
+            n_q = quantize_model_grinqh(model=self.model, group_size=gs,
+                                        target_effective_bits=target_bits)
+            self._log(f"GRINQH: {n_q} layers quantized (effective {target_bits}-bit, "
+                      f"group={gs})")
+        elif mode == "mixllm":
+            from research.inference.quant.mixllm import quantize_model_mixllm
+            cfg = getattr(self.model, 'config', None)
+            gs = getattr(cfg, 'mixllm_group_size', 128) if cfg else 128
+            hf = getattr(cfg, 'mixllm_high_fraction', 0.10) if cfg else 0.10
+            n_q = quantize_model_mixllm(self.model, group_size=gs, high_fraction=hf)
+            self._log(f"MixLLM: {n_q} layers quantized (global mixed-precision, "
+                      f"high_fraction={hf})")
+        elif mode == "acbq":
+            from research.inference.quant.acbq import quantize_model_acbq
+            cfg = getattr(self.model, 'config', None)
+            gs = getattr(cfg, 'acbq_group_size', 128) if cfg else 128
+            attn_bits = getattr(cfg, 'acbq_attn_bits', 4) if cfg else 4
+            ffn_bits = getattr(cfg, 'acbq_ffn_bits', 4) if cfg else 4
+            n_q = quantize_model_acbq(self.model, group_size=gs,
+                                      attn_bits=attn_bits, ffn_bits=ffn_bits)
+            self._log(f"ACBQ: {n_q} layers quantized (adaptive cross-block, "
+                      f"attn={attn_bits}bit, ffn={ffn_bits}bit)")
         else:
             raise ConfigurationError(
                 f"Unknown quantization mode: {mode}",
                 context={"mode": mode},
-                suggestion="Use one of: int8, int4, fp8, w8a8, nvfp4")
+                suggestion="Use one of: int8, int4, fp8, w8a8, nvfp4, "
+                           "forge_quant, grinqh, mixllm, acbq")
 
     # ── Generation ────────────────────────────────────────────────────────
 
@@ -1476,7 +1629,8 @@ class ForgeEngine:
                  finish_sentence: bool = True,
                  context_limit: int | None = None,
                  skip_special_tokens: bool = True,
-                 min_p: float = 0.0, min_k: float = 0.0) -> str:
+                 min_p: float = 0.0, min_k: float = 0.0,
+                 json_schema: dict | None = None) -> str:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -1498,16 +1652,23 @@ class ForgeEngine:
             min_k: Min-k semantic-cliff sampling sensitivity (0 = disabled).
                 Detects sharp logit transitions for dynamic truncation.
                 Temperature-invariant (ACL 2026).
+            json_schema: Optional JSON schema dict for constrained decoding.
+                When provided, an XGrammarConstrainer is built and used as a
+                logits processor to mask tokens that would produce
+                schema-invalid JSON. Bypasses prefix cache / CacheBlend /
+                AirLLM paths (constrained decoding needs per-step masking).
         """
         return self._generate_with_oom_recovery(
             self._generate_impl, prompt, max_new_tokens, temperature,
             top_p, top_k, repetition_penalty, finish_sentence,
-            context_limit, skip_special_tokens, min_p, min_k)
+            context_limit, skip_special_tokens, min_p, min_k,
+            json_schema=json_schema)
 
     def _generate_impl(self, prompt, max_new_tokens, temperature, top_p,
                        top_k, repetition_penalty, finish_sentence,
                        context_limit, skip_special_tokens,
-                       min_p: float = 0.0, min_k: float = 0.0) -> str:
+                       min_p: float = 0.0, min_k: float = 0.0,
+                       json_schema: dict | None = None) -> str:
         """Internal generate implementation (no OOM wrapper)."""
         self._require_awake()
         self._validate_generation_params(
@@ -1533,42 +1694,66 @@ class ForgeEngine:
             add_special_tokens=True,  # BOS <|startoftext|> — required for sane raw prompts
         ).input_ids.to(self.device)
 
-        # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
-        # Attempted before prefix caching; on a productive blend it
-        # assembles a KV buffer from pre-computed chunks and decodes the
-        # suffix, skipping most of the prefill.  Falls through to the
-        # prefix-cache / standard path on a miss (zero overhead).
-        output_ids = None
-        if self._cache_blend is not None:
-            blend_result = self._cache_blend.blend_prefill(self, ids)
-            if blend_result is not None:
-                blend_kv, covered_len = blend_result
-                suffix = ids[:, covered_len:]
-                if suffix.shape[1] > 0 and blend_kv is not None:
-                    with torch.inference_mode():
-                        out = self.model(
-                            suffix, past_key_values=blend_kv, use_cache=True)
-                        logits, past_kv = unpack_output_with_kv(out)
-                    output_ids = self._decode_with_kv(
-                        ids, logits, past_kv, max_new_tokens, temperature,
-                        top_p, top_k=top_k,
-                        repetition_penalty=repetition_penalty)
-                    print(f"  [CacheBlend] HIT (reused {covered_len} tokens, "
-                          f"suffix {suffix.shape[1]} to prefill)")
+        # Constrained decoding (R39-5): when a JSON schema is provided,
+        # build an XGrammar logits processor and use the per-step
+        # _decode_tokens path.  This bypasses prefix cache / CacheBlend /
+        # AirLLM because constrained decoding requires per-step masking
+        # that those fast paths don't support.
+        if json_schema is not None:
+            processor = self._build_xgrammar_processor(json_schema)
+            eos_set = self._eos_token_ids()
+            generated_ids: list[int] = []
+            logits, past_kv = self._prefill(ids)
+            gen_tokens = []
+            for next_token, _ in self._decode_tokens(
+                logits, past_kv, max_new_tokens, temperature, top_p,
+                top_k, repetition_penalty, eos_set, generated_ids,
+                processor, min_p, min_k,
+            ):
+                gen_tokens.append(next_token)
+            if gen_tokens:
+                output_ids = torch.cat([ids] + [
+                    t.unsqueeze(0) if t.dim() == 1 else t for t in gen_tokens
+                ], dim=1)
+            else:
+                output_ids = ids
+        else:
+            # CacheBlend (R&D14): non-prefix KV reuse for RAG / tool-use.
+            # Attempted before prefix caching; on a productive blend it
+            # assembles a KV buffer from pre-computed chunks and decodes the
+            # suffix, skipping most of the prefill.  Falls through to the
+            # prefix-cache / standard path on a miss (zero overhead).
+            output_ids = None
+            if self._cache_blend is not None:
+                blend_result = self._cache_blend.blend_prefill(self, ids)
+                if blend_result is not None:
+                    blend_kv, covered_len = blend_result
+                    suffix = ids[:, covered_len:]
+                    if suffix.shape[1] > 0 and blend_kv is not None:
+                        with torch.inference_mode():
+                            out = self.model(
+                                suffix, past_key_values=blend_kv, use_cache=True)
+                            logits, past_kv = unpack_output_with_kv(out)
+                        output_ids = self._decode_with_kv(
+                            ids, logits, past_kv, max_new_tokens, temperature,
+                            top_p, top_k=top_k,
+                            repetition_penalty=repetition_penalty)
+                        print(f"  [CacheBlend] HIT (reused {covered_len} tokens, "
+                              f"suffix {suffix.shape[1]} to prefill)")
 
-        # Prefix caching: check if we've seen this prompt prefix before
-        if output_ids is None:
-            output_ids = _generate_from_prefix_cache(
-                self, ids, max_new_tokens, temperature, top_p, top_k,
-                repetition_penalty)
-        if output_ids is None and self.acceleration == "airllm_streaming":
-            output_ids = AirLLMStreamer.generate(
-                self, ids, max_new_tokens, temperature)
-        elif output_ids is None:
-            output_ids = self.decoding.generate(
-                self.model, ids, max_new_tokens, temperature, top_p,
-                top_k=top_k, repetition_penalty=repetition_penalty,
-                min_p=min_p, min_k=min_k)
+            # Prefix caching: check if we've seen this prompt prefix before
+            if output_ids is None:
+                output_ids = _generate_from_prefix_cache(
+                    self, ids, max_new_tokens, temperature, top_p, top_k,
+                    repetition_penalty)
+            if output_ids is None and self.acceleration == "airllm_streaming":
+                output_ids = AirLLMStreamer.generate(
+                    self, ids, max_new_tokens, temperature)
+            elif output_ids is None:
+                output_ids = self.decoding.generate(
+                    self.model, ids, max_new_tokens, temperature, top_p,
+                    top_k=top_k, repetition_penalty=repetition_penalty,
+                    min_p=min_p, min_k=min_k)
 
         # Capture KV cache from decoding step for fast finish-to-stop path
         captured_kv = getattr(self.model, '_forge_last_kv', None)
@@ -1593,6 +1778,75 @@ class ForgeEngine:
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms, temperature)
         return result
+
+    # ── Test-time scaling & cascade routing (R39-6 / R39-8) ──────────────
+
+    def generate_with_scaling(self, prompt: str, strategy: str = "ffs",
+                              n_samples: int = 8, beam_width: int = 4,
+                              n_iterations: int = 32, max_tokens: int = 512,
+                              **kwargs) -> str:
+        """Generate with test-time scaling.
+
+        Trades extra inference FLOPs for higher answer quality by running
+        a search strategy (FFS / beam search / MCTS) over the engine.
+
+        Args:
+            strategy: ``"ffs"`` (first-finish search), ``"beam"`` (beam
+                search), or ``"mcts"`` (Monte-Carlo tree search).
+            n_samples: Number of parallel samples for FFS.
+            beam_width: Beam width for beam search.
+            n_iterations: MCTS iterations.
+            max_tokens: Maximum tokens per sample / beam / rollout.
+            **kwargs: Forwarded to the underlying ``generate()`` calls
+                (e.g. ``temperature``, ``top_p``).
+
+        Returns:
+            The best-scoring generation as a string.
+        """
+        adapter = _ScalingModelAdapter(self, **kwargs)
+        if strategy == "ffs":
+            scaler = FirstFinishSearch(
+                n_samples=n_samples, max_tokens=max_tokens,
+                temperature=kwargs.get("temperature", 0.8),
+                top_p=kwargs.get("top_p", 0.95))
+        elif strategy == "beam":
+            scaler = BeamSearch(
+                beam_width=beam_width, max_tokens=max_tokens)
+        elif strategy == "mcts":
+            scaler = MCTSDecoder(
+                n_iterations=n_iterations, max_tokens=max_tokens)
+        else:
+            raise ValueError(
+                f"Unknown strategy {strategy!r}; expected "
+                "'ffs', 'beam', or 'mcts'")
+        return scaler.generate(adapter, prompt)
+
+    def generate_cascade(self, prompt: str, small_engine: "ForgeEngine",
+                         difficulty_threshold: float = 0.5,
+                         **kwargs) -> str:
+        """Generate using model cascade — routes easy queries to small_engine.
+
+        Wraps ``self`` (the large engine) and ``small_engine`` in the
+        string-based ``generate(prompt, **kwargs) -> str`` interface that
+        :class:`ModelCascade` expects, then delegates routing to it.
+
+        Args:
+            prompt: The input prompt.
+            small_engine: A smaller/cheaper ``ForgeEngine`` for easy queries.
+            difficulty_threshold: Queries with estimated difficulty >=
+                threshold go to ``self`` (large); the rest to ``small_engine``.
+            **kwargs: Forwarded to the underlying ``generate()`` call.
+
+        Returns:
+            The generated string from the routed model.
+        """
+        small_adapter = _ScalingModelAdapter(small_engine, **kwargs)
+        large_adapter = _ScalingModelAdapter(self, **kwargs)
+        cascade = ModelCascade(
+            small_model=small_adapter,
+            large_model=large_adapter,
+            difficulty_threshold=difficulty_threshold)
+        return cascade.generate(prompt)
 
     # ── CacheBlend public API (R&D14) ────────────────────────────────
 
@@ -2075,6 +2329,60 @@ class ForgeEngine:
             if self.model is not None:
                 self.model._forge_last_kv = past_kv
 
+    def _build_xgrammar_processor(self, schema: dict):
+        """Build an XGrammar logits processor from a JSON schema.
+
+        Creates an :class:`XGrammarConstrainer` compiled with the given
+        schema and returns a closure compatible with the
+        ``logits_processor`` parameter of ``_decode_tokens``.
+
+        The closure signature is ``(logits, generated_ids) -> logits``,
+        matching the existing logits-processor pattern.  At each call:
+
+        1. If ``generated_ids`` is non-empty, the constrainer's FSM is
+           advanced with the last generated token (reflecting the token
+           selected in the *previous* step).  On the first call the FSM
+           is at its initial state (set by ``compile_json`` → ``reset``).
+        2. A boolean mask ``(vocab_size,)`` is obtained from
+           ``constrainer.get_mask``.
+        3. Disallowed tokens are masked to ``-inf``.
+        4. The modified logits are returned for sampling.
+
+        Args:
+            schema: JSON schema dict (e.g. ``{"type": "object", ...}``).
+
+        Returns:
+            A callable ``logits_processor(logits, generated_ids) -> logits``.
+        """
+        from research.inference.structured import XGrammarConstrainer
+
+        vocab_size = getattr(self.config, "vocab_size", None)
+        if vocab_size is None:
+            # Fallback: derive from the model's embedding/output layer.
+            vocab_size = getattr(self.model, "vocab_size", 65536)
+        constrainer = XGrammarConstrainer(vocab_size, self.tokenizer)
+        constrainer.compile_json(schema)
+
+        def logits_processor(logits, generated_ids):
+            # Advance the FSM with the last generated token (if any).
+            # On the first call generated_ids is empty → FSM stays at START.
+            if generated_ids:
+                constrainer.advance(generated_ids[-1])
+            # Get the allowed-token mask for the current FSM state.
+            mask = constrainer.get_mask(
+                generated_ids[-1] if generated_ids else 0)
+            mask = mask.to(logits.device)
+            # Mask out disallowed tokens (set to -inf).
+            if logits.dim() > 1:
+                # (batch, vocab) — broadcast mask across batch dim.
+                logits = logits.masked_fill(
+                    ~mask.unsqueeze(0), float("-inf"))
+            else:
+                logits = logits.masked_fill(~mask, float("-inf"))
+            return logits
+
+        return logits_processor
+
     @torch.no_grad()
     def generate_raw(
         self,
@@ -2089,6 +2397,7 @@ class ForgeEngine:
         skip_special_tokens: bool = False,
         min_p: float = 0.0,
         min_k: float = 0.0,
+        json_schema: dict | None = None,
     ) -> str:
         """Generate text with raw control — for self-play / agentic loops.
 
@@ -2117,6 +2426,12 @@ class ForgeEngine:
                 Self-play needs False to preserve tool-call markers.
             min_p: Min-p sampling threshold (0 = disabled).
             min_k: Min-k semantic-cliff sampling (0 = disabled).
+            json_schema: Optional JSON schema dict for constrained decoding.
+                When provided (and logits_processor is None), an
+                XGrammarConstrainer is built and used as the logits
+                processor to mask tokens that would produce schema-invalid
+                JSON. If both json_schema and logits_processor are given,
+                json_schema takes precedence.
 
         Returns:
             Decoded string of generated tokens (not including prompt).
@@ -2127,6 +2442,11 @@ class ForgeEngine:
             repetition_penalty, min_p, min_k)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
+
+        # Build XGrammar logits processor from JSON schema if provided.
+        # Takes precedence over a caller-supplied logits_processor.
+        if json_schema is not None:
+            logits_processor = self._build_xgrammar_processor(json_schema)
 
         def _run():
             ids = self._tokenize(prompt)

@@ -535,18 +535,20 @@ class GroupedQueryAttention(nn.Module):
     """
 
     def __init__(self, d_model=768, n_heads=12, n_kv_heads=None, max_seq_len=2048, base=10000.0, rope_scaling=None,
-                 use_qk_norm=False, attn_scale=None, attn_bias=False, qk_norm_eps=1e-6):
+                 use_qk_norm=False, attn_scale=None, attn_bias=False, qk_norm_eps=1e-6,
+                 use_rope=True):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads  # default to MHA
         self.head_dim = d_model // n_heads
         self.n_rep = n_heads // self.n_kv_heads
         self._qk_norm_eps = qk_norm_eps
+        self.use_rope = use_rope
         self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=attn_bias)
         self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)  # o_proj never has bias (Qwen2 convention)
-        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling)
+        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling) if use_rope else None
 
         # QK-norm: RMSNorm on Q and K before RoPE (LFM2 / Gemma3 / Qwen3 style).
         # When weights are identity (all 1.0), skip — it's a no-op.
@@ -602,6 +604,7 @@ class GroupedQueryAttention(nn.Module):
             os.environ.get("FORGE_FUSED_ROPE_QKNORM", "0") == "1"
             and self.use_qk_norm and not self._qk_norm_identity
             and position_ids is None and q.is_cuda
+            and self.use_rope
         )
         if _use_fused:
             from research.decoding.fused_rope_qknorm import fused_qk_norm_rope
@@ -622,15 +625,17 @@ class GroupedQueryAttention(nn.Module):
                 q = self.q_norm(q)
                 k = self.k_norm(k)
 
-            # Pre-allocated cache path: O(1) append, no torch.cat.
-            if preallocated_cache is not None:
-                past_len = preallocated_cache.position
-                q = self.rope(q, offset=past_len, position_ids=position_ids)
-                k = self.rope(k, offset=past_len, position_ids=position_ids)
-            else:
-                past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
-                q = self.rope(q, offset=past_len, position_ids=position_ids)
-                k = self.rope(k, offset=past_len, position_ids=position_ids)
+            # RoPE: skip when use_rope=False (Jamba attention has no RoPE)
+            if self.use_rope:
+                # Pre-allocated cache path: O(1) append, no torch.cat.
+                if preallocated_cache is not None:
+                    past_len = preallocated_cache.position
+                    q = self.rope(q, offset=past_len, position_ids=position_ids)
+                    k = self.rope(k, offset=past_len, position_ids=position_ids)
+                else:
+                    past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
+                    q = self.rope(q, offset=past_len, position_ids=position_ids)
+                    k = self.rope(k, offset=past_len, position_ids=position_ids)
 
         # Cache append + KV retrieval (same for both paths)
         if preallocated_cache is not None:
@@ -1240,7 +1245,8 @@ class ModularBlock(nn.Module):
 def build_attention(config: ModelConfig) -> nn.Module:
     kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
                   use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None),
-                  qk_norm_eps=getattr(config, 'norm_eps', 1e-6))
+                  qk_norm_eps=getattr(config, 'norm_eps', 1e-6),
+                  use_rope=getattr(config, 'use_rope', True))
     # LeRoPE/AdaRoPE: learnable RoPE frequencies (identity init = lossless).
     # Applied post-construction by replacing the RotaryEmbedding module.
     rope_variant = getattr(config, 'rope_variant', 'standard')

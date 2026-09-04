@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 from ..api.model_boot import ModelBootWorker
 from ..api.models_index import ModelsIndex, _human_bytes
 from ..api.status_reader import project_root
+from ..widgets.empty_state import EmptyState
 from ..widgets.metric_card import MetricCard
 from ..widgets.search_combo import SearchableComboBox
 from ._base import card_grid, page_container, section_label
@@ -105,7 +107,23 @@ class ModelsPage(QWidget):
         self._ck_table.setAlternatingRowColors(True)
         self._ck_table.setObjectName("dataTable")
         self._ck_table.itemSelectionChanged.connect(self._on_select)
-        cl.addWidget(self._ck_table)
+
+        # empty-state placeholder (shown when no checkpoints exist)
+        self._ck_empty = EmptyState(
+            title="No checkpoints found",
+            description=(
+                "Place a .safetensors checkpoint in research/checkpoints/ "
+                "or train one from the Fine-Tune page."),
+            icon="📦",
+            action_text="Open checkpoints folder",
+            on_action=self._open_folder,
+        )
+
+        # stacked container: page 0 = table, page 1 = empty state
+        self._ck_stack = QStackedWidget()
+        self._ck_stack.addWidget(self._ck_table)
+        self._ck_stack.addWidget(self._ck_empty)
+        cl.addWidget(self._ck_stack)
 
         # ---- configs table ----
         cfg_card = QFrame(); cfg_card.setObjectName("card")
@@ -205,6 +223,12 @@ class ModelsPage(QWidget):
         self._on_select()
 
     def _populate_table(self, models: list) -> None:
+        # toggle empty-state vs table
+        if not models:
+            self._ck_stack.setCurrentWidget(self._ck_empty)
+            self._ck_table.setRowCount(0)
+            return
+        self._ck_stack.setCurrentWidget(self._ck_table)
         self._ck_table.setRowCount(len(models))
         for i, m in enumerate(models):
             is_lora = "lora" in m.name.lower()

@@ -53,6 +53,7 @@ CATEGORIES = [
     "Position Encoding",
     "Quantization R&D",
     "Runtime",
+    "I/O & Loading",
 ]
 
 # ── option tables for the core combos ──────────────────────────────────
@@ -246,6 +247,13 @@ FIELDS: tuple[FieldSpec, ...] = (
     # Runtime
     FieldSpec("warmup", "Warmup", "bool", "Runtime",
               "Pre-run a dummy token after activation so first generation is fast."),
+    # I/O & Loading (R35)
+    FieldSpec("use_avmp", "AVMP paging", "bool", "I/O & Loading",
+              "Asymmetric Virtual Memory Paging — tiered GPU/CPU memory for large tensors."),
+    FieldSpec("use_virtual_tensor", "Virtual tensor (eLLM)", "bool", "I/O & Loading",
+              "Elastic LLM virtual tensors — automatic GPU/CPU spillover for oversized layers."),
+    FieldSpec("use_progressive_load", "Progressive GGUF load", "bool", "I/O & Loading",
+              "Stream GGUF checkpoints layer-by-layer to reduce peak load memory."),
 )
 
 _BY_NAME: dict[str, FieldSpec] = {f.name: f for f in FIELDS}

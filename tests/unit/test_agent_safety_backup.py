@@ -257,9 +257,9 @@ class TestSubAgentManager:
         mgr = SubAgentManager(MockRuntime())
         tid = mgr.spawn("test prompt")
         assert tid.startswith("sub_")
-        # wait for it to fail (thread pool may take a moment)
-        import time as _t
-        _t.sleep(2.0)
+        # wait for the future to complete (avoids race with fixed sleep)
+        future = mgr._futures[tid]
+        future.result(timeout=10.0)
         task = mgr.get_result(tid)
         assert task.status == "error"
         mgr.shutdown()

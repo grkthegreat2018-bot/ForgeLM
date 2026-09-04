@@ -18,7 +18,8 @@ import time
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog,
+                               QDoubleSpinBox,
                                QFileDialog, QFrame, QGridLayout, QHeaderView,
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QPlainTextEdit, QPushButton, QProgressBar,
@@ -32,6 +33,8 @@ from ..api.activation_catalog import (FIELDS, PRESETS, FieldSpec,
                                        preset_config, validate)
 from ..api.engine_runtime import EngineRuntime
 from ..theme import Palette
+from ..widgets.activation_wizard import ActivationWizard
+from ..widgets.empty_state import EmptyState
 from ..widgets.search_combo import SearchableComboBox
 from ._base import section_label
 
@@ -235,6 +238,18 @@ class EnginePage(QWidget):
         # models_index.models()/configs() which scan research/checkpoints/.
         QTimer.singleShot(0, self._reload_checkpoints)
         ml.addWidget(self._ckpt)
+        # empty-state placeholder shown when no checkpoints are available
+        self._ckpt_empty = EmptyState(
+            title="No checkpoints available",
+            description=(
+                "Place a .safetensors checkpoint in research/checkpoints/ "
+                "or train one from the Fine-Tune page, then refresh."),
+            icon="📦",
+            action_text="Refresh",
+            on_action=self._reload_checkpoints,
+        )
+        self._ckpt_empty.setVisible(False)
+        ml.addWidget(self._ckpt_empty)
         cfg_row = QHBoxLayout(); cfg_row.setSpacing(10)
         cfg_row.addWidget(QLabel("Config"))
         self._config = QComboBox()
@@ -348,6 +363,14 @@ class EnginePage(QWidget):
         self._preset_desc.setWordWrap(True)
         pl.addWidget(self._preset_desc)
         row = QHBoxLayout(); row.setSpacing(10)
+        self._wizard_btn = QPushButton("✦ Wizard")
+        self._wizard_btn.setObjectName("primary")
+        self._wizard_btn.setToolTip(
+            "One-click quantize & activation preset wizard — pick a "
+            "use-case (Chat / Coding / Agent / Long-Context / Max-Speed) "
+            "and auto-apply the best quantization + KV cache + decoding.")
+        self._wizard_btn.clicked.connect(self._open_wizard)
+        row.addWidget(self._wizard_btn)
         self._match_btn = QPushButton("Copy resident engine's config")
         self._match_btn.clicked.connect(self._copy_resident)
         row.addWidget(self._match_btn); row.addStretch(1)
@@ -1347,6 +1370,11 @@ class EnginePage(QWidget):
         if not added:
             self._ckpt.addItem("ForgeLM_V2_Light.safetensors",
                                "research/checkpoints/ForgeLM_V2_Light.safetensors")
+        # toggle empty-state: show it only when no real checkpoints were found
+        has_empty = hasattr(self, "_ckpt_empty")
+        if has_empty:
+            self._ckpt_empty.setVisible(not added)
+            self._ckpt.setVisible(added)
 
     def _reload_configs(self) -> None:
         self._config.clear()
@@ -1478,6 +1506,36 @@ class EnginePage(QWidget):
         self._info_lbl.setText(f"load failed: {err}")
 
     # ── activation studio logic ───────────────────────────────────────
+    def _open_wizard(self) -> None:
+        """Open the one-click activation wizard and apply its result."""
+        wiz = ActivationWizard(self)
+        if wiz.exec() != QDialog.DialogCode.Accepted:
+            return
+        kwargs = wiz.result_kwargs
+        if not kwargs:
+            return
+        # fill the activation form with the wizard's selection so the user
+        # can see / fine-tune what was chosen
+        base = default_config()
+        base.update(kwargs)
+        self._fill_form(base)
+        for chip in self._preset_group.values():
+            chip.setChecked(False)
+        self._preset_desc.setText(
+            "Wizard preset applied — fine-tune below or click "
+            "“Apply to resident engine”.")
+        self._update_diff()
+        # if an engine is resident, re-activate live; otherwise the form
+        # values carry through to the next load (Manual mode)
+        if self.runtime.is_ready():
+            errors = validate(base)
+            if errors:
+                QMessageBox.warning(self, "Invalid activation config",
+                                    "\n".join(errors))
+                return
+            self._apply_live_btn.setEnabled(False)
+            self.runtime.reactivate(base)
+
     def _apply_preset(self, name: str) -> None:
         cfg = preset_config(name)
         if cfg is None:

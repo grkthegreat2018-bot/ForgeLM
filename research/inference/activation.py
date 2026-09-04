@@ -97,6 +97,11 @@ class ActivationConfig:
     use_mosaic_quant: bool = False
     use_aoh: bool = False
 
+    # R35: I/O Optimizations & Boot Performance
+    use_avmp: bool = False             # Asymmetric virtual memory paging
+    use_virtual_tensor: bool = False   # eLLM elastic GPU/CPU memory
+    use_progressive_load: bool = False  # Progressive GGUF loading
+
     # Warmup
     warmup: bool = True
 

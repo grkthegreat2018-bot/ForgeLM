@@ -35,8 +35,8 @@ TOOL_CALL_START_ID = 531
 TOOL_CALL_END_ID = 532
 
 # Jamba tool result markers (single tokens: 539/540)
-TOOL_RESP_START = "<tool_call>"
-TOOL_RESP_END = "
+TOOL_RESP_START = "<|tool_resp_start|>"
+TOOL_RESP_END = "<|tool_resp_end|>"
 
 
 def qwen_render_tool_defs(tools: list[dict]) -> str:

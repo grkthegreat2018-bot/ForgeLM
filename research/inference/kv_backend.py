@@ -394,6 +394,27 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     if strategy == "residual_stream":
         from research.inference.kv.residual_cache import ResidualStreamCache
         return ResidualStreamCache()
+    if strategy == "hyquant":
+        from research.inference.kv.hyquant_kv import HyQuantKVCache
+        return HyQuantKVCache()
+    if strategy == "hisparse":
+        from research.inference.kv.hisparse_kv import HiSparseKVCache
+        return HiSparseKVCache()
+    if strategy == "evo_sparse":
+        from research.inference.kv.evo_sparse import EvoSparseKVCache
+        return EvoSparseKVCache()
+    if strategy == "vegas":
+        from research.inference.kv.vegas_kv import VegasKVCache
+        return VegasKVCache()
+    if strategy == "capture":
+        from research.inference.kv.capture_kv import CaptureKVCache
+        return CaptureKVCache()
+    if strategy == "vtoken":
+        from research.inference.kv.vtoken_kv import VTokenKVCache
+        return VTokenKVCache()
+    if strategy == "auto_context":
+        from research.inference.kv.auto_context import AutoContextKVCache
+        return AutoContextKVCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()

@@ -1,5 +1,51 @@
 # ForgeEngine R&D Research — Frontier Gap Analysis
 Date: 2026-09-03
+
+## R40 Research Sweep Results (2026-09-03)
+Six parallel subagents surveyed: sequence mixers, decoding acceleration, PKM,
+KAN, training objectives, extreme quantization. Full doc: docs/rd_round_40.md.
+
+### R41 Implementation Priorities (decided)
+1. **MTP activation** — already wired, just enable `--mtp-weight 0.3 --mtp-n-heads 2-4`
+2. **MatryoshkaKV** — 60% KV compression, attention-only, biggest 12GB win
+3. **Mamba-3 forward pass** — complex SSM + MIMO, Mamba3Key already exists, need module
+4. **Medusa heads** — lowest-cost speculative decoding
+5. **KTO alignment** — binary labels, small patch on dpo_align.py
+6. **Quamba2 W4A8** — SSM-specific quantization (don't use AQLM on Mamba!)
+7. **SIGReg hidden-state regularizer** (LeWM) — training stability, prevents collapse
+8. **AdaLN-zero conditioning** (LeWM) — lossless conditioning injection
+9. **ReplaySSM** — cache SSM inputs not state, enables spec decode for Mamba (1.48x AR, 1.87x spec)
+
+### R42 Priorities (planned)
+9. **Expert streaming + LFU cache** (Swiftlet) — run 35-80B MoE on 12GB
+10. **WriteableMemory + BAEE budget** (SynapNet) — long context without KV bloat
+11. **CAJQ mixed-precision quant** (SynapNet) — 4.4x compression for SSM+attn
+12. **Gated DeltaNet-2** — best recurrent recall, replace Mamba in hybrid
+13. **PKM residual augmentation** — num_keys=128, 4 attention layers, zero-init
+14. **InfoDensity reward** — concise CoT via entropy/length penalties
+15. **Synapse graph memory** — agent memory, 95% token reduction
+
+### R43 Priorities (advanced)
+16. **STRIDE reasoning training** — +14% reasoning accuracy
+17. **ReDrafter** — Mamba draft model for speculative (O(1) state = cheap drafts)
+18. **TIDE dynamic depth** — 5-20% compute reduction
+19. **RWKV-7 layer option** — tiny state alternative
+20. **KAN FFN ablation** — interpretability R&D only (low priority)
+
+### Parked / Low priority
+- **KAN FFN**: no consistent LLM win, 1.36-100x slower, park as R43+ interpretability experiment
+- **RWKV-7**: excellent but needs custom WKV7 kernels, high effort
+- **BTC-LLM**: sub-1-bit but research stage, no SM120 kernel
+- **Soft MoE**: only relevant if model is already MoE
+- **Token merging (ToMe/SLERP)**: risky for SSM recurrence, not recommended
+
+### Critical quantization rule for hybrid models
+**NEVER apply attention-optimized extreme PTQ (AQLM/QuIP#/BitNet) to Mamba/SSM
+blocks.** Naive W1.58 PTQ on Mamba gives PPL ~13M. Use Quamba2/SSDi8 for SSM,
+AQLM/NVFP4 for attention. Different quantizers per block type.
+
+---
+
 Source: 16 web searches across NeurIPS/ACL/arXiv 2025-2026 + ForgeEngine inventory
 
 ## Current ForgeEngine capabilities (inventory)
@@ -942,6 +988,63 @@ Source: 16 web searches across NeurIPS/ACL/arXiv 2025-2026 + ForgeEngine invento
 - **Paper**: CVPR 2026
 - **What**: "Listen-to-prune" paradigm — audio guides video token pruning. Audio retention score per time group. Interleaved spatio-temporal compression. 2.51-3.42× speedup.
 - **Why for ForgeAI**: For future omni-modal support. The cross-modal guidance (audio→video pruning) is novel.
+
+---
+
+## R37-R39 Benchmark Audit (2026-09-03)
+
+### WINNERS — Keep & Integrate (verified improvements over baseline)
+
+| Feature | Metric | Baseline | New | Improvement |
+|---------|--------|----------|-----|-------------|
+| R37 Kronecker Embed (vocab≥4096) | Param count | 8.4M-537M | 1.1M-4.2M | 87-99.2% reduction |
+| R37 PIT Tying | Orthonormality error | N/A (rank-constrained) | 4.78e-7 | Full-rank orthonormal memory |
+| R37 Mamba-3 | State expressivity | d_state real | 2×d_state complex | 2× capacity, lossless |
+| R37 ForgeHybrid | Warm start | N/A | zero-init SSM | Lossless, more capacity |
+| R37 OutRo | Sink attention connections | 1 (self only) | seq_len (all) | Sink attends beyond causal |
+| R38 rsLoRA | Scale at rank=256 | 0.0625 (vanishes) | 1.0 (stable) | 16× more stable |
+| R38 rsLoRA | Scale at rank=1024 | 0.0156 (vanishes) | 0.5 (stable) | 32× more stable |
+| R38 DLoRA | Initial params (rank=4) | 1536 (LoRA r=8) | 768 | 50% savings, growable |
+| R38 ForgeAdapter | FLOPs (low-entropy) | 6144 (LoRA r=32) | 768 (r=4) | 88% FLOP savings |
+| R38 PiSSA | Init reconstruction error | 2.30 (random=0) | 2.15e-6 | 1e6× better start point |
+| R38 DoRA | Trainable params | 1536 (LoRA) | 1664 (+magnitude) | Lossless, more expressive |
+| R39 Cascade | Cost (10 easy + 10 hard) | 20 large calls | 10 large + 10 small | 50% cost saving |
+| R39 METRO | Overloaded expert routing | always expert 0 | routes away | Load balance improves |
+| R39 Self-Speculative | Output correctness | identical | identical | Lossless, sparse_k forwarded |
+| R39 XGrammar | JSON conformance | unconstrained | guaranteed | Eliminates parse failures |
+| R39 Arch Adapters | Tensor preservation | N/A | 100% bit-exact | Lossless Qwen3/Gemma3/Llama4 |
+
+### LOSERS / MARGINAL — Archive to Prevent Regressive R&D
+
+1. **R37 Kronecker at small vocab (≤256)**: Only 24.6% param reduction.
+   - **Do NOT use Kronecker for vocab < 4096.** Standard embedding is better for small vocabs.
+   - Break-even point: ~vocab=1024. Below that, Kronecker overhead (d_char × max_char_len × d_model) exceeds savings.
+   - V12 preset uses Kronecker only because vocab=65536 (99.2% reduction) — correct usage.
+
+2. **R39 LASER (layer-selective routing)**: Only 1.1× capacity vs fixed top-k=2.
+   - The improvement is modest, not dramatic. Early layers get k=4, late get k=2, total=23 vs 20.
+   - **Do NOT claim dramatic MoE speedup from LASER alone.** The gain is ~15% more expert capacity in feature extraction layers.
+   - Worth keeping for the principle (early layers need more features) but don't oversell.
+
+3. **R39 Cascade cost saving**: 50% measured, not the claimed 58%.
+   - The 58% claim was likely for a different easy/hard ratio (more easy queries → higher saving).
+   - With 50% easy / 50% hard: 50% saving. With 70% easy / 30% hard: ~70% saving.
+   - **The cascade is only worth it if the workload is easy-heavy.** For balanced workloads, the saving is proportional to the easy fraction.
+
+4. **R38 DoRA extra params**: 1664 vs 1536 (LoRA) — only 8% more params for magnitude decomposition.
+   - The gain is in expressivity (magnitude + direction), not param efficiency.
+   - **Do NOT use DoRA for param-constrained scenarios.** Use DLoRA instead.
+
+### Benchmark Files
+- `tests/unit/bench_r37_vs_baseline.py` — 29 tests (V12 vs V11, 5 architecture keys)
+- `tests/unit/bench_r38_vs_lora.py` — 20 tests (6 adapters vs standard LoRA)
+- `tests/unit/bench_r39_vs_baseline.py` — 25 tests (8 engine features vs baselines)
+- **Total: 74 benchmark tests, all passing**
+
+### Pre-existing Bug Fixed
+- `test_agent_safety_backup.py::TestSubAgentManager::test_spawn_returns_task_id`: race condition
+  where `time.sleep(2.0)` was used instead of `future.result(timeout=10.0)`. Fixed by waiting
+  on the ThreadPoolExecutor future directly instead of a fixed sleep.
 - **Implementation**: Forward-looking. Note for omni-modal support.
 
 ### R3-48. TTF — Temporal Token Fusion for Video

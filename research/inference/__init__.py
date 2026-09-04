@@ -5,7 +5,8 @@ Integrates all ForgeAI runtime optimizations:
     streaming, snapkv, snapkv_4bit, paged_eviction, xquant, cpu_offload,
     s4r (15x compression), rotorquant (default, Givens rotation + Lloyd-Max),
     hqe_kv, 2bit
-  - Decoding: standard, speculative, medusa, dspark, eagle3, MTP self-spec
+  - Decoding: standard, speculative, medusa, dspark, eagle3, MTP self-spec,
+    self-speculative sparse (R39-4: same model draft+target, sparse attention)
   - Quantization: none, INT8, INT4, FP8, W8A8, NVFP4, BitNet ternary
     (auto-selected by VRAM + GPU capability)
   - Acceleration: none, CUDA graphs, AirLLM layer-streaming, megakernel,
@@ -28,6 +29,7 @@ from .decoding import (
     DSparkDecoding,
     MedusaDecoding,
     MTPSelfSpecDecoding,
+    SelfSpeculativeSparse,
     SpeculativeDecoding,
     StandardDecoding,
 )
