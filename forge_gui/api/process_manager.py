@@ -251,12 +251,6 @@ def get_presets() -> list[ProcessPreset]:
             description="Extract vocabulary packs from tokenizer",
             arg_defaults={},
         ),
-        ProcessPreset(
-            name="Inject HF Data",
-            script="scripts/inject_hf_data.py",
-            description="Inject HuggingFace training data into the pipeline",
-            arg_defaults={},
-        ),
     ]
 
 

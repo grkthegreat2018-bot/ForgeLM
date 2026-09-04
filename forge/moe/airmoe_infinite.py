@@ -562,7 +562,7 @@ def main():
 
     if not os.path.exists(os.path.join(module_dir, "manifest.json")):
         print(f"\n  ERROR: No V2 expert library at {module_dir}")
-        print("  Run: python scripts/inject_hf_data.py --topics all")
+        print("  Run: python scripts/train_expert.py --topic <name> --data <data.json>")
         return
 
     # Load model

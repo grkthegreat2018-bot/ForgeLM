@@ -148,6 +148,10 @@ FIELDS: tuple[FieldSpec, ...] = (
               "Popularity-weighted KV retention/eviction."),
     FieldSpec("use_conf_kv", "CONF-KV", "bool", "KV & Memory",
               "Confidence-gated KV cache compression."),
+    FieldSpec("use_matryoshka_kv", "Matryoshka KV", "bool", "KV & Memory",
+              "Nested-granularity KV compression — multiple resolution levels in one cache."),
+    FieldSpec("use_replay_ssm", "ReplaySSM cache", "bool", "KV & Memory",
+              "Input-caching ring buffer for SSM state reconstruction during speculative decode rollback."),
     # Caching
     FieldSpec("use_prefix_cache", "Prefix cache (LRU)", "bool", "Caching",
               "Cache KV for repeated prompt prefixes — big win for chat/agent system prompts."),
@@ -244,6 +248,8 @@ FIELDS: tuple[FieldSpec, ...] = (
               "MosaicQuant production quantization path."),
     FieldSpec("use_aoh", "Autonomy of Heads", "bool", "Quantization R&D",
               "AoH per-head autonomy quantization."),
+    FieldSpec("use_quamba2", "Quamba2 W4A8", "bool", "Quantization R&D",
+              "SSM-specific W4A8 quantization — INT4 weights + INT8 activations, FP16 SSM core."),
     # Runtime
     FieldSpec("warmup", "Warmup", "bool", "Runtime",
               "Pre-run a dummy token after activation so first generation is fast."),

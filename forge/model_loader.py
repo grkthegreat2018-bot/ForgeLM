@@ -1766,7 +1766,7 @@ class ConfigurableResearchLLM(nn.Module):
         # MTP heads (Nemotron Lightning): shared-weight multi-token prediction
         self.mtp_module: nn.Module | None = None
         if getattr(config, 'use_mtp', False):
-            from research.architecture.mtp import MTPModule
+            from forge.decoding.mtp import MTPModule
             self.mtp_module = MTPModule(
                 d_model=config.d_model,
                 vocab_size=config.vocab_size,

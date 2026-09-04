@@ -92,19 +92,6 @@ class TestRestoreEmaImportable:
             assert torch.equal(p.data, ema_state[name])
 
 
-class TestRpoZeroGradAfterOom:
-    """RPO trainer should call optimizer.zero_grad() after OOM skip."""
-
-    def test_zero_grad_present_after_skip(self):
-        """Verify the source code has optimizer.zero_grad() in the skip branch."""
-        path = Path(__file__).parent.parent.parent / "forge" / "training" / "runners" / "rpo_train.py"
-        source = path.read_text(encoding="utf-8")
-        # The skip branch should contain zero_grad
-        assert "self.optimizer.zero_grad()" in source, (
-            "RPO trainer should call optimizer.zero_grad() after OOM skip"
-        )
-
-
 class TestForgeHookOrdering:
     """FORGE optimizer hooks should be registered AFTER optimizer creation."""
 

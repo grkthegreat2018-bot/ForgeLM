@@ -304,7 +304,20 @@ def finetune_expert(model, tokenizer, samples: List[Dict[str, str]],
     Only trains LoRA adapters on expert 0's FFN weights (last 8 layers).
     Base model stays frozen. Merges LoRA back after training.
     """
-    from research.architecture.dora import apply_dora_to_linear
+    from forge.training.dora import DoRALinear
+
+    def apply_dora_to_linear(layer, rank=4, alpha=8):
+        """Wrap an nn.Linear with DoRA, preserving its weight."""
+        dora = DoRALinear(
+            in_features=layer.in_features,
+            out_features=layer.out_features,
+            rank=rank, alpha=alpha,
+            bias=layer.bias is not None,
+        )
+        dora.load_from_weight(layer.weight.data)
+        if layer.bias is not None:
+            dora.bias.data.copy_(layer.bias.data)
+        return dora
 
     # Freeze everything
     for param in model.parameters():
