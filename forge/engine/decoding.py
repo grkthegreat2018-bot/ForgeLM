@@ -303,11 +303,12 @@ class MTPSelfSpecDecoding(DecodingStrategy):
     """
 
     def __init__(self, k=7, mtp_module=None, acceptance_threshold=0.95,
-                 draft_model_ratio=0.10):
+                 draft_model_ratio=0.10, replay_ssm_cache=None):
         self.k = k
         self.mtp = mtp_module  # Optional: pre-loaded MTP module
         self.acceptance_threshold = acceptance_threshold
         self.draft_model_ratio = draft_model_ratio
+        self.replay_ssm = replay_ssm_cache  # ReplaySSMCache for SSM rollback
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
@@ -347,6 +348,12 @@ class MTPSelfSpecDecoding(DecodingStrategy):
             if eos and (main_token == eos).any().item():
                 ids = torch.cat([ids, main_token], dim=-1)
                 break
+
+            # ReplaySSM: checkpoint before drafting so we can rollback
+            # the SSM state efficiently if the draft is rejected.
+            ssm_checkpoint = None
+            if self.replay_ssm is not None:
+                ssm_checkpoint = self.replay_ssm.checkpoint()
 
             # Step 2: MTP heads predict draft tokens (parallel, from last hidden)
             if hidden is not None:
@@ -421,6 +428,14 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                 k, v = layer_kv
                 past_kv.append((k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
 
+            # ReplaySSM: if some drafts were rejected, rollback the SSM
+            # input cache to the checkpoint so the next reconstruct_state
+            # replays only the accepted inputs.  When all drafts are
+            # accepted, no rollback is needed.
+            if (self.replay_ssm is not None and ssm_checkpoint is not None
+                    and n_accepted < n_draft):
+                self.replay_ssm.rollback(ssm_checkpoint + n_accepted + 1)
+
             # Accepted tokens: main_token + drafts 1..n_accepted.
             accepted = verify_seq[:, :n_accepted + 1]
             ids = torch.cat([ids, accepted], dim=-1)
@@ -481,9 +496,11 @@ class SelfSpeculativeSparse(DecodingStrategy):
             slower; smaller = faster but lower acceptance rate.
     """
 
-    def __init__(self, draft_len: int = 4, sparse_k: int = 64):
+    def __init__(self, draft_len: int = 4, sparse_k: int = 64,
+                 replay_ssm_cache=None):
         self.draft_len = draft_len
         self.sparse_k = sparse_k
+        self.replay_ssm = replay_ssm_cache  # ReplaySSMCache for SSM rollback
         # Acceptance statistics (updated during generate).
         self.acceptance_rate: float = 0.0
         self._total_drafts: int = 0
@@ -519,6 +536,12 @@ class SelfSpeculativeSparse(DecodingStrategy):
             else:
                 base_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
+
+            # ReplaySSM: checkpoint before drafting so we can rollback
+            # the SSM state efficiently if the draft is rejected.
+            ssm_checkpoint = None
+            if self.replay_ssm is not None:
+                ssm_checkpoint = self.replay_ssm.checkpoint()
 
             # ── Step 2: Draft phase — sparse attention ────────────────
             # Generate draft_len tokens autoregressively with sparse
@@ -585,6 +608,13 @@ class SelfSpeculativeSparse(DecodingStrategy):
                 k, v = layer_kv
                 past_kv.append(
                     (k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
+
+            # ReplaySSM: if some drafts were rejected, rollback the SSM
+            # input cache to the checkpoint + accepted prefix so the next
+            # reconstruct_state replays only the accepted inputs.
+            if (self.replay_ssm is not None and ssm_checkpoint is not None
+                    and n_accepted < n_draft):
+                self.replay_ssm.rollback(ssm_checkpoint + n_accepted + 1)
 
             # ── Step 6: Accept tokens ────────────────────────────────
             accepted = verify_seq[:, :n_accepted + 1]

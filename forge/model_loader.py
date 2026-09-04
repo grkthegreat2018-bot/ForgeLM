@@ -932,19 +932,40 @@ class ModularBlock(nn.Module):
                 use_bitnet=getattr(config, 'use_bitnet', False),
                 bitnet_config=config)
         elif ltype in ("mamba", "ssm"):
-            from forge.keys.architecture.mamba_probe import MambaLayer
-            self.attn = MambaLayer(
-                d_model=config.d_model,
-                d_state=getattr(config, 'mamba_d_state', 16),
-                d_conv=getattr(config, 'mamba_d_conv', 4),
-                expand=getattr(config, 'mamba_expand', 2),
-                dt_rank=getattr(config, 'mamba_dt_rank', "auto"),
-                bias=getattr(config, 'mamba_bias', False),
-                conv_bias=getattr(config, 'mamba_conv_bias', True),
-                layer_idx=layer_idx,
-                norm_eps=getattr(config, 'norm_eps', 1e-6),
-                use_jamba_norms=True,
-            )
+            # Mamba-3: complex-valued SSM states (R37-1). Selected via
+            # config.ssm_type == "mamba3" or config.use_mamba3 == True.
+            # Default is "mamba2" (backward compatible).
+            _ssm_type = getattr(config, 'ssm_type', 'mamba2')
+            if _ssm_type == "mamba3" or getattr(config, 'use_mamba3', False):
+                from forge.engine.mamba3 import Mamba3Block
+                self.attn = Mamba3Block(
+                    d_model=config.d_model,
+                    d_state=getattr(config, 'mamba3_d_state',
+                                    getattr(config, 'mamba_d_state', 16)),
+                    d_conv=getattr(config, 'mamba_d_conv', 4),
+                    expand=getattr(config, 'mamba_expand', 2),
+                    dt_rank=getattr(config, 'mamba_dt_rank', "auto"),
+                    bias=getattr(config, 'mamba_bias', False),
+                    conv_bias=getattr(config, 'mamba_conv_bias', True),
+                    layer_idx=layer_idx,
+                    norm_eps=getattr(config, 'norm_eps', 1e-6),
+                    n_inputs=getattr(config, 'mamba3_n_inputs', 1),
+                    n_outputs=getattr(config, 'mamba3_n_outputs', 1),
+                )
+            else:
+                from forge.keys.architecture.mamba_probe import MambaLayer
+                self.attn = MambaLayer(
+                    d_model=config.d_model,
+                    d_state=getattr(config, 'mamba_d_state', 16),
+                    d_conv=getattr(config, 'mamba_d_conv', 4),
+                    expand=getattr(config, 'mamba_expand', 2),
+                    dt_rank=getattr(config, 'mamba_dt_rank', "auto"),
+                    bias=getattr(config, 'mamba_bias', False),
+                    conv_bias=getattr(config, 'mamba_conv_bias', True),
+                    layer_idx=layer_idx,
+                    norm_eps=getattr(config, 'norm_eps', 1e-6),
+                    use_jamba_norms=True,
+                )
         else:
             self.attn = build_attention(config)
         if self._use_adaln:
@@ -964,7 +985,7 @@ class ModularBlock(nn.Module):
                 "GroupedTiedAttention",
                 "GroupedLatentAttention")
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
-        self._is_mamba = type(self.attn).__name__ == "MambaLayer"
+        self._is_mamba = type(self.attn).__name__ in ("MambaLayer", "Mamba3Block")
         self._gradient_checkpointing = False
         # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
         # only FFN — biggest activation consumer, ~2-4x VRAM savings on
@@ -2117,6 +2138,10 @@ class ConfigurableResearchLLM(nn.Module):
                     block.attn._conv_state_reset = True
                 if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state'):
                     block.attn._ssm_state = None  # reset Mamba recurrent state
+                # Mamba-3: reset complex state (real + imag parts)
+                if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state_real'):
+                    block.attn._ssm_state_real = None
+                    block.attn._ssm_state_imag = None
         # SIGReg: collect per-layer hidden states for spectral regularization.
         hidden_states_list: list[torch.Tensor] = [] if return_hidden_states else None
         for i, block in enumerate(self.blocks):

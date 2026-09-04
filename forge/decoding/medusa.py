@@ -280,8 +280,8 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
 
             # 4. Verify: forward with [main_token + medusa_tokens] and check.
             candidate_seq = torch.cat([
-                main_token,
-                medusa_tokens.unsqueeze(0).t()  # (n_heads, 1) → (1, n_heads)
+                main_token,  # (1, 1)
+                medusa_tokens.unsqueeze(0)  # (1, n_heads)
             ], dim=1)  # (1, 1 + n_heads)
 
             # Append to input and verify.
@@ -317,7 +317,7 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
                         verify_logits[0, start_pos:start_pos + n_heads, :] / temperature, dim=-1)
                     # Draft probs from Medusa heads: (n_heads, V)
                     draft_probs = torch.stack(
-                        [F.softmax(ml[:, -1, :] / temperature, dim=-1)
+                        [F.softmax(ml[:, -1, :].squeeze(0) / temperature, dim=-1)
                          for ml in medusa_logits_list[:n_heads]], dim=0)  # (n_heads, V)
                     # q(x) and p(x) at the draft token positions
                     draft_tok = medusa_tokens[:n_heads]  # (n_heads,)

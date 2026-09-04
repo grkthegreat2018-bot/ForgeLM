@@ -391,6 +391,26 @@ def _h_mosaic_quant(eng, _flags):
     return "MosaicQuant: inlier-outlier disaggregation 4-bit"
 
 
+def _h_quamba2(eng, _flags):
+    """Quamba2 W4A8 quantization for SSM (Mamba) blocks.
+
+    Quantizes in_proj/x_proj/out_proj/conv1d to W4A8 while keeping the SSM
+    core (A_log, dt_bias, D, selective scan) in FP16.  Falls back to w8a8
+    if no SSM blocks are found.
+    """
+    from forge.quant.quamba2 import quantize_model_quamba2
+    cfg = getattr(eng.model, "config", None)
+    gs = getattr(cfg, "quamba2_group_size", 128) if cfg else 128
+    alpha = getattr(cfg, "quamba2_smoothquant_alpha", 0.5) if cfg else 0.5
+    n_q = quantize_model_quamba2(eng.model, group_size=gs,
+                                 smoothquant_alpha=alpha)
+    if n_q == 0:
+        return ("Quamba2: no SSM blocks found — skipping "
+                "(use quantize='quamba2' for fallback to w8a8)")
+    return (f"Quamba2: {n_q} SSM blocks quantized (W4A8, "
+            f"group={gs}, alpha={alpha}). SSM core kept in FP16.")
+
+
 # ── Final attention features ─────────────────────────────────────────────────
 
 def _h_aoh(eng, _flags):
@@ -401,6 +421,15 @@ def _h_aoh(eng, _flags):
     eng._aoh = AutonomyOfHeads(
         n_heads, head_dim, d_model, sparsity_ratio=0.5)
     return "AoH: data-free head classification (retrieval vs streaming)"
+
+
+def _h_replay_ssm(eng, _flags):
+    from forge.engine.kv.replay_ssm import ReplaySSMCache
+    n_layers = _cfg(eng, "n_layers", 16)
+    max_replay = _cfg(eng, "replay_ssm_max_tokens", 512)
+    eng._replay_ssm = ReplaySSMCache(n_layers, max_replay_tokens=max_replay)
+    return (f"ReplaySSM: input-caching for SSM state reconstruction "
+            f"({n_layers} layers, max_replay={max_replay})")
 
 
 # ── Utility ──────────────────────────────────────────────────────────────────
@@ -465,6 +494,9 @@ _FEATURE_REGISTRY: list[FeatureSpec] = [
     FeatureSpec("use_adamx", _h_adamx),
     FeatureSpec("use_sharq", _h_sharq),
     FeatureSpec("use_mosaic_quant", _h_mosaic_quant),
+    FeatureSpec("use_quamba2", _h_quamba2),
     # Final attention
     FeatureSpec("use_aoh", _h_aoh),
+    # SSM / speculative
+    FeatureSpec("use_replay_ssm", _h_replay_ssm),
 ]

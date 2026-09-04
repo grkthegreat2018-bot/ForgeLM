@@ -1100,7 +1100,7 @@ class ForgeEngine:
             decoding: "standard", "speculative", "medusa", "dspark", "eagle3", "mtp_selfspec",
                       "self_speculative_sparse"
             quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
-                      "forge_quant", "grinqh", "mixllm", "acbq"
+                      "forge_quant", "grinqh", "mixllm", "acbq", "quamba2"
             acceleration: None, "cuda_graph", "airllm_streaming", "megakernel", "flex_decoding"
             mrl_keep_ratio: if set (e.g. 0.75), truncate to that fraction of dims
             kv_bits: 4 or 8, for KV cache quantization
@@ -1472,6 +1472,10 @@ class ForgeEngine:
         "fp8": ["int8", "int4", None],
         "int8": ["int4", None],
         "int4": [None],
+        # Quamba2: SSM-specific W4A8. Falls back to w8a8 (same bit-budget for
+        # non-SSM layers) then the standard chain. If no SSM blocks are found,
+        # quantize_model_quamba2 is a no-op (returns 0) and we fall through.
+        "quamba2": ["w8a8", "fp8", "int8", "int4", None],
         None: [],
     }
 
@@ -1574,12 +1578,22 @@ class ForgeEngine:
                                       attn_bits=attn_bits, ffn_bits=ffn_bits)
             self._log(f"ACBQ: {n_q} layers quantized (adaptive cross-block, "
                       f"attn={attn_bits}bit, ffn={ffn_bits}bit)")
+        elif mode == "quamba2":
+            from forge.quant.quamba2 import quantize_model_quamba2
+            cfg = getattr(self.model, "config", None)
+            gs = getattr(cfg, "quamba2_group_size", 128) if cfg else 128
+            alpha = getattr(cfg, "quamba2_smoothquant_alpha", 0.5) if cfg else 0.5
+            n_q = quantize_model_quamba2(self.model, group_size=gs,
+                                         smoothquant_alpha=alpha)
+            self._log(f"Quamba2: {n_q} SSM blocks quantized (W4A8, "
+                      f"group={gs}, smoothquant_alpha={alpha}). "
+                      f"SSM core (A_log, dt, scan) kept in FP16.")
         else:
             raise ConfigurationError(
                 f"Unknown quantization mode: {mode}",
                 context={"mode": mode},
                 suggestion="Use one of: int8, int4, fp8, w8a8, nvfp4, "
-                           "forge_quant, grinqh, mixllm, acbq")
+                           "forge_quant, grinqh, mixllm, acbq, quamba2")
 
     # ── Generation ────────────────────────────────────────────────────────
 

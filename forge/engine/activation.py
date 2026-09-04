@@ -97,6 +97,8 @@ class ActivationConfig:
     use_sharq: bool = False
     use_mosaic_quant: bool = False
     use_aoh: bool = False
+    use_quamba2: bool = False       # Quamba2 W4A8 quantization for SSM blocks
+    use_replay_ssm: bool = False       # ReplaySSM: input-caching for SSM state reconstruction
 
     # R35: I/O Optimizations & Boot Performance
     use_avmp: bool = False             # Asymmetric virtual memory paging

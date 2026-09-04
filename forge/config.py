@@ -47,6 +47,14 @@ class ModelConfig:
     mamba_dt_rank: str | int = "auto"  # "auto" = ceil(d_model/16), or explicit int
     mamba_bias: bool = False       # Bias on in_proj/out_proj
     mamba_conv_bias: bool = True   # Bias on conv1d
+    # SSM type: "mamba2" (default, backward compatible) or "mamba3"
+    # (complex-valued states, MIMO, exponential-trapezoidal discretization).
+    # When "mamba3", layers with type "mamba"/"ssm" use Mamba3Block.
+    ssm_type: str = "mamba2"
+    # Mamba-3 MIMO config (n_inputs -> n_outputs per SSM unit).
+    # Default 1/1 = scalar SSM (matches Mamba-2, lossless warm start).
+    mamba3_n_inputs: int = 1
+    mamba3_n_outputs: int = 1
 
     # === Our keys (all zero/identity init = lossless at start) ===
     # QK-norm: RMSNorm on Q and K before RoPE (LFM2/Gemma3/Qwen3 style).
