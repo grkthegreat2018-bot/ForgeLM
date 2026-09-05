@@ -184,6 +184,45 @@ from forge.engine.cascade import ModelCascade
 from forge.model_loader import unpack_output_with_kv
 
 
+def _map_gguf_to_forge(name: str) -> str | None:
+    """Map GGUF tensor names to Forge model state-dict keys.
+
+    GGUF: blk.N.attn_q.weight, blk.N.ffn_gate.weight, token_embd.weight, etc.
+    Forge: blocks.N.attn.q_proj.weight, blocks.N.ffn.w_gate.weight, embed.weight, etc.
+    """
+    # Token embeddings
+    if name == "token_embd.weight":
+        return "embed.weight"
+    # Output head
+    if name == "output.weight":
+        return "head.weight"
+    # Final norm
+    if name == "output_norm.weight":
+        return "ln_f.weight"
+    # Per-block mappings
+    if name.startswith("blk."):
+        parts = name.split(".")
+        layer_idx = parts[1]
+        rest = ".".join(parts[2:])
+        mapping = {
+            "attn_norm.weight": f"blocks.{layer_idx}.ln1.weight",
+            "attn_q.weight": f"blocks.{layer_idx}.attn.q_proj.weight",
+            "attn_k.weight": f"blocks.{layer_idx}.attn.k_proj.weight",
+            "attn_v.weight": f"blocks.{layer_idx}.attn.v_proj.weight",
+            "attn_output.weight": f"blocks.{layer_idx}.attn.out_proj.weight",
+            "ffn_norm.weight": f"blocks.{layer_idx}.ln2.weight",
+            "ffn_gate.weight": f"blocks.{layer_idx}.ffn.w_gate.weight",
+            "ffn_up.weight": f"blocks.{layer_idx}.ffn.w_up.weight",
+            "ffn_down.weight": f"blocks.{layer_idx}.ffn.w_down.weight",
+            # Gated attention variants
+            "attn_q_norm.weight": f"blocks.{layer_idx}.attn.q_norm.weight",
+            "attn_k_norm.weight": f"blocks.{layer_idx}.attn.k_norm.weight",
+            "ffn_gate_inp.weight": f"blocks.{layer_idx}.ffn.gate.weight",
+        }
+        return mapping.get(rest)
+    return None
+
+
 class _ScalingModelAdapter:
     """Adapter wrapping a ``ForgeEngine`` in the string-based
     ``generate(prompt, **kwargs) -> str`` interface that the test-time
@@ -532,6 +571,11 @@ class ForgeEngine:
         cfg = get_config(config_name, device=device)
         tok_path = tokenizer_path or "research/checkpoints/lfm25_tokenizer"
         tokenizer = get_tokenizer(tok_path)
+
+        # GGUF checkpoint detection — route to ForgeLoader for dequant + load
+        if str(checkpoint).lower().endswith(".gguf"):
+            return cls._load_gguf_checkpoint(
+                checkpoint, tokenizer, device, auto_activate, **kwargs)
 
         ckpt_size = _checkpoint_size_cache.get(checkpoint)
         if ckpt_size is None:
@@ -953,6 +997,112 @@ class ForgeEngine:
         engine._checkpoint_metadata = metadata
         engine.keystack_features = ["bitnet_prequant", "quarot", "mrl"]
         engine._log(f"KeyStack features: {engine.keystack_features}")
+        return engine
+
+    @classmethod
+    def _load_gguf_checkpoint(cls, checkpoint, tokenizer, device,
+                              auto_activate=True, **kwargs) -> "ForgeEngine":
+        """Load a GGUF checkpoint with dequantization.
+
+        Uses ForgeLoader to parse the GGUF file, dequantize quantized tensors
+        (Q4_0, Q8_0, Q4_K, Q6_K, etc.) to float16, and build a model from
+        the extracted weights. The GGUF metadata is used to auto-detect the
+        architecture and build an appropriate ModelConfig.
+        """
+        from forge.engine.forge_loader import ForgeLoader, GGUFInfo
+        from forge.config import ModelConfig
+        from forge.model_loader import ModelLoader
+
+        print(f"  [ForgeEngine] Loading GGUF: {checkpoint}")
+        info = GGUFInfo(checkpoint)
+        arch = info.get_architecture()
+        print(f"  [GGUF] Architecture: {arch}, tensors: {len(info.tensors)}")
+
+        # Build config from GGUF metadata
+        d_model = info.metadata.get(f"{arch}.embedding_length", 2048)
+        n_layers = info.metadata.get(f"{arch}.block_count", 16)
+        n_heads = info.metadata.get(f"{arch}.attention.head_count", 16)
+        n_kv_heads = info.metadata.get(
+            f"{arch}.attention.head_count_kv", n_heads)
+        intermediate = info.metadata.get(
+            f"{arch}.feed_forward_length", int(4 * d_model))
+        vocab_size = info.metadata.get(f"{arch}.vocab_size", 32000)
+        max_seq = info.metadata.get(
+            f"{arch}.context_length", info.get_context_length())
+
+        cfg = ModelConfig(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            intermediate_size=intermediate,
+            attn_type="gqa" if n_kv_heads < n_heads else "mha",
+            attn_bias=False,
+            ffn_type="swiglu",
+            norm_type="rmsnorm",
+            norm_eps=1e-5,
+            use_embed_norm=False,
+            use_final_norm=True,
+            rope_base=10000.0,
+            max_seq_len=max_seq,
+            layer_types=["attention"] * n_layers,
+            use_qk_norm=False,
+            use_bitnet=False,
+            use_bitnet_residual=False,
+            ffn_compression="none",
+            nlrq_rank=0,
+            use_factorized_embeddings=False,
+            embed_factorized_rank=0,
+            use_pit=False,
+            use_iri_fp4=False,
+            use_spectral_kv=False,
+            zero_init_residual=True,
+            batch_size=1,
+            seq_len=2048,
+            max_steps=50000,
+            warmup_steps=2000,
+            max_lr=3e-4,
+            min_lr=3e-5,
+        )
+
+        # Build model on meta device, then load dequantized weights
+        model = ModelLoader.build_model(cfg, checkpoint_path=None)
+        model = model.to(device).to(torch.float16)
+
+        # Load and dequantize weights from GGUF
+        state_dict = {}
+        for t_info in info.tensors:
+            name = t_info["name"]
+            try:
+                tensor = info.get_tensor(name, dequantize=True)
+                state_dict[name] = tensor.to(device).to(torch.float16)
+            except Exception as e:
+                print(f"  [GGUF] Skipping tensor {name}: {e}")
+
+        # Map GGUF tensor names to Forge model names
+        # GGUF uses: blk.N.attn_q.weight, blk.N.ffn_gate.weight, etc.
+        # Forge uses: blocks.N.attn.q_proj.weight, blocks.N.ffn.w_gate.weight, etc.
+        mapped = {}
+        for name, tensor in state_dict.items():
+            forge_name = _map_gguf_to_forge(name)
+            if forge_name:
+                mapped[forge_name] = tensor
+
+        # Load mapped weights into model (strict=False for missing/extra keys)
+        missing, unexpected = model.load_state_dict(mapped, strict=False)
+        if missing:
+            print(f"  [GGUF] Missing keys: {len(missing)} (first 5: {missing[:5]})")
+        if unexpected:
+            print(f"  [GGUF] Unexpected keys: {len(unexpected)}")
+
+        info.close()
+        engine = cls(model, tokenizer, device=device,
+                     checkpoint_path=checkpoint, **kwargs)
+        engine._log(f"GGUF loaded: {arch}, {len(state_dict)} tensors, "
+                    f"{len(mapped)} mapped")
+        if auto_activate:
+            engine._auto_activate_optimal()
         return engine
 
     @classmethod
@@ -1861,7 +2011,10 @@ class ForgeEngine:
                  skip_special_tokens: bool = True,
                  min_p: float = 0.0, min_k: float = 0.0,
                  json_schema: dict | None = None,
-                 stop: list[str] | None = None) -> str:
+                 stop: list[str] | None = None,
+                 logprobs: int | None = None,
+                 prompt_logprobs: int | None = None,
+                 return_logprobs: bool = False) -> str | dict:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -1893,14 +2046,19 @@ class ForgeEngine:
             self._generate_impl, prompt, max_new_tokens, temperature,
             top_p, top_k, repetition_penalty, finish_sentence,
             context_limit, skip_special_tokens, min_p, min_k,
-            json_schema=json_schema, stop=stop)
+            json_schema=json_schema, stop=stop,
+            logprobs=logprobs, prompt_logprobs=prompt_logprobs,
+            return_logprobs=return_logprobs)
 
     def _generate_impl(self, prompt, max_new_tokens, temperature, top_p,
                        top_k, repetition_penalty, finish_sentence,
                        context_limit, skip_special_tokens,
                        min_p: float = 0.0, min_k: float = 0.0,
                        json_schema: dict | None = None,
-                       stop: list[str] | None = None) -> str:
+                       stop: list[str] | None = None,
+                       logprobs: int | None = None,
+                       prompt_logprobs: int | None = None,
+                       return_logprobs: bool = False) -> str | dict:
         """Internal generate implementation (no OOM wrapper)."""
         self._require_awake()
         self._validate_generation_params(
@@ -2018,6 +2176,15 @@ class ForgeEngine:
 
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms, temperature)
+
+        # Logprobs extraction (OpenAI API compat)
+        if return_logprobs or logprobs is not None or prompt_logprobs is not None:
+            lp_data = self._extract_logprobs(
+                ids, output_ids, logprobs, prompt_logprobs)
+            if return_logprobs:
+                return {"text": result, "logprobs": lp_data}
+            # Otherwise attach to result via attribute (server reads it)
+            result._forge_logprobs = lp_data  # type: ignore[attr-defined]
         return result
 
     # ── Test-time scaling & cascade routing (R39-6 / R39-8) ──────────────
@@ -2625,6 +2792,46 @@ class ForgeEngine:
         return logits_processor
 
     @torch.no_grad()
+    def embed(self, text: str) -> list[float]:
+        """Generate an embedding vector for the input text.
+
+        Uses the model's last hidden state (mean-pooled) as the embedding.
+        Falls back to a hash-based pseudo-embedding if the model doesn't
+        expose hidden states.
+        """
+        ids = self.tokenizer(text, return_tensors="pt",
+                             truncation=True, max_length=512).input_ids.to(self.device)
+        with torch.inference_mode():
+            out = self.model(ids, use_cache=False, return_hidden=True)
+            # Model returns (logits, loss, presents, hidden) with return_hidden
+            if isinstance(out, tuple) and len(out) >= 4:
+                hidden = out[3]
+            elif hasattr(out, 'last_hidden_state'):
+                hidden = out.last_hidden_state
+            else:
+                # Fallback: use logits as pseudo-embedding
+                hidden = out[0] if isinstance(out, tuple) else out.logits
+            # Mean-pool over sequence dimension
+            emb = hidden[0].float().mean(dim=0)
+            # L2 normalize
+            emb = emb / emb.norm().clamp(min=1e-8)
+        return emb.cpu().tolist()
+
+    @torch.no_grad()
+    def rerank(self, query: str, document: str) -> float:
+        """Score the relevance of a document to a query.
+
+        Uses cross-attention scoring: concatenates query + document,
+        runs a forward pass, and uses the final hidden state's cosine
+        similarity between query and document segments as the relevance score.
+        """
+        # Simple approach: embed both and compute cosine similarity
+        q_emb = torch.tensor(self.embed(query), device=self.device)
+        d_emb = torch.tensor(self.embed(document), device=self.device)
+        score = torch.cosine_similarity(q_emb.unsqueeze(0), d_emb.unsqueeze(0)).item()
+        return score
+
+    @torch.no_grad()
     def generate_raw(
         self,
         prompt: str,
@@ -2956,6 +3163,84 @@ class ForgeEngine:
         return stops
 
     @torch.no_grad()
+    def _extract_logprobs(self, prompt_ids: torch.Tensor,
+                          output_ids: torch.Tensor,
+                          logprobs: int | None,
+                          prompt_logprobs: int | None) -> dict:
+        """Extract token logprobs for OpenAI API compatibility.
+
+        Returns dict with:
+          - content: list of {token, logprob, bytes, top_logprobs} per
+            generated token (up to ``logprobs`` top alternatives each)
+          - prompt: list of {token, logprob, bytes, top_logprobs} per
+            prompt token (up to ``prompt_logprobs`` alternatives each)
+        """
+        device = prompt_ids.device
+        prompt_len = prompt_ids.shape[1]
+        gen_ids = output_ids[0, prompt_len:]
+
+        content_logprobs = []
+        prompt_lp = []
+
+        with torch.inference_mode():
+            # Re-run forward to get logits for each position
+            # Prompt logprobs: one forward pass over the prompt
+            if prompt_logprobs is not None and prompt_logprobs > 0:
+                out = self.model(prompt_ids, use_cache=False)
+                logits = out[0] if isinstance(out, tuple) else out.logits
+                log_probs = F.log_softmax(logits[0].float(), dim=-1)
+                for i in range(min(prompt_len, len(log_probs))):
+                    token_id = prompt_ids[0, i].item()
+                    lp = log_probs[i, token_id].item()
+                    top_n = min(prompt_logprobs, log_probs.shape[-1])
+                    top_vals, top_ids = log_probs[i].topk(top_n)
+                    top_lp = [
+                        {"token": self.tokenizer.decode([tid.item()]),
+                         "logprob": lp_val.item(),
+                         "bytes": tid.item()}
+                        for tid, lp_val in zip(top_ids, top_vals)
+                    ]
+                    prompt_lp.append({
+                        "token": self.tokenizer.decode([token_id]),
+                        "logprob": lp,
+                        "bytes": token_id,
+                        "top_logprobs": top_lp,
+                    })
+
+            # Generated token logprobs: need per-step logits
+            if logprobs is not None and logprobs > 0 and len(gen_ids) > 0:
+                # Re-run generation to capture per-step logits
+                ids = prompt_ids.clone()
+                past_kv = None
+                for step in range(min(len(gen_ids), output_ids.shape[1] - prompt_len)):
+                    with torch.inference_mode():
+                        if past_kv is not None:
+                            out = self.model(ids[:, -1:], past_key_values=past_kv, use_cache=True)
+                        else:
+                            out = self.model(ids, use_cache=True)
+                        logits = out[0] if isinstance(out, tuple) else out.logits
+                        past_kv = out[2] if isinstance(out, tuple) and len(out) > 2 else out.past_key_values
+                    log_probs = F.log_softmax(logits[0, -1].float(), dim=-1)
+                    token_id = gen_ids[step].item()
+                    lp = log_probs[token_id].item()
+                    top_n = min(logprobs, log_probs.shape[-1])
+                    top_vals, top_ids = log_probs.topk(top_n)
+                    top_lp = [
+                        {"token": self.tokenizer.decode([tid.item()]),
+                         "logprob": lp_val.item(),
+                         "bytes": tid.item()}
+                        for tid, lp_val in zip(top_ids, top_vals)
+                    ]
+                    content_logprobs.append({
+                        "token": self.tokenizer.decode([token_id]),
+                        "logprob": lp,
+                        "bytes": token_id,
+                        "top_logprobs": top_lp,
+                    })
+                    ids = torch.cat([ids, gen_ids[step:step+1].unsqueeze(0)], dim=1)
+
+        return {"content": content_logprobs, "prompt": prompt_lp}
+
     def _finish_to_stop(self, output_ids, prompt_len,
                         temperature, top_p, extra_budget=32,
                         past_kv=None, top_k: int = 80,

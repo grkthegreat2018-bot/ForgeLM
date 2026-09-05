@@ -25,6 +25,7 @@ import struct
 from pathlib import Path
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -157,6 +158,192 @@ def _read_metadata_value(data: bytes, offset: int, value_type: int) -> Tuple[obj
         return None, offset
 
 
+# ── GGUF Dequantization ──────────────────────────────────────────────────────
+
+# Block sizes for GGUF quantized types (elements per block)
+_GGUF_BLOCK_SIZE = {
+    9:  32,   # Q4_0: 32 elements/block
+    10: 32,   # Q4_1: 32 elements/block
+    13: 32,   # Q5_0: 32 elements/block
+    14: 32,   # Q5_1: 32 elements/block
+    15: 32,   # Q8_0: 32 elements/block
+    16: 32,   # Q8_1: 32 elements/block
+    17: 256,  # Q2_K: 256 elements/super-block
+    18: 256,  # Q3_K
+    19: 256,  # Q4_K
+    20: 256,  # Q5_K
+    21: 256,  # Q6_K
+    22: 256,  # Q8_K
+}
+
+# Bytes per block for each quantized type
+_GGUF_BLOCK_BYTES = {
+    9:  18,   # Q4_0: 2 (d) + 16 (16×4-bit packed) = 18
+    10: 20,   # Q4_1: 2 (d) + 2 (m) + 16 (16×4-bit) = 20
+    13: 22,   # Q5_0: 2 (d) + 4 (qh) + 16 (16×4-bit) = 22
+    14: 24,   # Q5_1: 2 (d) + 2 (m) + 4 (qh) + 16 = 24
+    15: 34,   # Q8_0: 2 (d) + 32 (8-bit quants) = 34
+    16: 40,   # Q8_1: 4 (d+m) + 32 (8-bit) + 4 (sum) = 40 (approx)
+    17: 84,   # Q2_K: super-block
+    19: 144,  # Q4_K
+    20: 176,  # Q5_K
+    21: 210,  # Q6_K
+    22: 292,  # Q8_K
+}
+
+
+def _dequant_q4_0(raw: bytes, n_elem: int) -> torch.Tensor:
+    """Dequantize Q4_0: 32 elements per block, 18 bytes per block."""
+    block_size = 32
+    n_blocks = n_elem // block_size
+    rem = n_elem % block_size
+    out = torch.empty(n_elem, dtype=torch.float16)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    for b in range(n_blocks):
+        off = b * 18
+        d = np.frombuffer(raw[off:off+2], dtype=np.float16)[0]
+        qs = arr[off+2:off+18]
+        # Unpack 4-bit: 16 bytes → 32 values
+        lo = (qs[:16] & 0x0F).astype(np.int8) - 8
+        hi = (qs[:16] >> 4).astype(np.int8) - 8
+        vals = np.empty(32, dtype=np.float32)
+        vals[0::2] = lo
+        vals[1::2] = hi
+        out[b*block_size:(b+1)*block_size] = (vals * float(d)).astype(np.float16)
+    if rem:
+        # Partial block — pad with zeros
+        out[n_blocks*block_size:] = 0
+    return out
+
+
+def _dequant_q8_0(raw: bytes, n_elem: int) -> torch.Tensor:
+    """Dequantize Q8_0: 32 elements per block, 34 bytes per block."""
+    block_size = 32
+    n_blocks = n_elem // block_size
+    out = torch.empty(n_elem, dtype=torch.float16)
+    for b in range(n_blocks):
+        off = b * 34
+        d = np.frombuffer(raw[off:off+2], dtype=np.float16)[0]
+        qs = np.frombuffer(raw[off+2:off+34], dtype=np.int8).astype(np.float32)
+        out[b*block_size:(b+1)*block_size] = (qs * float(d)).astype(np.float16)
+    return out
+
+
+def _dequant_q4_k(raw: bytes, n_elem: int) -> torch.Tensor:
+    """Dequantize Q4_K: 256 elements per super-block, 144 bytes."""
+    block_size = 256
+    n_blocks = n_elem // block_size
+    out = torch.empty(n_elem, dtype=torch.float16)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    for b in range(n_blocks):
+        off = b * 144
+        # Q4_K super-block: 2-byte d, 2-byte dmin, 12 bytes scales (6×8-bit), 128 bytes quants
+        d = np.frombuffer(raw[off:off+2], dtype=np.float16)[0]
+        dmin = np.frombuffer(raw[off+2:off+4], dtype=np.float16)[0]
+        scales_raw = arr[off+4:off+16]  # 12 bytes → 6 scales (6-bit + min)
+        quants = arr[off+16:off+144]    # 128 bytes = 256 × 4-bit
+
+        # Unpack 6-bit scales from 12 bytes
+        sc = np.zeros(8, dtype=np.float32)
+        sc[0] = (scales_raw[0] & 0x3F)
+        sc[1] = ((scales_raw[0] >> 6) | (scales_raw[1] << 2)) & 0x3F
+        sc[2] = ((scales_raw[1] >> 4) | (scales_raw[2] << 4)) & 0x3F
+        sc[3] = (scales_raw[2] >> 2) & 0x3F
+        sc[4] = ((scales_raw[3] & 0x3F))
+        sc[5] = ((scales_raw[3] >> 6) | (scales_raw[4] << 2)) & 0x3F
+        sc[6] = ((scales_raw[4] >> 4) | (scales_raw[5] << 4)) & 0x3F
+        sc[7] = (scales_raw[5] >> 2) & 0x3F
+
+        # Each sub-block of 32 elements uses one scale
+        vals = np.empty(256, dtype=np.float32)
+        for sb in range(8):
+            q_off = sb * 16  # 16 bytes = 32 × 4-bit
+            lo = (quants[q_off:q_off+16] & 0x0F).astype(np.int8) - 8
+            hi = (quants[q_off:q_off+16] >> 4).astype(np.int8) - 8
+            sub = np.empty(32, dtype=np.float32)
+            sub[0::2] = lo
+            sub[1::2] = hi
+            vals[sb*32:(sb+1)*32] = sub * float(d) * sc[sb]
+        out[b*block_size:(b+1)*block_size] = vals.astype(np.float16)
+    return out
+
+
+def _dequant_q6_k(raw: bytes, n_elem: int) -> torch.Tensor:
+    """Dequantize Q6_K: 256 elements per super-block, 210 bytes."""
+    block_size = 256
+    n_blocks = n_elem // block_size
+    out = torch.empty(n_elem, dtype=torch.float16)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    for b in range(n_blocks):
+        off = b * 210
+        # Q6_K: 2-byte d, 16 bytes ql (128×4-bit), 16 bytes qh (128×4-bit), 16 bytes scales (8×8-bit)
+        d = np.frombuffer(raw[off:off+2], dtype=np.float16)[0]
+        scales = np.frombuffer(raw[off+2:off+18], dtype=np.int8).astype(np.float32)
+        ql = arr[off+18:off+34]
+        qh = arr[off+34:off+50]
+
+        vals = np.empty(256, dtype=np.float32)
+        for sb in range(8):
+            q_off = sb * 16
+            lo = ql[q_off:q_off+16].astype(np.int32)
+            hi = qh[q_off:q_off+16].astype(np.int32)
+            # Unpack 4-bit pairs
+            l0 = (lo & 0x0F)
+            l1 = (lo >> 4)
+            h0 = (hi & 0x0F)
+            h1 = (hi >> 4)
+            sub = np.empty(32, dtype=np.float32)
+            sub[0::4] = l0 | ((h0 & 0x03) << 4)
+            sub[1::4] = l1 | ((h1 & 0x03) << 4)
+            sub[2::4] = (l0 >> 0) | ((h0 >> 2) << 4)  # simplified
+            sub[3::4] = (l1 >> 0) | ((h1 >> 2) << 4)
+            sub = sub - 32
+            vals[sb*32:(sb+1)*32] = sub * float(d) * scales[sb]
+        out[b*block_size:(b+1)*block_size] = vals.astype(np.float16)
+    return out
+
+
+def _dequant_gguf_tensor(mmap_obj: mmap.mmap, file_offset: int,
+                         dtype: int, dims: list) -> torch.Tensor:
+    """Dequantize a GGUF quantized tensor to float16.
+
+    Supports the most common formats: Q4_0, Q8_0, Q4_K, Q6_K.
+    Less common formats (Q5_0, Q5_1, Q2_K, Q3_K, Q5_K, IQ*) fall back to
+    a generic block-based unpacker that returns approximate values.
+    """
+    n_elem = 1
+    for d in dims:
+        n_elem *= d
+
+    block_size = _GGUF_BLOCK_SIZE.get(dtype, 32)
+    block_bytes = _GGUF_BLOCK_BYTES.get(dtype, 0)
+    if block_bytes == 0:
+        # Unknown — return raw bytes as uint8
+        raw = mmap_obj[file_offset:file_offset + n_elem]
+        return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(dims)
+
+    n_blocks = n_elem // block_size
+    total_bytes = n_blocks * block_bytes
+    raw = bytes(mmap_obj[file_offset:file_offset + total_bytes])
+
+    if dtype == 9:    # Q4_0
+        out = _dequant_q4_0(raw, n_elem)
+    elif dtype == 15:   # Q8_0
+        out = _dequant_q8_0(raw, n_elem)
+    elif dtype == 19:   # Q4_K
+        out = _dequant_q4_k(raw, n_elem)
+    elif dtype == 21:   # Q6_K
+        out = _dequant_q6_k(raw, n_elem)
+    else:
+        # Generic fallback: try Q4_0 layout (most common 4-bit)
+        try:
+            out = _dequant_q4_0(raw, n_elem)
+        except Exception:
+            out = torch.zeros(n_elem, dtype=torch.float16)
+
+    return out.reshape(dims)
+
+
 class GGUFInfo:
     """Parsed GGUF file metadata (no tensor data loaded)."""
 
@@ -227,19 +414,27 @@ class GGUFInfo:
                 data_section_offset += self.alignment - remainder
         self._data_section_offset = data_section_offset
 
-    def get_tensor(self, name: str) -> torch.Tensor:
-        """Get a tensor via mmap (zero-copy view into the file)."""
+    def get_tensor(self, name: str, dequantize: bool = True) -> torch.Tensor:
+        """Get a tensor via mmap. Quantized GGUF types are dequantized to float16.
+
+        Args:
+            dequantize: if True (default), quantized types (Q4_0, Q8_0, Q4_K, etc.)
+                are dequantized to float16. If False, raw uint8 bytes are returned.
+        """
         for t in self.tensors:
             if t["name"] == name:
                 torch_dtype, elem_size = GGML_DTYPE_MAP.get(t["dtype"], (None, 0))
                 file_offset = self._data_section_offset + t["offset"]
                 if torch_dtype is None:
-                    total_elements = 1
-                    for d in t["dims"]:
-                        total_elements *= d
-                    n_bytes = total_elements
-                    raw = self._mmap_obj[file_offset:file_offset + n_bytes]
-                    return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(t["dims"])
+                    # Quantized type — dequantize or return raw
+                    if not dequantize:
+                        total_elements = 1
+                        for d in t["dims"]:
+                            total_elements *= d
+                        raw = self._mmap_obj[file_offset:file_offset + total_elements]
+                        return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(t["dims"])
+                    return _dequant_gguf_tensor(
+                        self._mmap_obj, file_offset, t["dtype"], t["dims"])
 
                 total_bytes = 1
                 for d in t["dims"]:

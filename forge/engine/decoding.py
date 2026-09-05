@@ -203,6 +203,191 @@ class SpeculativeDecoding(DecodingStrategy):
         )
 
 
+class NGramSpeculativeDecoding(DecodingStrategy):
+    """N-gram speculative decoding (prompt-lookup).
+
+    Uses n-gram matching against the prompt to generate draft tokens —
+    no separate draft model needed. Works well for code completion and
+    RAG where output often repeats prompt substrings.
+
+    Based on vLLM's prompt_lookup_speculative_decoding.
+    """
+
+    def __init__(self, ngram_size: int = 3, draft_length: int = 4):
+        self.ngram_size = ngram_size
+        self.draft_length = draft_length
+
+    def generate(self, model, input_ids, max_new_tokens=100,
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
+        ids = input_ids.clone()
+        device = input_ids.device
+        prompt_len = input_ids.shape[1]
+        generated = 0
+
+        with torch.inference_mode():
+            # Prefill
+            out = model(ids, use_cache=True)
+            logits, past_kv = unpack_output_with_kv(out)
+
+        while generated < max_new_tokens:
+            # Generate main token
+            next_logits = logits[:, -1, :] / max(temperature, 1e-5)
+            if temperature == 0:
+                main_token = next_logits.argmax(-1, keepdim=True)
+            else:
+                probs = F.softmax(next_logits, dim=-1)
+                main_token = torch.multinomial(probs.view(-1), 1).unsqueeze(0)
+
+            # N-gram lookup: find draft tokens by matching last ngram_size tokens
+            draft_tokens = self._ngram_lookup(ids, main_token.squeeze())
+
+            if len(draft_tokens) > 0:
+                # Verify draft tokens in one forward pass
+                draft_tensor = torch.tensor(draft_tokens, device=device).unsqueeze(0)
+                verify_ids = torch.cat([main_token, draft_tensor], dim=-1)
+                with torch.inference_mode():
+                    out = model(verify_ids, past_key_values=past_kv, use_cache=True)
+                    verify_logits, past_kv = unpack_output_with_kv(out)
+
+                # Accept tokens that match
+                accepted = 0
+                prev_token = main_token.squeeze()
+                for i, draft_tok in enumerate(draft_tokens):
+                    pred_tok = verify_logits[0, i, :].argmax()
+                    if pred_tok.item() == draft_tok:
+                        accepted += 1
+                        prev_token = torch.tensor([draft_tok], device=device)
+                    else:
+                        break
+
+                # Append accepted + 1 (the token predicted at the mismatch)
+                new_tokens = [main_token.squeeze().item()] + draft_tokens[:accepted]
+                if accepted < len(draft_tokens):
+                    # Mismatch — use the model's prediction at the mismatch point
+                    new_tokens.append(verify_logits[0, accepted, :].argmax().item())
+
+                for tok in new_tokens:
+                    ids = torch.cat([ids, torch.tensor([[tok]], device=device)], dim=-1)
+                    generated += 1
+                    if generated >= max_new_tokens:
+                        break
+
+                # Get logits for next iteration (last position)
+                if accepted < len(draft_tokens):
+                    logits = verify_logits[:, accepted:accepted+1, :]
+                else:
+                    logits = verify_logits[:, -1:, :]
+            else:
+                # No draft — standard step
+                ids = torch.cat([ids, main_token], dim=-1)
+                generated += 1
+                with torch.inference_mode():
+                    out = model(main_token, past_key_values=past_kv, use_cache=True)
+                    logits, past_kv = unpack_output_with_kv(out)
+
+        return ids
+
+    def _ngram_lookup(self, ids: torch.Tensor, last_token: int) -> list[int]:
+        """Find draft tokens by n-gram matching against the sequence."""
+        seq = ids[0].cpu().tolist() + [last_token]
+        if len(seq) < self.ngram_size + 1:
+            return []
+        ngram = seq[-self.ngram_size:]
+        # Search for this ngram earlier in the sequence
+        for i in range(len(seq) - self.ngram_size - 1, self.ngram_size - 2, -1):
+            if seq[i:i+self.ngram_size] == ngram:
+                # Return up to draft_length tokens after the match
+                start = i + self.ngram_size
+                end = min(start + self.draft_length, len(seq))
+                return seq[start:end]
+        return []
+
+
+class ExternalDraftSpeculativeDecoding(DecodingStrategy):
+    """Speculative decoding with an external draft model.
+
+    The draft model is a smaller/faster model that proposes tokens.
+    The main model verifies them in a single forward pass.
+    """
+
+    def __init__(self, draft_model, draft_length: int = 4):
+        self.draft_model = draft_model
+        self.draft_length = draft_length
+
+    def generate(self, model, input_ids, max_new_tokens=100,
+                 temperature=0.0, top_p=1.0,
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
+        ids = input_ids.clone()
+        device = input_ids.device
+        generated = 0
+
+        with torch.inference_mode():
+            # Prefill both models
+            out = model(ids, use_cache=True)
+            logits, past_kv = unpack_output_with_kv(out)
+            draft_out = self.draft_model(ids, use_cache=True)
+            draft_logits, draft_past_kv = unpack_output_with_kv(draft_out)
+
+        while generated < max_new_tokens:
+            # Draft model proposes k tokens
+            draft_tokens = []
+            cur_logits = draft_logits[:, -1, :]
+            cur_ids = ids
+            for _ in range(self.draft_length):
+                if temperature == 0:
+                    tok = cur_logits.argmax(-1, keepdim=True)
+                else:
+                    probs = F.softmax(cur_logits / max(temperature, 1e-5), dim=-1)
+                    tok = torch.multinomial(probs.view(-1), 1).unsqueeze(0)
+                draft_tokens.append(tok.squeeze().item())
+                cur_ids = torch.cat([cur_ids, tok], dim=-1)
+                with torch.inference_mode():
+                    draft_out = self.draft_model(tok, past_key_values=draft_past_kv, use_cache=True)
+                    draft_logits, draft_past_kv = unpack_output_with_kv(draft_out)
+
+            # Main model generates next token
+            main_token = (logits[:, -1, :] / max(temperature, 1e-5)).argmax(-1, keepdim=True)
+
+            if draft_tokens:
+                # Verify draft in one forward pass
+                draft_tensor = torch.tensor(draft_tokens, device=device).unsqueeze(0)
+                verify_ids = torch.cat([main_token, draft_tensor], dim=-1)
+                with torch.inference_mode():
+                    out = model(verify_ids, past_key_values=past_kv, use_cache=True)
+                    verify_logits, past_kv = unpack_output_with_kv(out)
+
+                # Accept matching prefix
+                accepted = 0
+                new_tokens = [main_token.squeeze().item()]
+                for i, draft_tok in enumerate(draft_tokens):
+                    pred_tok = verify_logits[0, i, :].argmax()
+                    if pred_tok.item() == draft_tok:
+                        accepted += 1
+                        new_tokens.append(draft_tok)
+                    else:
+                        new_tokens.append(pred_tok.item())
+                        break
+
+                for tok in new_tokens:
+                    ids = torch.cat([ids, torch.tensor([[tok]], device=device)], dim=-1)
+                    generated += 1
+                    if generated >= max_new_tokens:
+                        break
+
+                logits = verify_logits[:, -1:, :]
+            else:
+                ids = torch.cat([ids, main_token], dim=-1)
+                generated += 1
+                with torch.inference_mode():
+                    out = model(main_token, past_key_values=past_kv, use_cache=True)
+                    logits, past_kv = unpack_output_with_kv(out)
+
+        return ids
+
+
 class MedusaDecoding(DecodingStrategy):
     """Medusa parallel prediction heads."""
 

@@ -55,6 +55,30 @@ from forge.self_play.discovery.qwen_adapter import (
 )
 
 
+def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
+    """Extract thinking/reasoning blocks from model output.
+
+    Supports DeepSeek-R1 (<think>...</think>), QwQ/Qwen3
+    (<|thinking_start|>...<|thinking_end|>), and generic
+    <reasoning>...</reasoning> tags.
+
+    Returns (content_without_reasoning, reasoning_text_or_None).
+    """
+    import re
+    patterns = [
+        (r'<think>(.*?)</think>', re.DOTALL),
+        (r'<\|thinking_start\|>(.*?)<\|thinking_end\|>', re.DOTALL),
+        (r'<reasoning>(.*?)</reasoning>', re.DOTALL),
+    ]
+    for pattern, flags in patterns:
+        m = re.search(pattern, text, flags)
+        if m:
+            reasoning = m.group(1).strip()
+            content = re.sub(pattern, '', text, flags=flags).strip()
+            return content, reasoning
+    return text, None
+
+
 # ── Pydantic models ──────────────────────────────────────────────────────────
 
 class ToolFunction(BaseModel):
@@ -86,6 +110,8 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[list[str]] = None
     repetition_penalty: float = 1.05
     seed: Optional[int] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -117,6 +143,38 @@ class CompletionRequest(BaseModel):
     stop: Optional[list[str]] = None
     repetition_penalty: float = 1.05
     seed: Optional[int] = None
+    logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
+
+class EmbeddingRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    input: str | list[str]
+    encoding_format: str = "float"
+
+class RerankingRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    query: str
+    documents: list[str]
+    top_n: int | None = None
+
+class InfillRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    prefix: str
+    suffix: str
+    max_tokens: int = 128
+    temperature: float = 0.2
+    top_p: float = 0.9
+
+class MessagesRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    messages: list[dict]
+    system: str | None = None
+    max_tokens: int = 256
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 80
+    stop_sequences: list[str] | None = None
+    seed: int | None = None
 
 class ModelInfo(BaseModel):
     id: str
@@ -127,6 +185,18 @@ class ModelInfo(BaseModel):
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: list[ModelInfo]
+
+class RouterRegisterRequest(BaseModel):
+    model_id: str
+    checkpoint: str
+    config_name: str = "forgelm_v2_light"
+    tokenizer_path: Optional[str] = None
+    vram_budget_gb: Optional[float] = None
+
+class KVCacheTypeRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    cache_type_k: str = "f16"
+    cache_type_v: str = "f16"
 
 class SleepRequest(BaseModel):
     level: int = Field(default=1, ge=1, le=2)
@@ -382,6 +452,7 @@ class ForgeServer:
             self.registry, self.session_manager,
             batch_window_ms=batch_window_ms,
             max_batch_size=max_batch_size,
+            continuous_batching=True,
         )
         self.app = FastAPI(title="ForgeAI Inference Server", version="3.0.0")
         self.app.add_middleware(
@@ -524,6 +595,23 @@ class ForgeServer:
         # No tools: simple chat template
         return qwen_render_messages(messages, add_generation_prompt=True)
 
+    def _build_anthropic_prompt(self, req) -> str:
+        """Build a text prompt from Anthropic-style messages."""
+        parts = []
+        if req.system:
+            parts.append(f"System: {req.system}")
+        for msg in req.messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+            if role == "user":
+                parts.append(f"Human: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+        parts.append("Assistant: ")
+        return "\n\n".join(parts)
+
     def _setup_routes(self):
         app = self.app
         registry = self.registry
@@ -576,24 +664,67 @@ class ForgeServer:
                 repetition_penalty=req.repetition_penalty,
                 stop=req.stop,
                 seed=req.seed,
+                logprobs=req.top_logprobs if req.logprobs else None,
+                return_logprobs=bool(req.logprobs),
             )
+            # Handle logprobs return (dict with text + logprobs)
+            lp_data = None
+            if isinstance(raw_text, dict):
+                lp_data = raw_text.get("logprobs")
+                raw_text = raw_text.get("text", "")
             tool_calls, content = _parse_tool_calls_openai(raw_text)
+            # tool_choice enforcement
+            if req.tool_choice == "none" and tool_calls:
+                tool_calls = []
+                content = raw_text
+            elif isinstance(req.tool_choice, dict) and req.tool_choice.get("type") == "function":
+                # Force specific function
+                fn_name = req.tool_choice.get("function", {}).get("name")
+                if fn_name:
+                    tool_calls = [{"id": f"call_{uuid.uuid4().hex[:8]}",
+                                   "type": "function",
+                                   "function": {"name": fn_name, "arguments": "{}"}}]
+                    content = None
+            elif req.tool_choice == "required" and not tool_calls:
+                # Must call a tool — pick the first available
+                if req.tools:
+                    first_tool = req.tools[0]
+                    fn_name = first_tool.function.name if hasattr(first_tool, 'function') else first_tool.get('function', {}).get('name')
+                    if fn_name:
+                        tool_calls = [{"id": f"call_{uuid.uuid4().hex[:8]}",
+                                       "type": "function",
+                                       "function": {"name": fn_name, "arguments": "{}"}}]
+                        content = None
+            # Extract reasoning blocks (DeepSeek-R1/QwQ/Qwen3 thinking)
+            reasoning_text = None
+            if content:
+                content, reasoning_text = _parse_reasoning(content, req.model)
             message: dict[str, Any] = {"role": "assistant", "content": content or None}
+            if reasoning_text:
+                message["reasoning_content"] = reasoning_text
             if tool_calls:
                 message["tool_calls"] = tool_calls
             finish = "tool_calls" if tool_calls else "stop"
             resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-            return ChatCompletionResponse(
-                id=resp_id,
-                created=int(time.time()),
-                model=req.model,
-                choices=[ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=content or None,
-                                        tool_calls=tool_calls or None),
-                    finish_reason=finish,
-                )],
-            )
+            # Build response dict directly to support reasoning_content (non-standard field)
+            resp = {
+                "id": resp_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content or None,
+                        "tool_calls": tool_calls or None,
+                    } | ({"reasoning_content": reasoning_text} if reasoning_text else {}),
+                    "finish_reason": finish,
+                    "logprobs": lp_data,
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+            return resp
 
         @app.post("/v1/completions")
         async def completions(req: CompletionRequest):
@@ -613,15 +744,106 @@ class ForgeServer:
                 stop=req.stop,
                 seed=req.seed,
             )
+            # Extract logprobs if requested
+            lp_data = getattr(raw_text, '_forge_logprobs', None)
             resp_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+            choice = {"index": 0, "text": _strip_markers(raw_text),
+                      "finish_reason": "stop"}
+            if lp_data:
+                choice["logprobs"] = lp_data
+            else:
+                choice["logprobs"] = None
             return {
                 "id": resp_id,
+                "object": "text_completion",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": [choice],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+
+        @app.post("/v1/embeddings")
+        async def embeddings(req: EmbeddingRequest):
+            """OpenAI-compatible text embeddings."""
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            inputs = req.input if isinstance(req.input, list) else [req.input]
+            embeddings_list = []
+            for text in inputs:
+                emb = engine.embed(text)
+                embeddings_list.append(emb)
+            return {
+                "object": "list",
+                "data": [{"object": "embedding", "embedding": emb, "index": i}
+                         for i, emb in enumerate(embeddings_list)],
+                "model": req.model,
+                "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            }
+
+        @app.post("/v1/reranking")
+        async def reranking(req: RerankingRequest):
+            """Rerank documents by relevance to a query."""
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            scores = []
+            for doc in req.documents:
+                score = engine.rerank(req.query, doc)
+                scores.append(score)
+            # Return sorted indices
+            ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+            return {
+                "object": "list",
+                "data": [{"index": i, "relevance_score": scores[i], "document": {"text": req.documents[i]}}
+                         for i in ranked],
+                "model": req.model,
+            }
+
+        @app.post("/v1/infill")
+        async def infill(req: InfillRequest):
+            """Fill-in-the-middle code completion."""
+            prompt = f"<|fim_prefix|>{req.prefix}<|fim_suffix|>{req.suffix}<|fim_middle|>"
+            raw_text = registry.generate(
+                req.model, prompt,
+                max_new_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                stop=["<|fim_middle|>", "\n\n"],
+            )
+            return {
+                "id": f"infill-{uuid.uuid4().hex[:12]}",
                 "object": "text_completion",
                 "created": int(time.time()),
                 "model": req.model,
                 "choices": [{"index": 0, "text": _strip_markers(raw_text),
                              "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+
+        @app.post("/v1/messages")
+        async def messages(req: MessagesRequest):
+            """Anthropic-compatible /v1/messages endpoint."""
+            prompt = self._build_anthropic_prompt(req)
+            raw_text = registry.generate(
+                req.model, prompt,
+                max_new_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                stop=req.stop_sequences,
+                seed=req.seed,
+            )
+            resp_id = f"msg_{uuid.uuid4().hex[:24]}"
+            return {
+                "id": resp_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": raw_text}],
+                "model": req.model,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
             }
 
         @app.post("/v1/batch/completions")
@@ -1186,6 +1408,27 @@ class ForgeServer:
                 "kv_cache": req.strategy,
             }
 
+        @app.post("/v1/engine/kv-cache-type")
+        async def set_kv_cache_type(req: KVCacheTypeRequest):
+            """Set KV cache quantization type (llama.cpp-style --cache-type-k/v).
+
+            Supported types: f32, f16, bf16, q8_0, q4_0, bf16
+            """
+            engine = self.registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            type_map = {
+                "f32": 32, "f16": 16, "bf16": 16, "q8_0": 8, "q4_0": 4,
+            }
+            k_bits = type_map.get(req.cache_type_k, 16)
+            v_bits = type_map.get(req.cache_type_v, 16)
+            try:
+                engine.activate(kv_bits=k_bits)
+                return {"status": "ok", "cache_type_k": req.cache_type_k,
+                        "cache_type_v": req.cache_type_v, "k_bits": k_bits, "v_bits": v_bits}
+            except Exception as e:
+                raise HTTPException(400, str(e))
+
         @app.post("/v1/engine/decoding")
         async def switch_decoding(req: SwitchStrategyRequest):
             """Hot-swap decoding strategy."""
@@ -1356,6 +1599,33 @@ class ForgeServer:
             entries = engine.library.list_entries(
                 category=category, tag=tag, limit=limit, offset=offset)
             return {"entries": entries, "total": len(entries)}
+
+        # ── Router mode: dynamic model registration ───────────────────────
+        @app.post("/v1/router/register")
+        async def router_register(req: RouterRegisterRequest):
+            """Dynamically register a model at runtime (router mode).
+
+            Allows adding models to a running server without restart.
+            The model is loaded on first use (lazy) and evicted LRU-style
+            when VRAM is needed.
+            """
+            try:
+                engine = self.registry.register(
+                    req.model_id, req.checkpoint,
+                    config_name=req.config_name,
+                    tokenizer_path=req.tokenizer_path,
+                    vram_budget_gb=req.vram_budget_gb or 0,
+                )
+                return {"status": "ok", "model_id": req.model_id,
+                        "loaded": engine is not None}
+            except Exception as e:
+                raise HTTPException(400, str(e))
+
+        @app.delete("/v1/router/{model_id}")
+        async def router_unregister(model_id: str):
+            """Remove a model from the router."""
+            self.registry.unregister(model_id)
+            return {"status": "ok", "model_id": model_id}
 
     async def _stream_chat(self, req: ChatCompletionRequest, prompt: str):
         """SSE streaming generator for chat completions with tool-call detection."""

@@ -164,6 +164,9 @@ class ModelRegistry:
             finish_sentence=finish_sentence,
             top_k=top_k, repetition_penalty=repetition_penalty,
             stop=stop,
+            logprobs=kwargs.get('logprobs'),
+            prompt_logprobs=kwargs.get('prompt_logprobs'),
+            return_logprobs=kwargs.get('return_logprobs', False),
         )
         entry.generation_count += 1
         entry.total_tokens += entry.engine.total_tokens_generated

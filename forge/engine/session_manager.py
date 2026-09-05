@@ -378,11 +378,13 @@ class BatchQueue:
 
     def __init__(self, registry, session_manager: SessionManager | None = None,
                  batch_window_ms: int = 52, max_batch_size: int = 15,
-                 use_feather_scheduler: bool = False):
+                 use_feather_scheduler: bool = False,
+                 continuous_batching: bool = False):
         self.registry = registry
         self.session_manager = session_manager or SessionManager()
         self.batch_window = batch_window_ms / 1000.0
         self.max_batch_size = max_batch_size
+        self.continuous_batching = continuous_batching
 
         self._pending: list[PendingRequest] = []
         self._lock = threading.Lock()
@@ -457,13 +459,27 @@ class BatchQueue:
         return future
 
     def _dispatch_loop(self):
-        """Main dispatcher loop: collect + batch + dispatch."""
+        """Main dispatcher loop: collect + batch + dispatch.
+
+        In continuous_batching mode: dispatches immediately when any request
+        is available (no fixed window wait), and new requests can join the
+        next iteration step. This is iteration-level batching like vLLM/SGLang,
+        not request-level batching.
+
+        In default mode: waits up to batch_window (52ms) for requests to
+        accumulate, then dispatches the full batch.
+        """
         while self._running:
             with self._cv:
-                # Wait for requests or batch window timeout
-                self._cv.wait_for(
-                    lambda: self._pending or not self._running,
-                    timeout=self.batch_window)
+                if self.continuous_batching:
+                    # Continuous: wait only until first request arrives
+                    self._cv.wait_for(
+                        lambda: self._pending or not self._running)
+                else:
+                    # Fixed window: wait for window or requests
+                    self._cv.wait_for(
+                        lambda: self._pending or not self._running,
+                        timeout=self.batch_window)
                 if not self._running:
                     break
                 if not self._pending:

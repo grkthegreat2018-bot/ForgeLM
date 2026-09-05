@@ -346,3 +346,122 @@ def benchmark_quantization(model, tokenizer, prompts, device="cuda"):
     speedup = int8_tps / baseline_tps
     print(f"  [InferQuant] BF16: {baseline_tps:.0f} tok/s | INT8: {int8_tps:.0f} tok/s | {speedup:.2f}x speedup")
     return {"baseline_tps": baseline_tps, "int8_tps": int8_tps, "speedup": speedup}
+
+
+def dequantize_gptq(weight: torch.Tensor, qweight: torch.Tensor,
+                    qzeros: torch.Tensor, scales: torch.Tensor,
+                    bits: int = 4, group_size: int = 128) -> torch.Tensor:
+    """Dequantize GPTQ-packed weights to full precision.
+
+    GPTQ packs quantized weights into int32 tensors where each int32 holds
+    8/bits quantized values. Scales and zeros are per-group.
+
+    Args:
+        weight: output tensor [out_features, in_features] (to be filled)
+        qweight: packed quantized weights [out_features, in_features // pack_factor]
+        qzeros: zero points [num_groups, out_features // pack_factor]
+        scales: scales [num_groups, out_features]
+        bits: quantization bits (4 or 8)
+        group_size: number of elements per quantization group
+    """
+    pack_factor = 32 // bits
+    out_features, packed_in = qweight.shape
+    in_features = packed_in * pack_factor
+    num_groups = (in_features + group_size - 1) // group_size
+
+    # Unpack quantized weights
+    weight = torch.zeros(out_features, in_features, dtype=scales.dtype, device=qweight.device)
+    for i in range(pack_factor):
+        col_start = i * (in_features // pack_factor)
+        col_end = (i + 1) * (in_features // pack_factor)
+        # Extract bits at position i
+        mask = (1 << bits) - 1
+        qw_unpacked = (qweight[:, col_start:col_end] >> (i * bits)) & mask
+        # Subtract zero point and scale
+        for g in range(num_groups):
+            g_start = g * group_size
+            g_end = min((g + 1) * group_size, in_features)
+            g_len = g_end - g_start
+            if g_len <= 0:
+                break
+            # Get zero point for this group (subtract 1 from packed zero)
+            if g < qzeros.shape[0]:
+                zp = (qzeros[g, :out_features].float() - 1) * scales[g, :out_features]
+            else:
+                zp = torch.zeros(out_features, dtype=scales.dtype, device=qweight.device)
+            # Apply scale and zero point
+            weight[:, g_start:g_end] = (
+                qw_unpacked[:, g_start:col_start + g_len].float() *
+                scales[g, :out_features].unsqueeze(1).float()
+            ) - zp.unsqueeze(1)
+    return weight
+
+
+def dequantize_awq(weight: torch.Tensor, qweight: torch.Tensor,
+                   qzeros: torch.Tensor, scales: torch.Tensor,
+                   bits: int = 4, group_size: int = 128) -> torch.Tensor:
+    """Dequantize AWQ-packed weights to full precision.
+
+    AWQ uses a similar packing scheme to GPTQ but with different
+    zero-point handling (zeros are stored as actual values, not offset by 1).
+
+    Args:
+        weight: output tensor [out_features, in_features] (to be filled)
+        qweight: packed quantized weights [in_features // pack_factor, out_features]
+        qzeros: zero points [num_groups, out_features]
+        scales: scales [num_groups, out_features]
+        bits: quantization bits (4 or 8)
+        group_size: number of elements per quantization group
+    """
+    pack_factor = 32 // bits
+    packed_in, out_features = qweight.shape
+    in_features = packed_in * pack_factor
+    num_groups = (in_features + group_size - 1) // group_size
+
+    # AWQ stores qweight transposed vs GPTQ
+    weight = torch.zeros(out_features, in_features, dtype=scales.dtype, device=qweight.device)
+    for i in range(pack_factor):
+        mask = (1 << bits) - 1
+        qw_unpacked = (qweight[i::pack_factor, :].T >> 0) & mask  # AWQ interleaves differently
+        for g in range(num_groups):
+            g_start = g * group_size
+            g_end = min((g + 1) * group_size, in_features)
+            g_len = g_end - g_start
+            if g_len <= 0:
+                break
+            if g < qzeros.shape[0]:
+                zp = qzeros[g, :out_features].float()
+            else:
+                zp = torch.zeros(out_features, dtype=scales.dtype, device=qweight.device)
+            scale = scales[g, :out_features].float() if g < scales.shape[0] else torch.ones(out_features)
+            weight[:, g_start:g_end] = (
+                qw_unpacked[:out_features, :g_len].float() - zp.unsqueeze(1)
+            ) * scale.unsqueeze(1)
+    return weight
+
+
+def load_gptq_linear(layer: torch.nn.Linear, qweight: torch.Tensor,
+                     qzeros: torch.Tensor, scales: torch.Tensor,
+                     bits: int = 4, group_size: int = 128) -> torch.nn.Linear:
+    """Load GPTQ-quantized weights into a standard nn.Linear layer.
+
+    Dequantizes the GPTQ weights and loads them into the layer for
+    inference with standard matmul. This is the simple path — for
+    fast inference, a fused GPTQ kernel would be needed.
+    """
+    out_features, in_features = layer.weight.shape
+    dequant = dequantize_gptq(
+        layer.weight.data, qweight, qzeros, scales, bits, group_size)
+    layer.weight.data.copy_(dequant.to(layer.weight.dtype))
+    return layer
+
+
+def load_awq_linear(layer: torch.nn.Linear, qweight: torch.Tensor,
+                    qzeros: torch.Tensor, scales: torch.Tensor,
+                    bits: int = 4, group_size: int = 128) -> torch.nn.Linear:
+    """Load AWQ-quantized weights into a standard nn.Linear layer."""
+    out_features, in_features = layer.weight.shape
+    dequant = dequantize_awq(
+        layer.weight.data, qweight, qzeros, scales, bits, group_size)
+    layer.weight.data.copy_(dequant.to(layer.weight.dtype))
+    return layer
