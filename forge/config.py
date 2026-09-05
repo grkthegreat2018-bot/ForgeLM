@@ -380,6 +380,18 @@ class ModelConfig:
     use_iri_fp4: bool = False
     iri_fp4_rounds: int = 2        # 2 rounds = 9.0 bits/w, 41.6 dB SQNR, lossless
     iri_fp4_block_size: int = 32   # block size for per-block scale
+    # === R&D Round 49: SubBitnet — training-free sub-bitnet quantization ===
+    # Hadamard incoherence rotation + Iterative Residual Binarization (IRB) +
+    # optional SVD low-rank residual. Training-free QAT substitute targeting
+    # sub-bitnet bit-widths (<= 1.58 bits/w). No calibration, no gradient steps.
+    #   - rounds=1, rank=0:  ~1.0 bit/w  (pure binary, sub-bitnet)  ← default
+    #   - rounds=1, rank=16: ~1.02 bit/w (binary + structured residual)
+    #   - rounds=2, rank=0:  ~2.0 bit/w
+    # Mutually exclusive with use_bitnet / use_iri_fp4 (apply at inference).
+    use_sub_bitnet: bool = False
+    sub_bitnet_rounds: int = 1     # IRB binary rounds (1 = pure 1-bit)
+    sub_bitnet_rank: int = 0       # SVD low-rank residual rank (0 = disabled)
+    sub_bitnet_hadamard: bool = True  # Hadamard incoherence rotation
     # Gradient checkpointing: recompute forward during backward to save VRAM.
     use_gradient_checkpointing: bool = False
     # Selective checkpoint strategy: "all" (full block), "ffn" (recompute only

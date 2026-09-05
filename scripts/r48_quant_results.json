@@ -1,0 +1,96 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "fp16_ppl": 31.625,
+  "fp16_speed": 20.291191846957254,
+  "fp16_mb": 942.292724609375,
+  "results": [
+    {
+      "method": "NanoQuant (rank=128)",
+      "ppl": 1064960.0,
+      "delta_ppl": 1064928.375,
+      "speed": 20.68039178465157,
+      "speed_ratio": 1.0191807332279832,
+      "weight_mb": 9.439453125,
+      "eff_bits": 0.22129120879120878,
+      "gpu_mem": 2138.802734375,
+      "n_layers": 168
+    },
+    {
+      "method": "NanoQuant (rank=256)",
+      "ppl": 152576.0,
+      "delta_ppl": 152544.375,
+      "speed": 46.30417562958461,
+      "speed_ratio": 2.2819840243404976,
+      "weight_mb": 17.830078125,
+      "eff_bits": 0.4179945054945055,
+      "gpu_mem": 2148.7578125,
+      "n_layers": 168
+    },
+    {
+      "method": "BTC-LLM (K=256, rotated)",
+      "ppl": 8355840.0,
+      "delta_ppl": 8355808.375,
+      "speed": 20.5116989879379,
+      "speed_ratio": 1.0108671359791865,
+      "weight_mb": 11.490234375,
+      "eff_bits": 0.26936813186813185,
+      "gpu_mem": 2372.3017578125,
+      "n_layers": 168
+    },
+    {
+      "method": "BTC-LLM (K=512, rotated)",
+      "ppl": 45088768.0,
+      "delta_ppl": 45088736.375,
+      "speed": 47.02218873881146,
+      "speed_ratio": 2.317369481963802,
+      "weight_mb": 20.490234375,
+      "eff_bits": 0.48035714285714287,
+      "gpu_mem": 2382.24853515625,
+      "n_layers": 168
+    },
+    {
+      "method": "TernaryPTQ (Hessian-refined)",
+      "ppl": 1359872.0,
+      "delta_ppl": 1359840.375,
+      "speed": 25.308818826368984,
+      "speed_ratio": 1.2472810378639312,
+      "weight_mb": 68.83014678955078,
+      "eff_bits": 1.6136005108173077,
+      "gpu_mem": 2198.92822265625,
+      "n_layers": 168
+    },
+    {
+      "method": "TernaryPTQ (vanilla absmean)",
+      "ppl": 284672.0,
+      "delta_ppl": 284640.375,
+      "speed": 48.29941161669813,
+      "speed_ratio": 2.3803141767614218,
+      "weight_mb": 68.83014678955078,
+      "eff_bits": 1.6136005108173077,
+      "gpu_mem": 2199.4443359375,
+      "n_layers": 168
+    },
+    {
+      "method": "AWQFP4 (R47 best)",
+      "ppl": 31.625,
+      "delta_ppl": 0.0,
+      "speed": 21.56414031304811,
+      "speed_ratio": 1.0627340412377866,
+      "weight_mb": 193.11328125,
+      "eff_bits": 4.5271978021978025,
+      "gpu_mem": 2328.4912109375,
+      "n_layers": 168
+    },
+    {
+      "method": "NVFP4 (baseline)",
+      "ppl": 43.25,
+      "delta_ppl": 11.625,
+      "speed": 45.8269420818499,
+      "speed_ratio": 2.258464777598652,
+      "weight_mb": 193.11328125,
+      "eff_bits": 4.5271978021978025,
+      "gpu_mem": 5884.23486328125,
+      "n_layers": 168
+    }
+  ]
+}

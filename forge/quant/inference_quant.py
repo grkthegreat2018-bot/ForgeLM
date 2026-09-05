@@ -109,7 +109,7 @@ class QuantizedLinear(nn.Module):
             weight = self._cached_weight
         else:
             weight = self._dequantize().to(x.dtype)
-        return F.linear(x, weight, self.bias_weight if self.bias is not None else None)
+        return F.linear(x, weight, self.bias_weight.to(x.dtype) if self.bias is not None else None)
 
     def __repr__(self):
         return f"QuantizedLinear(in={self.in_features}, out={self.out_features}, bits={self.bits})"
@@ -176,7 +176,9 @@ class FastINT8Linear(nn.Module):
 
         # Fallback: dequant weight to bf16, standard matmul (CPU / no _scaled_mm).
         w_bf16 = self.q_weight.to(torch.float32) * self.w_scale.to(torch.float32)
-        return F.linear(x, w_bf16.to(x.dtype), bias).reshape(*orig_shape[:-1], self.out_features)
+        w_out = w_bf16.to(x.dtype)
+        bias_out = bias.to(x.dtype) if bias is not None else None
+        return F.linear(x, w_out, bias_out).reshape(*orig_shape[:-1], self.out_features)
 
     def __repr__(self):
         return f"FastINT8Linear(in={self.in_features}, out={self.out_features}, fp8_scaled_mm)"

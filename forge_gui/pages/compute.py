@@ -91,7 +91,9 @@ class ComputePage(QWidget):
         outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0); outer.addWidget(self._host)
 
     def refresh(self) -> None:
-        gs = self._gpu.snapshot()
+        # R37: use cached_snapshot() — populated by background GpuPoller
+        # so the UI thread never blocks on torch import / CUDA queries.
+        gs = self._gpu.cached_snapshot()
         if not gs.available:
             self._c_name.set_value("CUDA unavailable")
             self._c_cuda.set_value("—"); self._c_total.set_value("—", unit="GB")

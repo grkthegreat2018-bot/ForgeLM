@@ -88,7 +88,9 @@ class DashboardPage(QWidget):
         import time
         if self._start_ts == 0.0:
             self._start_ts = time.time()
-        gs = self._gpu.snapshot()
+        # R37: use cached_snapshot() — populated by background GpuPoller
+        # so the UI thread never blocks on torch import / CUDA queries.
+        gs = self._gpu.cached_snapshot()
         self._vram_gauge.set_value(gs.vram_pct)
         self._compute_gauge.set_value(min(100.0, gs.vram_pct * 1.1))  # proxy
         self._card_vram.set_value(f"{gs.vram_allocated_gb:.2f}", unit="GB")

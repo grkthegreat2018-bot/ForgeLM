@@ -139,7 +139,10 @@ class ModelRegistry:
 
     def generate(self, model_id: str, prompt: str, max_new_tokens: int = 100,
                  temperature: float = 0.0, top_p: float = 1.0,
-                 finish_sentence: bool = True) -> str:
+                 finish_sentence: bool = True,
+                 top_k: int = 80, repetition_penalty: float = 1.05,
+                 stop: list[str] | None = None, seed: int | None = None,
+                 **kwargs) -> str:
         """Generate text from a registered model. Auto-wakes if asleep."""
         with self._lock:
             if model_id not in self._entries:
@@ -150,10 +153,17 @@ class ModelRegistry:
             entry = self._entries[model_id]
             entry.last_used = time.time()
 
+        # Seed handling: set on the engine for reproducible sampling
+        if seed is not None:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
         output = entry.engine.generate(
             prompt, max_new_tokens=max_new_tokens,
             temperature=temperature, top_p=top_p,
             finish_sentence=finish_sentence,
+            top_k=top_k, repetition_penalty=repetition_penalty,
+            stop=stop,
         )
         entry.generation_count += 1
         entry.total_tokens += entry.engine.total_tokens_generated

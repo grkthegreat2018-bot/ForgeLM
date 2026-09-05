@@ -1,0 +1,105 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "device": "cuda",
+  "fp16_ppl": 31.625,
+  "fp16_speed": 28.89123955374513,
+  "fp16_mb": 942.292724609375,
+  "results": [
+    {
+      "method": "HadamardRotatedFP4",
+      "method_key": "hr_fp4",
+      "ppl": 45.25,
+      "delta_ppl": 13.625,
+      "speed": 20.69332922851644,
+      "weight_mb": 250.91015625,
+      "eff_bits": 5.882142857142857,
+      "recon_err": 0.08381044901422792,
+      "gpu_mem": 2622.20751953125,
+      "n_layers": 168
+    },
+    {
+      "method": "GPTQFP4",
+      "method_key": "gptq_fp4",
+      "ppl": 43.75,
+      "delta_ppl": 12.125,
+      "speed": 46.84919725090875,
+      "weight_mb": 193.11328125,
+      "eff_bits": 4.5271978021978025,
+      "recon_err": 0.10161651012385388,
+      "gpu_mem": 2343.46630859375,
+      "n_layers": 168
+    },
+    {
+      "method": "AWQFP4",
+      "method_key": "awq_fp4",
+      "ppl": 31.625,
+      "delta_ppl": 0.0,
+      "speed": 47.45392792141819,
+      "weight_mb": 193.11328125,
+      "eff_bits": 4.5271978021978025,
+      "recon_err": 0.10037539713947337,
+      "gpu_mem": 2326.76123046875,
+      "n_layers": 168
+    },
+    {
+      "method": "OptimalGridFP4",
+      "method_key": "og_fp4",
+      "ppl": 44.5,
+      "delta_ppl": 12.875,
+      "speed": 46.59783781261561,
+      "weight_mb": 193.118408203125,
+      "eff_bits": 4.527317994505495,
+      "recon_err": 0.08470312231746231,
+      "gpu_mem": 2326.05517578125,
+      "n_layers": 168
+    },
+    {
+      "method": "HadamardGPTQFP4",
+      "method_key": "hr_gptq_fp4",
+      "ppl": 48.25,
+      "delta_ppl": 16.625,
+      "speed": 35.19947722130592,
+      "weight_mb": 250.91015625,
+      "eff_bits": 5.882142857142857,
+      "recon_err": 0.08929392896421036,
+      "gpu_mem": 2630.20947265625,
+      "n_layers": 168
+    },
+    {
+      "method": "HadamardAWQFP4",
+      "method_key": "hr_awq_fp4",
+      "ppl": 45.25,
+      "delta_ppl": 13.625,
+      "speed": 42.47149870117246,
+      "weight_mb": 250.91015625,
+      "eff_bits": 5.882142857142857,
+      "recon_err": 0.08478418132143262,
+      "gpu_mem": 2627.98486328125,
+      "n_layers": 168
+    },
+    {
+      "method": "SchurAB-FP4 (R45)",
+      "method_key": "schur_ab_fp4",
+      "ppl": 43.75,
+      "delta_ppl": 12.125,
+      "speed": 9.258095629593534,
+      "weight_mb": 203.77734375,
+      "eff_bits": 4.7771978021978025,
+      "recon_err": 0.09286299627399745,
+      "gpu_mem": 1645.13720703125,
+      "n_layers": 168
+    },
+    {
+      "method": "NVFP4 (baseline)",
+      "method_key": "nvfp4",
+      "ppl": 43.25,
+      "delta_ppl": 11.625,
+      "speed": 38.64022788159296,
+      "weight_mb": 259.739990234375,
+      "eff_bits": 16.0,
+      "recon_err": 0.1044410951269041,
+      "gpu_mem": 5875.53857421875,
+      "n_layers": 168
+    }
+  ]
+}

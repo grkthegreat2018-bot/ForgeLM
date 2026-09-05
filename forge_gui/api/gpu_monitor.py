@@ -1,10 +1,15 @@
 """GPU / compute monitoring via torch.cuda.
 
 Falls back to zeroed stats when CUDA is unavailable so the GUI still renders.
+
+R37: ``cached_snapshot()`` returns the most recent stats produced by a
+background poller thread (``GpuPoller``), so the UI thread never blocks
+on ``import torch`` (1-3 s CUDA runtime init) or CUDA API queries.
 """
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +45,11 @@ class GpuMonitor:
     def __init__(self) -> None:
         self._torch = None
         self._torch_loaded = False
+        # R37: thread-safe cache populated by GpuPoller (background thread).
+        # UI threads read this via cached_snapshot() to avoid importing torch
+        # on the event loop (1-3 s CUDA init freeze).
+        self._cache_lock = threading.Lock()
+        self._cached: GpuStats = GpuStats()
 
     def _ensure_torch(self):
         """Lazily import torch on first use — importing torch at construction
@@ -60,6 +70,21 @@ class GpuMonitor:
     def available(self) -> bool:
         t = self._ensure_torch()
         return bool(t and t.cuda.is_available())
+
+    def cached_snapshot(self) -> GpuStats:
+        """Return the most recent GpuStats from the background poller.
+
+        Never blocks — returns a zeroed GpuStats if no poll has completed
+        yet (e.g. during the first second after launch before torch has
+        finished importing in the background thread).
+        """
+        with self._cache_lock:
+            return self._cached
+
+    def _set_cached(self, stats: GpuStats) -> None:
+        """Called by GpuPoller to update the cache (thread-safe)."""
+        with self._cache_lock:
+            self._cached = stats
 
     def snapshot(self) -> GpuStats:
         t = self._ensure_torch()
@@ -96,3 +121,45 @@ class GpuMonitor:
                 t.cuda.reset_peak_memory_stats()
             except Exception as e:
                 logger.warning("reset_peak_memory_stats failed: %s", e)
+
+
+class GpuPoller:
+    """Background GPU stats poller using a plain daemon thread.
+
+    Imports torch + queries CUDA in the background, updating the
+    ``GpuMonitor`` cache so the UI event loop never blocks on CUDA init
+    (1-3 s on first import).  The poller is a daemon thread — it stops
+    automatically when the process exits, or call ``stop()`` for a clean
+    shutdown.
+    """
+
+    def __init__(self, gpu: GpuMonitor, interval_s: float = 2.0) -> None:
+        self._gpu = gpu
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="GpuPoller", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout_s: float = 3.0) -> None:
+        self._stop.set()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout_s)
+        self._thread = None
+
+    def _run(self) -> None:
+        import time as _time
+        while not self._stop.is_set():
+            try:
+                stats = self._gpu.snapshot()
+                self._gpu._set_cached(stats)
+            except Exception as e:
+                logger.debug("GpuPoller snapshot error: %s", e)
+            self._stop.wait(self._interval_s)

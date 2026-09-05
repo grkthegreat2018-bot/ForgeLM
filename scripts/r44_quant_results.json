@@ -1,0 +1,56 @@
+[
+  {
+    "method": "FP16 (baseline)",
+    "ppl": 8.5,
+    "speed": 20.95556233927864,
+    "weight_mb": 942.292724609375,
+    "eff_bits": 16.0,
+    "recon_err": 0.0,
+    "gpu_mem": 951.44775390625
+  },
+  {
+    "method": "AB-FP4 no-residual (3/4-bit only)",
+    "ppl": 9.1875,
+    "speed": 11.81230442745314,
+    "weight_mb": 463.43359375,
+    "eff_bits": 7.8701781153603765,
+    "recon_err": 0.09286299627399745,
+    "gpu_mem": 1418.4931640625
+  },
+  {
+    "method": "SparseResidualINT4 (SR-INT4)",
+    "ppl": 10.25,
+    "speed": 12.127864810035616,
+    "weight_mb": 490.4573230743408,
+    "eff_bits": 8.329103765102076,
+    "recon_err": 0.1038875381270344,
+    "gpu_mem": 1783.482421875
+  },
+  {
+    "method": "SR-INT4 gs=128 (less scale overhead)",
+    "ppl": 11.4375,
+    "speed": 27.609775021437606,
+    "weight_mb": 482.4655513763428,
+    "eff_bits": 8.193384931662328,
+    "recon_err": 0.11737019719927076,
+    "gpu_mem": 1775.51611328125
+  },
+  {
+    "method": "SR-INT4 aggressive (n_std=1.0)",
+    "ppl": 9.1875,
+    "speed": 27.431884169187214,
+    "weight_mb": 706.983850479126,
+    "eff_bits": 12.00622678846106,
+    "recon_err": 0.07976413498185426,
+    "gpu_mem": 2034.5546875
+  },
+  {
+    "method": "NVFP4 (baseline)",
+    "ppl": 10.25,
+    "speed": 45.99876658250134,
+    "weight_mb": 452.76953125,
+    "eff_bits": 7.689077581345981,
+    "recon_err": 0.1044410951269041,
+    "gpu_mem": 5643.7080078125
+  }
+]

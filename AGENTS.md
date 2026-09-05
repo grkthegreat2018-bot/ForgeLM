@@ -217,6 +217,44 @@ unless the user explicitly overrides them for a specific task.
   `urlopen` — no real HTTP, fast & deterministic. Suite: 290 GUI/tool/web
   tests pass.
 
+#### Boot 2026-09-05: R37 GUI boot optimization — no more UI-thread freeze
+- **Problem**: GUI window appeared then froze for 1-3 s on first refresh
+  tick. Root cause: `GpuMonitor.snapshot()` calls `import torch` +
+  `torch.cuda.*` queries **on the UI thread** — the 1-3 s CUDA runtime
+  init blocked the event loop. The fast timer (500 ms) fired
+  `DashboardPage.refresh()` → `gpu.snapshot()` before the window
+  manager finished compositing, producing the "not responding" lockup.
+  Additionally, all 16 shared backends were constructed eagerly in
+  `MainWindow.__init__` even though only 6 are needed by the Dashboard
+  (the first visible page).
+- **Fix 1 — Background GPU poller** (`gpu_monitor.py`): new `GpuPoller`
+  class (daemon thread, not QThread — no Qt dependency needed) calls
+  `gpu.snapshot()` every 2 s in the background and updates a
+  thread-safe cache (`_cached: GpuStats` + `_cache_lock`). New
+  `GpuMonitor.cached_snapshot()` returns the cached stats instantly
+  (zeroed `GpuStats` if no poll has completed yet). Dashboard, Compute,
+  and `_refresh_slow` all call `cached_snapshot()` instead of
+  `snapshot()` — the UI thread **never** imports torch or queries CUDA.
+- **Fix 2 — Lazy backends** (`app.py`): 12 of 16 backends converted
+  from eager attributes to lazy `@property` constructs: `chat_store`,
+  `lora_mgr`, `lorebook`, `lora_harness`, `mcp_manager`, `lora_training`,
+  `backup_manager`, `sub_agent_manager`, `time_manager`,
+  `library_manager`, `web_tools`, `tool_harness`. Each constructs on
+  first property access (triggered when the user visits the page that
+  needs it). The 6 eager backends (`gpu`, `status_reader`, `models_index`,
+  `log_tailer`, `proc_mgr`, `engine_runtime`) are either needed by the
+  Dashboard or are cheap QObjects with no disk I/O.
+- **Fix 3 — Delayed timer start** (`app.py`): the fast (500 ms) and
+  slow (2000 ms) refresh timers are no longer started in `__init__`.
+  Instead, `QTimer.singleShot(800, self._start_timers)` starts them
+  after the window has been visible for ~800 ms, ensuring the first
+  paint is never interrupted by a refresh tick.
+- **Results**: MainWindow construction dropped from ~2-4 s (16 eager
+  backends + torch CUDA init on first refresh) to **0.27 s** (6 eager
+  backends, no torch on UI thread). `cached_snapshot()` returns in
+  0.0000 s. Lazy backend construction (e.g. `chat_store`) is 0.006 s
+  on first access. All 351 GUI-related tests pass.
+
 #### GUI 2026-09-01: ForgeAI Control Center v2 (LM Studio + Agent + Train platform)
 - **New shared backends** (`forge_gui/api/`):
   - `chat_store.py` — pure-python conversation persistence

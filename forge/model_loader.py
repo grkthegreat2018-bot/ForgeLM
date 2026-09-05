@@ -2021,6 +2021,13 @@ class ConfigurableResearchLLM(nn.Module):
         # SIGReg: return per-layer hidden states for spectral regularization.
         return_hidden_states: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[KVCache | None]]:
+        # Mark a new step for CUDAGraph tree manager. Conv layers clone state
+        # buffers in forward (e.g. _conv_state = ...clone()), which triggers
+        # "tensor output overwritten by subsequent run" errors under
+        # torch.compile + CUDAGraphs. Marking the step boundary tells the
+        # manager to start a fresh capture window, preventing the overwrite
+        # detection from firing on legitimate state updates.
+        torch.compiler.cudagraph_mark_step_begin()
         # FP8 training autocast: wrap forward in FP8 for 2x throughput on
         # Hopper/Blackwell. Falls back to BF16 on older GPUs.
         if getattr(self.config, 'use_fp8_training', False):

@@ -115,11 +115,17 @@ def get_cached_prefix(prefix_cache, ids: torch.Tensor):
         return None
     if hasattr(cached, "kv_cache"):
         return cached.length, cached.kv_cache
-    cached_prefix, cached_past_kv = cached
-    cached_len = (
-        cached_prefix if isinstance(cached_prefix, int)
-        else cached_prefix.shape[1]
-    )
+    # Handle two storage formats:
+    #   1. Legacy dict: (key_len, prefix_kv) tuple
+    #   2. LRUPrefixCache: prefix_kv directly (a list of (k,v) tuples)
+    if isinstance(cached, tuple) and len(cached) == 2 \
+            and isinstance(cached[0], int):
+        # Legacy (key_len, prefix_kv) format
+        cached_len, cached_past_kv = cached
+    else:
+        # LRUPrefixCache stored just the KV; infer length from key
+        cached_past_kv = cached
+        cached_len = min(_PREFIX_CACHE_KEY_LENGTH, ids.shape[1])
     return cached_len, cached_past_kv
 
 

@@ -14,7 +14,7 @@ Canonical keys (imported by model_loader.py / forge_engine.py / sft_train.py):
   misc:         pit
   moe:          expert_tying
   position:     lerope
-  quantization: bitnet_b158, fused_gemm
+  quantization: bitnet_b158, fused_gemm, sub_bitnet
   speculative:  mtp
 """
 from .misc.base import Key, KeyClass, KeyResult

@@ -63,11 +63,15 @@ class DecodingStrategy(ABC):
                  temperature: float = 0.0,
                  top_p: float = 1.0,
                  top_k: int = 80,
-                 repetition_penalty: float = 1.05) -> torch.Tensor:
+                 repetition_penalty: float = 1.05,
+                 **kwargs) -> torch.Tensor:
         """Generate tokens. Returns full sequence [1, prompt_len + gen_len].
 
         top_k and repetition_penalty are LFM2.5-recommended defaults; they are
         only applied when temperature > 0 (ignored for greedy decoding).
+        Subclasses may accept additional kwargs (min_p, min_k, etc.) — the base
+        signature accepts **kwargs so the engine can uniformly pass all sampling
+        params without TypeError on strategies that don't use them.
         """
         pass
 
@@ -189,7 +193,8 @@ class SpeculativeDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         from research.speculative_decode import speculative_generate
         return speculative_generate(
             model, self.draft_model, input_ids,
@@ -206,7 +211,8 @@ class MedusaDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         from forge.decoding.medusa import medusa_generate
         return medusa_generate(
             model, self.medusa, input_ids,
@@ -223,7 +229,8 @@ class DSparkDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         from forge.decoding.dspark import dspark_generate
         return dspark_generate(
             model, self.dspark, input_ids,
@@ -250,13 +257,15 @@ class Eagle3Decoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         if self.eagle_head is None:
             # Fallback to standard if no head loaded
             return StandardDecoding().generate(
                 model, input_ids, max_new_tokens=max_new_tokens,
                 temperature=temperature, top_p=top_p,
                 top_k=top_k, repetition_penalty=repetition_penalty,
+                **kwargs,
             )
         from forge.decoding.eagle import eagle3_generate as _eagle_gen
         # eagle3_generate takes a prompt string; here we work with token ids
@@ -312,7 +321,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         ids = input_ids.clone()
         device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
@@ -325,7 +335,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
             # No MTP heads — fall back to standard
             return StandardDecoding().generate(
                 model, input_ids, max_new_tokens, temperature, top_p,
-                top_k=top_k, repetition_penalty=repetition_penalty)
+                top_k=top_k, repetition_penalty=repetition_penalty,
+                **kwargs)
 
         # Prefill — need both KV cache (presents) and hidden states for MTP
         with torch.inference_mode():
@@ -511,7 +522,8 @@ class SelfSpeculativeSparse(DecodingStrategy):
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05):
+                 top_k=80, repetition_penalty=1.05,
+                 **kwargs):
         ids = input_ids.clone()
         device = input_ids.device
         eos = getattr(model, "eos_token_id", None)

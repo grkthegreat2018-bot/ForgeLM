@@ -1,0 +1,93 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B",
+  "device": "cuda",
+  "fp16_ppl": 31.625,
+  "fp16_speed": 47.71027380041928,
+  "fp16_mb": 942.292724609375,
+  "results": [
+    {
+      "method": "SchurAB-FP4",
+      "method_key": "schur_ab_fp4",
+      "ppl": 43.75,
+      "delta_ppl": 12.125,
+      "speed": 10.204841133282986,
+      "weight_mb": 203.77734375,
+      "eff_bits": 4.7771978021978025,
+      "recon_err": 0.09286299627399745,
+      "gpu_mem": 1424.8916015625,
+      "n_layers": 168
+    },
+    {
+      "method": "SVDLiftBinary r=128",
+      "method_key": "svd_lift_128",
+      "ppl": 778240.0,
+      "delta_ppl": 778208.375,
+      "speed": 24.194385548103863,
+      "weight_mb": 9.48046875,
+      "eff_bits": 0.22225274725274724,
+      "recon_err": 0.89539076868238,
+      "gpu_mem": 1287.7783203125,
+      "n_layers": 168
+    },
+    {
+      "method": "SVDLiftBinary r=256",
+      "method_key": "svd_lift_256",
+      "ppl": 471040.0,
+      "delta_ppl": 471008.375,
+      "speed": 24.1445621395344,
+      "weight_mb": 17.150390625,
+      "eff_bits": 0.4020604395604396,
+      "recon_err": 0.8659159492349796,
+      "gpu_mem": 1372.4658203125,
+      "n_layers": 168
+    },
+    {
+      "method": "SVDLiftBinary r=448 (~2bit)",
+      "method_key": "svd_lift_448",
+      "ppl": 643072.0,
+      "delta_ppl": 643040.375,
+      "speed": 24.26562745878498,
+      "weight_mb": 28.6552734375,
+      "eff_bits": 0.671771978021978,
+      "recon_err": 0.838078391132389,
+      "gpu_mem": 1440.6494140625,
+      "n_layers": 168
+    },
+    {
+      "method": "WaveletLift r=128",
+      "method_key": "wavelet_lift_128",
+      "ppl": 251904.0,
+      "delta_ppl": 251872.375,
+      "speed": 0.1427194086960273,
+      "weight_mb": 11.16796875,
+      "eff_bits": 0.2618131868131868,
+      "recon_err": 0.8949674220832975,
+      "gpu_mem": 1299.9306640625,
+      "n_layers": 168
+    },
+    {
+      "method": "AB-FP4 no-residual (R44)",
+      "method_key": "ab_fp4_no_residual",
+      "ppl": 43.75,
+      "delta_ppl": 12.125,
+      "speed": 15.658047649428507,
+      "weight_mb": 463.43359375,
+      "eff_bits": 7.8701781153603765,
+      "recon_err": 0.09286299627399745,
+      "gpu_mem": 1428.0712890625,
+      "n_layers": 168
+    },
+    {
+      "method": "NVFP4 (baseline)",
+      "method_key": "nvfp4",
+      "ppl": 43.25,
+      "delta_ppl": 11.625,
+      "speed": 40.45612892294248,
+      "weight_mb": 452.76953125,
+      "eff_bits": 7.689077581345981,
+      "recon_err": 0.1044410951269041,
+      "gpu_mem": 5661.8486328125,
+      "n_layers": 168
+    }
+  ]
+}

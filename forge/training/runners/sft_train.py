@@ -537,12 +537,16 @@ def compute_loss(model, input_ids, labels, attn_mask,
                  entropy_alpha: float = 0.0,
                  sample_weights: torch.Tensor | None = None,
                  sigreg_weight: float = 0.0,
-                 sigreg_threshold: float = 1.0) -> torch.Tensor:
+                 sigreg_threshold: float = 1.0,
+                 is_hf_model: bool = False) -> torch.Tensor:
     """Completion-only cross-entropy loss with optional anti-regression techniques.
 
     The model's forward(targets=...) computes mean CE over ALL non-ignored
     positions. We pass labels as targets with -100 for masked positions, so
     only completion tokens contribute.
+
+    When is_hf_model=True, uses the manual logits path (HF models don't
+    support targets= kwarg in forward).
 
     Memory-optimized fast paths (no full logits materialization):
       - entropy_alpha=0, no sample_weights → chunked_linear_cross_entropy
@@ -567,6 +571,23 @@ def compute_loss(model, input_ids, labels, attn_mask,
     from forge.training.losses.sigreg import SIGRegLoss
     _sigreg = SIGRegLoss(threshold=sigreg_threshold) if sigreg_weight > 0.0 else None
     _need_hidden = _sigreg is not None
+
+    # ── HuggingFace model path: manual logits + CE (no targets= kwarg) ──
+    if is_hf_model:
+        with torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16,
+            enabled=input_ids.is_cuda,
+        ):
+            out = model(input_ids, attention_mask=attn_mask)
+        logits = out.logits if hasattr(out, "logits") else out[0]
+        shift_logits = logits[:, :-1, :].contiguous().float()
+        shift_labels = labels[:, 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1), ignore_index=-100)
+        if not torch.isfinite(ce_loss):
+            raise RuntimeError(f"Non-finite training loss ({ce_loss.item()}).")
+        return ce_loss
 
     # ── Fast path: chunked CE (no logits materialization) ──
     # Used when no per-example sample weighting is needed. The model's
@@ -772,6 +793,12 @@ def main():
                    help="Model config name (default: forgelm_v2_light)")
     p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_Light.safetensors",
                    help="Base checkpoint to fine-tune from")
+    p.add_argument("--hf-model", default=None,
+                   help="Load a HuggingFace model directly (e.g. Qwen/Qwen2.5-0.5B). "
+                        "Bypasses ForgeEngine/ModelLoader — loads via transformers. "
+                        "Use with --nanoquant-qat or --no-bitnet-everywhere for QAT "
+                        "on non-ForgeAI models. The tokenizer is auto-loaded from "
+                        "the same HF repo.")
     p.add_argument("--save", default="research/checkpoints/ForgeLM_V2_Light.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
@@ -888,6 +915,19 @@ def main():
                         "No NF4/bnb needed — BitNet IS the quantization (1.58 bits). "
                         "Validated on V3 1.2B: 2.39x vs AdamW, 6.32GB VRAM. "
                         "(default: True, use --no-bitnet-everywhere to disable)")
+    p.add_argument("--nanoquant-qat", action="store_true", default=False,
+                   help="Convert all nn.Linear to NanoQuantQATLinear (sub-1-bit "
+                        "binary factorization QAT with STE). Uses SVD-based "
+                        "fast init, then STE refines binary factors during "
+                        "training. Achieves <1 bit/weight with QAT. "
+                        "Requires --no-bitnet-everywhere. Use --nanoquant-rank "
+                        "to control compression ratio.")
+    p.add_argument("--nanoquant-rank", type=int, default=128,
+                   help="NanoQuant factorization rank (default 128). "
+                        "Higher rank = better quality, more memory. "
+                        "rank=128 → ~0.22 bits/w, rank=512 → ~0.81 bits/w.")
+    p.add_argument("--nanoquant-quick-init", type=int, default=1,
+                   help="1=SVD fast init (default, instant), 0=ADMM init (slow)")
     p.add_argument("--manual-lora", action="store_true",
                    help="Use manual LoRA adapters (BitNet-compatible, unlike PEFT). "
                         "Works with BitNetLinear. Auto-enabled with --bitnet-everywhere.")
@@ -1192,7 +1232,23 @@ def main():
     # Set device on config so build_model_fast loads weights directly to GPU,
     # avoiding a CPU RAM copy that can exceed 32GB on 8B+ models.
     cfg.device = str(device)
-    if args.checkpoint is not None and args.use_forge_engine:
+
+    # ── HuggingFace model loading (for QAT on non-ForgeAI models) ──
+    if args.hf_model is not None:
+        from transformers import AutoModelForCausalLM as _HFModel
+        print(f"  Loading HuggingFace model: {args.hf_model}")
+        model = _HFModel.from_pretrained(
+            args.hf_model, dtype=dtype, trust_remote_code=True).to(device)
+        # Override tokenizer with HF model's tokenizer
+        from transformers import AutoTokenizer as _HFTok
+        tokenizer = _HFTok.from_pretrained(
+            args.hf_model, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        pad_id = tokenizer.pad_token_id
+        print(f"  HF model loaded: {type(model).__name__}, "
+              f"vocab={tokenizer.vocab_size}, pad_id={pad_id}")
+    elif args.checkpoint is not None and args.use_forge_engine:
         try:
             from forge.engine.forge_engine import ForgeEngine
             print("  Loading via ForgeEngine (auto_activate=False for training)...")
@@ -1244,10 +1300,26 @@ def main():
         replace_rmsnorm_with_dyt(model)
 
     # ── BitNet-everywhere: convert all Linear → BitNetLinear ──
-    if args.bitnet_everywhere:
+    if args.bitnet_everywhere and not args.nanoquant_qat:
         from forge.training.bitnet_lora import convert_to_bitnet_everywhere
         n_conv, n_already = convert_to_bitnet_everywhere(model)
         print(f"BitNet-everywhere: {n_conv} Linear → BitNetLinear, {n_already} already BitNet")
+
+    # ── NanoQuant QAT: convert all Linear → NanoQuantQATLinear (sub-1-bit) ──
+    if args.nanoquant_qat:
+        from forge.engine.quant.novel_quant_r48 import (
+            convert_model_to_nanoquant_qat, estimate_r48_memory,
+        )
+        n_conv = convert_model_to_nanoquant_qat(
+            model, rank=args.nanoquant_rank,
+            quick_init=bool(args.nanoquant_quick_init), verbose=True)
+        mem = estimate_r48_memory(model)
+        print(f"NanoQuant QAT: {n_conv} Linear → NanoQuantQATLinear "
+              f"(rank={args.nanoquant_rank}, ~{mem['total_mb']:.1f} MB, "
+              f"{mem['avg_eff_bits']:.3f} bits/w)")
+        # Disable LoRA — NanoQuant QAT trains the binary factors directly
+        args.lora = False
+        args.manual_lora = False
 
     # ── R32-1: NF4 QLoRA — quantize base to NF4, then add LoRA adapters ──
     if args.qlora_nf4:
@@ -1751,7 +1823,8 @@ def main():
                                                entropy_alpha=args.entropy_alpha,
                                                sample_weights=sw,
                                                sigreg_weight=args.sigreg_weight,
-                                               sigreg_threshold=args.sigreg_threshold)
+                                               sigreg_threshold=args.sigreg_threshold,
+                                               is_hf_model=args.hf_model is not None)
 
                     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
                     # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
@@ -1950,7 +2023,8 @@ def main():
                                 continue
                             vi_ids, vi_labels, vi_mask, _ = collate_batch(vbatch, pad_id, device)
                             vloss = compute_loss(model, vi_ids, vi_labels, vi_mask,
-                                                 entropy_alpha=0.0)  # plain CE for eval
+                                                 entropy_alpha=0.0,  # plain CE for eval
+                                                 is_hf_model=args.hf_model is not None)
                             val_losses.append(vloss.item())
                     val_loss = sum(val_losses) / max(len(val_losses), 1)
                     print(f"  [Val] step {step+1}: val_loss={val_loss:.4f} "

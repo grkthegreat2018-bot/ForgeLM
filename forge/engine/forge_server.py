@@ -85,6 +85,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     stop: Optional[list[str]] = None
     repetition_penalty: float = 1.05
+    seed: Optional[int] = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -115,6 +116,7 @@ class CompletionRequest(BaseModel):
     stream: bool = False
     stop: Optional[list[str]] = None
     repetition_penalty: float = 1.05
+    seed: Optional[int] = None
 
 class ModelInfo(BaseModel):
     id: str
@@ -570,6 +572,10 @@ class ForgeServer:
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
+                stop=req.stop,
+                seed=req.seed,
             )
             tool_calls, content = _parse_tool_calls_openai(raw_text)
             message: dict[str, Any] = {"role": "assistant", "content": content or None}
@@ -602,6 +608,10 @@ class ForgeServer:
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
+                stop=req.stop,
+                seed=req.seed,
             )
             resp_id = f"cmpl-{uuid.uuid4().hex[:12]}"
             return {

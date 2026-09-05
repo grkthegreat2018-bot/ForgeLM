@@ -61,8 +61,10 @@ import json
 import threading
 from pathlib import Path
 from collections.abc import Iterator
+from typing import Optional, Dict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
@@ -326,6 +328,30 @@ class ForgeEngine:
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
             torch.cuda.synchronize(self.device)
+
+    def __del__(self):
+        """Release GPU tensors and CPU weight snapshots to prevent VRAM leaks
+        between engine loads. Safe to call multiple times (gc also calls this).
+        """
+        try:
+            # Free CPU weight snapshot from _save_original_weights
+            if hasattr(self, '_original_weights'):
+                self._original_weights = None
+            # Free cached quantized weights
+            if hasattr(self, 'model') and self.model is not None:
+                for m in self.model.modules():
+                    if hasattr(m, '_cached_weight'):
+                        m._cached_weight = None
+            # Move model to CPU to release GPU tensors
+            if hasattr(self, 'model') and self.model is not None:
+                try:
+                    self.model.cpu()
+                except Exception:
+                    pass
+            if hasattr(self, 'device') and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     @staticmethod
     def _clear_cuda_cache_static(device):
@@ -1100,7 +1126,8 @@ class ForgeEngine:
             decoding: "standard", "speculative", "medusa", "dspark", "eagle3", "mtp_selfspec",
                       "self_speculative_sparse"
             quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
-                      "forge_quant", "grinqh", "mixllm", "acbq", "quamba2"
+                      "forge_quant", "grinqh", "mixllm", "acbq", "quamba2",
+                      "awq_fp4", "nanoquant", "btc", "ternary_ptq"
             acceleration: None, "cuda_graph", "airllm_streaming", "megakernel", "flex_decoding"
             mrl_keep_ratio: if set (e.g. 0.75), truncate to that fraction of dims
             kv_bits: 4 or 8, for KV cache quantization
@@ -1141,8 +1168,17 @@ class ForgeEngine:
                                    kv_bits, feature_flags):
         # 1. Quantization
         if quantize:
+            # Save original weights before quantization modifies them in-place.
+            # This allows restore when activate(quantize=None) is called later.
+            if not hasattr(self, '_original_weights') or self._original_weights is None:
+                self._save_original_weights()
             self._apply_quantization(quantize)
             self.quantize = quantize
+        elif self.quantize is not None:
+            # quantize=None but model was previously quantized → restore originals
+            self._log(f"Restoring unquantized weights (was: {self.quantize})")
+            self._restore_original_weights()
+            self.quantize = None
 
         # 2. MRL adaptive context
         if mrl_keep_ratio and mrl_keep_ratio < 1.0:
@@ -1464,6 +1500,10 @@ class ForgeEngine:
     # Fallback order: if a quantization mode fails, try the next lower one.
     _QUANT_FALLBACK_CHAIN = {
         "nvfp4": ["w8a8", "fp8", "int8", "int4", None],
+        "awq_fp4": ["nvfp4", "w8a8", "int8", "int4", None],
+        "nanoquant": ["awq_fp4", "nvfp4", "int4", None],
+        "btc": ["awq_fp4", "nvfp4", "int4", None],
+        "ternary_ptq": ["awq_fp4", "int4", None],
         "forge_quant": ["nvfp4", "w8a8", "int8", "int4", None],
         "grinqh": ["forge_quant", "int4", None],
         "mixllm": ["forge_quant", "int8", "int4", None],
@@ -1478,6 +1518,34 @@ class ForgeEngine:
         "quamba2": ["w8a8", "fp8", "int8", "int4", None],
         None: [],
     }
+
+    def _save_original_weights(self):
+        """Snapshot model weights to CPU RAM before in-place quantization.
+
+        Stores a CPU-side copy of every parameter so ``activate(quantize=None)``
+        can restore the original bf16 weights after a prior quantization pass.
+        Without this, quantization is "sticky" — re-activating without
+        ``quantize=`` leaves the quantized (slower) weights in place.
+        """
+        self._original_weights = {}
+        for name, param in self.model.named_parameters():
+            self._original_weights[name] = param.data.cpu().clone()
+        self._log(f"Saved {len(self._original_weights)} weight tensors "
+                  f"for quantization restore")
+
+    def _restore_original_weights(self):
+        """Restore model weights from the CPU snapshot saved by _save_original_weights."""
+        if not hasattr(self, '_original_weights') or self._original_weights is None:
+            self._log("No original weights snapshot to restore", level="warn")
+            return
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if name in self._original_weights:
+                    saved = self._original_weights[name]
+                    param.data = saved.to(param.device, dtype=param.dtype)
+        self._clear_cuda_cache()
+        self._log(f"Restored {len(self._original_weights)} weight tensors "
+                  f"from snapshot")
 
     def _apply_quantization(self, mode: str):
         """Apply weight-only quantization with automatic fallback.
@@ -1516,6 +1584,101 @@ class ForgeEngine:
             f"All quantization modes failed for '{mode}'",
             context={"mode": mode, "last_error": str(last_error)},
             suggestion="Try quantize=None to run unquantized.")
+
+    def block_reconstruct(
+        self,
+        model_orig: Optional[nn.Module] = None,
+        calibration_data: Optional[torch.Tensor] = None,
+        n_iters: int = 50,
+        lr: float = 0.05,
+        mode: str = "progressive",
+        kl_iters: int = 20,
+        verbose: bool = True,
+    ) -> Dict[int, float]:
+        """Run block-level reconstruction on the quantized model.
+
+        Optimizes quantized layer parameters (scales + latent binary matrices
+        via STE) to minimize block-level output error against the original
+        model. This is the key technique from NanoQuant (ICML 2026) for
+        improving extreme low-bit PTQ quality.
+
+        Modes:
+            - "progressive": sequential block reconstruction (default)
+            - "standard": independent block reconstruction
+            - "error_mitigation": sequential with error propagation mitigation
+              (adjusts targets to account for accumulated quantization errors)
+            - "kl_calib": progressive block recon + model-level KL calibration
+
+        Args:
+            model_orig: original unquantized model (for targets). If None,
+                loads from the same checkpoint.
+            calibration_data: (batch, seq_len) input_ids for calibration.
+                If None, generates random tokens from the model's vocab.
+            n_iters: optimization iterations per block
+            lr: learning rate for scale optimization
+            mode: reconstruction mode (see above)
+            kl_iters: KL calibration iterations (only for "kl_calib" mode)
+            verbose: print progress
+
+        Returns:
+            dict mapping block_idx → final loss
+
+        Example:
+            >>> engine = ForgeEngine.from_checkpoint("model.pt", quantize="nanoquant")
+            >>> engine.block_reconstruct(n_iters=50, lr=0.05, mode="kl_calib")
+        """
+        self._require_awake()
+        from forge.engine.quant.block_recon import BlockReconstructor
+
+        # Get or load original model
+        if model_orig is None:
+            # Reload from checkpoint if available
+            ckpt_path = getattr(self, '_checkpoint_path', None)
+            if ckpt_path is not None:
+                from forge.engine.model_loader import ModelLoader
+                loader = ModelLoader()
+                model_orig, _ = loader.load_default_model(
+                    str(ckpt_path), device=str(self.device))
+            else:
+                self._log("block_reconstruct: no original model available "
+                          "(need model_orig or checkpoint_path)", level="warn")
+                return {}
+        model_orig = model_orig.to(self.device).eval()
+
+        # Generate calibration data if not provided
+        if calibration_data is None:
+            cfg = getattr(self.model, 'config', None)
+            vocab_size = getattr(cfg, 'vocab_size', 32000) if cfg else 32000
+            calibration_data = torch.randint(0, vocab_size, (4, 128),
+                                             device=self.device)
+        calibration_data = calibration_data.to(self.device)
+
+        recon = BlockReconstructor(
+            model_orig=model_orig,
+            model_quant=self.model,
+            calibration_data=calibration_data,
+            device=str(self.device),
+        )
+
+        if mode == "progressive":
+            results = recon.reconstruct_progressive(
+                n_iters=n_iters, lr=lr, verbose=verbose)
+        elif mode == "error_mitigation":
+            results = recon.reconstruct_with_error_mitigation(
+                n_iters=n_iters, lr=lr, verbose=verbose)
+        elif mode == "kl_calib":
+            results = recon.reconstruct_progressive(
+                n_iters=n_iters, lr=lr, verbose=verbose)
+            if kl_iters > 0:
+                recon.calibrate_kl(n_iters=kl_iters, lr=lr * 0.1,
+                                   verbose=verbose)
+        else:
+            results = recon.reconstruct(
+                n_iters=n_iters, lr=lr, verbose=verbose)
+
+        self._log(f"Block reconstruction complete: {len(results)} blocks, "
+                  f"avg loss={sum(results.values())/max(len(results),1):.4f}")
+        return results
 
     def _apply_quantization_single(self, mode: str):
         """Apply a single quantization mode (no fallback). Raises on failure."""
@@ -1588,12 +1751,65 @@ class ForgeEngine:
             self._log(f"Quamba2: {n_q} SSM blocks quantized (W4A8, "
                       f"group={gs}, smoothquant_alpha={alpha}). "
                       f"SSM core (A_log, dt, scan) kept in FP16.")
+        elif mode == "awq_fp4":
+            from forge.engine.quant.novel_quant_r46 import (
+                quantize_model_awq_fp4, collect_activations as _collect_acts_r46,
+            )
+            # AWQ-FP4 needs calibration data — use a short forward pass
+            cfg = getattr(self.model, "config", None)
+            block_size = getattr(cfg, "nvfp4_block_size", 32) if cfg else 32
+            # Generate calibration input from model's vocab
+            vocab_size = getattr(cfg, "vocab_size", 32000) if cfg else 32000
+            calib_ids = torch.randint(0, vocab_size, (4, 128))
+            self._log("AWQ-FP4: collecting calibration activations...")
+            acts = _collect_acts_r46(self.model, calib_ids.to(self.device),
+                                     n_samples=128, device=str(self.device))
+            n_q = quantize_model_awq_fp4(self.model, acts, block_size=block_size,
+                                         verbose=True)
+            self._log(f"AWQ-FP4: {n_q} layers quantized (activation-aware FP4, "
+                      f"block={block_size}). Best quality FP4 in R&D rounds.")
+        elif mode == "nanoquant":
+            from forge.engine.quant.novel_quant_r48 import quantize_model_nanoquant
+            cfg = getattr(self.model, "config", None)
+            rank = getattr(cfg, "nanoquant_rank", 128) if cfg else 128
+            n_q = quantize_model_nanoquant(self.model, rank=rank,
+                                           admm_iters=50, verbose=True)
+            self._log(f"NanoQuant: {n_q} layers quantized (low-rank binary, "
+                      f"rank={rank}). Sub-1-bit extreme compression.")
+        elif mode == "btc":
+            from forge.engine.quant.novel_quant_r48 import quantize_model_btc
+            cfg = getattr(self.model, "config", None)
+            K = getattr(cfg, "btc_codebook_size", 256) if cfg else 256
+            n_q = quantize_model_btc(self.model, codebook_size=K,
+                                     use_rotation=True, verbose=True)
+            self._log(f"BTC-LLM: {n_q} layers quantized (binary codebook, "
+                      f"K={K}). Sub-1-bit via pattern clustering.")
+        elif mode == "ternary_ptq":
+            from forge.engine.quant.novel_quant_r48 import (
+                quantize_model_ternary_ptq,
+                collect_activations as _collect_acts_r48,
+            )
+            cfg = getattr(self.model, "config", None)
+            vocab_size = getattr(cfg, "vocab_size", 32000) if cfg else 32000
+            calib_ids = torch.randint(0, vocab_size, (4, 128))
+            acts = _collect_acts_r48(self.model, calib_ids.to(self.device),
+                                     n_samples=128, device=str(self.device)) \
+                if hasattr(_collect_acts_r48, '__call__') else None
+            # Use R46's collect_activations (same signature)
+            from forge.engine.quant.novel_quant_r46 import collect_activations as _ca46
+            acts = _ca46(self.model, calib_ids.to(self.device),
+                         n_samples=128, device=str(self.device))
+            n_q = quantize_model_ternary_ptq(self.model, activations=acts,
+                                             refine_iters=20, verbose=True)
+            self._log(f"TernaryPTQ: {n_q} layers quantized (1.58-bit ternary, "
+                      f"Hessian-refined scales). BitNet-style PTQ.")
         else:
             raise ConfigurationError(
                 f"Unknown quantization mode: {mode}",
                 context={"mode": mode},
                 suggestion="Use one of: int8, int4, fp8, w8a8, nvfp4, "
-                           "forge_quant, grinqh, mixllm, acbq, quamba2")
+                           "forge_quant, grinqh, mixllm, acbq, quamba2, "
+                           "awq_fp4, nanoquant, btc, ternary_ptq")
 
     # ── Generation ────────────────────────────────────────────────────────
 
@@ -1644,7 +1860,8 @@ class ForgeEngine:
                  context_limit: int | None = None,
                  skip_special_tokens: bool = True,
                  min_p: float = 0.0, min_k: float = 0.0,
-                 json_schema: dict | None = None) -> str:
+                 json_schema: dict | None = None,
+                 stop: list[str] | None = None) -> str:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -1676,13 +1893,14 @@ class ForgeEngine:
             self._generate_impl, prompt, max_new_tokens, temperature,
             top_p, top_k, repetition_penalty, finish_sentence,
             context_limit, skip_special_tokens, min_p, min_k,
-            json_schema=json_schema)
+            json_schema=json_schema, stop=stop)
 
     def _generate_impl(self, prompt, max_new_tokens, temperature, top_p,
                        top_k, repetition_penalty, finish_sentence,
                        context_limit, skip_special_tokens,
                        min_p: float = 0.0, min_k: float = 0.0,
-                       json_schema: dict | None = None) -> str:
+                       json_schema: dict | None = None,
+                       stop: list[str] | None = None) -> str:
         """Internal generate implementation (no OOM wrapper)."""
         self._require_awake()
         self._validate_generation_params(
@@ -1788,6 +2006,15 @@ class ForgeEngine:
         prompt_len = ids.shape[1]
         generated_ids = output_ids[0, prompt_len:]
         result = self.tokenizer.decode(generated_ids, skip_special_tokens=skip_special_tokens)
+
+        # Stop-string truncation: if any stop string appears in the output,
+        # truncate at the first occurrence and discard the rest (OpenAI API spec).
+        if stop:
+            for s in stop:
+                idx = result.find(s)
+                if idx != -1:
+                    result = result[:idx]
+                    break
 
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms, temperature)
@@ -2014,11 +2241,11 @@ class ForgeEngine:
         try:
             output_ids = batched.generate_batch(
                 self.model, all_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                repetition_penalty=repetition_penalty,
+                max_tokens_list=[max_new_tokens] * len(prompts),
+                temperatures=[temperature] * len(prompts),
+                top_ps=[top_p] * len(prompts),
+                top_k_list=[top_k] * len(prompts),
+                repetition_penalty_list=[repetition_penalty] * len(prompts),
             )
         except torch.cuda.OutOfMemoryError:
             # Fallback: serial generation

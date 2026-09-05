@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from .api.backup_manager import BackupManager
 from .api.chat_store import ChatStore
 from .api.engine_runtime import EngineRuntime
-from .api.gpu_monitor import GpuMonitor
+from .api.gpu_monitor import GpuMonitor, GpuPoller
 from .api.library_install import LibraryInstallManager
 from .api.log_tailer import LogTailer
 from .api.lorebook import Lorebook
@@ -100,40 +100,39 @@ class MainWindow(QMainWindow):
         self._set_window_icon()
 
         # ---- shared backends ----
+        # R37: Only backends needed by the Dashboard (the first visible
+        # page) or core infrastructure are constructed eagerly.  All
+        # chat/agent/LoRA/MCP/backups/sub-agent/time/library/web backends
+        # are lazy-constructed on first access via properties below —
+        # this shaves several hundred ms of disk I/O + object creation
+        # off boot time since most users never visit those pages in a
+        # given session.
         self.gpu = GpuMonitor()
         self.status_reader = StatusReader()
         self.models_index = ModelsIndex()
         self.log_tailer = LogTailer()
         self.proc_mgr = ProcessManager(self)
-        self.chat_store = ChatStore()
         self.engine_runtime = EngineRuntime(self)
-        self.lora_mgr = LoraManager(self)
-        self.lorebook = Lorebook()
-        self.lora_harness = LoraHarness(self.lora_mgr, self.engine_runtime, self)
-        self.mcp_manager = MCPManager()
-        self.lora_training = LoraTrainingTrigger(
-            proc_mgr=self.proc_mgr, chat_store=self.chat_store,
-            checkpoint="research/checkpoints/ForgeLM_V2_Light.safetensors")
-        self.backup_manager = BackupManager(project_root(), parent=self)
-        self.sub_agent_manager = SubAgentManager(self.engine_runtime, parent=self)
-        self.time_manager = TimeManager(parent=self)
-        self.library_manager = LibraryInstallManager(parent=self)
-        self.web_tools = WebTools(enabled=True)
-        # shared tool harness for agent mode (full access)
-        self.tool_harness = ToolHarness(
-            workspace=str(project_root()),
-            lorebook=self.lorebook,
-            lora_harness=self.lora_harness,
-            mcp_manager=self.mcp_manager,
-            lora_training=self.lora_training,
-            backup_manager=self.backup_manager,
-            sub_agent_manager=self.sub_agent_manager,
-            time_manager=self.time_manager,
-            library_manager=self.library_manager,
-            web_tools=self.web_tools,
-            read_only=False,
-            enable_safety=True,
-        )
+        # Lazy backends — None until first property access
+        self._chat_store: ChatStore | None = None
+        self._lora_mgr: LoraManager | None = None
+        self._lorebook: Lorebook | None = None
+        self._lora_harness: LoraHarness | None = None
+        self._mcp_manager: MCPManager | None = None
+        self._lora_training: LoraTrainingTrigger | None = None
+        self._backup_manager: BackupManager | None = None
+        self._sub_agent_manager: SubAgentManager | None = None
+        self._time_manager: TimeManager | None = None
+        self._library_manager: LibraryInstallManager | None = None
+        self._web_tools: WebTools | None = None
+        self._tool_harness: ToolHarness | None = None
+
+        # R37: Background GPU poller — imports torch + queries CUDA in a
+        # daemon thread so the UI event loop never blocks on the 1-3 s
+        # CUDA runtime init.  Pages call gpu.cached_snapshot() instead of
+        # gpu.snapshot() to read the latest cached stats.
+        self._gpu_poller = GpuPoller(self.gpu, interval_s=2.0)
+        self._gpu_poller.start()
 
         # ---- sidebar ----
         self.sidebar = NavSidebar(PAGES)
@@ -194,13 +193,18 @@ class MainWindow(QMainWindow):
         # live updates (self-play event feed, charts). Slow timer (2000ms):
         # GPU snapshot + sidebar status + background pages (every 4th slow
         # tick = ~8s) to avoid unnecessary work on hidden pages.
+        # R37: Timers are NOT started here — they are started by
+        # _start_timers() via a singleShot(800ms) so the window paints
+        # fully before any refresh work runs.  This eliminates the
+        # "window appears then freezes" effect caused by the first
+        # refresh tick firing before the window manager has finished
+        # compositing.
         self._tick = 0
         self._fast_timer = QTimer(self); self._fast_timer.setInterval(500)
         self._fast_timer.timeout.connect(self._refresh_fast)
-        self._fast_timer.start()
         self._slow_timer = QTimer(self); self._slow_timer.setInterval(2000)
         self._slow_timer.timeout.connect(self._refresh_slow)
-        self._slow_timer.start()
+        QTimer.singleShot(800, self._start_timers)
 
         # ---- keyboard shortcuts ----
         self._setup_shortcuts()
@@ -233,6 +237,104 @@ class MainWindow(QMainWindow):
         # NOTE: no eager _refresh_slow()/_refresh_fast() here — the timers
         # (started above) fire on the next event-loop tick after win.show(),
         # so the window appears before GPU/CUDA init or page scans run.
+
+    # ---- lazy backend properties (R37) ----
+    # Constructed on first access — defers disk I/O + object creation
+    # for backends only needed by chat/agent/LoRA/etc pages.
+    @property
+    def chat_store(self) -> ChatStore:
+        if self._chat_store is None:
+            self._chat_store = ChatStore()
+        return self._chat_store
+
+    @property
+    def lora_mgr(self) -> LoraManager:
+        if self._lora_mgr is None:
+            self._lora_mgr = LoraManager(self)
+        return self._lora_mgr
+
+    @property
+    def lorebook(self) -> Lorebook:
+        if self._lorebook is None:
+            self._lorebook = Lorebook()
+        return self._lorebook
+
+    @property
+    def lora_harness(self) -> LoraHarness:
+        if self._lora_harness is None:
+            self._lora_harness = LoraHarness(self.lora_mgr,
+                                             self.engine_runtime, self)
+        return self._lora_harness
+
+    @property
+    def mcp_manager(self) -> MCPManager:
+        if self._mcp_manager is None:
+            self._mcp_manager = MCPManager()
+        return self._mcp_manager
+
+    @property
+    def lora_training(self) -> LoraTrainingTrigger:
+        if self._lora_training is None:
+            self._lora_training = LoraTrainingTrigger(
+                proc_mgr=self.proc_mgr, chat_store=self.chat_store,
+                checkpoint="research/checkpoints/ForgeLM_V2_Light.safetensors")
+        return self._lora_training
+
+    @property
+    def backup_manager(self) -> BackupManager:
+        if self._backup_manager is None:
+            self._backup_manager = BackupManager(project_root(), parent=self)
+        return self._backup_manager
+
+    @property
+    def sub_agent_manager(self) -> SubAgentManager:
+        if self._sub_agent_manager is None:
+            self._sub_agent_manager = SubAgentManager(
+                self.engine_runtime, parent=self)
+        return self._sub_agent_manager
+
+    @property
+    def time_manager(self) -> TimeManager:
+        if self._time_manager is None:
+            self._time_manager = TimeManager(parent=self)
+        return self._time_manager
+
+    @property
+    def library_manager(self) -> LibraryInstallManager:
+        if self._library_manager is None:
+            self._library_manager = LibraryInstallManager(parent=self)
+        return self._library_manager
+
+    @property
+    def web_tools(self) -> WebTools:
+        if self._web_tools is None:
+            self._web_tools = WebTools(enabled=True)
+        return self._web_tools
+
+    @property
+    def tool_harness(self) -> ToolHarness:
+        if self._tool_harness is None:
+            self._tool_harness = ToolHarness(
+                workspace=str(project_root()),
+                lorebook=self.lorebook,
+                lora_harness=self.lora_harness,
+                mcp_manager=self.mcp_manager,
+                lora_training=self.lora_training,
+                backup_manager=self.backup_manager,
+                sub_agent_manager=self.sub_agent_manager,
+                time_manager=self.time_manager,
+                library_manager=self.library_manager,
+                web_tools=self.web_tools,
+                read_only=False,
+                enable_safety=True,
+            )
+        return self._tool_harness
+
+    def _start_timers(self) -> None:
+        """R37: Start refresh timers after the window has been visible for
+        ~800 ms so the first paint is never interrupted by a refresh tick."""
+        self._fast_timer.start()
+        self._slow_timer.start()
 
     def _maybe_show_onboarding(self) -> None:
         """R36-2: Show onboarding dialog on first run."""
@@ -294,6 +396,12 @@ class MainWindow(QMainWindow):
                                type(page).__name__, e, exc_info=True)
 
     def closeEvent(self, event) -> None:
+        # R37: stop the background GPU poller (daemon thread, but clean
+        # shutdown avoids a brief join delay on exit).
+        try:
+            self._gpu_poller.stop(timeout_s=2.0)
+        except Exception:
+            pass
         # wait for an in-flight engine load so the QThread is never
         # destroyed while still running
         try:
@@ -397,8 +505,9 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.warning("bg refresh error on page %d (%s): %s",
                                    i, type(page).__name__, e, exc_info=True)
-        # sidebar status
-        gs = self.gpu.snapshot()
+        # sidebar status — R37: use cached snapshot (populated by
+        # background GpuPoller) so the UI thread never blocks on torch.
+        gs = self.gpu.cached_snapshot()
         if gs.available:
             self.sidebar.set_gpu(f"GPU {gs.vram_pct:.0f}% · {gs.vram_allocated_gb:.1f}GB")
             self.sidebar.set_status("● live", Palette.ok)

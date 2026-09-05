@@ -208,14 +208,15 @@ class EngineProfiler:
         timings: list[float] = [0.0] * len(blocks)
         counts: list[int] = [0] * len(blocks)
 
-        def make_hook(idx: int):
-            def hook(module, args, output):
+        def make_pre_hook(idx: int):
+            def pre_hook(module, args):
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
-                t = time.perf_counter()
-                # Store start time on module for delta computation
-                module._profile_start = t
-            def hook_forward(module, args, kwargs, output):
+                module._profile_start = time.perf_counter()
+            return pre_hook
+
+        def make_post_hook(idx: int):
+            def post_hook(module, args, kwargs, output):
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 t = time.perf_counter()
@@ -224,12 +225,14 @@ class EngineProfiler:
                     timings[idx] += (t - start) * 1000
                     counts[idx] += 1
                     module._profile_start = None
-            return hook_forward
+            return post_hook
 
-        # Register hooks
+        # Register both pre- and post-forward hooks per block
         for i, block in enumerate(blocks):
-            h = block.register_forward_hook(make_hook(i), with_kwargs=True)
-            self._hooks.append(h)
+            pre = block.register_forward_pre_hook(make_pre_hook(i))
+            post = block.register_forward_hook(make_post_hook(i), with_kwargs=True)
+            self._hooks.append(pre)
+            self._hooks.append(post)
 
         try:
             # Run generation
