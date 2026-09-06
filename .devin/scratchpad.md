@@ -356,3 +356,46 @@ Priority key:
 - PPO/reward modeling, padding-free packing, early stopping, LR scheduler choices
 - W&B/TensorBoard, FP8 training wired, FA2/3 training wrapper
 - Prometheus metrics, vision input
+
+## Sub-BitNet Quantization R&D (2026-09-06)
+
+### Goal
+Training-free ~1-bit quantization key for LLMs, tested on Qwen 2.5 0.5B (CUDA, RTX 5070 12GB).
+
+### Best Configuration Found
+- **Method**: BiLLM (salient + concentrated/sparse split) + NF4-quantized SVD residual
+- **Params**: salient_frac=0.10, salient_order=2, svd_rank=48, svd_block_size=32
+- **Result**: PPL 1096 at 1.55 bpw (FP16 baseline PPL 22 on same corpus)
+- **VRAM**: 3.21 GB for quantized model (vs ~1 GB FP16)
+
+### Key Findings
+1. **Pure ternary (1.58 bpw)**: PPL 3M+ — completely unusable without residuals.
+2. **BiLLM alone (no SVD)**: PPL 5568-7616 at ~1.10 bpw — too much distortion.
+3. **Mean-centered residuals**: Dramatically worse than absmean (zero-mean) binarization. PPL in hundreds of thousands. Mean-centering is NOT a good fit for this model.
+4. **Hadamard rotation**: Helps attention layers (896?1024, 12.5% padding) but HURTS down_proj (4864?8192, 40.6% padding). Auto-disable Hadamard when padding > 15%.
+5. **GPTQ compensation**: Inconsistent — improved single-layer SQNR by +2dB but worsened average output SQNR by -0.69dB across layers. Not enabled by default.
+6. **SVD residual is essential**: The gap between BiLLM-only (PPL ~5000+) and BiLLM+SVD (PPL ~1096) is enormous. SVD captures the structured low-rank component of the quantization error.
+7. **Block-wise NF4 (bs=32)** for SVD factors is the sweet spot. Per-tensor NF4 is too coarse (PPL 18304). Per-row NF4 adds too much scale overhead. bs=16 wastes bits on scales, bs=128+ loses precision.
+
+### Storage Accounting (1.55 bpw)
+Per layer (out_f, in_f):
+- Salient binary: salient_order × out_f × n_salient bits
+- Non-salient binary: 1 × out_f × n_nonsalient bits
+- Split mask: 1 × out_f × n_nonsalient bits (stored as bool)
+- SVD U: 4 × rank × out_f + 16 × ceil(rank×out_f / bs) bits (NF4 + scales)
+- SVD V: 4 × rank × h_size + 16 × ceil(rank×h_size / bs) bits (NF4 + scales)
+- Total ÷ (out_f × in_f) = effective bpw
+
+### Failed Approaches (documented dead ends)
+- Ternary alone: PPL 3M+
+- BiLLM mean-centered: PPL 100K-1M
+- Per-tensor NF4 SVD: PPL 18K (too coarse)
+- 8-bit SVD: always exceeds 1.58 bpw budget
+- IRB 1-round + SVD in Hadamard space: PPL 1.5M (Hadamard padding inflates SVD cost)
+- IRB 1-round + SVD in original space: PPL 1.5M (residual not well-aligned)
+
+### Remaining Limitations
+- PPL 1096 is still far from FP16 baseline (22). This is NOT "~1-bit working" in a usable sense.
+- The 1.55 bpw target is met but quality is insufficient for practical use.
+- Longer evaluation corpus needed for stable PPL measurement.
+- Sub-1.58 bpw with usable quality likely requires either: (a) calibration data (GPTQ/AWQ), (b) higher rank SVD (exceeds budget), or (c) training-based refinement (QAT).
