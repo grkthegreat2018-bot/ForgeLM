@@ -112,6 +112,7 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
+    lora_adapter: Optional[str] = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -200,6 +201,12 @@ class KVCacheTypeRequest(BaseModel):
 
 class SleepRequest(BaseModel):
     level: int = Field(default=1, ge=1, le=2)
+
+class LoRALoadRequest(BaseModel):
+    model: str = "lfm2.5-1.2b"
+    adapter_path: str
+    rank: int = 32
+    alpha: Optional[int] = None
 
 
 # ── Task API models ──────────────────────────────────────────────────────────
@@ -654,6 +661,21 @@ class ForgeServer:
                     media_type="text/event-stream",
                 )
 
+            # Per-request LoRA adapter selection
+            lora_swapped = False
+            prev_lora = None
+            if req.lora_adapter:
+                engine = registry.get_engine(req.model)
+                if engine is not None:
+                    prev_lora = engine.lora_info() if engine.has_lora() else None
+                    if prev_lora and prev_lora.get("path") != req.lora_adapter:
+                        engine.unload_lora()
+                        engine.load_lora(req.lora_adapter)
+                        lora_swapped = True
+                    elif not prev_lora:
+                        engine.load_lora(req.lora_adapter)
+                        lora_swapped = True
+
             # Non-streaming
             raw_text = registry.generate(
                 req.model, prompt,
@@ -667,6 +689,15 @@ class ForgeServer:
                 logprobs=req.top_logprobs if req.logprobs else None,
                 return_logprobs=bool(req.logprobs),
             )
+
+            # Restore previous LoRA adapter if we swapped
+            if lora_swapped:
+                engine = registry.get_engine(req.model)
+                if engine is not None:
+                    engine.unload_lora()
+                    if prev_lora and prev_lora.get("path"):
+                        engine.load_lora(prev_lora["path"], rank=prev_lora.get("rank", 32),
+                                        alpha=prev_lora.get("alpha", 64))
             # Handle logprobs return (dict with text + logprobs)
             lp_data = None
             if isinstance(raw_text, dict):
@@ -1110,6 +1141,27 @@ class ForgeServer:
                 raise HTTPException(404, f"Model '{model_id}' not found")
             registry.sleep(model_id, level=req.level)
             return {"status": "ok", "model": model_id, "level": req.level}
+
+        @app.post("/v1/lora/load")
+        async def lora_load(req: LoRALoadRequest):
+            """Load a LoRA adapter onto a model."""
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            try:
+                n = engine.load_lora(req.adapter_path, rank=req.rank, alpha=req.alpha)
+                return {"status": "ok", "model": req.model, "n_adapters": n}
+            except Exception as e:
+                raise HTTPException(400, str(e))
+
+        @app.post("/v1/lora/unload")
+        async def lora_unload(model_id: str = "lfm2.5-1.2b"):
+            """Unload LoRA adapter from a model."""
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(404, f"Model '{model_id}' not found")
+            engine.unload_lora()
+            return {"status": "ok", "model": model_id}
 
         @app.post("/v1/models/{model_id}/wake")
         async def wake_model(model_id: str):

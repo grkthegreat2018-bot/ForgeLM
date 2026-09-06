@@ -353,3 +353,123 @@ def build_health_report(engine) -> dict:
             report["recent_warnings"] = warns
 
     return report
+
+
+# ── BandwidthProfiler ──────────────────────────────────────────────────────
+
+class BandwidthProfiler:
+    """Profile PCIe bandwidth and CPU-GPU transfer speeds.
+
+    FreeToken-style bandwidth-adaptive CPU-GPU co-execution requires
+    knowing the actual transfer speed to optimally split work.
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self._cpu_to_gpu_gbps: float | None = None
+        self._gpu_to_cpu_gbps: float | None = None
+        self._cpu_compute_gflops: float | None = None
+        self._gpu_compute_gflops: float | None = None
+
+    def benchmark_transfers(self, size_mb: int = 64) -> dict:
+        """Benchmark CPU↔GPU transfer bandwidth."""
+        import time
+        if self.device.type != "cuda":
+            return {"cpu_to_gpu_gbps": 0, "gpu_to_cpu_gbps": 0}
+        n_bytes = size_mb * 1024 * 1024
+        n_elements = n_bytes // 2  # float16
+        # CPU → GPU
+        cpu_tensor = torch.randn(n_elements, dtype=torch.float16, pin_memory=True)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            gpu_tensor = cpu_tensor.to(self.device, non_blocking=True)
+        torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) / 5
+        self._cpu_to_gpu_gbps = (n_bytes / 1e9) / dt
+        # GPU → CPU
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            _ = gpu_tensor.to("cpu", non_blocking=True)
+        torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) / 5
+        self._gpu_to_cpu_gbps = (n_bytes / 1e9) / dt
+        del cpu_tensor, gpu_tensor
+        torch.cuda.empty_cache()
+        return {
+            "cpu_to_gpu_gbps": self._cpu_to_gpu_gbps,
+            "gpu_to_cpu_gbps": self._gpu_to_cpu_gbps,
+        }
+
+    def benchmark_compute(self, n: int = 4096) -> dict:
+        """Benchmark CPU and GPU matmul throughput."""
+        import time
+        # GPU compute
+        if self.device.type == "cuda":
+            a = torch.randn(n, n, dtype=torch.float16, device=self.device)
+            b = torch.randn(n, n, dtype=torch.float16, device=self.device)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(10):
+                c = a @ b
+            torch.cuda.synchronize()
+            dt = (time.perf_counter() - t0) / 10
+            self._gpu_compute_gflops = (2 * n**3 / 1e9) / dt
+            del a, b, c
+            torch.cuda.empty_cache()
+        # CPU compute
+        a = torch.randn(n, n, dtype=torch.float32)
+        b = torch.randn(n, n, dtype=torch.float32)
+        t0 = time.perf_counter()
+        for _ in range(2):
+            c = a @ b
+        dt = (time.perf_counter() - t0) / 2
+        self._cpu_compute_gflops = (2 * n**3 / 1e9) / dt
+        del a, b, c
+        return {
+            "gpu_compute_gflops": self._gpu_compute_gflops or 0,
+            "cpu_compute_gflops": self._cpu_compute_gflops,
+        }
+
+    def optimal_split(self, total_flops: float, transfer_bytes: float) -> dict:
+        """Compute optimal CPU/GPU work split.
+
+        Returns {gpu_fraction, cpu_fraction, estimated_speedup}.
+        """
+        gpu_gflops = self._gpu_compute_gflops or 0
+        cpu_gflops = self._cpu_compute_gflops or 0
+        transfer_gbps = self._cpu_to_gpu_gbps or 0
+        if gpu_gflops == 0:
+            return {"gpu_fraction": 0, "cpu_fraction": 1, "estimated_speedup": 1.0}
+        if cpu_gflops == 0 or transfer_gbps == 0:
+            return {"gpu_fraction": 1, "cpu_fraction": 0, "estimated_speedup": 1.0}
+        # Simple model: find split that equalizes time
+        # GPU time = (f * total_flops) / (gpu_gflops * 1e9)
+        # CPU time = ((1-f) * total_flops) / (cpu_gflops * 1e9) + transfer_bytes / (transfer_gbps * 1e9)
+        # Equalize: solve for f
+        best_f = 1.0
+        best_time = float('inf')
+        for f in [0.0, 0.25, 0.5, 0.75, 0.9, 1.0]:
+            gpu_time = (f * total_flops) / (gpu_gflops * 1e9)
+            cpu_time = ((1 - f) * total_flops) / (cpu_gflops * 1e9)
+            transfer_time = (transfer_bytes * (1 - f)) / (transfer_gbps * 1e9)
+            total_time = max(gpu_time, cpu_time + transfer_time)
+            if total_time < best_time:
+                best_time = total_time
+                best_f = f
+        # Speedup vs GPU-only
+        gpu_only_time = total_flops / (gpu_gflops * 1e9)
+        speedup = gpu_only_time / best_time if best_time > 0 else 1.0
+        return {
+            "gpu_fraction": best_f,
+            "cpu_fraction": 1 - best_f,
+            "estimated_speedup": speedup,
+        }
+
+    def profile_all(self) -> dict:
+        """Run all benchmarks and return results."""
+        return {
+            "transfers": self.benchmark_transfers(),
+            "compute": self.benchmark_compute(),
+        }

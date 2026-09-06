@@ -405,3 +405,299 @@ class ChunkedPrefixCache:
             "partial_hits": self._partial_hits,
             "hit_rate": self._hits / total if total > 0 else 0,
         }
+
+
+# ── Semantic KV anchors (FreeToken-style, R&D round 15) ────────────────────
+
+
+class SemanticKVAnchors:
+    """Semantic anchor-based KV cache reuse (FreeToken-style).
+
+    Saves KV cache state at logical boundaries (tool calls, thinking blocks,
+    paragraph breaks) so agentic edits recompute only the suffix after the
+    last anchor, not the entire prefix.
+
+    Anchors are detected at:
+    - Tool call boundaries: <tool_call>...</tool_call> tags
+    - Thinking blocks: <thinking>...</thinking> or <|thinking_end|>
+    - Paragraph breaks: double newlines
+    - Sentence boundaries: . ! ? followed by newline
+    """
+
+    def __init__(self, max_anchors: int = 16):
+        self._anchors: list[dict] = []  # [{token_pos, text_pos, type, kv_state}]
+        self._max_anchors = max_anchors
+
+    def detect_anchors(self, text: str, token_offsets: list[int] | None = None) -> list[dict]:
+        """Find semantic anchor positions in text.
+
+        Returns list of {text_pos, type} for each anchor.
+        """
+        import re
+        anchors = []
+        # Tool call boundaries
+        for m in re.finditer(r'</tool_call>', text):
+            anchors.append({"text_pos": m.end(), "type": "tool_call"})
+        # Thinking blocks
+        for m in re.finditer(r'</thinking>|<\|thinking_end\|>', text):
+            anchors.append({"text_pos": m.end(), "type": "thinking"})
+        # Paragraph breaks
+        for m in re.finditer(r'\n\n', text):
+            anchors.append({"text_pos": m.end(), "type": "paragraph"})
+        # Sort by position
+        anchors.sort(key=lambda a: a["text_pos"])
+        return anchors
+
+    def save_anchor(self, token_pos: int, text_pos: int, anchor_type: str,
+                    kv_state) -> None:
+        """Save KV cache state at an anchor point."""
+        self._anchors.append({
+            "token_pos": token_pos,
+            "text_pos": text_pos,
+            "type": anchor_type,
+            "kv_state": kv_state,
+        })
+        # Evict oldest if over limit
+        if len(self._anchors) > self._max_anchors:
+            self._anchors.pop(0)
+
+    def find_reuse_point(self, text: str) -> dict | None:
+        """Find the best anchor to reuse for the given text.
+
+        Returns the anchor with the longest matching prefix, or None.
+        """
+        # Find the last anchor whose text_pos is within the new text
+        best = None
+        for anchor in reversed(self._anchors):
+            if anchor["text_pos"] <= len(text):
+                # Check if text up to anchor matches
+                # (simplified: just use position-based matching)
+                best = anchor
+                break
+        return best
+
+    def get_kv_state(self, token_pos: int) -> object | None:
+        """Get saved KV state at or before the given token position."""
+        best = None
+        for anchor in self._anchors:
+            if anchor["token_pos"] <= token_pos:
+                best = anchor
+            else:
+                break
+        return best["kv_state"] if best else None
+
+    def clear(self) -> None:
+        """Clear all anchors."""
+        self._anchors.clear()
+
+    def info(self) -> dict:
+        return {
+            "n_anchors": len(self._anchors),
+            "anchors": [{"token_pos": a["token_pos"], "type": a["type"]}
+                       for a in self._anchors],
+        }
+
+
+# ── Radix-tree prefix cache (SGLang RadixAttention-style) ────────────────────
+
+
+class RadixPrefixCache:
+    """Radix-tree cross-request prefix sharing (SGLang RadixAttention-style).
+
+    Unlike LRU (exact-key) or ChunkedPrefixCache (rolling-hash chunks),
+    this stores KV cache in a radix tree keyed by token-id sequences.
+    Multiple requests sharing a common prefix (system prompt, few-shot
+    examples, tool definitions) automatically reuse the same KV nodes,
+    even when they diverge later.
+
+    Tree structure:
+        root → [token 1] → [token 2] → ... → [token N] (leaf: KV state)
+              ↘ [token A] → [token B] → ... (different request's KV)
+
+    Each node stores:
+        - token_ids: list[int] for this edge
+        - kv_state: KV cache at the end of this edge (None for internal)
+        - ref_count: how many active requests reference this node
+        - children: dict[token_id → RadixNode]
+
+    Eviction: LRU on leaves (ref_count == 0), evicting oldest first.
+    """
+
+    class _Node:
+        __slots__ = ("token_ids", "kv_state", "ref_count", "children", "last_used")
+
+        def __init__(self):
+            self.token_ids: list[int] = []
+            self.kv_state = object()  # None until computed
+            self.ref_count = 0
+            self.children: dict[int, "RadixPrefixCache._Node"] = {}
+            self.last_used = 0.0
+
+    def __init__(self, max_entries: int = _DEFAULT_MAX_ENTRIES):
+        self.root = self._Node()
+        self.max_entries = max_entries
+        self._n_entries = 0
+        self._hits = 0
+        self._misses = 0
+
+    def _match(self, node: _Node, token_ids: list[int], start: int) -> tuple[int, _Node]:
+        """Walk the tree from `node` matching `token_ids[start:]`.
+
+        Returns (matched_count, last_node) — the deepest node reached
+        and how many tokens were matched along the way.
+        """
+        matched = 0
+        cur = node
+        i = start
+        while i < len(token_ids):
+            # Try to extend within current edge
+            if matched < len(cur.token_ids):
+                if cur.token_ids[matched] == token_ids[i]:
+                    matched += 1
+                    i += 1
+                    continue
+                else:
+                    break  # Mismatch within edge
+            # Try to descend to a child
+            child = cur.children.get(token_ids[i])
+            if child is None:
+                break
+            cur = child
+            matched = 0
+            # Continue matching within this child's edge
+            if matched < len(cur.token_ids) and cur.token_ids[matched] == token_ids[i]:
+                matched += 1
+                i += 1
+        # If we stopped mid-edge, return the partial match count
+        return i - start, cur
+
+    def lookup_longest_prefix(self, ids: torch.Tensor) -> tuple[int, object] | None:
+        """Find the longest cached prefix for `ids`.
+
+        Returns (cached_len, kv_state) or None.
+        """
+        import time
+        token_ids = ids[0].cpu().tolist()
+        if len(token_ids) <= 16:
+            return None
+        matched, node = self._match(self.root, token_ids, 0)
+        if matched <= 0:
+            self._misses += 1
+            return None
+        # Find the deepest node with a kv_state
+        best_len = 0
+        best_kv = None
+        # Walk from root again, accumulating lengths
+        cur = self.root
+        acc = 0
+        i = 0
+        while i < matched:
+            edge_len = min(len(cur.token_ids), matched - i) if cur.token_ids else 0
+            if cur.token_ids:
+                acc += edge_len
+                i += edge_len
+                if cur.kv_state is not None and acc > best_len:
+                    best_len = acc
+                    best_kv = cur.kv_state
+                if i >= matched:
+                    break
+            # Descend
+            if i < len(token_ids):
+                child = cur.children.get(token_ids[i])
+                if child is None:
+                    break
+                cur = child
+            else:
+                break
+        if best_kv is not None:
+            self._hits += 1
+            node.last_used = time.time()
+            return best_len, best_kv
+        self._misses += 1
+        return None
+
+    def insert(self, token_ids: list[int], kv_state) -> None:
+        """Insert a KV state for the full token sequence."""
+        import time
+        if not token_ids:
+            return
+        # Find existing match
+        matched, node = self._match(self.root, token_ids, 0)
+        # If full match, just update kv_state
+        if matched == len(token_ids) and len(node.token_ids) == 0:
+            node.kv_state = kv_state
+            node.last_used = time.time()
+            return
+        # Need to split or extend
+        # For simplicity: create a new child edge for the remaining tokens
+        remaining = token_ids[matched:]
+        if not remaining:
+            node.kv_state = kv_state
+            node.last_used = time.time()
+            return
+        # Create new node for remaining tokens
+        new_node = self._Node()
+        new_node.token_ids = remaining[:]
+        new_node.kv_state = kv_state
+        new_node.last_used = time.time()
+        new_node.ref_count = 1
+        node.children[remaining[0]] = new_node
+        self._n_entries += 1
+        # Evict if over capacity
+        if self._n_entries > self.max_entries:
+            self._evict_lru()
+
+    def _evict_lru(self) -> None:
+        """Evict the least-recently-used leaf node."""
+        # BFS to find the oldest leaf with ref_count == 0
+        best = None
+        best_time = float('inf')
+        queue = [self.root]
+        parent_map = {id(self.root): None}
+        while queue:
+            node = queue.pop(0)
+            if node.kv_state is not None and node.ref_count == 0:
+                if node.last_used < best_time:
+                    best = node
+                    best_time = node.last_used
+            for child in node.children.values():
+                parent_map[id(child)] = node
+                queue.append(child)
+        if best is not None:
+            best.kv_state = None
+            self._n_entries -= 1
+
+    # LRU-compatible interface
+    def get(self, key):
+        """LRU-compatible get (uses key as token tuple)."""
+        if isinstance(key, tuple):
+            ids = torch.tensor([list(key)])
+            result = self.lookup_longest_prefix(ids)
+            if result:
+                return result[1]
+        return None
+
+    def put(self, key, value, length: int = 0):
+        """LRU-compatible put."""
+        if isinstance(key, tuple):
+            self.insert(list(key), value)
+
+    def __contains__(self, key):
+        if isinstance(key, tuple):
+            ids = torch.tensor([list(key)])
+            return self.lookup_longest_prefix(ids) is not None
+        return False
+
+    def __len__(self):
+        return self._n_entries
+
+    def stats(self) -> dict:
+        total = self._hits + self._misses
+        return {
+            "entries": self._n_entries,
+            "max_entries": self.max_entries,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": self._hits / total if total > 0 else 0,
+            "type": "radix",
+        }

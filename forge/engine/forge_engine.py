@@ -141,6 +141,7 @@ from forge.engine.activation import ActivationConfig
 from forge.engine.airllm_streamer import AirLLMStreamer
 from forge.engine.decoding import DecodingStrategy, StandardDecoding, build_decoding
 from forge.engine.diagnostics import (
+    BandwidthProfiler,
     EngineProfiler,
     EventLog,
     OutputHistory,
@@ -157,6 +158,7 @@ from forge.engine.kv_backend import KVCacheStrategy, build_kv_cache
 from forge.engine.prefix_cache import (
     LRUPrefixCache,
     ChunkedPrefixCache,
+    SemanticKVAnchors,
     cache_prompt_prefix as _cache_prompt_prefix,
     generate_from_prefix_cache as _generate_from_prefix_cache,
 )
@@ -297,6 +299,7 @@ class ForgeEngine:
         self.total_tokens_generated = 0
         self._prefix_cache = None
         self._cache_blend: CacheBlend | None = None  # R&D14: CacheBlend
+        self.semantic_anchors = SemanticKVAnchors()  # R&D15: FreeToken-style
         self._graph_runner = None
         self._stop_tokens = None
         self._awake = True
@@ -307,6 +310,7 @@ class ForgeEngine:
         self.events = EventLog(capacity=500)
         self.outputs = OutputHistory(capacity=100)
         self._profiler = EngineProfiler(self.model, self.device)
+        self.bandwidth_profiler = BandwidthProfiler(self.device)
         self._log("ForgeEngine initialized",
                   device=str(self.device),
                   checkpoint=checkpoint_path or "none")
@@ -2185,6 +2189,20 @@ class ForgeEngine:
                 return {"text": result, "logprobs": lp_data}
             # Otherwise attach to result via attribute (server reads it)
             result._forge_logprobs = lp_data  # type: ignore[attr-defined]
+
+        # Save semantic KV anchors for future reuse (FreeToken-style)
+        try:
+            anchors = self.semantic_anchors.detect_anchors(prompt + result)
+            if anchors and captured_kv is not None:
+                for a in anchors[:3]:  # Save up to 3 anchors per generation
+                    self.semantic_anchors.save_anchor(
+                        token_pos=ids.shape[1],  # approximate
+                        text_pos=a["text_pos"],
+                        anchor_type=a["type"],
+                        kv_state=captured_kv,
+                    )
+        except Exception:
+            pass
         return result
 
     # ── Test-time scaling & cascade routing (R39-6 / R39-8) ──────────────
@@ -3125,6 +3143,45 @@ class ForgeEngine:
                         tok_s=round(n_gen / (gen_ms / 1000), 1) if gen_ms > 0 else 0)
 
     @torch.no_grad()
+    def _chunked_prefill(self, ids: torch.Tensor, chunk_size: int = 512,
+                         past_kv=None) -> tuple:
+        """Chunked prefill: process prompt in chunks, mixing with decode.
+
+        vLLM V1 / SGLang-style chunked prefill splits long prompts into
+        chunks and processes them incrementally, interleaving with decode
+        steps from other requests. This prevents a single long prompt from
+        blocking the batch.
+
+        Args:
+            ids: full prompt token ids [1, seq_len]
+            chunk_size: tokens per prefill chunk (default 512)
+            past_kv: optional existing KV cache to extend
+
+        Returns:
+            (logits, past_kv) after processing all chunks
+        """
+        seq_len = ids.shape[1]
+        if seq_len <= chunk_size:
+            # Short prompt — single pass
+            with torch.inference_mode():
+                out = self.model(ids, past_key_values=past_kv, use_cache=True)
+                logits, past_kv = unpack_output_with_kv(out)
+            return logits, past_kv
+
+        # Process in chunks
+        offset = 0
+        kv = past_kv
+        logits = None
+        with torch.inference_mode():
+            while offset < seq_len:
+                end = min(offset + chunk_size, seq_len)
+                chunk = ids[:, offset:end]
+                out = self.model(chunk, past_key_values=kv, use_cache=True)
+                logits, kv = unpack_output_with_kv(out)
+                offset = end
+        # Return logits from the last chunk (last position)
+        return logits, kv
+
     def _decode_with_kv(self, ids, logits, past_kv,
                         max_new_tokens, temperature, top_p,
                         top_k: int = 80, repetition_penalty: float = 1.05):
@@ -3395,6 +3452,10 @@ class ForgeEngine:
                         source="engine",
                         warnings=len(report.get("warnings", [])))
         return report
+
+    def profile_bandwidth(self) -> dict:
+        """Profile CPU-GPU bandwidth and compute optimal split."""
+        return self.bandwidth_profiler.profile_all()
 
     # ── Evolutionary model merging ("sexual reproduction") ────────────────
     # Implements the GENOME framework (Zhang et al. 2026): crossover,
