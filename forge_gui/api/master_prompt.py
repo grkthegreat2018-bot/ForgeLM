@@ -29,10 +29,16 @@ def _detect_model_name(config_name: str) -> str:
         return "ForgeLM V2 Pro"
     if "v2_light" in name or "v2light" in name:
         return "ForgeLM V2 Light"
+    if "v12" in name and "jamba" in name:
+        return "ForgeLM V12 Jamba"
+    if name == "forgelm_v2":
+        return "ForgeLM V2"
     if "v10" in name:
         return "ForgeLM V2 Light"
     if "v11" in name:
         return "ForgeLM V2 Pro"
+    if "jamba" in name:
+        return "ForgeLM Jamba"
     if "lfm25" in name:
         return "LFM 2.5"
     return config_name.replace("_", " ").title()

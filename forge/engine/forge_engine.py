@@ -137,6 +137,19 @@ _checkpoint_metadata_cache: _OrderedDict[tuple[str, float], dict] = _OrderedDict
 _checkpoint_size_cache: _OrderedDict[str, int] = _OrderedDict()
 _ckpt_cache_lock = threading.Lock()
 
+# Tokenizer dispatch by config vocab size. The canonical LFM tokenizer
+# (vocab 65536) is wrong for HF-family checkpoints; Qwen-family checkpoints
+# (vocab 151936) need the Qwen tokenizer for correct encode/decode.
+_QWEN_VOCAB = 151936
+_QWEN_TOKENIZER_PATH = "Qwen/Qwen2.5-0.5B"
+
+
+def _tokenizer_for_vocab(vocab_size: int | None) -> str:
+    """Return the tokenizer path matching a config's vocabulary size."""
+    if vocab_size == _QWEN_VOCAB:
+        return _QWEN_TOKENIZER_PATH
+    return "research/checkpoints/lfm25_tokenizer"
+
 from forge.engine.activation import ActivationConfig
 from forge.engine.airllm_streamer import AirLLMStreamer
 from forge.engine.decoding import DecodingStrategy, StandardDecoding, build_decoding
@@ -554,6 +567,7 @@ class ForgeEngine:
                         tokenizer_path: str | None = None,
                         device: str = "cuda",
                         auto_activate: bool = True,
+                        config_overrides: dict | None = None,
                         **kwargs) -> "ForgeEngine":
         """Build engine from a KeyStack checkpoint.
 
@@ -568,12 +582,21 @@ class ForgeEngine:
                 ``activate_optimal()`` with keystack-aware overrides after
                 loading. Detected features (MTP, value_residual, etc.) are
                 auto-enabled. Set to False for manual activation.
+            config_overrides: Optional dict of config field overrides applied
+                to the base config before model construction (e.g.
+                ``{"use_mamba3": True}`` to enable Mamba-3 warm start).
         """
         from forge.config import get_config
         from research.tokenizer_cache import get_tokenizer
 
-        cfg = get_config(config_name, device=device)
-        tok_path = tokenizer_path or "research/checkpoints/lfm25_tokenizer"
+        cfg = get_config(config_name, device=device,
+                         **(config_overrides or {}))
+
+        # Tokenizer auto-dispatch: the canonical LFM tokenizer (vocab 65536)
+        # cannot tokenize for Qwen-family checkpoints (vocab 151936). Dispatch
+        # on the config's vocab so HF-style checkpoints get a matching
+        # tokenizer (explicit tokenizer_path always wins).
+        tok_path = tokenizer_path or _tokenizer_for_vocab(cfg.vocab_size)
         tokenizer = get_tokenizer(tok_path)
 
         # GGUF checkpoint detection — route to ForgeLoader for dequant + load
@@ -603,6 +626,24 @@ class ForgeEngine:
         metadata = cls._read_checkpoint_metadata(checkpoint)
         is_prequant = metadata.get("_bitnet_prequant") == "1"
 
+        # Architecture guard: a checkpoint whose tensor shapes don't match
+        # the selected config can NEVER load — the old behavior (fall through
+        # to AirLLM streaming with the same wrong config) silently produced
+        # a random-weight model that "loaded" but generated garbage.
+        try:
+            cls._validate_checkpoint_config(checkpoint, cfg, config_name)
+        except CheckpointError:
+            detected = cls._detect_config_from_header(checkpoint)
+            if detected and detected != config_name:
+                print(f"  [ForgeEngine] Checkpoint does not match config "
+                      f"'{config_name}' — auto-detected matching preset "
+                      f"'{detected}' from checkpoint shapes")
+                config_name = detected
+                cfg = get_config(detected, device=device)
+                cls._validate_checkpoint_config(checkpoint, cfg, config_name)
+            else:
+                raise
+
         engine = None
         try:
             if is_prequant:
@@ -617,6 +658,16 @@ class ForgeEngine:
                     cfg, checkpoint, tokenizer, device,
                     ckpt_size, vram_free, **kwargs)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if "size mismatch" in str(e).lower():
+                # Weights don't fit the built model — streaming the same
+                # shapes would silently produce a random-weight model.
+                raise CheckpointError(
+                    f"checkpoint tensors do not match config "
+                    f"'{config_name}': {e}",
+                    context={"checkpoint": checkpoint,
+                             "config": config_name},
+                    suggestion="Select the config matching this checkpoint."
+                ) from e
             # If the primary load path fails (OOM, corrupt weights, etc.),
             # fall through to the streaming path as a last resort.
             print(f"  [ForgeEngine] Load path failed ({e}), "
@@ -733,18 +784,22 @@ class ForgeEngine:
             # which OOMs on 12GB for models >2B params.
             try:
                 from forge.engine.quant.forge_quant import quantize_model_forge_quant  # noqa
-                # Check VRAM: ForgeQuant processes per-layer (lower overhead
-                # than NVFP4 which needs full model + quantized copy).
-                n_params = sum(p.numel() for p in self.model.parameters())
-                model_bytes_bf16 = n_params * 2
+                # ForgeQuant replaces nn.Linear with ForgeQuantLinear per-layer.
+                # Each replacement frees the original bf16 weight and allocates
+                # a smaller packed INT4 weight. Peak overhead per layer is just
+                # the ForgeQuantLinear storage (~50% of one layer's bf16 weight),
+                # NOT the full model. The old 1.3x model-size check was wrong
+                # and prevented ForgeQuant on 12GB GPUs with 3B+ models.
+                # We need only enough free VRAM for the largest single layer's
+                # quantization temp (~256MB for a 2560×10240 in_proj).
                 vram_free, _ = self._memory_info(self.device)
-                # ForgeQuant conversion: model in VRAM + per-layer temp (~1.3x)
-                if vram_free > model_bytes_bf16 * 1.3:
+                _per_layer_overhead = 256 * 1024 * 1024  # 256MB conservative
+                if vram_free > _per_layer_overhead:
                     return "forge_quant"
-                # Model barely fits — use int4 (minimal conversion overhead)
+                # Not enough VRAM even for per-layer conversion
                 self._log(
-                    f"ForgeQuant skipped: model {model_bytes_bf16/1e9:.1f}GB "
-                    f"would exceed {vram_free/1e9:.1f}GB free VRAM",
+                    f"ForgeQuant skipped: only {vram_free/1e9:.1f}GB free VRAM "
+                    f"(need {_per_layer_overhead/1e9:.1f}GB per-layer overhead)",
                     level="warn")
                 return "int4"
             except ImportError:
@@ -821,6 +876,111 @@ class ForgeEngine:
             while len(_checkpoint_metadata_cache) > _CKPT_CACHE_MAX:
                 _checkpoint_metadata_cache.popitem(last=False)
         return metadata
+
+    @staticmethod
+    def _read_safetensors_header(checkpoint) -> Optional[dict]:
+        """Raw safetensors header (tensor name → {shape, dtype, ...}).
+
+        Reads only the JSON header (8-byte length prefix + payload) — no
+        torch, no tensor loading. Returns None for non-safetensors files.
+        """
+        import struct
+        try:
+            with open(checkpoint, "rb") as f:
+                (n,) = struct.unpack("<Q", f.read(8))
+                return json.loads(f.read(n))
+        except (OSError, ValueError, struct.error):
+            return None
+
+    @classmethod
+    def _validate_checkpoint_config(cls, checkpoint, cfg, config_name) -> None:
+        """Fail fast when a checkpoint cannot possibly match ``cfg``.
+
+        Compares shapes read from the safetensors header (cheap, no tensor
+        loading) against the config. Skips silently for non-safetensors or
+        sharded checkpoints where per-file shapes are not authoritative.
+        """
+        path = Path(checkpoint)
+        if path.suffix.lower() != ".safetensors" or path.is_dir():
+            return
+        hdr = cls._read_safetensors_header(checkpoint)
+        if not hdr:
+            return
+        shapes = {k: v["shape"] for k, v in hdr.items()
+                  if isinstance(v, dict) and v.get("shape")}
+        if not shapes:
+            return
+
+        problems: list[str] = []
+        # Embedding: ForgeLM "embed.weight" or HF "model.embed_tokens.weight"
+        embed = shapes.get("embed.weight") or shapes.get("model.embed_tokens.weight")
+        if embed and len(embed) == 2:
+            if cfg.vocab_size and embed[0] != cfg.vocab_size:
+                problems.append(
+                    f"vocab mismatch: checkpoint embed {embed[0]} vs config "
+                    f"{cfg.vocab_size}")
+            if cfg.d_model and embed[1] != cfg.d_model:
+                problems.append(
+                    f"d_model mismatch: checkpoint embed is [{embed[0]}, "
+                    f"{embed[1]}] vs config d_model={cfg.d_model}")
+        # Depth: count distinct block indices (blocks.N / model.layers.N)
+        import re
+        idx = {int(m.group(1)) for k in shapes
+               for m in [re.match(r"(?:blocks|model\.layers)\.(\d+)\.", k)] if m}
+        if idx and cfg.n_layers and len(idx) != cfg.n_layers:
+            problems.append(
+                f"depth mismatch: checkpoint has {len(idx)} transformer "
+                f"blocks vs config n_layers={cfg.n_layers}")
+        if not problems:
+            return
+
+        keys = list(shapes)
+        hints = []
+        if any(k.startswith("model.") for k in shapes):
+            hints.append("transformers/HF-style key names")
+        if any("U_latent" in k or "V_latent" in k for k in shapes):
+            hints.append("low-rank (SVD/ASVD) factorized weights")
+        hint = f" (detected: {', '.join(hints)})" if hints else ""
+        raise CheckpointError(
+            f"Checkpoint '{Path(checkpoint).name}' does not match config "
+            f"'{config_name}': {'; '.join(problems)}.{hint}",
+            context={"checkpoint": str(checkpoint), "config": config_name,
+                     "problems": problems},
+            suggestion="Select the config matching this checkpoint, or "
+                       "re-export the checkpoint in ForgeLM KeyStack format.")
+
+    @classmethod
+    def _detect_config_from_header(cls, checkpoint) -> Optional[str]:
+        """Infer a matching MODEL_CONFIGS preset from checkpoint tensor shapes.
+
+        Reads the safetensors header (no tensor loading), extracts
+        (vocab, d_model, n_layers) from the embedding + block indices, and
+        returns the first preset whose shapes match exactly. None when no
+        preset matches (or the file has no readable header).
+        """
+        import re
+        from forge.config import MODEL_CONFIGS
+        path = Path(checkpoint)
+        if path.suffix.lower() != ".safetensors" or path.is_dir():
+            return None
+        hdr = cls._read_safetensors_header(checkpoint)
+        if not hdr:
+            return None
+        shapes = {k: v["shape"] for k, v in hdr.items()
+                  if isinstance(v, dict) and v.get("shape")}
+        embed = shapes.get("embed.weight") or shapes.get("model.embed_tokens.weight")
+        if not embed or len(embed) != 2:
+            return None
+        idx = {int(m.group(1)) for k in shapes
+               for m in [re.match(r"(?:blocks|model\.layers)\.(\d+)\.", k)] if m}
+        if not idx:
+            return None
+        vocab, d_model, n_layers = embed[0], embed[1], len(idx)
+        for name, preset in MODEL_CONFIGS.items():
+            if (getattr(cfg := preset, "vocab_size", None) == vocab
+                    and cfg.d_model == d_model and cfg.n_layers == n_layers):
+                return name
+        return None
 
     @classmethod
     def _load_prequant(cls, cfg, checkpoint, tokenizer, device,
@@ -1161,6 +1321,8 @@ class ForgeEngine:
                                 "attention on GPU")
                     return engine
                 except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    if "size mismatch" in str(e).lower():
+                        raise
                     print(f"  [HybridOffload] Failed ({e}), "
                           f"falling back to AirLLM streaming...")
                     cls._clear_cuda_cache_static(torch.device(device))
@@ -1277,8 +1439,9 @@ class ForgeEngine:
                       "cpu_offload", "s4r", "hqe_kv", "hyquant",
                       "evo_sparse", "vegas", "hisparse", "capture",
                       "vtoken", "auto_context"
-            decoding: "standard", "speculative", "medusa", "dspark", "eagle3", "mtp_selfspec",
-                      "self_speculative_sparse"
+            decoding: "standard", "speculative", "ngram_speculative",
+                      "external_draft_speculative", "medusa", "dspark", "eagle3",
+                      "mtp_selfspec", "self_speculative_sparse"
             quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
                       "forge_quant", "grinqh", "mixllm", "acbq", "quamba2",
                       "awq_fp4", "nanoquant", "btc", "ternary_ptq"
@@ -1448,17 +1611,21 @@ class ForgeEngine:
         last_error = None
         for try_cache in chain:
             try:
-                self.kv_cache = build_kv_cache(try_cache)
-                self.kv_cache.init(n_heads, head_dim, n_kv, max_seq,
-                                   str(self.device), self.dtype)
+                # Build + init into a local first: self.kv_cache must never
+                # reference a half-initialized cache (a concurrent stats()
+                # read crashed on missing attributes during the swap).
+                cache = build_kv_cache(try_cache)
+                cache.init(n_heads, head_dim, n_kv, max_seq,
+                           str(self.device), self.dtype)
+                self.kv_cache = cache
                 # Track active KV bits for OOM-recovery fallback (s4r 4-bit, etc.)
-                self._active_kv_bits = getattr(self.kv_cache, "bits", 8)
+                self._active_kv_bits = getattr(cache, "bits", 8)
                 self._active_kv_cache_name = try_cache
                 if try_cache != kv_cache:
                     self._log(
                         f"KV cache fallback: '{kv_cache}' failed, "
                         f"using '{try_cache}' instead", level="warn")
-                self._log(f"KV cache: {self.kv_cache.info()}")
+                self._log(f"KV cache: {cache.info()}")
                 return
             except (torch.cuda.OutOfMemoryError, RuntimeError, ImportError,
                     ValueError) as e:
@@ -1501,6 +1668,13 @@ class ForgeEngine:
             #                  draft_len=8, sparse_k=128).
             decode_kwargs.setdefault("draft_len", 4)
             decode_kwargs.setdefault("sparse_k", 64)
+        elif decoding == "uno":
+            # R49-1: Uno diffusion-augmented block decoding (arXiv:2609.04010).
+            # Lossless Psi-Spec verification; n-gram proposer by default.
+            # Overrides: engine.activate(decoding="uno", block_size=8,
+            #                            entropy_stop=0.1).
+            decode_kwargs.setdefault("block_size", 4)
+            decode_kwargs.setdefault("entropy_stop", None)
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 

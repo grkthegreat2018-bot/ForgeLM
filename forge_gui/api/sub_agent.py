@@ -136,11 +136,13 @@ class SubAgentManager(QObject):
                 messages.append({"role": "system", "content": task.system_prompt})
             messages.append({"role": "user", "content": task.prompt})
 
-            # render via qwen adapter
+            # render via qwen adapter (dispatch on config name)
             from forge.self_play.discovery.qwen_adapter import (
-                qwen_render_messages,
+                render_messages_for_config,
             )
-            rendered = qwen_render_messages(messages, add_generation_prompt=True)
+            cfg_name = self.engine_runtime.info.get("config_name", "")
+            rendered = render_messages_for_config(
+                messages, config_name=cfg_name, add_generation_prompt=True)
 
             # generate via the engine runtime
             parts: list[str] = []

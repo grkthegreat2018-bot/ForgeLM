@@ -967,6 +967,31 @@ MODEL_CONFIGS["forgelm_v12_jamba"] = ModelConfig(
     }
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Qwen2.5-0.5B (HF compat, R49) — native shapes for HF-style checkpoints.
+#
+# Matches Qwen/Qwen2.5-0.5B exactly: GQA 14Q/2KV (head_dim 64), QKV bias,
+# SwiGLU intermediate 4864, RMSNorm, RoPE base 1M, 32K context, untied
+# embed/head. Used by ForgeEngine._detect_config_from_header to auto-pair
+# checkpoints with HF-style keys (model.layers.N.*, embed 151936x896).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["qwen25_05b"] = ModelConfig(
+    vocab_size=151936,
+    d_model=896,
+    n_layers=24,
+    n_heads=14,
+    n_kv_heads=2,
+    intermediate_size=4864,
+    attn_type="gqa",
+    attn_bias=True,                # Qwen2.5 QKV bias (q/k/v_proj.bias)
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    rope_base=1_000_000.0,         # Qwen2.5 rope_theta
+    max_seq_len=32768,
+    use_qk_norm=False,             # Qwen2.5 has no q_norm/k_norm (Qwen3 only)
+    tie_word_embeddings=False,     # separate lm_head in checkpoint
+)
+
 
 def get_config(name: str | None = None, **overrides) -> ModelConfig:
     """Fetch a named config and apply optional overrides.

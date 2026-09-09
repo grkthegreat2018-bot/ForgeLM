@@ -844,6 +844,8 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
     strategies = {
         "standard": StandardDecoding,
         "speculative": SpeculativeDecoding,
+        "ngram_speculative": NGramSpeculativeDecoding,
+        "external_draft_speculative": ExternalDraftSpeculativeDecoding,
         "medusa": MedusaDecoding,
         "dspark": DSparkDecoding,
         "eagle3": Eagle3Decoding,
@@ -854,6 +856,10 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
     if strategy == "batched":
         from forge.engine.batched_decoding import BatchedDecoding
         return BatchedDecoding(**kwargs)
+    if strategy == "uno":
+        from forge.decoding.uno import NgramProposer, UnoDecoding
+        kwargs.setdefault("proposer", NgramProposer())
+        return UnoDecoding(**kwargs)
     cls = strategies.get(strategy, StandardDecoding)
     return cls(**kwargs)
 

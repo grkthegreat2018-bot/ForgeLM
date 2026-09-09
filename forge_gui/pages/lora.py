@@ -220,7 +220,7 @@ class LoraPage(QWidget):
             t.setItem(0, 0, placeholder)
         # populate base/config combos for merge
         self._base.clear()
-        configs = ["forgelm_v2_light"]
+        configs = ["forgelm_v2"]
         if self.models_index is not None:
             try:
                 configs = [c.name for c in self.models_index.configs()] or configs
@@ -328,7 +328,7 @@ class LoraPage(QWidget):
             out += ".safetensors"
         rank = e.rank or self._rank.value()
         alpha = self._alpha.value() or None
-        cfg = self._config.currentText().strip() or "forgelm_v2_light"
+        cfg = self._config.currentText().strip() or "forgelm_v2"
         adapter = e.path
         if not _isabs(adapter):
             adapter = str(project_root() / adapter)

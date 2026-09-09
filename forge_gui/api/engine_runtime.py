@@ -54,12 +54,15 @@ class _LoadWorker(QThread):
 
     def __init__(self, checkpoint: str, config_name: str,
                  activation: Optional[dict] = None,
-                 use_compile: Optional[bool] = None, parent=None) -> None:
+                 use_compile: Optional[bool] = None,
+                 config_overrides: Optional[dict] = None,
+                 parent=None) -> None:
         super().__init__(parent)
         self.checkpoint = checkpoint
         self.config_name = config_name
         self.activation = activation
         self.use_compile = use_compile
+        self.config_overrides = config_overrides
 
     def run(self) -> None:
         t0 = time.perf_counter()
@@ -77,10 +80,17 @@ class _LoadWorker(QThread):
             root = project_root()
             ckpt = self.checkpoint
             if not ckpt:
+                # Default to the best available checkpoint, not the broken
+                # V2 Light file (which has mismatched Qwen weights and was
+                # removed from the checkpoints directory).
                 ckpt = str(root / "research" / "checkpoints" /
-                           "ForgeLM_V2_Light.safetensors")
+                           "ForgeLM_V2.safetensors")
             elif not _isabs(ckpt):
                 ckpt = str(root / ckpt)
+
+            if not os.path.isfile(ckpt):
+                self.failed.emit(f"checkpoint not found: {ckpt}")
+                return
 
             # VRAM pre-flight: fail fast with a clear message instead of
             # silently degrading to AirLLM meta-device streaming.
@@ -102,7 +112,8 @@ class _LoadWorker(QThread):
                 # exact feature set requested by the user.
                 engine = ForgeEngine.from_checkpoint(
                     checkpoint=ckpt, config_name=self.config_name,
-                    auto_activate=False)
+                    auto_activate=False,
+                    config_overrides=self.config_overrides)
                 self.progress.emit("activating features (manual preset)…")
                 engine.activate(**self.activation)
             else:
@@ -111,7 +122,8 @@ class _LoadWorker(QThread):
                 # call — that used to reset every optimal feature back to
                 # defaults (paged KV, no quant, no fusion).
                 engine = ForgeEngine.from_checkpoint(
-                    checkpoint=ckpt, config_name=self.config_name)
+                    checkpoint=ckpt, config_name=self.config_name,
+                    config_overrides=self.config_overrides)
                 self.progress.emit("activating features (optimal preset)…")
 
             active: dict = {}
@@ -224,12 +236,16 @@ class EngineRuntime(QObject):
     # ── load / unload ─────────────────────────────────────────────────
     def load(self, checkpoint: str, config_name: str,
              use_compile: bool | None = None,
-             activation: dict | None = None) -> None:
+             activation: dict | None = None,
+             config_overrides: dict | None = None) -> None:
         """Load a checkpoint.
 
         ``activation=None`` → engine's optimal auto-activation (fast-load
         toggle still honored). ``activation={...}`` → the exact feature set
         (see forge_gui.api.activation_catalog).
+        ``config_overrides={...}`` → architecture overrides applied before
+        model construction (e.g. ``{"use_mamba3": True,
+        "use_forge_hybrid": True, "use_outro": True}``).
         """
         if self._state == "loading":
             return
@@ -238,7 +254,9 @@ class EngineRuntime(QObject):
         self._error = ""
         self._set_state("loading")
         self._worker = _LoadWorker(checkpoint, config_name, activation,
-                                   use_compile, parent=self)
+                                   use_compile,
+                                   config_overrides=config_overrides,
+                                   parent=self)
         self._worker.progress.connect(self.progress)
         self._worker.finished_ok.connect(self._on_loaded)
         self._worker.failed.connect(self._on_failed)

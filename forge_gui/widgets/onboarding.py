@@ -129,7 +129,7 @@ class OnboardingDialog(QDialog):
         row = QHBoxLayout(); row.setSpacing(8)
         self._model_path = QLineEdit()
         self._model_path.setPlaceholderText(
-            "research/checkpoints/ForgeLM_V2_Light.safetensors")
+            "research/checkpoints/ForgeLM_V2.safetensors")
         row.addWidget(self._model_path, 1)
         self._browse_btn = QPushButton("Browse…")
         row.addWidget(self._browse_btn)

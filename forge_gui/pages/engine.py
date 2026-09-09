@@ -1136,8 +1136,8 @@ class EnginePage(QWidget):
             except Exception:
                 pass
         if not paths:
-            paths.append(("ForgeLM_V2_Light.safetensors",
-                          "research/checkpoints/ForgeLM_V2_Light.safetensors"))
+            paths.append(("ForgeLM_V2.safetensors",
+                          "research/checkpoints/ForgeLM_V2.safetensors"))
         t.setRowCount(len(paths))
         for i, (name, path) in enumerate(paths):
             cb = QCheckBox()
@@ -1368,8 +1368,8 @@ class EnginePage(QWidget):
             except Exception as e:
                 logger.warning("checkpoint list failed: %s", e)
         if not added:
-            self._ckpt.addItem("ForgeLM_V2_Light.safetensors",
-                               "research/checkpoints/ForgeLM_V2_Light.safetensors")
+            self._ckpt.addItem("ForgeLM_V2.safetensors",
+                               "research/checkpoints/ForgeLM_V2.safetensors")
         # toggle empty-state: show it only when no real checkpoints were found
         has_empty = hasattr(self, "_ckpt_empty")
         if has_empty:
@@ -1378,7 +1378,7 @@ class EnginePage(QWidget):
 
     def _reload_configs(self) -> None:
         self._config.clear()
-        names = ["forgelm_v2_light"]
+        names = ["forgelm_v2"]
         if self.models_index is not None:
             try:
                 names = [c.name for c in self.models_index.configs()] or names
@@ -1394,7 +1394,10 @@ class EnginePage(QWidget):
     def _load(self) -> None:
         path = self._ckpt.currentSearchData() or self._ckpt.currentData() \
             or self._ckpt.currentText()
-        cfg = self._config.currentText().strip() or "forgelm_v2_light"
+        cfg = self._config.currentText().strip() or "forgelm_v2"
+        # Collect architecture overrides from the catalog's Architecture
+        # Overrides category (use_mamba3, use_forge_hybrid, use_outro, etc.)
+        config_overrides = self._collect_arch_overrides()
         if self._mode_manual.isChecked():
             activation = self._collect_config()
             errors = validate(activation)
@@ -1402,10 +1405,32 @@ class EnginePage(QWidget):
                 QMessageBox.warning(self, "Invalid activation config",
                                     "\n".join(errors))
                 return
-            self.runtime.load(path, cfg, activation=activation)
+            self.runtime.load(path, cfg, activation=activation,
+                              config_overrides=config_overrides)
         else:
             self.runtime.load(path, cfg,
-                              use_compile=not self._fast_load.isChecked())
+                              use_compile=not self._fast_load.isChecked(),
+                              config_overrides=config_overrides)
+
+    def _collect_arch_overrides(self) -> dict | None:
+        """Collect V12+ architecture override flags from the catalog UI.
+        Returns None if no overrides are set (preserves old behavior)."""
+        if not hasattr(self, '_widgets') or not self._widgets:
+            return None
+        overrides = {}
+        arch_fields = ("use_mamba3", "use_forge_hybrid", "use_outro",
+                       "use_kronecker_embed", "use_pit")
+        for name in arch_fields:
+            w = self._widgets.get(name)
+            if w is None:
+                continue
+            # Checkbox: only include if checked (default is unchecked = no override)
+            try:
+                if w.isChecked():
+                    overrides[name] = True
+            except AttributeError:
+                pass
+        return overrides or None
 
     def _on_mode_changed(self) -> None:
         manual = self._mode_manual.isChecked()

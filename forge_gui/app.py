@@ -277,7 +277,7 @@ class MainWindow(QMainWindow):
         if self._lora_training is None:
             self._lora_training = LoraTrainingTrigger(
                 proc_mgr=self.proc_mgr, chat_store=self.chat_store,
-                checkpoint="research/checkpoints/ForgeLM_V2_Light.safetensors")
+                checkpoint="research/checkpoints/ForgeLM_V2.safetensors")
         return self._lora_training
 
     @property
@@ -536,6 +536,7 @@ _SUBTITLES = {
 
 def run() -> int:
     _setup_logging()
+    _install_crash_handlers()
     _force_utf8_stdio()
     app = QApplication(sys.argv)
     app.setApplicationName("ForgeAI Control Center")
@@ -556,6 +557,53 @@ def run() -> int:
     win.show()
     splash.finish(win)
     return app.exec()
+
+
+def _install_crash_handlers() -> None:
+    """Leave a trace when the process dies unexpectedly.
+
+    The GUI previously died with exit code 1 and no output (native crash in
+    a CUDA/Qt worker). faulthandler captures segfaults; sys/threading
+    excepthooks capture unhandled exceptions in Qt slots and QThreads —
+    all appended to logs/crash.log.
+    """
+    import faulthandler
+    import threading
+    import traceback
+
+    log_dir = project_root() / "logs"
+    log_dir.mkdir(exist_ok=True)
+    global _crash_log
+    _crash_log = open(log_dir / "crash.log", "a", encoding="utf-8",
+                      buffering=1)
+    faulthandler.enable(_crash_log)
+
+    def _log_exc(header: str, exc) -> None:
+        try:
+            _crash_log.write(f"\n{header}\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__,
+                                      file=_crash_log)
+            _crash_log.flush()
+        except Exception:
+            pass
+
+    def _sys_hook(t, exc, tb):
+        _log_exc(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] unhandled "
+                 f"exception in main thread ({getattr(t, '__name__', t)}):",
+                 exc)
+        sys.__excepthook__(t, exc, tb)
+
+    def _thread_hook(args):
+        _log_exc(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] unhandled "
+                 f"exception in thread {args.thread.name}:", args.exc)
+        print(f"Unhandled exception in thread {args.thread.name}: "
+              f"{args.exc!r}", file=sys.stderr)
+
+    sys.excepthook = _sys_hook
+    threading.excepthook = _thread_hook
+
+
+_crash_log = None
 
 
 def _force_utf8_stdio() -> None:

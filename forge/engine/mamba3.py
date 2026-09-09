@@ -63,6 +63,18 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 
 
+def _to_complex(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
+    """torch.complex wrapper that handles BFloat16 by upcasting to float32.
+
+    torch.complex only supports Half/Float/Double — BFloat16 inputs cause
+    a RuntimeError. This helper upcasts to float32, constructs the complex
+    tensor, and returns complex64 (which all downstream code handles).
+    """
+    if real.dtype == torch.bfloat16 or imag.dtype == torch.bfloat16:
+        return torch.complex(real.float(), imag.float())
+    return torch.complex(real, imag)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Mamba3Cache — inference cache for the complex-valued recurrent state
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -120,7 +132,7 @@ class Mamba3Cache:
         """Combine real + imag parts into a complex tensor (B, n_ssm_units, d_state)."""
         if self.ssm_state_real is None:
             raise RuntimeError("Cache is empty — cannot build complex state.")
-        return torch.complex(self.ssm_state_real, self.ssm_state_imag)
+        return _to_complex(self.ssm_state_real, self.ssm_state_imag)
 
     def from_complex_state(self, h: torch.Tensor) -> None:
         """Store a complex state tensor by splitting into real + imag parts."""
@@ -167,7 +179,7 @@ def complex_rmsnorm(x: torch.Tensor, weight: torch.Tensor,
     x_mag_sq = x.real.pow(2) + x.imag.pow(2)  # (...,)
     rms_inv = x_mag_sq.mean(dim=-1, keepdim=True).add(eps).rsqrt()
     # Complex gain
-    w = torch.complex(weight[..., 0], weight[..., 1])  # (...,)
+    w = _to_complex(weight[..., 0], weight[..., 1])  # (...,)
     return x * rms_inv.to(x.dtype) * w
 
 
@@ -358,7 +370,7 @@ class Mamba3Block(nn.Module):
         A_log is stored as (n_ssm_units, d_state, 2) [real, imag].
         Returns: complex (n_ssm_units, d_state)
         """
-        a_log_complex = torch.complex(self.A_log[..., 0], self.A_log[..., 1])
+        a_log_complex = _to_complex(self.A_log[..., 0], self.A_log[..., 1])
         return -torch.exp(a_log_complex)
 
     def reset_state(self) -> None:
@@ -482,6 +494,9 @@ class Mamba3Block(nn.Module):
 
         # in_proj -> split into x (ssm path) and z (gate)
         xz = self.in_proj(x)  # (B, T, 2*d_inner)
+        # Cast to conv1d's dtype (ForgeQuant dequant may produce float32
+        # while conv1d weights stay BFloat16 — mixed precision safety).
+        xz = xz.to(self.conv1d.weight.dtype)
         x_ssm, z = xz.chunk(2, dim=-1)  # x first (ssm), z second (gate)
 
         # ── Conv1d (depthwise causal) ──
@@ -536,7 +551,7 @@ class Mamba3Block(nn.Module):
             B, T, self.d_state, self.n_inputs)
         B_imag = B_raw[..., self.d_state * self.n_inputs:].view(
             B, T, self.d_state, self.n_inputs)
-        B_c = torch.complex(B_real, B_imag)  # (B, T, d_state, n_inputs)
+        B_c = _to_complex(B_real, B_imag)  # (B, T, d_state, n_inputs)
         # B_norm: complex RMSNorm over d_state (dim=-2 for this shape)
         B_c = self._complex_norm_dim(B_c, self.B_norm, dim=-2)
 
@@ -545,14 +560,14 @@ class Mamba3Block(nn.Module):
             B, T, self.n_outputs, self.d_state)
         C_imag = C_raw[..., self.d_state * self.n_outputs:].view(
             B, T, self.n_outputs, self.d_state)
-        C_c = torch.complex(C_real, C_imag)  # (B, T, n_outputs, d_state)
+        C_c = _to_complex(C_real, C_imag)  # (B, T, n_outputs, d_state)
         # C_norm: complex RMSNorm over d_state (dim=-1 for this shape)
         C_c = self._complex_norm_dim(C_c, self.C_norm, dim=-1)
 
         # ── A_norm and recover complex A ──
         A = self._get_A_complex()  # (n_ssm_units, d_state) complex
         # A_norm: complex RMSNorm on d_state
-        a_weight = torch.complex(self.A_norm[..., 0], self.A_norm[..., 1])  # (d_state,)
+        a_weight = _to_complex(self.A_norm[..., 0], self.A_norm[..., 1])  # (d_state,)
         a_rms_inv = (A.real.pow(2) + A.imag.pow(2)).mean(dim=-1, keepdim=True).add(
             self.norm_eps).rsqrt()
         A = A * a_rms_inv.to(A.real.dtype) * a_weight
@@ -586,7 +601,7 @@ class Mamba3Block(nn.Module):
             sr = past_key_value.get("ssm_state_real")
             si = past_key_value.get("ssm_state_imag")
             if sr is not None and si is not None:
-                h_init = torch.complex(sr, si)
+                h_init = _to_complex(sr, si)
 
         # ── Complex selective scan ──
         y, h_final = self._complex_selective_scan(
@@ -649,7 +664,7 @@ class Mamba3Block(nn.Module):
         """
         mag_sq = x.real.pow(2) + x.imag.pow(2)  # same shape as x
         rms_inv = mag_sq.mean(dim=dim, keepdim=True).add(self.norm_eps).rsqrt()
-        w = torch.complex(weight[..., 0], weight[..., 1])  # (d_state,)
+        w = _to_complex(weight[..., 0], weight[..., 1])  # (d_state,)
         # Reshape w to broadcast against the correct dim of x
         # w is (d_state,) — need to insert a singleton dim so it aligns with `dim`
         n_dims = x.dim()

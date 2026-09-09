@@ -239,8 +239,8 @@ class SelfPlayPage(QWidget):
 
         cmd = [venv_py, "-u", "-m", "forge.self_play.infinite_loop",
                "--checkpoint", str(root / "research" / "checkpoints"
-                                    / "ForgeLM_V2_Light.safetensors"),
-               "--config", "forgelm_v2_light",
+                                    / "ForgeLM_V2.safetensors"),
+               "--config", "forgelm_v2",
                "--epochs", epochs,
                "--tasks-per-epoch", n_tasks,
                "--ft-batch-size", "8"]

@@ -91,8 +91,10 @@ from forge.training.training_utils import (
 IM_START = 6
 IM_END = 7
 
-# Tool call markers — LFM2.5's native special tokens (single-token ids 10/11).
-# Built from hex to avoid IDE tool-call parsing confusion.
+# Tool call markers — the tokenizer's native special tokens (ids 531/532).
+# The runtime parser (qwen_parse_tool_calls) expects JSON inside these tags:
+#   {"name": "func", "arguments": {"key": "val"}}
+# Built from hex to avoid IDE/tool-call parsing confusion.
 _TOOL_CALL_START = bytes.fromhex("3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
 _TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
 
@@ -100,31 +102,25 @@ _TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("asc
 # ── Chat-format rendering ────────────────────────────────────────────────────
 
 def _render_tool_call(tc: dict) -> str:
-    """Serialize one tool call in Pythonic format with native special tokens.
+    """Serialize one tool call as JSON inside native special token tags.
 
-    Model was trained on Pythonic format:
-      <|tool_call_start|>[func_name(arg1='val1', arg2=42)]<|tool_call_end|>
+    Format matches the runtime parser (qwen_parse_tool_calls):
+      {"name": "func_name", "arguments": {"key": "val"}}
     """
     name = tc.get("name", "")
     args = tc.get("args", tc.get("arguments", {}))
     if not isinstance(args, dict):
         args = {}
-    arg_strs = []
-    for k, v in args.items():
-        if isinstance(v, str):
-            arg_strs.append(f"{k}='{v}'")
-        elif isinstance(v, bool):
-            arg_strs.append(f"{k}={v}")
-        elif isinstance(v, (int, float)):
-            arg_strs.append(f"{k}={v}")
-        else:
-            arg_strs.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-    call_str = f"{name}({', '.join(arg_strs)})"
-    return _TOOL_CALL_START + '[' + call_str + ']' + _TOOL_CALL_END
+    call_obj = {"name": name, "arguments": args}
+    call_json = json.dumps(call_obj, ensure_ascii=False)
+    return _TOOL_CALL_START + "\n" + call_json + "\n" + _TOOL_CALL_END
 
 
 def render_messages(messages: list[dict]) -> tuple[str, int]:
-    """Render a multi-turn message list into Qwen chat format.
+    """Render a multi-turn message list into Jamba chat format.
+
+    Uses <|startofsegment|>/<|endofsegment|> markers (Jamba-style), which
+    the ForgeLM V2 checkpoint responds to natively.
 
     Returns (text, completion_start_char). completion_start_char is the
     character offset where the FIRST assistant response begins — everything
@@ -140,7 +136,7 @@ def render_messages(messages: list[dict]) -> tuple[str, int]:
     for i, m in enumerate(messages):
         role = m["role"]
         if role == "user":
-            parts.append(f"<|im_start|>user\n{m['content']}<|im_end|>\n")
+            parts.append(f"<|startofsegment|>user\n{m['content']}<|endofsegment|>\n")
         elif role == "assistant":
             if completion_start is None:
                 # Mark where the first assistant turn begins (start of completion).
@@ -149,49 +145,49 @@ def render_messages(messages: list[dict]) -> tuple[str, int]:
                 body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
             else:
                 body = m.get("content", "")
-            parts.append(f"<|im_start|>assistant\n{body}<|im_end|>\n")
+            parts.append(f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n")
         elif role == "tool":
             name = m.get("name", "tool")
             content = m.get("content", "")
-            parts.append(f"<|im_start|>tool\n{name}\n{content}<|im_end|>\n")
+            parts.append(f"<|startofsegment|>tool\n{name}\n{content}<|endofsegment|>\n")
         else:
-            parts.append(f"<|im_start|>{role}\n{m.get('content','')}<|im_end|>\n")
+            parts.append(f"<|startofsegment|>{role}\n{m.get('content','')}<|endofsegment|>\n")
     # Add a final generation prompt so the model knows the assistant turn is next
     # (only if the last message isn't already an assistant message).
     if messages and messages[-1]["role"] != "assistant":
         if completion_start is None:
             completion_start = sum(len(p) for p in parts)
-        parts.append("<|im_start|>assistant\n")
+        parts.append("<|startofsegment|>assistant\n")
     return "".join(parts), (completion_start or 0)
 
 
 def render_single_turn(prompt: str, response: str) -> tuple[str, int]:
-    """Render a single-turn Q&A into Qwen chat format.
+    """Render a single-turn Q&A into Jamba chat format.
 
     Returns (text, completion_start_char).
     """
-    prompt_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_text = f"<|startofsegment|>user\n{prompt}<|endofsegment|>\n<|startofsegment|>assistant\n"
     completion_start = len(prompt_text)
-    full = prompt_text + response + "<|im_end|>\n"
+    full = prompt_text + response + "<|endofsegment|>\n"
     return full, completion_start
 
 
 def _render_message(m: dict) -> str:
-    """Render a single message into Qwen chat format (no generation prompt)."""
+    """Render a single message into Jamba chat format (no generation prompt)."""
     role = m["role"]
     if role == "user":
-        return f"<|im_start|>user\n{m['content']}<|im_end|>\n"
+        return f"<|startofsegment|>user\n{m['content']}<|endofsegment|>\n"
     elif role == "assistant":
         if m.get("tool_calls"):
             body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
         else:
             body = m.get("content", "")
-        return f"<|im_start|>assistant\n{body}<|im_end|>\n"
+        return f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n"
     elif role == "tool":
         name = m.get("name", "tool")
         content = m.get("content", "")
-        return f"<|im_start|>tool\n{name}\n{content}<|im_end|>\n"
-    return f"<|im_start|>{role}\n{m.get('content','')}<|im_end|>\n"
+        return f"<|startofsegment|>tool\n{name}\n{content}<|endofsegment|>\n"
+    return f"<|startofsegment|>{role}\n{m.get('content','')}<|endofsegment|>\n"
 
 
 def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
@@ -219,15 +215,15 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
     for m in messages:
         if m["role"] == "assistant":
             # This is a turn boundary — create a training example.
-            prompt_text = "".join(prefix_parts) + "<|im_start|>assistant\n"
+            prompt_text = "".join(prefix_parts) + "<|startofsegment|>assistant\n"
             if m.get("tool_calls"):
                 body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
             else:
                 body = m.get("content", "")
-            completion_text = body + "<|im_end|>\n"
+            completion_text = body + "<|endofsegment|>\n"
             examples.append((prompt_text, completion_text))
             # Add this assistant turn to the prefix for subsequent examples.
-            prefix_parts.append(f"<|im_start|>assistant\n{body}<|im_end|>\n")
+            prefix_parts.append(f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n")
         else:
             prefix_parts.append(_render_message(m))
     return examples
@@ -789,17 +785,21 @@ def main():
                         "on I/O-bound workloads). Default: True.")
     p.add_argument("--prefetch-count", type=int, default=4,
                    help="Number of batches to prefetch ahead (default 4).")
-    p.add_argument("--config", default="forgelm_v2_light",
-                   help="Model config name (default: forgelm_v2_light)")
-    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2_Light.safetensors",
+    p.add_argument("--config", default="forgelm_v2",
+                   help="Model config name (default: forgelm_v2)")
+    p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2.safetensors",
                    help="Base checkpoint to fine-tune from")
+    p.add_argument("--config-overrides", default=None,
+                   help="JSON dict of architecture overrides applied before "
+                        "model construction (e.g. '{\"use_forge_hybrid\":true,"
+                        "\"use_outro\":true}')")
     p.add_argument("--hf-model", default=None,
                    help="Load a HuggingFace model directly (e.g. Qwen/Qwen2.5-0.5B). "
                         "Bypasses ForgeEngine/ModelLoader — loads via transformers. "
                         "Use with --nanoquant-qat or --no-bitnet-everywhere for QAT "
                         "on non-ForgeAI models. The tokenizer is auto-loaded from "
                         "the same HF repo.")
-    p.add_argument("--save", default="research/checkpoints/ForgeLM_V2_Light.sft.safetensors",
+    p.add_argument("--save", default="research/checkpoints/ForgeLM_V2.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
     p.add_argument("--lr", type=float, default=5e-5)
@@ -812,6 +812,10 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq"])
+    p.add_argument("--qk-clip-tau", type=float, default=0.0,
+                   help="QK-Clip tau (Kimi K2 MuonClip): cap per-head max attention "
+                        "logit after each optimizer step. 0 = disabled (default). "
+                        "30 or 100 recommended when training destabilizes.")
     # ── FreeToken-inspired training enhancements (R&D round 14) ──
     p.add_argument("--freetoken", action="store_true",
                    help="Enable FreeToken-inspired training pipeline (arXiv:2608.16157): "
@@ -1189,7 +1193,12 @@ def main():
               f"(train: {len(dataset)}, val_every={args.val_every})")
 
     # ── Build model ──
-    cfg = get_config(args.config, device=device)
+    config_overrides = None
+    if args.config_overrides:
+        import json as _json
+        config_overrides = _json.loads(args.config_overrides)
+    cfg = get_config(args.config, device=device,
+                     **(config_overrides or {}))
     cfg.grad_clip = args.grad_clip
     if args.grad_checkpoint:
         cfg.use_gradient_checkpointing = True
@@ -1254,7 +1263,8 @@ def main():
             print("  Loading via ForgeEngine (auto_activate=False for training)...")
             forge_engine = ForgeEngine.from_checkpoint(
                 args.checkpoint, config_name=args.config,
-                device=device, auto_activate=False)
+                device=device, auto_activate=False,
+                config_overrides=config_overrides)
             model = forge_engine.model
             print(f"  ForgeEngine loaded: {type(model).__name__}, "
                   f"KeyStack features: {forge_engine.keystack_features}")
@@ -1587,6 +1597,12 @@ def main():
                                      bandwidth_adaptive=args.bandwidth_adaptive,
                                      chunk_size_mb=args.chunk_size_mb)
 
+    qk_clip_monitor = None
+    if getattr(args, "qk_clip_tau", 0) > 0:
+        from forge.training.optim.qk_clip import QKClipMonitor
+        qk_clip_monitor = QKClipMonitor.attach(model, tau=args.qk_clip_tau)
+        print(f"  [QK-Clip] monitoring {len(qk_clip_monitor.attention_modules)} attention layers at tau={args.qk_clip_tau}")
+
     # ── FORGE optimizer: register gradient hooks (must run AFTER optimizer
     # creation — the optimizer object didn't exist at the previous site) ──
     if args.optimizer == "forge":
@@ -1913,6 +1929,11 @@ def main():
                         g["lr"] = lr
                     optimizer.step()
                     optimizer.zero_grad()
+                    # QK-Clip (Kimi K2 MuonClip): cap per-head attention logits.
+                    if qk_clip_monitor is not None:
+                        n_clip = qk_clip_monitor.clip(model)
+                        if n_clip:
+                            print(f"  [QK-Clip] step {step}: clipped {n_clip} head(s) at tau={qk_clip_monitor.tau}")
                     # BitNet int8: re-quantize CPU master → GPU int8 buffer
                     if getattr(cfg, 'bitnet_int8_training', False):
                         from forge.keys.quantization.bitnet_b158_key import BitNetLinear

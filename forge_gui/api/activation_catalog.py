@@ -54,6 +54,7 @@ CATEGORIES = [
     "Quantization R&D",
     "Runtime",
     "I/O & Loading",
+    "Architecture Overrides",
 ]
 
 # ── option tables for the core combos ──────────────────────────────────
@@ -85,11 +86,15 @@ DECODING_OPTIONS = (
     Option("speculative", "Speculative", "Draft-then-verify speculative decoding"),
     Option("medusa", "Medusa", "Medusa multi-head parallel decoding"),
     Option("dspark", "DSpark", "DSpark decoding strategy"),
+    Option("ngram_speculative", "N-gram speculative", "Prompt-lookup n-gram drafting — no draft model needed"),
+    Option("external_draft_speculative", "External draft", "Speculative decoding with an external draft model"),
+    Option("uno", "Uno (Psi-Spec)", "Lossless block diffusion decoding — n-gram drafts, AR verify (R49)"),
     Option("batched", "Batched", "Batched continuous decoding (generate_batch)"),
 )
 
 QUANTIZE_OPTIONS = (
     Option("none", "BF16 (none)", "No weight quantization — full precision"),
+    Option("forge_quant", "ForgeQuant", "INT4 dense + INT8 sparse outliers — best quality/size tradeoff on Blackwell"),
     Option("nvfp4", "NVFP4", "FP4 E2M1 block-32 — Blackwell native, 3.8x smaller"),
     Option("w8a8", "W8A8", "INT8 weights + INT8 activations"),
     Option("fp8", "FP8", "FP8 weights (Hopper+)"),
@@ -260,6 +265,19 @@ FIELDS: tuple[FieldSpec, ...] = (
               "Elastic LLM virtual tensors — automatic GPU/CPU spillover for oversized layers."),
     FieldSpec("use_progressive_load", "Progressive GGUF load", "bool", "I/O & Loading",
               "Stream GGUF checkpoints layer-by-layer to reduce peak load memory."),
+    # Architecture Overrides (V12+ — applied at model construction time
+    # via config_overrides, NOT via activate(). These are checkpoint-safe
+    # features that are identity/zero-initialized for lossless warm start.)
+    FieldSpec("use_mamba3", "Mamba-3 SSM", "bool", "Architecture Overrides",
+              "Complex-valued SSM states (Mamba-3). NOT lossless — complex RMSNorm changes dynamics. Requires Mamba3Key checkpoint conversion."),
+    FieldSpec("use_forge_hybrid", "ForgeHybrid SSM", "bool", "Architecture Overrides",
+              "Zero-init SSM path alongside attention in non-Mamba blocks. Bit-exact lossless at init (verified)."),
+    FieldSpec("use_outro", "OutRo attention", "bool", "Architecture Overrides",
+              "Output rotary embedding for attention blocks. Zero-strength at init = bit-exact lossless (verified)."),
+    FieldSpec("use_kronecker_embed", "Kronecker embedding", "bool", "Architecture Overrides",
+              "Byte-decomposed embedding. NOT checkpoint-compatible without explicit conversion (changes embed shape)."),
+    FieldSpec("use_pit", "PIT tying", "bool", "Architecture Overrides",
+              "Pseudo-inverse tying for embed/head. NOT checkpoint-compatible without explicit conversion."),
 )
 
 _BY_NAME: dict[str, FieldSpec] = {f.name: f for f in FIELDS}

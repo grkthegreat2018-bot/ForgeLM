@@ -200,6 +200,9 @@ class MambaLayer(nn.Module):
         # in_proj → split into x (ssm path) and z (gate)
         # HuggingFace Mamba: x, z = in_proj(x).chunk(2, dim=-1)
         xz = self.in_proj(x)  # (B, T, 2*d_inner)
+        # Cast to conv1d's dtype (ForgeQuant dequant may produce float32
+        # while conv1d weights stay BFloat16 — mixed precision safety).
+        xz = xz.to(self.conv1d.weight.dtype)
         x, z = xz.chunk(2, dim=-1)  # x first (ssm), z second (gate)
 
         # Conv1d (depthwise causal)

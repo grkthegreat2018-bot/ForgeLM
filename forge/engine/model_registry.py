@@ -15,7 +15,7 @@ Usage:
 
     registry = ModelRegistry()
     registry.register("forgelm-v10", checkpoint="...", config="forgelm_v2_light", vram_budget_gb=2.5)
-    registry.register("qwen2.5", checkpoint="...", config="qwen25_coder", vram_budget_gb=3.5)
+    registry.register("qwen2.5", checkpoint="...", config="qwen25_05b", vram_budget_gb=3.5)
 
     # Generate with either model — registry handles wake/sleep automatically
     out = registry.generate("lfm2.5", "def fibonacci(n):")

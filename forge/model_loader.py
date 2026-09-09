@@ -568,6 +568,11 @@ class GroupedQueryAttention(nn.Module):
         # init=0 → lossless (no bias added). Training learns sink values.
         self.sinks: nn.Parameter | None = None
 
+        # QK-Clip monitor (Kimi K2 MuonClip): set by QKClipMonitor.attach().
+        # None = disabled (zero overhead).
+        self._qk_clip_monitor = None
+        self._qk_clip_layer_idx = 0
+
     def _repeat_kv(self, x):
         """Repeat KV heads to match query heads."""
         if self.n_rep == 1:
@@ -651,6 +656,10 @@ class GroupedQueryAttention(nn.Module):
         # Repeat KV heads to match Q heads.
         k = self._repeat_kv(k)
         v = self._repeat_kv(v)
+
+        # QK-Clip monitoring (training-only, opt-in): record per-head max |logit|.
+        if self._qk_clip_monitor is not None and self.training:
+            self._qk_clip_monitor.observe(self._qk_clip_layer_idx, q, k)
 
         # Varlen attention path (R&D round 14): for packed sequences with
         # cu_seqlens, use varlen attention to prevent cross-example
@@ -987,6 +996,34 @@ class ModularBlock(nn.Module):
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
         self._is_mamba = type(self.attn).__name__ in ("MambaLayer", "Mamba3Block")
         self._gradient_checkpointing = False
+
+        # V12 ForgeHybrid: zero-init SSM path alongside attention (lossless
+        # warm start). The SSM output is zero at init, so the block output
+        # is identical to pure attention. Router = sink norm signal.
+        self._forge_hybrid_ssm = None
+        if getattr(config, 'use_forge_hybrid', False) and not self._is_mamba:
+            from forge.keys.architecture.mamba_probe import MambaLayer
+            d_state = getattr(config, 'forge_hybrid_d_state',
+                               getattr(config, 'mamba_d_state', 16))
+            self._forge_hybrid_ssm = MambaLayer(
+                d_model=config.d_model,
+                d_state=d_state,
+                d_conv=getattr(config, 'mamba_d_conv', 4),
+                expand=getattr(config, 'mamba_expand', 2),
+                dt_rank=getattr(config, 'mamba_dt_rank', "auto"),
+                bias=getattr(config, 'mamba_bias', False),
+                conv_bias=getattr(config, 'mamba_conv_bias', True),
+                layer_idx=layer_idx,
+                norm_eps=getattr(config, 'norm_eps', 1e-6),
+                use_jamba_norms=True,
+            )
+            # Zero-init the output projection → SSM contributes nothing at start.
+            if hasattr(self._forge_hybrid_ssm, 'out_proj') and hasattr(
+                    self._forge_hybrid_ssm.out_proj, 'weight'):
+                self._forge_hybrid_ssm.out_proj.weight.detach().zero_()
+            self._forge_hybrid_sink_threshold = getattr(
+                config, 'forge_hybrid_sink_threshold', float('inf'))
+
         # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
         # only FFN — biggest activation consumer, ~2-4x VRAM savings on
         # intermediates with minimal compute penalty), "attn" (recompute only
@@ -1253,6 +1290,15 @@ class ModularBlock(nn.Module):
                 update = x - x0
                 x = self._mhc(x0, update)
 
+        # V12 ForgeHybrid: zero-init SSM path alongside attention.
+        # At warm start the SSM output is zero (zero-init out_proj), so this
+        # is a no-op. Training opens the path via the SSM weights.
+        if self._forge_hybrid_ssm is not None:
+            ssm_out = self._forge_hybrid_ssm(x0)
+            if isinstance(ssm_out, tuple):
+                ssm_out = ssm_out[0]
+            x = x + ssm_out
+
         return x, present
 
     def _forward_mod_skip(self, x: torch.Tensor, layer_idx: int,
@@ -1307,6 +1353,7 @@ def build_attention(config: ModelConfig) -> nn.Module:
         attn = _maybe_apply_lerope(config, attn)
         attn = _maybe_apply_learned_sink(config, attn)
         attn = _maybe_apply_csa(config, attn)
+        attn = _maybe_apply_outro(config, attn)
         return _maybe_fuse_qkv(config, attn)
     if config.attn_type == "diff":
         # Differential Attention (Diff-Transformer): dual-softmax subtraction.
@@ -1422,6 +1469,21 @@ def _maybe_apply_csa(config: ModelConfig, attn: nn.Module) -> nn.Module:
     top_k = getattr(config, 'csa_top_k', 256)
     attn._csa_top_k = top_k
     attn._csa_enabled = True
+    return attn
+
+
+def _maybe_apply_outro(config: ModelConfig, attn: nn.Module) -> nn.Module:
+    """Enable OutRo (Outgoing-Rotary) sink-enhanced attention (V12 key).
+
+    Stores the OutRo configuration on the attention module so the forward
+    pass can apply non-causal masks for sink positions. Lossless at warm
+    start: align_strength=0.0 → identity alignment, no modification.
+    """
+    if not getattr(config, 'use_outro', False):
+        return attn
+    from forge.keys.attention.outro_key import OutRoKey
+    sink_threshold = getattr(config, 'outro_sink_threshold', 0.5)
+    attn._outro_key = OutRoKey(sink_threshold=sink_threshold, align_strength=0.0)
     return attn
 
 
@@ -1673,6 +1735,17 @@ class ConfigurableResearchLLM(nn.Module):
                 self.embed.project = build_bitnet_linear(
                     config, rank, config.d_model, bias=False)
             self.head = FactorizedLMHead(self.embed)
+        # V12: Kronecker-factored byte-level embedding (drop-in nn.Embedding
+        # replacement). Lossless warm-start via from_embedding() SVD when
+        # loading from a full-vocab checkpoint. ~8x param reduction.
+        elif getattr(config, 'use_kronecker_embed', False):
+            from forge.keys.architecture.kronecker_embed_key import KroneckerEmbedding
+            d_char = getattr(config, 'kronecker_d_char', 64)
+            max_char_len = getattr(config, 'kronecker_max_char_len', 8)
+            self.embed = KroneckerEmbedding(
+                config.vocab_size, config.d_model,
+                d_char=d_char, max_char_len=max_char_len)
+            self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         # PIT: Pseudo-Inverse Tying (L=I → standard weight tying, lossless).
         elif getattr(config, 'use_pit', False):
             from forge.keys.misc.pit_key import PITEmbedding, PITLMHead
@@ -1706,10 +1779,11 @@ class ConfigurableResearchLLM(nn.Module):
                 self.ln_f = norm(config.d_model)
         else:
             self.ln_f = None
-        # Weight tying: skip if PIT or factorized is enabled (they handle tying),
-        # or if config explicitly disables it (e.g., Qwen2.5).
+        # Weight tying: skip if PIT, factorized, or Kronecker is enabled
+        # (they handle tying), or if config explicitly disables it (e.g., Qwen2.5).
         if (not getattr(config, 'use_pit', False)
                 and not getattr(config, 'use_factorized_embeddings', False)
+                and not getattr(config, 'use_kronecker_embed', False)
                 and getattr(config, 'tie_word_embeddings', True)):
             self.embed.weight = self.head.weight  # Weight tying
 
@@ -2533,7 +2607,7 @@ class ModelLoader:
                             weight, rank=rank,
                             use_residual=use_residual,
                             residual_group_size=residual_gs,
-                            bias=bias)
+                            bias=None)
                     else:
                         nl = NLRQLinear.from_dense(weight, rank=rank,
                                                    factor_bits=factor_bits,
@@ -2553,6 +2627,45 @@ class ModelLoader:
                         new_state[f'blocks.{layer_idx}.ffn.w_{proj}.hadamard_V'] = nl.hadamard_V.to(tensor.dtype)
             else:
                 new_state[key] = tensor
+        return new_state
+
+    @staticmethod
+    def _reconstruct_factorized_state(state: dict) -> dict:
+        """Materialize dense weights from NanoQuant/ASVD factorized keys.
+
+        Factorized linears are stored as ``{base}.U_latent`` [out, rank],
+        ``{base}.V_latent`` [in, rank], ``{base}.s1`` [out], ``{base}.s2``
+        [in]. Reconstruction follows NanoQuantQATLinear.forward exactly:
+        ``W = s1 ⊙ (sign(U) @ sign(V)^T) ⊙ s2`` (sign(0) → 1, bake parity).
+        Non-factorized keys (embed, norms, biases, dense lm_head) pass
+        through unchanged.
+        """
+        import re
+        groups: dict[str, dict[str, torch.Tensor]] = {}
+        passthrough: dict[str, torch.Tensor] = {}
+        for key, tensor in state.items():
+            m = re.match(r"(.+)\.(U_latent|V_latent|s1|s2)$", key)
+            if m:
+                groups.setdefault(m.group(1), {})[m.group(2)] = tensor
+            else:
+                passthrough[key] = tensor
+        if not groups:
+            return state
+        new_state = dict(passthrough)
+        for base in sorted(groups):
+            parts = groups[base]
+            U = parts["U_latent"].float()
+            V = parts["V_latent"].float()
+            s1 = parts["s1"].float()
+            s2 = parts["s2"].float()
+            U_b = torch.sign(U)
+            U_b[U_b == 0] = 1
+            V_b = torch.sign(V)
+            V_b[V_b == 0] = 1
+            W = s1.unsqueeze(1) * (U_b @ V_b.T) * s2.unsqueeze(0)
+            new_state[f"{base}.weight"] = W.to(torch.bfloat16)
+        print(f"  [FastBuild] Reconstructed {len(groups)} factorized "
+              f"linears (NanoQuant U/V/s1/s2 -> dense)")
         return new_state
 
     @staticmethod
@@ -2652,6 +2765,213 @@ class ModelLoader:
         return t
 
     @staticmethod
+    def _warm_start_attention(state: dict, config: ModelConfig) -> dict:
+        """Apply lossless attention warm-start conversions to a state dict.
+
+        Handles GQA→diff, GQA→GTA (with V3→V4 auto-convert), and GQA→GLA.
+        Each conversion is identity-init (lossless at warm start). Shared
+        by both the fast and traditional build paths.
+        """
+        if not state:
+            return state
+        # GQA -> diff warm start (lambda=0, identity mode)
+        if config.attn_type == "diff":
+            qk = next((k for k in state if "attn.q_proj.weight" in k), None)
+            if qk is not None:
+                exp_rows = config.n_heads * (config.d_model // config.n_heads)
+                if state[qk].shape[0] == exp_rows:
+                    from forge.keys.attention.differential_attn_key import (
+                        DifferentialAttentionKey)
+                    res = DifferentialAttentionKey(
+                        n_layers=config.n_layers,
+                        n_heads=config.n_heads, identity=True).forward(state)
+                    if res.success:
+                        state = res.weights
+                        print("  [FastBuild] GQA -> diff warm start "
+                              "(lossless, lambda=0)")
+        # GQA -> GTA warm start (V=K, v_mix_gate=0, lossless)
+        # Also handles V3 (diff) -> V4 (GTA) auto-conversion.
+        elif config.attn_type == "gta":
+            qk = next((k for k in state if "attn.q_proj.weight" in k), None)
+            if qk is not None:
+                exp_gqa_rows = config.n_heads * (config.d_model // config.n_heads)
+                if state[qk].shape[0] == 2 * exp_gqa_rows:
+                    from research.architecture.v3_to_v4 import convert_v3_to_v4_state
+                    state = convert_v3_to_v4_state(
+                        state,
+                        n_heads=config.n_heads,
+                        n_kv_heads=config.n_kv_heads,
+                        head_dim=config.d_model // config.n_heads,
+                    )
+                    print("  [FastBuild] V3 (diff) -> V4 (GTA) auto-convert "
+                          "(reverse diff + GTA warm start)")
+                else:
+                    from forge.keys.attention.gta_key import GTAKey
+                    res = GTAKey(
+                        n_layers=config.n_layers,
+                        n_heads=config.n_heads).forward(state)
+                    if res.success:
+                        state = res.weights
+                        print("  [FastBuild] GQA -> GTA warm start "
+                              "(lossless, V=K, gate=0)")
+        # GQA -> GLA warm start (identity up-projs, lossless)
+        elif config.attn_type == "gla":
+            qk = next((k for k in state if "attn.q_proj.weight" in k), None)
+            if qk is not None:
+                from forge.keys.attention.gla_key import GLAKey
+                latent = getattr(config, 'gla_latent_dim', 0)
+                res = GLAKey(
+                    n_layers=config.n_layers, n_heads=config.n_heads,
+                    n_kv_heads=getattr(config, 'n_kv_heads', 8),
+                    latent_dim=latent if latent > 0 else None).forward(state)
+                if res.success:
+                    state = res.weights
+                    print("  [FastBuild] GQA -> GLA warm start "
+                          "(lossless, identity up-projs, gate=0)")
+        return state
+
+    @staticmethod
+    def _warm_start_mamba3(state: dict, config: ModelConfig) -> dict:
+        """Convert Mamba-2 real SSM states to Mamba-3 complex states (lossless).
+
+        Mamba-3 generalizes SSM to complex-valued states. The warm start
+        copies real parts verbatim and zero-initializes imaginary parts,
+        so the model starts at an identical operating point.
+
+        Only converts when config.use_mamba3=True AND the checkpoint has
+        Mamba-2 weights (2D A_log). Mamba-3 checkpoints (3D A_log) pass through.
+        """
+        if not getattr(config, 'use_mamba3', False) or not state:
+            return state
+        # Find Mamba layers with 2D A_log (Mamba-2 format)
+        mamba2_layers = []
+        for k, t in state.items():
+            if k.endswith(".A_log") and t.dim() == 2:
+                prefix = k[:-len(".A_log")]
+                mamba2_layers.append(prefix)
+        if not mamba2_layers:
+            return state  # already Mamba-3 or no Mamba layers
+        from forge.keys.architecture.mamba3_key import Mamba3Key
+        d_state = getattr(config, 'mamba3_d_state',
+                          getattr(config, 'mamba_d_state', 16))
+        dt_rank = getattr(config, 'mamba_dt_rank', None)
+        if dt_rank == "auto":
+            dt_rank = None
+        key = Mamba3Key(d_state=d_state, dt_rank=dt_rank)
+        converted = 0
+        for prefix in mamba2_layers:
+            # Extract this layer's weights (strip prefix)
+            layer_data = {}
+            other = {}
+            for k, t in state.items():
+                if k.startswith(prefix + "."):
+                    layer_data[k[len(prefix)+1:]] = t
+                else:
+                    other[k] = t
+            # Rename Jamba norm keys to add .weight suffix so Mamba3Key
+            # can match them (MAMBA3_COMPLEX_NORMS_JAMBA expects .weight).
+            # Checkpoint stores as nn.Parameter (no .weight suffix).
+            # NOTE: dt_layernorm (dt_rank=160) is a DIFFERENT norm than
+            # Mamba3Block's dt_norm (d_inner=5120) — do NOT remap it.
+            # dt_norm and A_norm are new in Mamba-3, identity-init (lossless).
+            _JAMBA_NORMS = ("b_layernorm", "c_layernorm")
+            for n in _JAMBA_NORMS:
+                if n in layer_data and f"{n}.weight" not in layer_data:
+                    layer_data[f"{n}.weight"] = layer_data.pop(n)
+            # dt_layernorm: rename to .weight for Mamba3Key complex conversion,
+            # but it will be kept under its original name (not mapped to dt_norm).
+            if "dt_layernorm" in layer_data and "dt_layernorm.weight" not in layer_data:
+                layer_data["dt_layernorm.weight"] = layer_data.pop("dt_layernorm")
+            res = key.forward(layer_data)
+            if not res.success:
+                # Conversion failed for this layer — keep original
+                other.update(layer_data)  # restore with prefix
+                state = other
+                continue
+            # Put converted weights back with prefix, remapping Jamba
+            # norm names to Mamba3Block parameter names:
+            #   b_layernorm.weight → B_norm (same shape d_state → d_state×2)
+            #   c_layernorm.weight → C_norm (same shape d_state → d_state×2)
+            #   dt_layernorm.weight → kept as-is (different from dt_norm)
+            #   dt_norm, A_norm → missing (identity-init by Mamba3Block, lossless)
+            _NORM_REMAP = {
+                "b_layernorm.weight": "B_norm",
+                "c_layernorm.weight": "C_norm",
+            }
+            for k, t in res.weights.items():
+                out_key = _NORM_REMAP.get(k, k)
+                other[f"{prefix}.{out_key}"] = t
+            state = other
+            converted += 1
+        if converted > 0:
+            print(f"  [FastBuild] Mamba-2 -> Mamba-3 warm start: "
+                  f"{converted} layers (lossless, imag=0)")
+        return state
+
+    @staticmethod
+    def _apply_ffn_compression(state: dict, config: ModelConfig) -> dict:
+        """Convert dense FFN weights to factored format (one-time).
+
+        Shared by both fast and traditional build paths.
+        """
+        ffn_compression = getattr(config, 'ffn_compression', 'none')
+        if ffn_compression == 'none' or not state:
+            return state
+        ffn_gate_key = next((k for k in state if 'ffn.w_gate.weight' in k), None)
+        if ffn_gate_key is None:
+            return state
+        state = ModelLoader._convert_ffn_compression(
+            state, config, ffn_compression)
+        print(f"  [FastBuild] Dense FFN -> {ffn_compression} "
+              f"compression (one-time conversion)")
+        return state
+
+    @staticmethod
+    def _scan_qk_norm_identity(model: "ConfigurableResearchLLM",
+                                config: ModelConfig) -> None:
+        """Detect non-identity QK-Norm weights and sync diff-attn identity.
+
+        Shared by both fast and traditional build paths.
+        """
+        for block in model.blocks:
+            attn = block.attn
+            if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
+                q_id = (attn.q_norm.weight == 1.0).all()
+                k_id = (attn.k_norm.weight == 1.0).all()
+                attn._qk_norm_identity = bool(q_id and k_id)
+            if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
+                attn.set_identity((attn.lambda_param == 0.0).all().item())
+        n_identity = sum(1 for b in model.blocks
+                         if getattr(b.attn, '_qk_norm_identity', True))
+        if getattr(config, 'use_qk_norm', False):
+            print(f"  [FastBuild] QK-Norm: {n_identity}/{len(model.blocks)} "
+                  "layers identity (skipped)")
+
+    @staticmethod
+    def _post_quant_iri_fp4(model: "ConfigurableResearchLLM",
+                            config: ModelConfig,
+                            has_packed: bool = False) -> "ConfigurableResearchLLM":
+        """Apply IRI-FP4 post-quantization if not already packed in checkpoint.
+
+        Shared by both fast and traditional build paths.
+        """
+        if not getattr(config, 'use_iri_fp4', False) or has_packed:
+            return model
+        import time
+        from forge.keys.quantization.iri_fp4_key import convert_model_to_iri_fp4
+        _block = getattr(config, 'iri_fp4_block_size', 32)
+        _rounds = getattr(config, 'iri_fp4_rounds', 2)
+        t_q = time.time()
+        model = convert_model_to_iri_fp4(
+            model, block_size=_block, n_rounds=_rounds)
+        t_q = time.time() - t_q
+        n_iri = sum(1 for m in model.modules()
+                    if m.__class__.__name__ == "IRIFP4Linear")
+        print(f"  [FastBuild] IRI-FP4 post-quant: {n_iri} layers "
+              f"({_rounds} rounds, {_block} block) in {t_q:.1f}s")
+        return model
+
+    @staticmethod
     def build_model_fast(config: ModelConfig, checkpoint_path: str | None = None,
                          compile: bool = False, moe_top_k: int | None = None,
                          dtype: torch.dtype | None = None,
@@ -2709,6 +3029,9 @@ class ModelLoader:
                         if isinstance(s, dict) and "model_state" in s \
                                 and not any(k.startswith("blocks.") for k in s):
                             s = s["model_state"]
+                    # Materialize NanoQuant/ASVD factorized linears (pre-remap)
+                    if s and any("U_latent" in k for k in s):
+                        s = ModelLoader._reconstruct_factorized_state(s)
                     # Auto-remap HF keys
                     if s and any(k.startswith("model.") for k in s):
                         s = ModelLoader._remap_hf_keys(s, config)
@@ -2871,81 +3194,10 @@ class ModelLoader:
                     print(f"  [FastBuild] IRI-FP4 packed load: {iri_loaded} layers "
                           f"(stays packed in VRAM, {_rounds} rounds)")
 
-            # GQA -> diff warm start (CPU-side transform on loaded state_dict)
-            if config.attn_type == "diff":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    exp_rows = config.n_heads * (config.d_model // config.n_heads)
-                    if state[qk].shape[0] == exp_rows:
-                        from forge.keys.attention.differential_attn_key import (
-                            DifferentialAttentionKey)
-                        res = DifferentialAttentionKey(
-                            n_layers=config.n_layers,
-                            n_heads=config.n_heads, identity=True).forward(state)
-                        if res.success:
-                            state = res.weights
-                            print("  [FastBuild] GQA -> diff warm start "
-                                  "(lossless, lambda=0)")
-
-            # GQA -> GTA warm start (V=K, v_mix_gate=0, lossless)
-            # Also handles V3 (diff) -> V4 (GTA) auto-conversion.
-            if config.attn_type == "gta":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    # Check if checkpoint is V3 (diff) — q_proj rows are doubled
-                    exp_gqa_rows = config.n_heads * (config.d_model // config.n_heads)
-                    if state[qk].shape[0] == 2 * exp_gqa_rows:
-                        # V3 diff checkpoint → reverse diff + forward GTA
-                        from research.architecture.v3_to_v4 import convert_v3_to_v4_state
-                        state = convert_v3_to_v4_state(
-                            state,
-                            n_heads=config.n_heads,
-                            n_kv_heads=config.n_kv_heads,
-                            head_dim=config.d_model // config.n_heads,
-                        )
-                        print("  [FastBuild] V3 (diff) -> V4 (GTA) auto-convert "
-                              "(reverse diff + GTA warm start)")
-                    else:
-                        # Plain GQA checkpoint → forward GTA only
-                        from forge.keys.attention.gta_key import GTAKey
-                        res = GTAKey(
-                            n_layers=config.n_layers,
-                            n_heads=config.n_heads).forward(state)
-                        if res.success:
-                            state = res.weights
-                            print("  [FastBuild] GQA -> GTA warm start "
-                                  "(lossless, V=K, gate=0)")
-
-            # GQA -> GLA warm start (kv_down_proj=k_proj, identity up-projs, lossless)
-            if config.attn_type == "gla":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    from forge.keys.attention.gla_key import GLAKey
-                    latent = getattr(config, 'gla_latent_dim', 0)
-                    res = GLAKey(
-                        n_layers=config.n_layers, n_heads=config.n_heads,
-                        n_kv_heads=getattr(config, 'n_kv_heads', 8),
-                        latent_dim=latent if latent > 0 else None).forward(state)
-                    if res.success:
-                        state = res.weights
-                        print("  [FastBuild] GQA -> GLA warm start "
-                              "(lossless, identity up-projs, gate=0)")
-
-            # V5.2: FFN compression (Monarch/Kronecker/TT) — convert dense
-            # FFN weights to factored format on first load. Subsequent saves
-            # store the factored weights directly (no re-conversion needed).
-            ffn_compression = getattr(config, 'ffn_compression', 'none')
-            if ffn_compression != 'none':
-                ffn_gate_key = next((k for k in state
-                                     if 'ffn.w_gate.weight' in k), None)
-                if ffn_gate_key is not None:
-                    state = ModelLoader._convert_ffn_compression(
-                        state, config, ffn_compression)
-                    print(f"  [FastBuild] Dense FFN -> {ffn_compression} "
-                          f"compression (one-time conversion)")
+            # GQA -> diff/GTA/GLA warm start + Mamba-2 -> Mamba-3 + FFN compression
+            state = ModelLoader._warm_start_attention(state, config)
+            state = ModelLoader._warm_start_mamba3(state, config)
+            state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
 
@@ -3023,33 +3275,15 @@ class ModelLoader:
                       "..." if len(unexpected) > 5 else "")
 
             # Post-load QK-norm + diff-attn identity scan
-            for block in model.blocks:
-                attn = block.attn
-                if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
-                    q_id = (attn.q_norm.weight == 1.0).all()
-                    k_id = (attn.k_norm.weight == 1.0).all()
-                    attn._qk_norm_identity = bool(q_id and k_id)
-                if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
-                    attn.set_identity((attn.lambda_param == 0.0).all().item())
+            ModelLoader._scan_qk_norm_identity(model, config)
 
             # ── Post-load IRI-FP4 quantization (V2 default quant) ──
             # If use_iri_fp4=True but the checkpoint didn't have .iri_packed
             # keys (non-quantized checkpoint or random init), quantize all
             # 2D nn.Linear weights to IRI-FP4 now. This makes V2 quantized by
             # default — any V2 build ends up with IRIFP4Linear modules.
-            if getattr(config, 'use_iri_fp4', False) and not _has_iri:
-                from forge.keys.quantization.iri_fp4_key import (
-                    convert_model_to_iri_fp4)
-                _block = getattr(config, 'iri_fp4_block_size', 32)
-                _rounds = getattr(config, 'iri_fp4_rounds', 2)
-                t_q = time.time()
-                model = convert_model_to_iri_fp4(
-                    model, block_size=_block, n_rounds=_rounds)
-                t_q = time.time() - t_q
-                n_iri = sum(1 for m in model.modules()
-                            if m.__class__.__name__ == "IRIFP4Linear")
-                print(f"  [FastBuild] IRI-FP4 post-quant: {n_iri} layers "
-                      f"({_rounds} rounds, {_block} block) in {t_q:.1f}s")
+            model = ModelLoader._post_quant_iri_fp4(
+                model, config, has_packed=_has_iri)
 
             t_total = time.time() - t0
             param_count = sum(p.numel() for p in model.parameters()) / 1e6
@@ -3120,76 +3354,20 @@ class ModelLoader:
                 if isinstance(state, dict) and "model_state" in state and not any(k.startswith("blocks.") for k in state):
                     state = state["model_state"]
 
+            # Materialize NanoQuant/ASVD factorized linears to dense weights
+            # (must run BEFORE the HF remap — factorized keys are HF-style).
+            if state and any("U_latent" in k for k in state):
+                state = ModelLoader._reconstruct_factorized_state(state)
+
             # Auto-detect and remap HuggingFace keys to ForgeAI internal names.
             if state and any(k.startswith("model.") for k in state):
                 state = ModelLoader._remap_hf_keys(state, config)
                 print(f"  [FastBuild] Remapped {len(state)} HF keys to ForgeAI format")
 
-            # Lossless GQA -> DifferentialAttention conversion: when the
-            # config asks for diff attention but the checkpoint has plain
-            # GQA q/k projections, duplicate rows and set lambda=0 (identity
-            # mode) so the loaded model is bit-exact until trained.
-            if config.attn_type == "diff":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    exp_rows = config.n_heads * (config.d_model // config.n_heads)
-                    if state[qk].shape[0] == exp_rows:
-                        from forge.keys.attention.differential_attn_key import (
-                            DifferentialAttentionKey)
-                        res = DifferentialAttentionKey(
-                            n_layers=config.n_layers,
-                            n_heads=config.n_heads, identity=True).forward(state)
-                        if res.success:
-                            state = res.weights
-                            print("  [FastBuild] GQA -> diff warm start "
-                                  "(lossless, lambda=0)")
-
-            # GQA -> GTA warm start (V=K, v_mix_gate=0, lossless)
-            # Also handles V3 (diff) -> V4 (GTA) auto-conversion.
-            if config.attn_type == "gta":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    # Check if checkpoint is V3 (diff) — q_proj rows are doubled
-                    exp_gqa_rows = config.n_heads * (config.d_model // config.n_heads)
-                    if state[qk].shape[0] == 2 * exp_gqa_rows:
-                        # V3 diff checkpoint → reverse diff + forward GTA
-                        from research.architecture.v3_to_v4 import convert_v3_to_v4_state
-                        state = convert_v3_to_v4_state(
-                            state,
-                            n_heads=config.n_heads,
-                            n_kv_heads=config.n_kv_heads,
-                            head_dim=config.d_model // config.n_heads,
-                        )
-                        print("  [FastBuild] V3 (diff) -> V4 (GTA) auto-convert "
-                              "(reverse diff + GTA warm start)")
-                    else:
-                        # Plain GQA checkpoint → forward GTA only
-                        from forge.keys.attention.gta_key import GTAKey
-                        res = GTAKey(
-                            n_layers=config.n_layers,
-                            n_heads=config.n_heads).forward(state)
-                        if res.success:
-                            state = res.weights
-                            print("  [FastBuild] GQA -> GTA warm start "
-                                  "(lossless, V=K, gate=0)")
-
-            # GQA -> GLA warm start (identity up-projs, lossless)
-            if config.attn_type == "gla":
-                qk = next((k for k in state
-                           if "attn.q_proj.weight" in k), None)
-                if qk is not None:
-                    from forge.keys.attention.gla_key import GLAKey
-                    latent = getattr(config, 'gla_latent_dim', 0)
-                    res = GLAKey(
-                        n_layers=config.n_layers, n_heads=config.n_heads,
-                        n_kv_heads=getattr(config, 'n_kv_heads', 8),
-                        latent_dim=latent if latent > 0 else None).forward(state)
-                    if res.success:
-                        state = res.weights
-                        print("  [FastBuild] GQA -> GLA warm start "
-                              "(lossless, identity up-projs, gate=0)")
+            # Lossless GQA -> diff/GTA/GLA warm start + Mamba-2 -> Mamba-3 + FFN compression.
+            state = ModelLoader._warm_start_attention(state, config)
+            state = ModelLoader._warm_start_mamba3(state, config)
+            state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
 
@@ -3206,21 +3384,7 @@ class ModelLoader:
             t_gpu = time.time() - t_gpu
 
             # Post-load: detect non-identity QK-Norm weights.
-            # If all q_norm/k_norm weights are 1.0, skip normalization (lossless).
-            # If any differ, enable normalization (trained QK-Norm).
-            for block in model.blocks:
-                attn = block.attn
-                if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
-                    q_id = (attn.q_norm.weight == 1.0).all()
-                    k_id = (attn.k_norm.weight == 1.0).all()
-                    attn._qk_norm_identity = bool(q_id and k_id)
-                # Sync diff-attn identity mode with the loaded lambda weights.
-                if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
-                    attn.set_identity((attn.lambda_param == 0.0).all().item())
-            # Log
-            n_identity = sum(1 for b in model.blocks if getattr(b.attn, '_qk_norm_identity', True))
-            if getattr(config, 'use_qk_norm', False):
-                print(f"  [FastBuild] QK-Norm: {n_identity}/{len(model.blocks)} layers identity (skipped)")
+            ModelLoader._scan_qk_norm_identity(model, config)
 
             print(f"  [FastBuild] Weights: {t_weights:.1f}s | GPU transfer: {t_gpu:.1f}s")
         elif checkpoint_path:
@@ -3229,25 +3393,14 @@ class ModelLoader:
         # ── Post-load IRI-FP4 quantization (V2 default quant) ──
         # Same as the fast path: if use_iri_fp4=True and the checkpoint
         # didn't contain .iri_packed keys, quantize now.
-        if getattr(config, 'use_iri_fp4', False):
+        _has_iri_trad = False
+        if checkpoint_path and os.path.exists(checkpoint_path):
             _has_iri_trad = any(
                 k.endswith(".iri_packed")
-                for k in (state if checkpoint_path and os.path.exists(checkpoint_path)
-                          else {}).keys()
-            ) if checkpoint_path and os.path.exists(checkpoint_path) else False
-            if not _has_iri_trad:
-                from forge.keys.quantization.iri_fp4_key import (
-                    convert_model_to_iri_fp4)
-                _block = getattr(config, 'iri_fp4_block_size', 32)
-                _rounds = getattr(config, 'iri_fp4_rounds', 2)
-                t_q = time.time()
-                model = convert_model_to_iri_fp4(
-                    model, block_size=_block, n_rounds=_rounds)
-                t_q = time.time() - t_q
-                n_iri = sum(1 for m in model.modules()
-                            if m.__class__.__name__ == "IRIFP4Linear")
-                print(f"  [FastBuild] IRI-FP4 post-quant: {n_iri} layers "
-                      f"({_rounds} rounds, {_block} block) in {t_q:.1f}s")
+                for k in (state if 'state' in locals() else {}).keys()
+            )
+        model = ModelLoader._post_quant_iri_fp4(
+            model, config, has_packed=_has_iri_trad)
 
         t_total = time.time() - t0
         param_count = sum(p.numel() for p in model.parameters()) / 1e6
@@ -3496,14 +3649,18 @@ def load_default_model(
     if dtype is None:
         dtype = torch.bfloat16 if "cuda" in device else torch.float32
 
+    # Tokenizer auto-dispatch: Qwen-family checkpoints (vocab 151936) need
+    # the Qwen tokenizer, not the canonical LFM tokenizer (vocab 65536).
+    from forge.engine.forge_engine import _tokenizer_for_vocab
+    tok_path = _tokenizer_for_vocab(cfg.vocab_size)
+
     # Fast load: start tokenizer in parallel with model build (hides ~2.7s)
     tok_fut = None
     _tok_ex = None
     if fast_load:
         from concurrent.futures import ThreadPoolExecutor
         _tok_ex = ThreadPoolExecutor(max_workers=1)
-        tok_fut = _tok_ex.submit(
-            get_tokenizer, "research/checkpoints/lfm25_tokenizer")
+        tok_fut = _tok_ex.submit(get_tokenizer, tok_path)
 
     try:
         model = ModelLoader.build_model_fast(
@@ -3520,7 +3677,7 @@ def load_default_model(
         if tok_fut is not None:
             tokenizer = tok_fut.result()
         else:
-            tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+            tokenizer = get_tokenizer(tok_path)
     finally:
         if _tok_ex is not None:
             _tok_ex.shutdown(wait=False)

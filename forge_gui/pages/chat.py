@@ -70,9 +70,12 @@ class _EngineChatWorker(QThread):
     def run(self) -> None:
         try:
             from forge.self_play.discovery.qwen_adapter import (
-                qwen_render_messages,
+                render_messages_for_config,
             )
-            rendered = qwen_render_messages(self.messages, add_generation_prompt=True)
+            cfg_name = self._runtime.info.get("config_name", "")
+            rendered = render_messages_for_config(
+                self.messages, config_name=cfg_name,
+                add_generation_prompt=True)
             parts: list[str] = []
             with self._runtime.acquire(timeout_s=30.0) as engine:
                 for tok in engine.generate_stream(
@@ -130,7 +133,7 @@ class _EngineChatToolWorker(QThread):
     def run(self) -> None:
         try:
             from forge.self_play.discovery.qwen_adapter import (
-                qwen_parse_tool_calls, qwen_render_messages,
+                qwen_parse_tool_calls, render_messages_for_config,
             )
             import json as _json
 
@@ -138,13 +141,15 @@ class _EngineChatToolWorker(QThread):
             defs = self.tool_harness.chat_tool_defs()
             messages = list(self.messages)
             final_text = ""
+            cfg_name = self._runtime.info.get("config_name", "")
 
             for round_idx in range(self.max_rounds):
                 if self._cancelled:
                     break
 
-                rendered = qwen_render_messages(
-                    messages, tools=defs, add_generation_prompt=True)
+                rendered = render_messages_for_config(
+                    messages, config_name=cfg_name,
+                    tools=defs, add_generation_prompt=True)
 
                 with self._runtime.acquire(timeout_s=30.0) as engine:
                     raw = engine.generate(
@@ -880,7 +885,7 @@ class ChatPage(QWidget):
                             thinking_enabled=self._thinking.isChecked()))
                 else:
                     name = self._model.currentText() if self._model.count() else ""
-                    cfg_name = "forgelm_v2_light"
+                    cfg_name = "forgelm_v2"
                     if "Pro" in name or "pro" in name.lower():
                         cfg_name = "forgelm_v2_pro"
                     parts.append(get_default_prompt_for_config(
@@ -1081,8 +1086,8 @@ class ChatPage(QWidget):
             except Exception as e:
                 logger.warning("model list failed: %s", e)
         if self._model.count() == 0:
-            self._model.addItem("ForgeLM_V2_Light.safetensors",
-                                "research/checkpoints/ForgeLM_V2_Light.safetensors")
+            self._model.addItem("ForgeLM_V2.safetensors",
+                                "research/checkpoints/ForgeLM_V2.safetensors")
 
     def _on_source_changed(self) -> None:
         local = self._source.currentIndex() == 0

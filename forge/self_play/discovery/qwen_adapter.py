@@ -28,6 +28,10 @@ IM_END = "<|im_end|>"
 EOS_IDS = (2, 519)  #  and <|im_end|>
 BOS_ID = 1  # <|startoftext|>
 
+# Jamba segment markers (BPE fragments — model responds natively)
+JAMBA_SEG_START = "<|startofsegment|>"
+JAMBA_SEG_END = "<|endofsegment|>"
+
 # Jamba tool call markers (single tokens: 531/532)
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
@@ -130,6 +134,73 @@ def qwen_render_messages(messages: list[dict],
         parts.append(f"{IM_START}assistant\n")
 
     return "".join(parts)
+
+
+def jamba_render_messages(messages: list[dict],
+                          tools: list[dict] | None = None,
+                          add_generation_prompt: bool = True) -> str:
+    """Render a conversation in Jamba segment format.
+
+    Uses <|startofsegment|>/<|endofsegment|> markers (Jamba-style), which
+    the ForgeLM V2 checkpoint responds to natively. Tool calls use the
+    same  tags as qwen_render_messages (ids 531/532).
+
+    Messages: [{"role": "system"|"user"|"assistant"|"tool", "content": str,
+                "tool_calls": [...], "name": str}]
+    """
+    parts = []
+
+    # System message with tool definitions
+    system_text = ""
+    if messages and messages[0]["role"] == "system":
+        system_text = messages[0].get("content", "")
+        messages = messages[1:]
+
+    if tools:
+        tool_text = qwen_render_tool_defs(tools)
+        system_text = (system_text + "\n\n" + tool_text) if system_text else tool_text
+
+    if system_text:
+        parts.append(f"{JAMBA_SEG_START}system\n{system_text}{JAMBA_SEG_END}\n")
+
+    for msg in messages:
+        role = msg["role"]
+        if role == "user":
+            parts.append(f"{JAMBA_SEG_START}user\n{msg.get('content', '')}{JAMBA_SEG_END}\n")
+        elif role == "assistant":
+            content = msg.get("content", "")
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                from .chat_template import render_tool_calls
+                tc_str = render_tool_calls(tool_calls)
+                body = tc_str if not content else f"{content}\n{tc_str}"
+            else:
+                body = content or ""
+            parts.append(f"{JAMBA_SEG_START}assistant\n{body}{JAMBA_SEG_END}\n")
+        elif role == "tool":
+            content = msg.get("content", "")
+            parts.append(f"{JAMBA_SEG_START}tool\n{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{JAMBA_SEG_END}\n")
+
+    if add_generation_prompt:
+        parts.append(f"{JAMBA_SEG_START}assistant\n")
+
+    return "".join(parts)
+
+
+def render_messages_for_config(messages: list[dict],
+                               config_name: str | None = None,
+                               tools: list[dict] | None = None,
+                               add_generation_prompt: bool = True) -> str:
+    """Dispatch prompt rendering based on model config name.
+
+    Jamba-family configs (forgelm_v2, forgelm_v12_jamba, jamba_*) use
+    <|startofsegment|>/<|endofsegment|> format. All others use ChatML.
+    """
+    if config_name and ("jamba" in config_name.lower()
+                        or config_name == "forgelm_v2"
+                        or config_name.startswith("forgelm_v2")):
+        return jamba_render_messages(messages, tools, add_generation_prompt)
+    return qwen_render_messages(messages, tools, add_generation_prompt)
 
 
 # ── Tool-call parsing ─────────────────────────────────────────────────────
@@ -368,16 +439,27 @@ def qwen_generate(model, tokenizer, prompt: str, max_new_tokens: int = 256,
 
 # ── xgrammar constrained decoding helpers ─────────────────────────────────
 
-import xgrammar as xgr
+# Lazy import — xgrammar is optional (only needed for constrained decoding)
+xgr = None
 
 # Cache tokenizer info + compiler (expensive to create, reuse across calls)
-_xgr_tokenizer_info: xgr.TokenizerInfo | None = None
-_xgr_compiler: xgr.GrammarCompiler | None = None
+_xgr_tokenizer_info = None
+_xgr_compiler = None
 
 
-def _get_xgr_compiler(tokenizer) -> xgr.GrammarCompiler:
+def _ensure_xgr():
+    """Lazy-load xgrammar on first use (avoids ImportError when unused)."""
+    global xgr
+    if xgr is None:
+        import xgrammar as _xgr
+        xgr = _xgr
+    return xgr
+
+
+def _get_xgr_compiler(tokenizer):
     """Get or create a cached xgrammar compiler for the tokenizer."""
     global _xgr_tokenizer_info, _xgr_compiler
+    xgr = _ensure_xgr()
     if _xgr_compiler is None or _xgr_tokenizer_info is None:
         # Load a fresh HF tokenizer for xgrammar (gigatoken wrapper not supported)
         from transformers import AutoTokenizer
@@ -390,7 +472,7 @@ def _get_xgr_compiler(tokenizer) -> xgr.GrammarCompiler:
     return _xgr_compiler
 
 
-def create_tool_grammar(tokenizer, tools: list[dict]) -> tuple[xgr.GrammarMatcher, Any]:
+def create_tool_grammar(tokenizer, tools: list[dict]) -> tuple[Any, Any]:
     """Create an xgrammar matcher that constrains tool call JSON to valid names.
 
     The grammar enforces:

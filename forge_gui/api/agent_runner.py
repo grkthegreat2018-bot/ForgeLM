@@ -128,7 +128,7 @@ class AgentRunner(QThread):
     def _loop(self) -> dict:
         from forge.self_play.discovery.qwen_adapter import (  # type: ignore
             TOOL_CALL_START, TOOL_CALL_END,
-            qwen_parse_tool_calls, qwen_render_messages,
+            qwen_parse_tool_calls, render_messages_for_config,
         )
         from .tool_harness import ToolHarness
 
@@ -162,8 +162,10 @@ class AgentRunner(QThread):
             rounds = round_idx + 1
             self.round_started.emit(round_idx)
 
-            rendered = qwen_render_messages(
-                messages, tools=defs, add_generation_prompt=True)
+            cfg_name = self._runtime.info.get("config_name", "")
+            rendered = render_messages_for_config(
+                messages, config_name=cfg_name,
+                tools=defs, add_generation_prompt=True)
             self.prompt_rendered.emit(round_idx, rendered)
 
             # Generate with grammar-constrained decoding if available.
@@ -211,8 +213,9 @@ class AgentRunner(QThread):
                     )
                     messages.append({"role": "tool", "name": "system",
                                      "content": err_msg})
-                    rendered = qwen_render_messages(
-                        messages, tools=defs, add_generation_prompt=True)
+                    rendered = render_messages_for_config(
+                        messages, config_name=cfg_name,
+                        tools=defs, add_generation_prompt=True)
                     self.prompt_rendered.emit(round_idx, rendered)
                     with self._runtime.acquire() as engine:
                         if grammar_proc is not None and hasattr(engine, "generate_raw"):

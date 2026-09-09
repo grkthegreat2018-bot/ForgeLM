@@ -80,7 +80,7 @@ class FineTunePage(QWidget):
         """Populate base-model combos once (NOT in refresh() — refresh runs
         every 500ms on the visible page and must not reset selections)."""
         self._config.clear()
-        names = ["forgelm_v2_light"]
+        names = ["forgelm_v2"]
         if self.models_index is not None:
             try:
                 names = [c.name for c in self.models_index.configs()] or names
@@ -88,8 +88,8 @@ class FineTunePage(QWidget):
                 pass
         self._config.addItems(names)
         self._ckpt.clear()
-        self._ckpt.addItem("research/checkpoints/ForgeLM_V2_Light.safetensors",
-                           "research/checkpoints/ForgeLM_V2_Light.safetensors")
+        self._ckpt.addItem("research/checkpoints/ForgeLM_V2.safetensors",
+                           "research/checkpoints/ForgeLM_V2.safetensors")
         if self.models_index is not None:
             try:
                 for m in self.models_index.models():
@@ -238,6 +238,14 @@ class FineTunePage(QWidget):
         self._clip = _spin(0.0, 10.0, 1.0, 2, 0.1)
         self._clip.valueChanged.connect(lambda _v: self._preview())
         wd_row.addWidget(self._clip)
+        wd_row.addWidget(QLabel("QK-Clip τ"))
+        self._qk_clip = _spin(0.0, 1000.0, 0.0, 1, 10.0)
+        self._qk_clip.setToolTip("QK-Clip (Kimi K2 MuonClip): cap per-head max "
+                                 "attention logit after each optimizer step. "
+                                 "0 = disabled; 30 or 100 recommended when "
+                                 "training destabilizes.")
+        self._qk_clip.valueChanged.connect(lambda _v: self._preview())
+        wd_row.addWidget(self._qk_clip)
         wd_row.addStretch(1)
         al.addLayout(wd_row)
         rl.addWidget(adv_card)
@@ -274,7 +282,7 @@ class FineTunePage(QWidget):
         ol.setSpacing(8)
         save_row = QHBoxLayout(); save_row.setSpacing(10)
         save_row.addWidget(QLabel("Save to"))
-        self._save = QLineEdit("research/checkpoints/ForgeLM_V2_Light.sft.safetensors")
+        self._save = QLineEdit("research/checkpoints/ForgeLM_V2.safetensors")
         save_row.addWidget(self._save, 1)
         ol.addLayout(save_row)
         rl.addWidget(out_card)
@@ -367,9 +375,9 @@ class FineTunePage(QWidget):
         cmd = [str(venv_python if venv_python.is_file() else "python"),
                str(root / "research" / "training" / "runners" / "sft_train.py"),
                "--data", *paths,
-               "--config", self._config.currentText().strip() or "forgelm_v2_light",
+               "--config", self._config.currentText().strip() or "forgelm_v2",
                "--checkpoint", self._ckpt.currentData()
-               or "research/checkpoints/ForgeLM_V2_Light.safetensors",
+               or "research/checkpoints/ForgeLM_V2.safetensors",
                "--max-steps", str(int(self._cfg_rows["max_steps"].value())),
                "--lr", f"{self._cfg_rows['lr'].value():.7g}",
                "--min-lr", f"{self._cfg_rows['min_lr'].value():.7g}",
@@ -385,6 +393,8 @@ class FineTunePage(QWidget):
                "--curriculum", self._curriculum.currentText(),
                "--save", self._save.text().strip(),
                ]
+        if self._qk_clip.value() > 0:
+            cmd += ["--qk-clip-tau", f"{self._qk_clip.value():.3g}"]
         if self._use_lora.currentIndex() == 0:
             cmd += ["--lora",
                     "--lora-r", str(int(self._lora_r.value())),

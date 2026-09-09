@@ -301,7 +301,7 @@ class ModelsPage(QWidget):
                 "Adapters can't boot alone — load a base model first, then "
                 "attach the adapter on the LoRA page.")
             return
-        self._runtime.load(m.path, m.config_name or "forgelm_v2_light")
+        self._runtime.load(m.path, m.config_name or "forgelm_v2")
         self.request_open.emit(3)   # Engine page index (set in app.py)
 
     def _reveal(self) -> None:
