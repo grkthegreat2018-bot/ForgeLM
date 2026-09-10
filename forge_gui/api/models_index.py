@@ -10,7 +10,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .status_reader import project_root
 
@@ -35,7 +34,7 @@ class ModelEntry:
     size_bytes: int
     size_label: str
     ext: str
-    config_name: Optional[str] = None
+    config_name: str | None = None
     config: dict = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
     modified: float = 0.0
@@ -51,7 +50,7 @@ class ConfigEntry:
     d_model: int
     n_layers: int
     n_heads: int
-    n_kv_heads: Optional[int]
+    n_kv_heads: int | None
     vocab_size: int
     attn_type: str
     ffn_type: str
@@ -83,7 +82,7 @@ class ModelsIndex:
     def __init__(self) -> None:
         self._configs: dict[str, dict] = {}
         self._loaded = False
-        self._scan_sig: Optional[tuple] = None  # dir-mtime signature of last scan
+        self._scan_sig: tuple | None = None  # dir-mtime signature of last scan
         self._scan_cache: list[ModelEntry] = []
 
     def _ensure_configs(self) -> None:
@@ -130,7 +129,7 @@ class ModelsIndex:
         return out
 
     @staticmethod
-    def _dir_signature(ckpt_dir: Path) -> Optional[tuple]:
+    def _dir_signature(ckpt_dir: Path) -> tuple | None:
         """Cheap change signature: dir mtime + mtimes of immediate subdirs.
 
         New runs create subdirectories (bumps ckpt_dir mtime); new files
@@ -174,14 +173,21 @@ class ModelsIndex:
                 mp = Path(str(p) + suf) if suf == ".meta.json" else p.with_suffix(suf)
                 if mp.is_file():
                     try:
-                        with open(mp, "r", encoding="utf-8") as f:
+                        with open(mp, encoding="utf-8") as f:
                             meta = json.load(f)
                         break
                     except Exception as e:
                         logger.warning("failed to parse metadata %s: %s", mp, e)
                         meta = {}
             cfg_name = meta.get("config") or meta.get("config_name")
-            cfg = self._configs.get(cfg_name, {}) if cfg_name else {}
+            if isinstance(cfg_name, dict):
+                # SFT checkpoints embed the full config dict in meta —
+                # use it directly (a dict key would crash dict.get).
+                cfg, cfg_name = cfg_name, None
+            elif isinstance(cfg_name, str):
+                cfg = self._configs.get(cfg_name, {})
+            else:
+                cfg = {}
             out.append(ModelEntry(
                 name=p.name, path=str(p.relative_to(root)).replace("\\", "/"),
                 size_bytes=st.st_size, size_label=_human_bytes(st.st_size),

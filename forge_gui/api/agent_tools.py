@@ -309,7 +309,7 @@ class ToolSandbox:
             if not _fnmatch_rel(p, root, glob):
                 continue
             try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(p, encoding="utf-8", errors="ignore") as fh:
                     for i, line in enumerate(fh, 1):
                         if rx.search(line):
                             matches.append({
@@ -442,7 +442,7 @@ class ToolSandbox:
             if not _fnmatch_rel(p, self.workspace, glob):
                 continue
             try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(p, encoding="utf-8", errors="ignore") as fh:
                     for i, line in enumerate(fh, 1):
                         if rx.search(line):
                             matches.append({
@@ -478,7 +478,7 @@ class ToolSandbox:
             files = [f for f in self._walk_files() if f.suffix == ".py"]
         for p in files:
             try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(p, encoding="utf-8", errors="ignore") as fh:
                     for i, line in enumerate(fh, 1):
                         for rx, kind in rxs:
                             m = rx.match(line)
@@ -503,7 +503,7 @@ class ToolSandbox:
             if not _fnmatch_rel(p, self.workspace, glob):
                 continue
             try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(p, encoding="utf-8", errors="ignore") as fh:
                     for i, line in enumerate(fh, 1):
                         m = rx.search(line)
                         if m:

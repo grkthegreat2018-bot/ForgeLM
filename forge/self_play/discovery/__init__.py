@@ -21,12 +21,17 @@ Public API:
     distill         — bloat-filtering self-distillation (distill)
     anti_regression — fingerprint block + stuck rollback (anti_regression)
 """
-from forge.self_play.discovery.anti_regression import (
-    FingerprintSet, StuckDetector)
+from forge.self_play.discovery.anti_regression import FingerprintSet, StuckDetector
 from forge.self_play.discovery.discovery_db import DiscoveryDB
 from forge.self_play.discovery.discovery_loop import DiscoveryLoop
 from forge.self_play.discovery.discovery_tools import ToolRegistry
 from forge.self_play.discovery.epoch_manager import EpochManager
 
-__all__ = ["DiscoveryDB", "DiscoveryLoop", "ToolRegistry", "EpochManager",
-           "FingerprintSet", "StuckDetector"]
+__all__ = [
+    "DiscoveryDB",
+    "DiscoveryLoop",
+    "EpochManager",
+    "FingerprintSet",
+    "StuckDetector",
+    "ToolRegistry",
+]

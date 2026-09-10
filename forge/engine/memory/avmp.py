@@ -15,8 +15,6 @@ to the pool that's full.
 """
 from __future__ import annotations
 
-import torch
-
 
 class AVMPPool:
     """A single memory pool with tracked allocations."""

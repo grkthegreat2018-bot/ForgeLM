@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
-                               QProgressBar, QPushButton,
-                               QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.events_reader import EventsReader
 from ..api.process_manager import ProcessManager
@@ -41,7 +47,7 @@ class SelfPlayPage(QWidget):
 
     def __init__(self, status_reader: StatusReader,
                  proc_mgr: ProcessManager,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._status = status_reader
         self._proc_mgr = proc_mgr
@@ -52,7 +58,7 @@ class SelfPlayPage(QWidget):
         self._exec_ms_hist: list[float] = []
         self._tpm_hist: list[float] = []
         self._last_event_count = 0
-        self._selfplay_task_id: Optional[str] = None  # track our launched process
+        self._selfplay_task_id: str | None = None  # track our launched process
 
         # ---- control bar (always visible — start/stop self-play from here) ----
         ctrl = QFrame(); ctrl.setObjectName("card")
@@ -216,8 +222,9 @@ class SelfPlayPage(QWidget):
         topic = self._topic_combo.currentText()
         epochs = str(self._epochs_spin.value())
         n_tasks = str(self._tasks_spin.value())
-        from ..api.status_reader import project_root
         from pathlib import Path
+
+        from ..api.status_reader import project_root
         root = project_root()
         venv_py = str(root / "venv" / "Scripts" / "python.exe")
         if not Path(venv_py).is_file():

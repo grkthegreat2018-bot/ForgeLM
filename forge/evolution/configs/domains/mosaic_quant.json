@@ -1,0 +1,21 @@
+{
+  "name": "mosaic_quant",
+  "category": "quantization",
+  "description": "MosaicQuant n_tiles, tile_dim, mix_ratio. Score = -err*100 + (1-mem_ratio)*10.",
+  "simulator": "mosaic_simulate",
+  "params": [
+    {"name": "n_tiles", "type": "int", "range": [4, 32]},
+    {"name": "tile_dim", "type": "int", "range": [64, 512]},
+    {"name": "mix_ratio", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["mem_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "mem_ratio", "weight": -10.0}
+    ],
+    "bias": 10.0,
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

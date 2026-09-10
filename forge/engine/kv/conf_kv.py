@@ -31,8 +31,8 @@ For our model:
 from __future__ import annotations
 
 import math
+
 import torch
-from typing import Optional
 
 
 class ConfidenceScorer:

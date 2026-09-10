@@ -7,9 +7,9 @@ Generates synthetic K/V tensors that mimic real LLM attention patterns:
 """
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as F
 import time
+
+import torch
 
 
 def generate_synthetic_kv(

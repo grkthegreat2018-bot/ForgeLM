@@ -105,7 +105,7 @@ if HAS_TRITON:
         pid_d = tl.program_id(2)
 
         t_start = pid_t * BLOCK_T
-        t_offs = t_start + tl.arange(0, BLOCK_T)
+        t_start + tl.arange(0, BLOCK_T)
 
         # Load conv weights
         w = tl.load(w_ptr + pid_d * K_CONST + tl.arange(0, K_CONST))  # (K,)
@@ -146,7 +146,6 @@ def fused_gated_conv_forward(
     """
     B, T, D = Bx.shape
     K = conv_weight.shape[-1]
-    device = Bx.device
 
     if T == 1 and conv_state is not None:
         # Decode path: use PyTorch (fast for single token, avoids Triton overhead)
@@ -212,7 +211,7 @@ def patch_conv_layers(model: nn.Module):
                         )
                         if use_cache:
                             conv_layer._init_conv_state(B, x.device, x.dtype)
-                            if T >= conv_layer.kernel_size - 1:
+                            if conv_layer.kernel_size - 1 <= T:
                                 conv_layer._conv_state = Bx[:, -(conv_layer.kernel_size - 1):, :].transpose(1, 2).clone()
                             else:
                                 pad_len = conv_layer.kernel_size - 1 - T

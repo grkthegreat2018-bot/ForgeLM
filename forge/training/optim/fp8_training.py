@@ -61,7 +61,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ── Smooth-SwiGLU ─────────────────────────────────────────────────────────
 
 class SmoothSwiGLUFFN(nn.Module):
@@ -125,7 +124,6 @@ def mu_scale_init(model: nn.Module, verbose: bool = False):
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             d_in = module.in_features
-            d_out = module.out_features
 
             # μScaling: std = 1/sqrt(d_in) for unit variance forward pass
             # (Xavier uses sqrt(2/(d_in+d_out)), which under-scales for wide layers)

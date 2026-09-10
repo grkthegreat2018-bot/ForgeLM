@@ -26,6 +26,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
+
 # E4M3FN max representable value (finite).
 _E4M3_MAX = 448.0
 
@@ -47,7 +49,7 @@ def _fp8_per_tensor_scale(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, 
     return t_fp8, scale, scale_val
 
 
-class FP8Linear(nn.Module):
+class FP8Linear(QuantizedLinearMixin):
     """FP8 weight-only + dynamic-activation Linear for inference.
 
     Weight stored as float8_e4m3fn (1 byte) + per-tensor fp32 scale.
@@ -205,4 +207,4 @@ if __name__ == "__main__":
     k_fp8, k_s, _, _ = quantize_kv_cache_fp8(k, k)
     k_back, _ = dequantize_kv_cache_fp8(k_fp8, k_s, k_fp8, k_s)
     print(f"KV FP8 roundtrip max diff: {(k_back - k).abs().max().item():.4f}")
-    print(f"KV compression: 2x (1 byte vs 2 byte)")
+    print("KV compression: 2x (1 byte vs 2 byte)")

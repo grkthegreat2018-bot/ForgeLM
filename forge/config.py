@@ -1,6 +1,5 @@
 """Config-driven model specifications for ForgeAI architecture research."""
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -465,6 +464,15 @@ class ModelConfig:
     forge_hybrid_d_state: int = 16         # SSM state dimension for hybrid path
     forge_hybrid_sink_threshold: float = float("inf")  # routing threshold (inf = all attention at warm start)
     forge_hybrid_n_ssm_layers: int | None = None  # None = all layers, int = subset for gradual rollout
+
+    # === Preset lineage (critique F2 — machine-enforced lineage) ===
+    # parent: name of the parent preset this one is derived from (or None for
+    #   root presets). When set, get_config() validates that every field in
+    #   the parent is present in this preset unless listed in dropped_keys.
+    parent: str | None = None
+    # dropped_keys: fields intentionally NOT carried forward from parent.
+    #   Each must have a reason comment in the preset definition.
+    dropped_keys: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.d_model % self.n_heads != 0:
@@ -947,6 +955,14 @@ MODEL_CONFIGS["forgelm_v12"] = ModelConfig(
 MODEL_CONFIGS["forgelm_v12_jamba"] = ModelConfig(
     **{
         **MODEL_CONFIGS["forgelm_v2"].__dict__,
+        "parent": "forgelm_v2",  # lineage: derived from V2 (critique F2)
+        "dropped_keys": (  # V12-Jamba divergences from V2 (all NEW keys)
+            "use_mamba3",          # R37-1: Mamba-3 complex state
+            "use_kronecker_embed", # R37-2: Kronecker embeddings
+            "use_pit",            # R37-3: PIT tying
+            "use_outro",          # R37-4: OutRo sink-aware attention
+            "use_forge_hybrid",   # R37-5: SSM+attention routing
+        ),
         # ── V12 NEW: Mamba-3 (R37-1) ──
         "use_mamba3": True,
         "mamba3_d_state": 16,
@@ -1007,3 +1023,57 @@ def get_config(name: str | None = None, **overrides) -> ModelConfig:
             raise ValueError(f"Unknown config '{name}'. Available: {list(MODEL_CONFIGS)}")
         base = MODEL_CONFIGS[name]
     return ModelConfig(**{**base.__dict__, **overrides})
+
+
+def validate_preset_lineage() -> list[str]:
+    """Validate that every preset with a ``parent`` field documents all
+    divergences from its parent in ``dropped_keys``.
+
+    Returns a list of error messages (empty if all lineage is valid).
+    Called by tests to enforce AGENTS.md directive A (build on the prior).
+
+    A "divergence" is any field whose value in the child differs from the
+    parent. Each divergence must be listed in ``dropped_keys`` (the name is
+    kept for compatibility — it really means "changed/overridden keys").
+    Undocumented divergences are potential silent regressions.
+    """
+    errors: list[str] = []
+    for name, cfg in MODEL_CONFIGS.items():
+        if cfg.parent is None:
+            continue
+        if cfg.parent not in MODEL_CONFIGS:
+            errors.append(
+                f"Preset '{name}' has parent='{cfg.parent}' but that preset "
+                f"does not exist in MODEL_CONFIGS"
+            )
+            continue
+        parent_cfg = MODEL_CONFIGS[cfg.parent]
+        skip = {"parent", "dropped_keys"}
+        # Find fields where child diverges from parent
+        divergent: list[str] = []
+        for key in parent_cfg.__dict__:
+            if key in skip:
+                continue
+            parent_val = parent_cfg.__dict__[key]
+            child_val = cfg.__dict__.get(key)
+            if child_val != parent_val:
+                divergent.append(key)
+        # Keys explicitly documented as changed
+        documented = set(cfg.dropped_keys)
+        undocumented = set(divergent) - documented
+        if undocumented:
+            errors.append(
+                f"Preset '{name}' (parent='{cfg.parent}') has undocumented "
+                f"divergences from parent in keys: {sorted(undocumented)}. "
+                f"Add them to dropped_keys, or align with parent."
+            )
+        # Check that dropped_keys are real field names
+        valid_fields = set(parent_cfg.__dict__.keys()) - skip
+        invalid_dropped = set(cfg.dropped_keys) - valid_fields
+        if invalid_dropped:
+            errors.append(
+                f"Preset '{name}' lists dropped_keys "
+                f"{sorted(invalid_dropped)} but these don't exist in parent "
+                f"'{cfg.parent}'"
+            )
+    return errors

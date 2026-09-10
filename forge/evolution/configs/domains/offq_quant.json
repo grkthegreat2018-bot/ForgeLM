@@ -1,0 +1,20 @@
+{
+  "name": "offq_quant",
+  "category": "quantization",
+  "description": "OffQ offset_init, n_iter, learn_offset. Score = -err*100 - clipping*10.",
+  "simulator": "offq_simulate",
+  "params": [
+    {"name": "offset_init", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_iter", "type": "int", "range": [10, 100]},
+    {"name": "learn_offset", "type": "bool"}
+  ],
+  "behavioral_dims": [["clipping", 10, 0, 1], ["err", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "clipping", "weight": -10.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

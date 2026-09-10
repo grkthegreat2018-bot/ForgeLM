@@ -1,0 +1,23 @@
+{
+  "name": "beam_search",
+  "category": "decoding",
+  "description": "Beam search: beam_width, length_penalty, early_stopping, diversity_penalty.",
+  "simulator": "beam_search_simulate",
+  "params": [
+    {"name": "beam_width", "type": "int", "range": [1, 8]},
+    {"name": "length_penalty", "type": "float", "range": [0.5, 2.0]},
+    {"name": "early_stopping", "type": "choice", "values": [false, true]},
+    {"name": "diversity_penalty", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["accuracy", 10, 0.0, 1.0], ["compute", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "accuracy", "weight": 15.0},
+      {"metric": "compute", "weight": -10.0},
+      {"metric": "diversity_bonus", "weight": 1.0},
+      {"metric": "length_factor", "weight": 3.0},
+      {"metric": "beam_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

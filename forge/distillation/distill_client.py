@@ -92,13 +92,13 @@ model automatically uses a different provider.
 """
 from __future__ import annotations
 
-import json
 import os
 import random
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 # OpenAI SDK is compatible with Groq, DeepSeek, OpenRouter, NVIDIA, Cerebras,
 # SambaNova, Mistral, Z AI, Cloudflare, SiliconFlow, HuggingFace
@@ -452,7 +452,7 @@ class DistillationClient:
         # it is blacklisted for the rest of the process — no more useless calls.
         self._blacklisted_providers: set[str] = set()
 
-    def _get_client(self, model: DistillModel) -> Optional[OpenAI]:
+    def _get_client(self, model: DistillModel) -> OpenAI | None:
         """Get or create an OpenAI client for the model's provider.
 
         Handles Cloudflare's {account_id} URL substitution.
@@ -546,7 +546,7 @@ class DistillationClient:
         # first day (counts only ever incremented).
         with self._lock:
             if time.time() - self._last_reset > 86400:
-                self._daily_counts = {k: 0 for k in self._daily_counts}
+                self._daily_counts = dict.fromkeys(self._daily_counts, 0)
                 self._last_reset = time.time()
 
         # Shuffle canonical groups for diversity
@@ -718,13 +718,9 @@ class DistillationClient:
             # - 429 with "per-day" / "daily" / "per-month" (quota exhausted)
             # - 404 Model not found (model retired/renamed)
             should_blacklist = False
-            if "402" in err_str or "Payment required" in err_str:
-                should_blacklist = True
-            elif "429" in err_str and any(kw in err_str.lower() for kw in
+            if "402" in err_str or "Payment required" in err_str or ("429" in err_str and any(kw in err_str.lower() for kw in
                     ("per-day", "per_day", "daily", "per-month", "per_month",
-                     "free-models-per-day", "rate limit exceeded")):
-                should_blacklist = True
-            elif "404" in err_str and "model" in err_str.lower():
+                     "free-models-per-day", "rate limit exceeded"))) or ("404" in err_str and "model" in err_str.lower()):
                 should_blacklist = True
 
             if should_blacklist:

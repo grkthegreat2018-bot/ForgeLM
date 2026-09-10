@@ -21,15 +21,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn as nn
 
-from research.paths import DATA_DIR, V10_CHECKPOINT
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
+from research.paths import DATA_DIR, V10_CHECKPOINT
 
 _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 
@@ -77,7 +74,6 @@ def build_sft_dataset(db: DiscoveryDB, tokenizer, max_seq_len: int) -> list[dict
         pairs.append((f"Summarize findings on: {r['query']}", r["summary"]))
 
     # Tool-use trajectories: render as Qwen-format per-turn examples.
-    from forge.self_play.discovery.qwen_adapter import qwen_render_messages
     traj_pairs = _build_trajectory_pairs(db)
     pairs.extend(traj_pairs)
 
@@ -101,8 +97,7 @@ def _build_trajectory_pairs(db: DiscoveryDB,
                             min_reward: float = 0.5,
                             max_pairs: int = 200) -> list[tuple[str, str]]:
     """Build (prompt, completion) pairs from tool-use trajectories."""
-    from forge.self_play.discovery.qwen_adapter import (
-        qwen_render_messages, IM_START, IM_END)
+    from forge.self_play.discovery.qwen_adapter import IM_END, qwen_render_messages
 
     trajectories = db.get_trajectories(min_reward=min_reward, limit=max_pairs)
     pairs = []
@@ -167,10 +162,10 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
     Returns:
         Path to the newly saved LoRA adapter checkpoint.
     """
-    from forge.engine.forge_engine import ForgeEngine
-    from research.tokenizer_cache import get_tokenizer
-    from forge.training.bitnet_lora import add_lora_adapters
     from safetensors.torch import save_file as _save
+
+    from forge.engine.forge_engine import ForgeEngine
+    from forge.training.bitnet_lora import add_lora_adapters
 
     cfg = config or FinetuneConfig()
 

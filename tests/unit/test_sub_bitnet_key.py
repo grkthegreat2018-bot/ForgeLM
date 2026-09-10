@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from forge.keys.misc.base import KeyClass
-from forge.keys.quantization.sub_bitnet_key import (
+from tests.fixtures.keys.quantization.sub_bitnet_key import (
     SubBitnetKey,
     SubBitnetLinear,
     SubBitnetLinearBiLLM,

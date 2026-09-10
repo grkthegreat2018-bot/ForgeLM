@@ -70,7 +70,7 @@ def nvfp4_simulate(config: dict, domain=None) -> dict:
     bs = int(config.get("block_size", 32))
     w = torch.randn(256, 512, device=device) * 0.02
     try:
-        from forge.engine.quant.nvfp4_quant import _quantize_to_fp4, _dequantize_fp4
+        from forge.engine.quant.nvfp4_quant import _dequantize_fp4, _quantize_to_fp4
         packed, scales, global_scale = _quantize_to_fp4(w, bs)
         w_dq = _dequantize_fp4(packed, scales, 256, 512, bs, torch.float32, global_scale)
         err = float((w - w_dq).norm().item() / (w.norm().item() + 1e-8))

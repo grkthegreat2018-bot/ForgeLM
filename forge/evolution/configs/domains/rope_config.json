@@ -1,0 +1,32 @@
+{
+  "name": "rope_config",
+  "category": "attention",
+  "description": "RoPE theta, scaling type, and scaling factor. Metrics: rotation_diversity, stability, rot_div_long, compat_penalty, frozen_penalty.",
+  "simulator": "rope_simulate",
+  "params": [
+    {"name": "theta", "type": "float", "range": [1000, 10000000]},
+    {"name": "scaling_type", "type": "choice", "values": ["none", "yarn", "linear"]},
+    {"name": "scaling_factor", "type": "float", "range": [0.5, 4.0]}
+  ],
+  "behavioral_dims": [["rotation_diversity", 10, 0, 1], ["stability", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "rotation_diversity", "weight": 5.0},
+      {"metric": "rot_div_long", "weight": 5.0},
+      {"metric": "stability", "weight": 5.0},
+      {"metric": "compat_penalty", "weight": -1.0},
+      {"metric": "frozen_penalty", "weight": -1.0}
+    ],
+    "penalties": [
+      {"flag": "checkpoint_compat"},
+      {"flag": "frozen_dim_detect"},
+      {"flag": "long_range_diversity"}
+    ],
+    "hardening": ["no_nan"]
+  },
+  "seed_configs": [
+    {"theta": 10000, "scaling_type": "none", "scaling_factor": 1.0},
+    {"theta": 1000000, "scaling_type": "none", "scaling_factor": 1.0},
+    {"theta": 500000, "scaling_type": "yarn", "scaling_factor": 2.0}
+  ]
+}

@@ -15,7 +15,6 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -80,9 +79,9 @@ class AgentRunner(QThread):
                  max_rounds: int = 8, max_new_tokens: int = 512,
                  temperature: float = 0.2, top_p: float = 0.95, top_k: int = 80,
                  repetition_penalty: float = 1.05,
-                 enabled_tools: Optional[list[str]] = None,
+                 enabled_tools: list[str] | None = None,
                  approval_mode: str = APPROVAL_DESTRUCTIVE,
-                 history: Optional[list[dict]] = None,
+                 history: list[dict] | None = None,
                  tool_harness=None,
                  parent=None) -> None:
         super().__init__(parent)
@@ -127,9 +126,12 @@ class AgentRunner(QThread):
 
     def _loop(self) -> dict:
         from forge.self_play.discovery.qwen_adapter import (  # type: ignore
-            TOOL_CALL_START, TOOL_CALL_END,
-            qwen_parse_tool_calls, render_messages_for_config,
+            TOOL_CALL_END,
+            TOOL_CALL_START,
+            qwen_parse_tool_calls,
+            render_messages_for_config,
         )
+
         from .tool_harness import ToolHarness
 
         # Use provided harness or create one

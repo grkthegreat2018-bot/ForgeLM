@@ -26,7 +26,6 @@ Usage:
                          mtp_d_weight=0.3)
     loss = trainer.compute_loss(input_ids)
 """
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -181,7 +180,6 @@ class MTPTrainer:
         self.current_n = self._get_current_n()
 
         B, T = input_ids.shape
-        device = input_ids.device
 
         # Forward pass through main model.
         model_out = self.model(input_ids)
@@ -393,7 +391,7 @@ class MTPModule(nn.Module):
             sequence too short), logits_list is the list of per-head logits.
         """
         T = hidden.size(1)
-        if T <= self.n_heads + 1:
+        if self.n_heads + 1 >= T:
             return None, []
 
         trunk_out = self.trunk(hidden)  # (B, T, d_model)

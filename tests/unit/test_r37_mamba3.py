@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
 from forge.keys.architecture.mamba3_key import (
     Mamba3Key, MAMBA3_PASSTHROUGH, MAMBA3_COMPLEX_NORMS,
 )
-from forge.keys.architecture.mamba_key import MambaKey, Mamba2Key
+from tests.fixtures.keys.architecture.mamba_key import MambaKey, Mamba2Key
 from forge.keys.misc.base import KeyClass
 
 

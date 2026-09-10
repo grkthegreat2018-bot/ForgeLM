@@ -15,7 +15,7 @@ import os
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,13 +23,13 @@ import torch
 try:
     from safetensors.torch import load_file, save_file
     _HAS_SAFETENSORS = True
-except Exception:
+except ImportError:
     _HAS_SAFETENSORS = False
 
 try:
     from fastsafetensors import SafeTensorsFileLoader
     _HAS_FAST_SAFETENSORS = True
-except Exception:
+except ImportError:
     _HAS_FAST_SAFETENSORS = False
 
 

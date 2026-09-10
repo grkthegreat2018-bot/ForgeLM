@@ -1,0 +1,19 @@
+{
+  "name": "kara",
+  "category": "misc",
+  "description": "KARA KV cache: sink_size, window_size, target_budget, chunk_expand_size. Delegates to KARADomain.",
+  "simulator": "kara_simulate",
+  "params": [
+    {"name": "sink_size", "type": "int", "range": [2, 8]},
+    {"name": "window_size", "type": "int", "range": [128, 1024]},
+    {"name": "target_budget", "type": "int", "range": [512, 4096]},
+    {"name": "chunk_expand_size", "type": "int", "range": [4, 16]}
+  ],
+  "behavioral_dims": [["compression", 10, 1.0, 8.0], ["fwd_error", 10, 0.0, 0.3]],
+  "scoring": {
+    "components": [
+      {"metric": "base_score", "weight": 1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

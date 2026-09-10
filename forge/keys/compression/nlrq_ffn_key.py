@@ -41,7 +41,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ── Hadamard rotation utilities (for HINT4-NLRQ) ──────────────────────────
 
 def _next_power_of_2(n: int) -> int:
@@ -367,7 +366,7 @@ class NLRQLinear(nn.Module):
     def from_dense(cls, weight: torch.Tensor, rank: int = 256,
                    factor_bits: int = 8, use_residual: bool = False,
                    residual_group_size: int = 128,
-                   bias: torch.Tensor | None = None) -> 'NLRQLinear':
+                   bias: torch.Tensor | None = None) -> NLRQLinear:
         """Fit NLRQ factors from a dense weight matrix via SVD + INT8 quantize.
 
         Args:
@@ -424,7 +423,7 @@ class NLRQLinear(nn.Module):
                             factor_bits: int = 8,
                             use_residual: bool = False,
                             residual_group_size: int = 128,
-                            bias: torch.Tensor | None = None) -> tuple['NLRQLinear', int]:
+                            bias: torch.Tensor | None = None) -> tuple[NLRQLinear, int]:
         """Fit NLRQ with SVD energy-based adaptive rank selection.
 
         Instead of a fixed rank, selects the smallest rank that captures
@@ -471,7 +470,7 @@ class NLRQLinear(nn.Module):
     def from_dense_hadamard_int4(cls, weight: torch.Tensor, rank: int = 768,
                                  use_residual: bool = True,
                                  residual_group_size: int = 128,
-                                 bias: torch.Tensor | None = None) -> 'NLRQLinear':
+                                 bias: torch.Tensor | None = None) -> NLRQLinear:
         """Fit NLRQ with Hadamard-INT4 factors (HINT4) from a dense weight matrix.
 
         Process:
@@ -788,7 +787,7 @@ class NLRQSwiGLUFFN(nn.Module):
     @classmethod
     def from_dense_ffn(cls, ffn: nn.Module, rank: int = 256,
                        factor_bits: int = 8, use_residual: bool = False,
-                       residual_group_size: int = 128) -> 'NLRQSwiGLUFFN':
+                       residual_group_size: int = 128) -> NLRQSwiGLUFFN:
         """Convert a dense SwiGLUFFN to NLRQSwiGLUFFN."""
         d_model = ffn.w_gate.in_features
         hidden_dim = ffn.w_gate.out_features
@@ -821,7 +820,7 @@ class NLRQSwiGLUFFN(nn.Module):
                                 min_rank: int = 64,
                                 factor_bits: int = 8,
                                 use_residual: bool = False,
-                                residual_group_size: int = 128) -> tuple['NLRQSwiGLUFFN', list[int]]:
+                                residual_group_size: int = 128) -> tuple[NLRQSwiGLUFFN, list[int]]:
         """Build NLRQSwiGLUFFN with adaptive rank per projection.
 
         Applies SVD energy-based adaptive rank selection to each of the three

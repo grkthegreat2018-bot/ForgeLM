@@ -31,9 +31,7 @@ Integrates with:
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 
@@ -43,8 +41,8 @@ class PrefixNode:
     """Node in the prefix hotness tree."""
     prefix_hash: int
     length: int
-    kv_cache: Optional[torch.Tensor] = None  # GPU-resident KV for this prefix
-    cpu_kv_cache: Optional[torch.Tensor] = None  # CPU fallback
+    kv_cache: torch.Tensor | None = None  # GPU-resident KV for this prefix
+    cpu_kv_cache: torch.Tensor | None = None  # CPU fallback
     access_count: int = 0
     last_access: float = field(default_factory=time.time)
     hotness: float = 0.0
@@ -79,7 +77,7 @@ class HotPrefixManager:
         self._last_rebalance = time.time()
 
     def access(self, prefix_hash: int, length: int,
-               kv_cache: Optional[torch.Tensor] = None) -> Optional[PrefixNode]:
+               kv_cache: torch.Tensor | None = None) -> PrefixNode | None:
         """Record an access to a prefix and return its node.
 
         Args:
@@ -162,7 +160,7 @@ class HotPrefixManager:
                 node.kv_cache = None
             node.is_hot = False
 
-    def get_kv_cache(self, prefix_hash: int) -> Optional[torch.Tensor]:
+    def get_kv_cache(self, prefix_hash: int) -> torch.Tensor | None:
         """Get the KV cache for a prefix (from GPU or CPU)."""
         node = self._prefixes.get(prefix_hash)
         if node is None:

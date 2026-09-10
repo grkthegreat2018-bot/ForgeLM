@@ -1,0 +1,20 @@
+{
+  "name": "kvzip_kv",
+  "category": "kv",
+  "description": "KV zip vector quantization. Search compression_ratio, codebook_size, n_iter.",
+  "simulator": "kv_zip_kv_simulate",
+  "params": [
+    {"name": "compression_ratio", "type": "int", "range": [2, 16]},
+    {"name": "codebook_size", "type": "int", "range": [64, 512]},
+    {"name": "n_iter", "type": "int", "range": [10, 100]}
+  ],
+  "behavioral_dims": [["actual_comp", 10, 1.0, 16.0], ["recon_err", 10, 0.0, 0.5]],
+  "scoring": {
+    "components": [
+      {"metric": "actual_comp", "weight": 8.0},
+      {"metric": "recon_err", "weight": -300.0},
+      {"metric": "n_iter", "weight": -0.02}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

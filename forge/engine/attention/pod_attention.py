@@ -150,17 +150,15 @@ class PODAttentionScheduler:
             return prefill_results, decode_results
 
         # Concurrent execution on separate streams
-        with torch.cuda.stream(self._prefill_stream):
-            with torch.inference_mode():
-                for ids in prefill_ids:
-                    out = model(ids, use_cache=True)
-                    prefill_results.append(out)
+        with torch.cuda.stream(self._prefill_stream), torch.inference_mode():
+            for ids in prefill_ids:
+                out = model(ids, use_cache=True)
+                prefill_results.append(out)
 
-        with torch.cuda.stream(self._decode_stream):
-            with torch.inference_mode():
-                for ids in decode_ids:
-                    out = model(ids, use_cache=True)
-                    decode_results.append(out)
+        with torch.cuda.stream(self._decode_stream), torch.inference_mode():
+            for ids in decode_ids:
+                out = model(ids, use_cache=True)
+                decode_results.append(out)
 
         self._prefill_stream.synchronize()
         self._decode_stream.synchronize()

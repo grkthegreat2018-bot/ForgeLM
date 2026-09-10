@@ -14,7 +14,7 @@ produces coherent (not random) output — a strong initialization for
 fine-tuning or a standalone statistical model.
 
 Usage:
-    from forge.keys.architecture.text_to_weights_key import TextToWeightsKey
+    from tests.fixtures.keys.architecture.text_to_weights_key import TextToWeightsKey
     key = TextToWeightsKey()
     state_dict = key.synthesize(
         text_path="data/corpus.txt",

@@ -1,0 +1,21 @@
+{
+  "name": "local_global",
+  "category": "attention",
+  "description": "Local window, global ratio, n global heads. Metrics: receptive_field, compute_ratio, trivial_penalty.",
+  "simulator": "local_global_simulate",
+  "params": [
+    {"name": "local_window", "type": "int", "range": [256, 2048]},
+    {"name": "global_ratio", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_global_heads", "type": "int", "range": [1, 16]}
+  ],
+  "behavioral_dims": [["receptive_field", 10, 0, 1], ["compute_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "receptive_field", "weight": 10.0},
+      {"metric": "compute_ratio", "weight": -5.0},
+      {"metric": "trivial_penalty", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

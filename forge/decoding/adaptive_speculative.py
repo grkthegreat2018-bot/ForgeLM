@@ -27,7 +27,6 @@ Adaptive selection:
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Optional
 
 import torch
 
@@ -72,7 +71,7 @@ class NGramCache:
             for k in keys[:len(keys) - self.max_cache_size]:
                 del self._cache[k]
 
-    def lookup(self, tokens: list[int]) -> Optional[list[int]]:
+    def lookup(self, tokens: list[int]) -> list[int] | None:
         """Look up the best continuation for the current token sequence.
 
         Args:

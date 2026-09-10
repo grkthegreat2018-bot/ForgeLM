@@ -28,9 +28,6 @@ For our BatchQueue (which batches up to 8 requests per 50ms window):
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Optional
-
-import torch
 
 
 class ChunkedHashTree:
@@ -78,7 +75,7 @@ class ChunkedHashTree:
         for i, h in enumerate(chain):
             self._prefix_map[h].append((request_id, (i + 1) * self.chunk_size))
 
-    def find_longest_prefix(self, tokens: list[int]) -> tuple[Optional[int], int]:
+    def find_longest_prefix(self, tokens: list[int]) -> tuple[int | None, int]:
         """Find the request with the longest shared prefix.
 
         Args:

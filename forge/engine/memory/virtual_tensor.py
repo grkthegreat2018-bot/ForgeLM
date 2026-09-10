@@ -121,7 +121,7 @@ class VirtualTensor:
                 new_cpu[:moved] = gpu_slice
                 new_cpu[moved:] = self._cpu_data
                 self._cpu_data = new_cpu
-            new_shape = (new_n,) + self.shape[1:] if len(self.shape) > 1 else (new_n,)
+            (new_n,) + self.shape[1:] if len(self.shape) > 1 else (new_n,)
             if new_n > 0:
                 self._gpu_data = self._gpu_data[:new_n].contiguous()
             else:

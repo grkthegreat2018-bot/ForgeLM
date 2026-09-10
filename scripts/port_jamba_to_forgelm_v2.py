@@ -24,7 +24,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from forge.keys.architecture.mamba_key import MambaKey
+from tests.fixtures.keys.architecture.mamba_key import MambaKey
 from forge.config import ModelConfig
 
 

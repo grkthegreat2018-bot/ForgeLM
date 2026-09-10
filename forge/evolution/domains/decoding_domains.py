@@ -4,9 +4,10 @@ Each domain explores a decoding configuration search space.
 All use small tensor operations for fast evaluation (no model loading).
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
-from typing import Any
+import torch
+
 from . import BaseDomain
 
 

@@ -27,8 +27,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import torch
 
@@ -45,7 +44,7 @@ class ServeRequest:
     queue_level: int = 0  # MLFQ level (0 = highest priority)
     last_service_time: float = 0.0
     preempted: bool = False
-    kv_cache: Optional[torch.Tensor] = None  # offloaded KV cache
+    kv_cache: torch.Tensor | None = None  # offloaded KV cache
 
     def __post_init__(self):
         if self.input_length == 0:
@@ -92,14 +91,14 @@ class SkipJoinMLFQ:
         req.queue_level = level
         self.queues[level].append(req)
 
-    def get_next_request(self) -> Optional[ServeRequest]:
+    def get_next_request(self) -> ServeRequest | None:
         """Get the highest-priority request."""
         for level in range(self.n_levels):
             if self.queues[level]:
                 return self.queues[level].popleft()
         return None
 
-    def preempt_lowest(self) -> Optional[ServeRequest]:
+    def preempt_lowest(self) -> ServeRequest | None:
         """Preempt the lowest-priority active request (for memory pressure)."""
         for level in range(self.n_levels - 1, -1, -1):
             if self.queues[level]:

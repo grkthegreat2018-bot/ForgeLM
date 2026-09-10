@@ -39,20 +39,18 @@ Teachers can also generate their own tasks (like GoalGenerator in infinite_tool_
 from __future__ import annotations
 
 import json
-import os
-import random
-import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from forge.distillation.distill_client import (
-    DistillationClient, DistillModel, DistillResult, MODEL_POOL,
+    DistillationClient,
+    DistillModel,
 )
-from forge.self_play.discovery.discovery_tools import ToolRegistry
 from forge.self_play.discovery.discovery_db import DiscoveryDB
+from forge.self_play.discovery.discovery_tools import ToolRegistry
 
 # compute_reward was in tool_use_loop.py, which was removed in the AZR loop
 # merge. The reward-scoring path is legacy — keep the module importable (other
@@ -434,13 +432,9 @@ class AgenticDistillClient(DistillationClient):
             # - 429 with daily/monthly quota exhausted
             # - 404 Model not found
             should_blacklist = False
-            if "402" in err_str or "Payment required" in err_str:
-                should_blacklist = True
-            elif "429" in err_str and any(kw in err_str.lower() for kw in
+            if "402" in err_str or "Payment required" in err_str or ("429" in err_str and any(kw in err_str.lower() for kw in
                     ("per-day", "per_day", "daily", "per-month", "per_month",
-                     "free-models-per-day", "rate limit exceeded")):
-                should_blacklist = True
-            elif "404" in err_str and "model" in err_str.lower():
+                     "free-models-per-day", "rate limit exceeded"))) or ("404" in err_str and "model" in err_str.lower()):
                 should_blacklist = True
 
             if should_blacklist:
@@ -645,10 +639,8 @@ class AgenticDistillClient(DistillationClient):
                 err_str = str(e)
                 print(f"Task generation error ({model.provider}): {err_str[:100]}")
                 # Blacklist if quota exhausted
-                if any(kw in err_str for kw in ("402", "Payment required")):
-                    self._blacklisted_providers.add(model.provider)
-                elif "429" in err_str and any(kw in err_str.lower() for kw in
-                        ("per-day", "daily", "per-month", "rate limit exceeded")):
+                if any(kw in err_str for kw in ("402", "Payment required")) or ("429" in err_str and any(kw in err_str.lower() for kw in
+                        ("per-day", "daily", "per-month", "rate limit exceeded"))):
                     self._blacklisted_providers.add(model.provider)
                 continue  # try next provider
 

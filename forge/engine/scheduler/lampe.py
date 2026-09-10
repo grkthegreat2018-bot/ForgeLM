@@ -27,8 +27,8 @@ For our model (32K training → 128K inference):
 from __future__ import annotations
 
 import math
+
 import torch
-import torch.nn.functional as F
 
 
 class LaMPE:

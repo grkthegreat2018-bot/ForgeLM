@@ -35,7 +35,10 @@ closing bracket is legal.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -86,8 +89,8 @@ class XGrammarConstrainer:
     def __init__(self, vocab_size: int, tokenizer: Any = None):
         self.vocab_size = vocab_size
         self.tokenizer = tokenizer
-        self._schema: Optional[dict] = None
-        self._grammar_str: Optional[str] = None
+        self._schema: dict | None = None
+        self._grammar_str: str | None = None
         # Precompute first-character of every token for fast masking.
         self._first_chars: list[str] = self._precompute_first_chars()
         # FSM state
@@ -98,7 +101,7 @@ class XGrammarConstrainer:
 
     # ── Compilation ────────────────────────────────────────────────────
 
-    def compile_json(self, schema: dict) -> "XGrammarConstrainer":
+    def compile_json(self, schema: dict) -> XGrammarConstrainer:
         """Compile a JSON schema into the FSM.
 
         For the simplified version, the FSM enforces valid JSON structure.
@@ -127,7 +130,7 @@ class XGrammarConstrainer:
             self._top_level_chars = None  # any valid JSON value
         return self
 
-    def compile_grammar(self, grammar_str: str) -> "XGrammarConstrainer":
+    def compile_grammar(self, grammar_str: str) -> XGrammarConstrainer:
         """Compile a CFG / grammar string into the FSM.
 
         Simplified: if the grammar looks JSON-like (contains ``json``,
@@ -299,9 +302,7 @@ class XGrammarConstrainer:
                 pass  # stay in IN_NUMBER
             elif char == ",":
                 self._handle_comma()
-            elif char == "}":
-                self._pop_and_after_value()
-            elif char == "]":
+            elif char == "}" or char == "]":
                 self._pop_and_after_value()
             # else: stay (shouldn't happen with masking)
 
@@ -323,9 +324,7 @@ class XGrammarConstrainer:
         elif s == AFTER_VAL:
             if char == ",":
                 self._handle_comma()
-            elif char == "}":
-                self._pop_and_after_value()
-            elif char == "]":
+            elif char == "}" or char == "]":
                 self._pop_and_after_value()
 
         elif s == END:
@@ -399,11 +398,11 @@ class XGrammarConstrainer:
                     return "".join(str(t) for t in tok)
                 return str(tok)
             except Exception:
-                pass
+                logger.debug("Tokenizer convert_ids_to_tokens failed", exc_info=True)
         # Fallback: decode([id])
         if hasattr(self.tokenizer, "decode"):
             try:
                 return self.tokenizer.decode([token_id])
             except Exception:
-                pass
+                logger.debug("Tokenizer decode([token_id]) failed", exc_info=True)
         return ""

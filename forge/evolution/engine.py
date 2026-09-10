@@ -24,20 +24,23 @@ Usage:
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
 import json
+import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
-from .generators import GeneratorConfig, GeneratorPopulation, TemplateGenerator
-from .surrogate import SurrogateModel
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
 from .archive import MapElitesArchive
-from .trainer import GeneratorTrainer
 from .database import FindingsDB
 from .domains import BaseDomain
-
+from .generators import GeneratorConfig, GeneratorPopulation, TemplateGenerator
+from .surrogate import SurrogateModel
+from .trainer import GeneratorTrainer
 
 # ── CPU worker globals (set by _cpu_worker_init in each worker process) ──
 _CPU_DOMAIN = None
@@ -203,7 +206,7 @@ class ForgeEvolve:
         self.pending_refinements: list[BaseDomain] = []
 
         # Novelty search: behavioral diversity to prevent plateaus
-        from forge.evolution.novelty_search import NoveltySearch, NoveltyConfig
+        from forge.evolution.novelty_search import NoveltyConfig, NoveltySearch
         novelty_cfg = NoveltyConfig(
             enabled=cfg.enable_novelty,
             k_neighbors=cfg.novelty_k_neighbors,
@@ -501,7 +504,7 @@ class ForgeEvolve:
                 if all(r is not None for r in results):
                     return results
             except Exception:
-                pass  # fall through to threaded eval
+                logger.debug("Batched eval failed, falling through to threaded eval", exc_info=True)
 
         # Fixed chunk size: each eval uses ~100MB, reserve 2GB for generators
         # On 12GB GPU: (12GB - 2GB) / (100MB * 1.5) = ~66 concurrent evals
@@ -605,7 +608,7 @@ class ForgeEvolve:
                 cscore = fut.result(timeout=0.1)
                 raw_results[i]["metadata"]["checker_score"] = cscore
             except Exception:
-                pass  # checker not ready — skip, heuristic score stands
+                logger.debug("Checker score not ready, heuristic score stands", exc_info=True)
 
         return raw_results, configs
 
@@ -617,6 +620,7 @@ class ForgeEvolve:
         during CUDA calls, so threads achieve real parallelism.
         """
         from concurrent.futures import ThreadPoolExecutor
+
         import torch
 
         # More threads = more kernel overlap. Cap at len(configs) and 8.
@@ -749,7 +753,7 @@ class ForgeEvolve:
 
                 # ── Novelty search: update phase (novelty ↔ quality pulsation) ──
                 if self.cfg.enable_novelty and gen > 0:
-                    phase = self.novelty.update_phase(self.archive.best_score)
+                    self.novelty.update_phase(self.archive.best_score)
                     if gen == 1 or self.novelty.phase_counter == 1:
                         self._log(f"  [Novelty] {self.novelty.status()}")
 
@@ -1109,7 +1113,7 @@ class ForgeEvolve:
                         if gm is not None and hasattr(self.domain, "set_gen_model"):
                             self.domain.set_gen_model(self._gen_mgr._model)
                     elif self._gen_mgr.should_shrink():
-                        self._log(f"  [GenModel] shrinking (overperforming)")
+                        self._log("  [GenModel] shrinking (overperforming)")
                         self._gen_mgr.shrink()
                         if hasattr(self.domain, "set_gen_model"):
                             self.domain.set_gen_model(self._gen_mgr._model)

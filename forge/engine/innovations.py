@@ -24,7 +24,6 @@ XP model checkpoint:
     proceeds speculatively while the residual stream loads concurrently.
     Inspired by Lynx (arxiv 2607.01831).
 """
-from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn

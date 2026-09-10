@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Optional
 
 
 def _make_mlp(input_dim: int, hidden_dim: int, seed: int = 0) -> nn.Sequential:

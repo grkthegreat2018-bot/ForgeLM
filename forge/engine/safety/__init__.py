@@ -5,4 +5,4 @@ R34-2: PoP — depth-fused hidden-norm probing (arXiv 2608.27165).
 """
 from .trilens import PoPDetector, TriLensDetector, TriLensPoPEnsemble
 
-__all__ = ["TriLensDetector", "PoPDetector", "TriLensPoPEnsemble"]
+__all__ = ["PoPDetector", "TriLensDetector", "TriLensPoPEnsemble"]

@@ -41,6 +41,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
+
 _ATTN_PATTERNS = (
     "q_proj", "k_proj", "v_proj", "o_proj", "out_proj",
     "qkv_proj", "in_proj", "kv_down_proj", "k_up_proj", "v_up_proj",
@@ -206,7 +208,7 @@ def _unpack_int2(packed: torch.Tensor, out_features: int, in_padded: int) -> tor
 # ACBQLinear: quantized Linear with cross-block error compensation
 # ──────────────────────────────────────────────────────────────────────────
 
-class ACBQLinear(nn.Module):
+class ACBQLinear(QuantizedLinearMixin):
     """INT4/INT2 quantized Linear with cross-block error compensation.
 
     Stores weights as packed INT4 (2 per uint8 byte) or INT2 (4 per byte)
@@ -271,7 +273,7 @@ class ACBQLinear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, group_size: int = 128,
                     bits: int = 4,
-                    correction: torch.Tensor | None = None) -> "ACBQLinear":
+                    correction: torch.Tensor | None = None) -> ACBQLinear:
         """Build ACBQLinear from an nn.Linear with pre-computed correction.
 
         Args:

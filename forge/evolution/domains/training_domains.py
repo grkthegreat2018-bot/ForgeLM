@@ -4,9 +4,10 @@ Each domain explores a training configuration search space.
 All use small tensor operations for fast evaluation (no model loading).
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
-from typing import Any
+import torch
+
 from . import BaseDomain
 
 
@@ -658,7 +659,7 @@ class TritonKernelConfig(BaseDomain):
         rms_target = 4096
         swiglu_target = 16384
         # Simulate fused kernel throughput
-        x = self._randn(4096)
+        self._randn(4096)
         # Base speedup from fused kernels (Liger-Kernel ~20%)
         base_speedup = 20.0
         # mismatch penalty: block < feature = multiple passes (slower)
@@ -700,7 +701,7 @@ class VarlenConfig(BaseDomain):
     def evaluate(self, config):
         use_varlen = config["use_varlen"]
         # Simulate packed-sequence attention
-        x = self._randn(128, 64)
+        self._randn(128, 64)
         if use_varlen:
             # Varlen: 2.1x faster, 50% less VRAM, no cross-example contamination
             speedup = 2.1

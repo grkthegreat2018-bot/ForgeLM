@@ -31,6 +31,8 @@ import math
 import torch
 import torch.nn as nn
 
+from forge.keys._tensor_utils import _rotate_half
+
 
 class LeRoPEEmbedding(nn.Module):
     """LeRoPE: learnable per-frequency-band scaling of RoPE frequencies.
@@ -103,11 +105,7 @@ class LeRoPEEmbedding(nn.Module):
         scale = torch.where(wavelens < low_freq_wavelen, torch.ones_like(scale), scale)
         return inv_freq / scale
 
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
+    _rotate_half = staticmethod(_rotate_half)
 
     def _get_cos_sin(self, seq_len: int, offset: int,
                      position_ids: torch.Tensor | None,
@@ -229,11 +227,7 @@ class AdaRoPEEmbedding(nn.Module):
         scale = torch.where(wavelens < low_freq_wavelen, torch.ones_like(scale), scale)
         return inv_freq / scale
 
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
+    _rotate_half = staticmethod(_rotate_half)
 
     def forward(self, x: torch.Tensor, offset: int = 0,
                 position_ids: torch.Tensor | None = None) -> torch.Tensor:

@@ -41,7 +41,7 @@ from forge.engine.quant.novel_quant import (
     quantize_asfp4_dequant, quantize_sr_fp4, quantize_iri_fp4,
     quantize_tsd_fp4, quantize_hpr_fp4,
 )
-from forge.keys.quantization.bitnet_residual_key import ternary_quantize
+from tests.fixtures.keys.quantization.bitnet_residual_key import ternary_quantize
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -21,10 +21,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.engine.quant.nvfp4_quant import (
-    _FP4_MAGNITUDES, _FP4_BOUNDARIES, _FP8_DTYPE, _HAS_FP8,
-    _dequantize_fp4, _quantize_to_fp4,
+    _FP4_BOUNDARIES,
+    _FP4_MAGNITUDES,
+    _FP8_DTYPE,
+    _HAS_FP8,
+    _dequantize_fp4,
+    _quantize_to_fp4,
 )
-
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Novel Algorithm 1: AdaptScale FP4 (AS-FP4)
@@ -116,7 +120,7 @@ def _quantize_to_fp4_adaptive(w: torch.Tensor, block_size: int = 32) -> tuple:
     idx = torch.searchsorted(_FP4_BOUNDARIES.to(w.device), abs_norm)
     idx = idx.clamp(0, 7)
     magnitude = _FP4_MAGNITUDES.to(w.device)[idx]
-    w_fp4 = torch.sign(w_norm) * magnitude
+    torch.sign(w_norm) * magnitude
 
     # Pack to 4-bit
     sign_bit = (w_norm < 0).long() << 3
@@ -138,7 +142,7 @@ def _quantize_to_fp4_adaptive(w: torch.Tensor, block_size: int = 32) -> tuple:
     return packed.contiguous(), scales_fp8.contiguous(), global_scale_flat.contiguous()
 
 
-class ASFP4Linear(nn.Module):
+class ASFP4Linear(QuantizedLinearMixin):
     """AdaptScale FP4 Linear — MSE-optimal block scales for FP4.
 
     Novel (R&D 14): Instead of absmax/6.0 block scaling, uses a grid search
@@ -178,7 +182,7 @@ class ASFP4Linear(nn.Module):
         self._cached_weight = None
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> "ASFP4Linear":
+    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> ASFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None, block_size=block_size)
@@ -268,7 +272,7 @@ def _quantize_to_fp4_residual(
     return packed, scales, global_scale, topk_indices.to(torch.int32), residual_int8, res_scale.to(torch.float32)
 
 
-class ResidualFP4Linear(nn.Module):
+class ResidualFP4Linear(QuantizedLinearMixin):
     """ResidualFP4 Linear — FP4 weights + sparse INT8 residual.
 
     Novel (R&D 14): Combines FP4 weight quantization with a sparse INT8
@@ -331,7 +335,7 @@ class ResidualFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    residual_ratio: float = 0.05) -> "ResidualFP4Linear":
+                    residual_ratio: float = 0.05) -> ResidualFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None,
@@ -981,7 +985,7 @@ def quantize_pcba(w: torch.Tensor, block_size: int = 32,
 #   HPR stack: HPR+SAAS+HW stacking — HW drags down (17.97 < HPR alone 20.74).
 
 
-class SRFP4Linear(nn.Module):
+class SRFP4Linear(QuantizedLinearMixin):
     """Stochastic-Rounding FP4 Linear (R&D 15 winner).
 
     Uses AS-FP4 (MSE-optimal) per-block scale + stochastic rounding to the
@@ -1025,7 +1029,7 @@ class SRFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    seed: int = 0) -> "SRFP4Linear":
+                    seed: int = 0) -> SRFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None, block_size=block_size, seed=seed)
@@ -1064,7 +1068,7 @@ class SRFP4Linear(nn.Module):
         return f"SRFP4Linear(in={self.in_features}, out={self.out_features})"
 
 
-class IRIFP4Linear(nn.Module):
+class IRIFP4Linear(QuantizedLinearMixin):
     """Iterative Residual Refinement FP4 Linear (R&D 15 winner).
 
     Stores K FP4 quantizations of the weight and its successive residuals.
@@ -1108,7 +1112,7 @@ class IRIFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    n_rounds: int = 2) -> "IRIFP4Linear":
+                    n_rounds: int = 2) -> IRIFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None,
@@ -1180,7 +1184,7 @@ def _pack_fp4_round(wb: torch.Tensor, scale: torch.Tensor,
     return packed, scales_fp8.contiguous(), global_scale.contiguous()
 
 
-class TSDSFP4Linear(nn.Module):
+class TSDSFP4Linear(QuantizedLinearMixin):
     """Threshold-Split Dual-Scale FP4 Linear (R&D 15 winner).
 
     Per block, splits elements into outliers (top 25% by |value|) and
@@ -1235,7 +1239,7 @@ class TSDSFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    split_quantile: float = 0.75) -> "TSDSFP4Linear":
+                    split_quantile: float = 0.75) -> TSDSFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None,
@@ -1255,7 +1259,7 @@ class TSDSFP4Linear(nn.Module):
         in_scale = in_max / 6.0
         scale = torch.where(is_outlier, out_scale, in_scale)
         # Pack with the per-element scale (each element uses its sub-group scale)
-        w_dq = _fp4_quant_dequant_block(wb, scale)
+        _fp4_quant_dequant_block(wb, scale)
         # Store: use the OUTLIER scale as the block scale (global), inlier as
         # separate. Pack FP4 codes relative to the per-element scale.
         s = scale.clamp(min=1e-12)
@@ -1312,7 +1316,7 @@ class TSDSFP4Linear(nn.Module):
             mask_flat[:, i] = (self.outlier_mask[:, byte_idx] >> bit_idx) & 1
         is_outlier = mask_flat
         # Apply scales: outlier elements use global*block scale, inlier use inlier_scales
-        n_blocks = self.weight_scales.shape[1]
+        self.weight_scales.shape[1]
         bs = self.block_size
         block_out_scale = (self.weight_scales.to(torch.float32) *
                            self.weight_global_scale.unsqueeze(1).to(torch.float32))
@@ -1491,7 +1495,7 @@ def quantize_hw_fp4_v2(w: torch.Tensor, activations: torch.Tensor,
     return quantize_hw_fp4(w, h_full, block_size)
 
 
-class HWFP4CalibratedLinear(nn.Module):
+class HWFP4CalibratedLinear(QuantizedLinearMixin):
     """HW-FP4-v2 Linear with real activation calibration.
 
     Two-step construction:
@@ -1538,7 +1542,7 @@ class HWFP4CalibratedLinear(nn.Module):
         self._calibrated = False
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> "HWFP4CalibratedLinear":
+    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> HWFP4CalibratedLinear:
         """Step 1: create from linear (weight stored unquantized temporarily)."""
         w = lin.weight.float()
         out_f, in_f = w.shape
@@ -1759,7 +1763,7 @@ def quantize_hpr_iri_fp4(w: torch.Tensor, block_size: int = 32,
     return w_dq[:, :in_f].contiguous()
 
 
-class HPRIRIFP4Linear(nn.Module):
+class HPRIRIFP4Linear(QuantizedLinearMixin):
     """HPR+IRI Linear: Hadamard rotation + iterative residual FP4.
 
     The rotation Q is absorbed into the preceding layer at inference (fused),
@@ -1810,7 +1814,7 @@ class HPRIRIFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    n_rounds: int = 2, optimal_signs: bool = False) -> "HPRIRIFP4Linear":
+                    n_rounds: int = 2, optimal_signs: bool = False) -> HPRIRIFP4Linear:
         w = lin.weight.float()
         out_f, in_f = w.shape
         obj = cls(in_f, out_f, bias=lin.bias is not None,
@@ -2495,7 +2499,7 @@ class SRFP4KVCache:
         rand = torch.rand_like(frac, generator=g) if w.device.type == "cpu" else torch.rand_like(frac)
         use_hi = rand < frac
         mag = torch.where(use_hi, mag_hi, mag_lo)
-        w_q = torch.sign(w_norm) * mag
+        torch.sign(w_norm) * mag
 
         # Pack to FP4
         sign_bit = (w_norm < 0).long() << 3
@@ -2548,7 +2552,7 @@ class SRFP4KVCache:
             v: (seq_len, n_heads, head_dim) dequantized V
         """
         if self.seq_len == 0:
-            d = self.n_heads * self.head_dim
+            self.n_heads * self.head_dim
             empty = torch.zeros(0, self.n_heads, self.head_dim, device=self.device, dtype=self.dtype)
             return empty, empty
 

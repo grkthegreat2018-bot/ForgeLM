@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from typing import Optional
 
 
 class LookaheadQualityGate:
@@ -69,7 +68,7 @@ class LookaheadQualityGate:
             score: quality score (0-1, higher = better)
         """
         B, T, D = hidden_states.shape
-        K = draft_tokens.shape[1]
+        draft_tokens.shape[1]
 
         # Geometry-based score: measure how "in-distribution" the draft is
         # 1. Compute draft log-probabilities (confidence)

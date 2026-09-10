@@ -23,11 +23,14 @@ Usage (automatic via ForgeEngine):
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from forge.engine.forge_engine import ForgeEngine
@@ -80,7 +83,7 @@ class SessionCacheManager:
         sessions first (unless pinned or within TTL).
     """
 
-    def __init__(self, engine: "ForgeEngine",
+    def __init__(self, engine: ForgeEngine,
                  max_sessions: int = 32,
                  default_ttl: float | None = None,
                  eviction_check_interval: int = 8):
@@ -212,7 +215,7 @@ class SessionCacheManager:
         if self._access_count % self.eviction_check_interval != 0:
             return
 
-        now = time.time()
+        time.time()
         # Evict expired sessions
         expired = [sid for sid, s in self._sessions.items()
                    if s.is_expired and not s.pinned]
@@ -268,4 +271,4 @@ class SessionCacheManager:
         try:
             self.clear()
         except Exception:
-            pass
+            logger.debug("Error during SessionCacheManager cleanup", exc_info=True)

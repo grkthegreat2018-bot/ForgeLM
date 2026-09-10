@@ -18,7 +18,9 @@ Usage:
     logits, hidden = cache.forward(model, input_ids)
 """
 from collections import OrderedDict
-from typing import Dict, Optional, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -110,7 +112,7 @@ class ForwardCache:
         try:
             self.clear()
         except Exception:
-            pass
+            logger.debug("Error during ForwardCache cleanup", exc_info=True)
 
     @property
     def hit_rate(self) -> float:

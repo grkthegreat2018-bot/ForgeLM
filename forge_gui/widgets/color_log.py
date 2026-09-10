@@ -11,16 +11,8 @@ Color scheme (per user spec):
 """
 from __future__ import annotations
 
-import time
-from collections import deque
-from typing import Optional
-
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor, QColor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
-
-from ..theme import Palette
-
 
 # Log levels mapped to colors
 LEVEL_COLORS = {
@@ -48,7 +40,7 @@ class ColorLogWidget(QPlainTextEdit):
         log.append_line("[PHASE] Epoch 1/3", level="phase", bold=True)
     """
 
-    def __init__(self, max_lines: int = 500, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, max_lines: int = 500, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
         self.setMaximumBlockCount(max_lines)

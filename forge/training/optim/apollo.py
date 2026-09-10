@@ -64,9 +64,9 @@ class APOLLO(Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.9), eps=1e-8,
                  weight_decay=0.01, rank=8, scale="tensor",
                  scale_weight=1.0, proj_freq=0):
-        if not 0.0 <= lr:
+        if not lr >= 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        if not 0.0 <= eps:
+        if not eps >= 0.0:
             raise ValueError(f"Invalid epsilon: {eps}")
         if not 0.0 <= betas[0] < 1.0:
             raise ValueError(f"Invalid beta1: {betas[0]}")
@@ -93,7 +93,7 @@ class APOLLO(Optimizer):
             wd = group["weight_decay"]
             rank = group["rank"]
             scale_mode = group["scale"]
-            scale_weight = group["scale_weight"]
+            group["scale_weight"]
             proj_freq = group["proj_freq"]
 
             for p in group["params"]:

@@ -1,11 +1,7 @@
 """LogView — read-only tailed log console with level coloring + search highlight."""
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt
-from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
-                           QTextDocument)
+from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QTextDocument
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from ..theme import Palette
@@ -39,7 +35,7 @@ class _LevelHighlighter(QSyntaxHighlighter):
 class LogView(QPlainTextEdit):
     """Append-only log console with level coloring and a cap on buffer size."""
 
-    def __init__(self, parent: Optional[QWidget] = None, max_blocks: int = 4000) -> None:
+    def __init__(self, parent: QWidget | None = None, max_blocks: int = 4000) -> None:
         super().__init__(parent)
         self.setObjectName("logView")
         self.setReadOnly(True)

@@ -55,17 +55,19 @@ Usage:
     with ForgeEngine.from_checkpoint(...) as engine:
         engine.generate("...")
 """
-import os
-import time
 import json
+import logging
+import os
 import threading
-from pathlib import Path
+import time
 from collections.abc import Iterator
-from typing import Optional, Dict
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
 # EOS token IDs for all supported parent models:
@@ -108,7 +110,7 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
     # Find the sharpest transition (semantic cliff).
     # The cliff is where the weighted decay rate exceeds sensitivity * max_decay.
     max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
-    cliff_mask = weighted_diffs > sensitivity * max_decay  # (batch, n)
+    weighted_diffs > sensitivity * max_decay  # (batch, n)
     # Find the first cliff position (rightmost cliff that separates core from tail).
     # We want to keep all tokens up to and including the last cliff.
     # cliff_mask is True at positions where there's a sharp transition.
@@ -132,6 +134,7 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
 # Thread-safe: guarded by _ckpt_cache_lock (forge_server runs generate() from
 # multiple worker threads via SessionManager/BatchQueue).
 from collections import OrderedDict as _OrderedDict
+
 _CKPT_CACHE_MAX = 64
 _checkpoint_metadata_cache: _OrderedDict[tuple[str, float], dict] = _OrderedDict()
 _checkpoint_size_cache: _OrderedDict[str, int] = _OrderedDict()
@@ -152,6 +155,8 @@ def _tokenizer_for_vocab(vocab_size: int | None) -> str:
 
 from forge.engine.activation import ActivationConfig
 from forge.engine.airllm_streamer import AirLLMStreamer
+from forge.engine.cascade import ModelCascade
+from forge.engine.crash_recovery import CrashRecoveryManager
 from forge.engine.decoding import DecodingStrategy, StandardDecoding, build_decoding
 from forge.engine.diagnostics import (
     BandwidthProfiler,
@@ -160,42 +165,42 @@ from forge.engine.diagnostics import (
     OutputHistory,
     build_health_report,
 )
+from forge.engine.engine_tools import EngineToolRegistry
+from forge.engine.errors import (
+    ActivationError,
+    CheckpointError,
+    ConfigurationError,
+    ForgeEngineError,
+    GenerationOOMError,
+)
 from forge.engine.feature_registry import _FEATURE_REGISTRY
+from forge.engine.hotswap import HotSwapManager
 from forge.engine.innovations import (
     MRLAdaptiveContext,
     ProgressiveKV,
     QuaRotKV,
     V0WarmStart,
 )
+from forge.engine.kv.cacheblend import CacheBlend
 from forge.engine.kv_backend import KVCacheStrategy, build_kv_cache
+from forge.engine.library import Library
 from forge.engine.prefix_cache import (
-    LRUPrefixCache,
     ChunkedPrefixCache,
+    LRUPrefixCache,
     SemanticKVAnchors,
+)
+from forge.engine.prefix_cache import (
     cache_prompt_prefix as _cache_prompt_prefix,
+)
+from forge.engine.prefix_cache import (
     generate_from_prefix_cache as _generate_from_prefix_cache,
 )
-from forge.engine.kv.cacheblend import CacheBlend
-from forge.engine.crash_recovery import CrashRecoveryManager
-from forge.engine.errors import (
-    ActivationError,
-    CheckpointError,
-    ConfigurationError,
-    ForgeEngineError,
-    GenerationError,
-    GenerationOOMError,
-    GenerationTimeoutError,
-)
 from forge.engine.session_cache import SessionCacheManager
-from forge.engine.hotswap import HotSwapManager, EngineSettings
-from forge.engine.library import Library
-from forge.engine.engine_tools import EngineToolRegistry
 from forge.engine.test_time_scaling import (
     BeamSearch,
     FirstFinishSearch,
     MCTSDecoder,
 )
-from forge.engine.cascade import ModelCascade
 from forge.model_loader import unpack_output_with_kv
 
 
@@ -403,11 +408,11 @@ class ForgeEngine:
                 try:
                     self.model.cpu()
                 except Exception:
-                    pass
+                    logger.debug("Failed to move model to CPU during cleanup", exc_info=True)
             if hasattr(self, 'device') and self.device.type == "cuda":
                 torch.cuda.empty_cache()
         except Exception:
-            pass
+            logger.debug("Error during engine cleanup", exc_info=True)
 
     @staticmethod
     def _clear_cuda_cache_static(device):
@@ -436,7 +441,7 @@ class ForgeEngine:
                     try:
                         method()
                     except Exception:
-                        pass
+                        logger.debug("Error releasing %s via %s", attr, method_name, exc_info=True)
                     break
             setattr(self, attr, None)
         self.acceleration = None
@@ -613,7 +618,8 @@ class ForgeEngine:
                     f"Cannot access checkpoint '{checkpoint}': {e}",
                     context={"checkpoint": checkpoint},
                     suggestion="Verify the path exists and is a valid "
-                               "safetensors file or directory of shards.")
+                               "safetensors file or directory of shards.",
+                ) from e
             with _ckpt_cache_lock:
                 _checkpoint_size_cache[checkpoint] = ckpt_size
                 while len(_checkpoint_size_cache) > _CKPT_CACHE_MAX:
@@ -817,7 +823,7 @@ class ForgeEngine:
                     pass
 
             try:
-                from forge.quant.fp8_infer import quantize_model_fp8  # noqa
+                from forge.quant.fp8_infer import quantize_model_fp8
                 return "fp8"
             except ImportError:
                 pass
@@ -878,7 +884,7 @@ class ForgeEngine:
         return metadata
 
     @staticmethod
-    def _read_safetensors_header(checkpoint) -> Optional[dict]:
+    def _read_safetensors_header(checkpoint) -> dict | None:
         """Raw safetensors header (tensor name → {shape, dtype, ...}).
 
         Reads only the JSON header (8-byte length prefix + payload) — no
@@ -934,7 +940,7 @@ class ForgeEngine:
         if not problems:
             return
 
-        keys = list(shapes)
+        list(shapes)
         hints = []
         if any(k.startswith("model.") for k in shapes):
             hints.append("transformers/HF-style key names")
@@ -950,7 +956,7 @@ class ForgeEngine:
                        "re-export the checkpoint in ForgeLM KeyStack format.")
 
     @classmethod
-    def _detect_config_from_header(cls, checkpoint) -> Optional[str]:
+    def _detect_config_from_header(cls, checkpoint) -> str | None:
         """Infer a matching MODEL_CONFIGS preset from checkpoint tensor shapes.
 
         Reads the safetensors header (no tensor loading), extracts
@@ -959,6 +965,7 @@ class ForgeEngine:
         preset matches (or the file has no readable header).
         """
         import re
+
         from forge.config import MODEL_CONFIGS
         path = Path(checkpoint)
         if path.suffix.lower() != ".safetensors" or path.is_dir():
@@ -994,13 +1001,18 @@ class ForgeEngine:
         normally as bf16. Peak CPU RAM is ~6 GB (int8 state dict) instead
         of ~17 GB (int8 + bf16 intermediate).
         """
+        import gc
+        import time
+
+        from safetensors import safe_open
+
+        from forge.config import ModelConfig
         from forge.keys.quantization.bitnet_b158_key import (
-            BitNetLinear, BitNetConv1d, BitNetEmbedding,
+            BitNetConv1d,
+            BitNetEmbedding,
+            BitNetLinear,
         )
         from forge.model_loader import ModelLoader
-        from forge.config import ModelConfig
-        from safetensors import safe_open
-        import time, gc
 
         t0 = time.time()
         print("  [ForgeEngine] Pre-quantized BitNet checkpoint: "
@@ -1173,8 +1185,8 @@ class ForgeEngine:
         the extracted weights. The GGUF metadata is used to auto-detect the
         architecture and build an appropriate ModelConfig.
         """
-        from forge.engine.forge_loader import ForgeLoader, GGUFInfo
         from forge.config import ModelConfig
+        from forge.engine.forge_loader import GGUFInfo
         from forge.model_loader import ModelLoader
 
         print(f"  [ForgeEngine] Loading GGUF: {checkpoint}")
@@ -1653,7 +1665,7 @@ class ForgeEngine:
                 eagle_path = self.checkpoint_path.replace(
                     ".safetensors", ".eagle3.safetensors")
                 if os.path.exists(eagle_path):
-                    from forge.decoding.eagle import Eagle3Head, add_eagle3_to_model
+                    from forge.decoding.eagle import add_eagle3_to_model
                     head = add_eagle3_to_model(self.model)
                     from safetensors.torch import load_file
                     head.load_state_dict(load_file(eagle_path))
@@ -1915,14 +1927,14 @@ class ForgeEngine:
 
     def block_reconstruct(
         self,
-        model_orig: Optional[nn.Module] = None,
-        calibration_data: Optional[torch.Tensor] = None,
+        model_orig: nn.Module | None = None,
+        calibration_data: torch.Tensor | None = None,
         n_iters: int = 50,
         lr: float = 0.05,
         mode: str = "progressive",
         kl_iters: int = 20,
         verbose: bool = True,
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         """Run block-level reconstruction on the quantized model.
 
         Optimizes quantized layer parameters (scales + latent binary matrices
@@ -2081,7 +2093,10 @@ class ForgeEngine:
                       f"SSM core (A_log, dt, scan) kept in FP16.")
         elif mode == "awq_fp4":
             from forge.engine.quant.novel_quant_r46 import (
-                quantize_model_awq_fp4, collect_activations as _collect_acts_r46,
+                collect_activations as _collect_acts_r46,
+            )
+            from forge.engine.quant.novel_quant_r46 import (
+                quantize_model_awq_fp4,
             )
             # AWQ-FP4 needs calibration data — use a short forward pass
             cfg = getattr(self.model, "config", None)
@@ -2114,8 +2129,10 @@ class ForgeEngine:
                       f"K={K}). Sub-1-bit via pattern clustering.")
         elif mode == "ternary_ptq":
             from forge.engine.quant.novel_quant_r48 import (
-                quantize_model_ternary_ptq,
                 collect_activations as _collect_acts_r48,
+            )
+            from forge.engine.quant.novel_quant_r48 import (
+                quantize_model_ternary_ptq,
             )
             cfg = getattr(self.model, "config", None)
             vocab_size = getattr(cfg, "vocab_size", 32000) if cfg else 32000
@@ -2376,7 +2393,7 @@ class ForgeEngine:
                         kv_state=captured_kv,
                     )
         except Exception:
-            pass
+            logger.debug("Failed to save semantic KV anchors", exc_info=True)
         return result
 
     # ── Test-time scaling & cascade routing (R39-6 / R39-8) ──────────────
@@ -2677,7 +2694,8 @@ class ForgeEngine:
               - "rounds": number of rounds executed
         """
         from forge.self_play.discovery.qwen_adapter import (
-            qwen_render_messages, qwen_parse_tool_calls,
+            qwen_parse_tool_calls,
+            qwen_render_messages,
         )
 
         # Build tool definitions: built-in + extra
@@ -3172,7 +3190,8 @@ class ForgeEngine:
                 f"OOM during streaming generation: {e}",
                 context={"vram": vram},
                 suggestion=("Use generate_raw() instead of generate_stream() "
-                            "for OOM recovery, or reduce max_new_tokens."))
+                            "for OOM recovery, or reduce max_new_tokens."),
+            ) from e
 
     def _record_generation(self, n_gen: int):
         """Update generation counters (shared by all generate methods)."""
@@ -3255,7 +3274,7 @@ class ForgeEngine:
 
             # Attempt 2: reduce KV bits + switch to S4R
             old_kv = self.kv_cache
-            old_bits = getattr(self, '_active_kv_bits', 8)
+            getattr(self, '_active_kv_bits', 8)
             try:
                 self._log("Retrying with S4R 4-bit KV cache...")
                 self._activate_kv_cache("s4r", None)
@@ -3286,7 +3305,8 @@ class ForgeEngine:
                          "vram_total_gb": vram["total_gb"],
                          "model": getattr(self.config, "name", "unknown")},
                 suggestion=("Try engine.sleep(1) to offload weights to CPU, "
-                            "or use quantize='int4' for 4x weight compression."))
+                            "or use quantize='int4' for 4x weight compression.")
+            ) from e
 
     def _safe_decode_ids(self, token_ids: list[int],
                          skip_special_tokens: bool = True) -> str:
@@ -3406,7 +3426,6 @@ class ForgeEngine:
           - prompt: list of {token, logprob, bytes, top_logprobs} per
             prompt token (up to ``prompt_logprobs`` alternatives each)
         """
-        device = prompt_ids.device
         prompt_len = prompt_ids.shape[1]
         gen_ids = output_ids[0, prompt_len:]
 
@@ -3706,13 +3725,22 @@ class ForgeEngine:
         Returns:
             Path to the saved merged checkpoint.
         """
-        from research.merge_models import (
-            crossover_blockwise, crossover_block_random, crossover_uniform,
-            mutate_gaussian, mutate_quant_perturb, mutate_block_swap,
-            merge_slerp, merge_linear, merge_ties, merge_dare, merge_svd,
-            merge_task_arith, _task_vectors,
-        )
         from forge.checkpoint_io import save_checkpoint
+        from research.merge_models import (
+            _task_vectors,
+            crossover_block_random,
+            crossover_blockwise,
+            crossover_uniform,
+            merge_dare,
+            merge_linear,
+            merge_slerp,
+            merge_svd,
+            merge_task_arith,
+            merge_ties,
+            mutate_block_swap,
+            mutate_gaussian,
+            mutate_quant_perturb,
+        )
         from research.paths import DATA_DIR
 
         if len(parents) < 1:
@@ -3768,7 +3796,7 @@ class ForgeEngine:
 
         if load_result:
             self._swap_weights(merged)
-            self._log(f"Merge result hot-swapped into engine")
+            self._log("Merge result hot-swapped into engine")
 
         return out_path
 
@@ -3867,8 +3895,8 @@ class ForgeEngine:
             - "history": list of per-gen fitness stats
             - "final_population": list of state dicts
         """
-        from research.merge_models import evolve
         from forge.checkpoint_io import save_checkpoint
+        from research.merge_models import evolve
         from research.paths import DATA_DIR
 
         if len(parents) < 2:
@@ -3978,7 +4006,9 @@ class ForgeEngine:
             ValueError: If LoRA checkpoint doesn't match model structure.
         """
         from pathlib import Path
+
         from safetensors.torch import load_file as _load
+
         from forge.training.bitnet_lora import add_lora_adapters
 
         if alpha is None:

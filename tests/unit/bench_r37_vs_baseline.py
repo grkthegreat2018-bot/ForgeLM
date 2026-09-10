@@ -29,7 +29,7 @@ from forge.keys.architecture.mamba3_key import Mamba3Key, MAMBA3_PASSTHROUGH, MA
 from forge.keys.architecture.kronecker_embed_key import KroneckerEmbedKey, KroneckerEmbedding
 from forge.keys.architecture.pit_tying_key import PITKey
 from forge.keys.attention.outro_key import OutRoKey
-from forge.keys.architecture.forge_hybrid_key import ForgeHybridKey
+from tests.fixtures.keys.architecture.forge_hybrid_key import ForgeHybridKey
 from forge.config import get_config, MODEL_CONFIGS
 
 

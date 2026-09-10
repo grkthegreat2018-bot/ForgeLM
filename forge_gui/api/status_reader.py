@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +55,7 @@ class RunSnapshot:
         return min(100.0, 100.0 * self.step / self.max_steps)
 
     @property
-    def eta_s(self) -> Optional[float]:
+    def eta_s(self) -> float | None:
         if self.step <= 0 or self.max_steps <= 0 or self.updated_at <= 0:
             return None
         return None  # filled by reader if start_ts present
@@ -70,7 +68,7 @@ class RunSnapshot:
 class StatusReader:
     """Polls status.json files and returns RunSnapshots."""
 
-    def __init__(self, search_dirs: Optional[list[Path]] = None) -> None:
+    def __init__(self, search_dirs: list[Path] | None = None) -> None:
         self.search_dirs = search_dirs or _default_search_dirs()
         self._known: dict[str, float] = {}  # path -> mtime last seen
         self._data_cache: dict[str, dict] = {}  # path -> last parsed JSON
@@ -111,7 +109,7 @@ class StatusReader:
                 data = self._data_cache[key]
             else:
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception as e:
                     logger.warning("failed to read status file %s: %s", path, e)
@@ -164,7 +162,7 @@ class StatusReader:
         if not log_path or not log_path.is_file():
             return []
         try:
-            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(log_path, encoding="utf-8", errors="ignore") as f:
                 all_lines = f.readlines()
             return [ln.rstrip("\n") for ln in all_lines[-lines:]]
         except Exception as e:

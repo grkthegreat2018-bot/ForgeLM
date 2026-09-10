@@ -28,10 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
 
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
 
 # Tools that write new content and must be fingerprint-checked.
 _WRITE_TOOLS = {"think", "sudo_think", "run_script", "propose_theory",
@@ -65,7 +63,7 @@ class FingerprintSet:
         self._seen: set[str] = set()
 
     @classmethod
-    def from_db(cls, db: DiscoveryDB) -> "FingerprintSet":
+    def from_db(cls, db: DiscoveryDB) -> FingerprintSet:
         fs = cls()
         for row in db.all_content_rows():
             fs._seen.add(fingerprint(row["content"]))

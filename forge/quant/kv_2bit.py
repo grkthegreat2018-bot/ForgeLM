@@ -14,7 +14,6 @@ Usage:
                         device="cuda", dtype=torch.bfloat16)
 """
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 

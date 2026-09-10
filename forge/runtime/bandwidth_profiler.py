@@ -22,10 +22,11 @@ Usage:
 """
 from __future__ import annotations
 
-import time
 import threading
+import time
+from dataclasses import dataclass
+
 import torch
-from dataclasses import dataclass, field
 
 
 @dataclass

@@ -17,8 +17,15 @@ from unittest.mock import patch
 import pytest
 
 from forge_gui.api.web_tools import (
-    WebTools, _arxiv_search, _is_safe_url, _strip_ddg_redirect,
-    _web_fetch, _web_search, _wikipedia_search, web_tool_defs,
+    WebTools, web_tool_defs,
+)
+from forge.web_primitives import (
+    arxiv_search as _arxiv_search,
+    ddg_search as _web_search,
+    fetch_url as _web_fetch,
+    is_safe_url as _is_safe_url,
+    strip_ddg_redirect as _strip_ddg_redirect,
+    wikipedia_search as _wikipedia_search,
 )
 from forge_gui.api.tool_harness import ToolHarness
 
@@ -96,7 +103,7 @@ _DDG_HTML = """
 
 
 def test_web_search_parses_results():
-    with patch("forge_gui.api.web_tools.urlopen",
+    with patch("forge.web_primitives.urlopen",
                _fake_urlopen(_DDG_HTML)):
         res = _web_search("urllib", n=5)
     assert res["error"] is None
@@ -118,14 +125,14 @@ def test_web_search_empty_query():
 def test_web_search_network_error():
     def boom(*a, **kw):
         raise OSError("connection refused")
-    with patch("forge_gui.api.web_tools.urlopen", boom):
+    with patch("forge.web_primitives.urlopen", boom):
         res = _web_search("anything")
     assert res["results"] == []
     assert "fetch failed" in res["error"]
 
 
 def test_web_search_no_results():
-    with patch("forge_gui.api.web_tools.urlopen",
+    with patch("forge.web_primitives.urlopen",
                _fake_urlopen("<html><body>no results here</body></html>")):
         res = _web_search("zzz")
     assert res["results"] == []
@@ -136,7 +143,7 @@ def test_web_search_no_results():
 def test_web_fetch_strips_html():
     html = ("<html><head><script>evil()</script><style>x{}</style></head>"
             "<body><p>Hello   world</p></body></html>")
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(html)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
         res = _web_fetch("https://example.com")
     assert res["error"] is None
     assert res["url"] == "https://example.com"
@@ -160,7 +167,7 @@ def test_web_fetch_rejects_file_scheme():
 def test_web_fetch_network_error():
     def boom(*a, **kw):
         raise OSError("404")
-    with patch("forge_gui.api.web_tools.urlopen", boom):
+    with patch("forge.web_primitives.urlopen", boom):
         res = _web_fetch("https://example.com/missing")
     assert res["text"] == ""
     assert "fetch failed" in res["error"]
@@ -168,7 +175,7 @@ def test_web_fetch_network_error():
 
 def test_web_fetch_truncates():
     html = "<body>" + ("x " * 5000) + "</body>"
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(html)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
         res = _web_fetch("https://example.com", max_chars=100)
     assert len(res["text"]) <= 100
     assert res["truncated"] is True
@@ -184,7 +191,7 @@ _WIKI_JSON = json.dumps({
 
 
 def test_wikipedia_search_parses():
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(_WIKI_JSON)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_WIKI_JSON)):
         res = _wikipedia_search("python", n=2)
     assert res["error"] is None
     assert len(res["results"]) == 2
@@ -196,7 +203,7 @@ def test_wikipedia_search_parses():
 def test_wikipedia_search_network_error():
     def boom(*a, **kw):
         raise OSError("dns fail")
-    with patch("forge_gui.api.web_tools.urlopen", boom):
+    with patch("forge.web_primitives.urlopen", boom):
         res = _wikipedia_search("x")
     assert res["results"] == []
     assert "dns fail" in res["error"]
@@ -215,7 +222,7 @@ _ARXIV_XML = """<?xml version="1.0"?>
 
 
 def test_arxiv_search_parses():
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(_ARXIV_XML)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_ARXIV_XML)):
         res = _arxiv_search("transformer", n=3)
     assert res["error"] is None
     assert len(res["results"]) == 1
@@ -229,7 +236,7 @@ def test_arxiv_search_parses():
 def test_arxiv_search_network_error():
     def boom(*a, **kw):
         raise OSError("timeout")
-    with patch("forge_gui.api.web_tools.urlopen", boom):
+    with patch("forge.web_primitives.urlopen", boom):
         res = _arxiv_search("x")
     assert res["results"] == []
     assert "timeout" in res["error"]
@@ -238,7 +245,7 @@ def test_arxiv_search_network_error():
 # ── WebTools.execute dispatch ───────────────────────────────────────────
 def test_webtools_execute_dispatch():
     wt = WebTools()
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(_DDG_HTML)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_DDG_HTML)):
         res = wt.execute("web_search", {"query": "test"})
     # success → error key popped by execute() normalization
     assert "error" not in res
@@ -265,7 +272,7 @@ def test_webtools_execute_clamps_n():
         captured["url"] = req.full_url
         return _FakeResp(b"<html></html>")
 
-    with patch("forge_gui.api.web_tools.urlopen", fake_open):
+    with patch("forge.web_primitives.urlopen", fake_open):
         wt.execute("web_search", {"query": "x", "n": 999})
     # n clamped to 10 → srlimit/max_results stays bounded (DDG ignores extra)
     assert "q=x" in captured["url"]
@@ -274,7 +281,7 @@ def test_webtools_execute_clamps_n():
 def test_webtools_execute_clamps_max_chars():
     wt = WebTools()
     html = "<body>" + ("y " * 10000) + "</body>"
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(html)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
         res = wt.execute("web_fetch", {"url": "https://x.com", "max_chars": 999999})
     # clamped to 8000
     assert len(res["text"]) <= 8000
@@ -295,7 +302,7 @@ def test_harness_no_web_tools_when_none(tmp_path):
 
 def test_harness_dispatches_web_tool(tmp_path):
     h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools())
-    with patch("forge_gui.api.web_tools.urlopen", _fake_urlopen(_DDG_HTML)):
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_DDG_HTML)):
         rec = h.execute("web_search", {"query": "urllib"})
     assert rec["ok"] is True
     assert rec["name"] == "web_search"

@@ -15,7 +15,6 @@ Usage:
     from forge.engine.kv.snapkv import SnapKVCache
     cache = SnapKVCache(observation_window=128, budget=512)
 """
-from typing import Dict, List, Optional, Tuple
 
 import torch
 

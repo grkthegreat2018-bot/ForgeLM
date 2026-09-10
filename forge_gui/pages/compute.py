@@ -1,12 +1,13 @@
 """Compute page — GPU topology, VRAM allocator, kernel/compile status, executor."""
 from __future__ import annotations
 
+import logging
 import time
-from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
 from ..api.gpu_monitor import GpuMonitor
 from ..theme import Palette
@@ -18,7 +19,7 @@ from ._base import card_grid, page_container, section_label
 
 
 class ComputePage(QWidget):
-    def __init__(self, gpu: GpuMonitor, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, gpu: GpuMonitor, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._gpu = gpu
         self._prev_vram_pct = 0.0
@@ -142,7 +143,7 @@ class ComputePage(QWidget):
                 info.append(f"compute cap:   {torch.cuda.get_device_capability()}")
                 info.append(f"streams:       {torch.cuda.Stream().query() and 'ok'}")
         except Exception:
-            pass
+            logger.debug("Failed to gather torch info for compute page", exc_info=True)
         self._torch_info.setText("\n".join(info))
 
     def _log_vram_events(self, gs) -> None:

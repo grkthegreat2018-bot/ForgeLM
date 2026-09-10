@@ -14,14 +14,15 @@ error + memory savings. Score = -error * 100 + compression * 5.
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
-import time
 from typing import Any
+
+import torch
+
 from . import BaseDomain
 from .kv_utils import (
-    generate_synthetic_kv, generate_synthetic_q,
-    full_attention_output, measure_speed,
+    full_attention_output,
+    generate_synthetic_kv,
+    generate_synthetic_q,
 )
 
 
@@ -261,7 +262,7 @@ class HqeKVDomain(BaseDomain):
                           "group_size": gs, "recency_decay": 0.95})
         return seeds
 
-    def to_cpu(self) -> "HqeKVDomain":
+    def to_cpu(self) -> HqeKVDomain:
         """Create CPU copy for parallel evaluation."""
         return HqeKVDomain(seq_len=self.seq_len, seed=43,
                           device=torch.device("cpu"))

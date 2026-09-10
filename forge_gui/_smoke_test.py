@@ -1,7 +1,9 @@
 """Headless smoke test — construction + page switching + refresh (no render)."""
 import sys
+
 from PySide6.QtWidgets import QApplication
-from forge_gui.app import MainWindow, _NUM_PAGES
+
+from forge_gui.app import _NUM_PAGES, MainWindow
 
 
 def main() -> int:

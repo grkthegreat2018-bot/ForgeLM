@@ -33,8 +33,12 @@ graphs (useful for MoD where some blocks are skipped).
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class BlockFusionRunner:
@@ -115,13 +119,12 @@ class BlockFusionRunner:
 
         # Capture
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(graph):
-                try:
-                    self._static_outputs[block_idx] = block(
-                        static_x, position_ids=static_pos)
-                except Exception:
-                    return
+        with torch.inference_mode(), torch.cuda.graph(graph):
+            try:
+                self._static_outputs[block_idx] = block(
+                    static_x, position_ids=static_pos)
+            except Exception:
+                return
 
         self._block_graphs[block_idx] = graph
 
@@ -201,7 +204,7 @@ class CompiledBlockFusion(BlockFusionRunner):
             try:
                 block = torch.compile(block, mode=compile_mode, fullgraph=False)
             except Exception:
-                pass
+                logger.debug("torch.compile failed for block fusion, using uncompiled block", exc_info=True)
         super().__init__(model, device)
 
     @staticmethod

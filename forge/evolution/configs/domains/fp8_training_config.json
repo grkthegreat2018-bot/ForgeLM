@@ -1,0 +1,27 @@
+{
+  "name": "fp8_training_config",
+  "category": "training",
+  "description": "FP8 autocast mode, smooth_swiglu, mu_scaling, loss_scale. Metrics: dynamic_range, overflow, quant_err. Scoring fix: quant_error_measure.",
+  "simulator": "fp8_training_simulate",
+  "params": [
+    {"name": "autocast_mode", "type": "choice", "values": ["e4m3", "e5m2"]},
+    {"name": "smooth_swiglu", "type": "bool"},
+    {"name": "mu_scaling", "type": "bool"},
+    {"name": "loss_scale", "type": "float", "range": [128, 4096]}
+  ],
+  "behavioral_dims": [["dynamic_range_norm", 10, 0, 1], ["overflow_risk", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "dynamic_range", "weight": 3.0},
+      {"metric": "overflow", "weight": -100.0},
+      {"metric": "quant_err", "weight": -30.0},
+      {"metric": "mu_scaling_bonus", "weight": 1.0},
+      {"metric": "smooth_swiglu_bonus", "weight": 1.0},
+      {"metric": "loss_scale_bonus", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "quant_error_measure"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

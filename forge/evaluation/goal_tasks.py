@@ -32,9 +32,8 @@ Usage:
 """
 import math
 import random
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 # ─── GoalTask ─────────────────────────────────────────────────────────
 
@@ -148,7 +147,7 @@ def _gen_is_prime_inputs(difficulty: str) -> list[tuple]:
         return [(2,), (1,), (97,), (997,), (7919,)]
 
 def _gen_gcd_inputs(difficulty: str) -> list[tuple]:
-    rng = random.Random(42)
+    random.Random(42)
     if difficulty == "easy":
         return [(12, 8,), (7, 3,), (0, 5,)]
     elif difficulty == "medium":
@@ -165,7 +164,7 @@ def _gen_reverse_string_inputs(difficulty: str) -> list[tuple]:
         return [("hello",), ("",), ("racecar",), ("a" * 100,)]
 
 def _gen_sum_list_inputs(difficulty: str) -> list[tuple]:
-    rng = random.Random(42)
+    random.Random(42)
     if difficulty == "easy":
         return [([1, 2, 3],), ([],), ([5],)]
     elif difficulty == "medium":

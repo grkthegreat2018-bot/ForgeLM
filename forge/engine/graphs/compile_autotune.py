@@ -27,12 +27,13 @@ caching the result so subsequent runs skip the benchmark.
 from __future__ import annotations
 
 import json
-import os
+import logging
 import time
 from pathlib import Path
 
 import torch
 
+logger = logging.getLogger(__name__)
 
 # Cache file for compile mode benchmark results.
 # Lives under research/runtime/ (gitignored runtime cache directory).
@@ -71,7 +72,7 @@ def _run_benchmark(
     with torch.inference_mode():
         for _ in range(n_benchmark):
             try:
-                out = compiled(input_ids)
+                compiled(input_ids)
                 n_tokens += input_ids.shape[1]
             except Exception:
                 return 0.0
@@ -119,7 +120,7 @@ def auto_tune_compile(
                 compiled = torch.compile(model, mode=best_mode, fullgraph=False)
                 return best_mode, compiled
         except Exception:
-            pass
+            logger.debug("Failed to load cached compile mode result", exc_info=True)
 
     # Benchmark each mode
     results = {}
@@ -148,7 +149,7 @@ def auto_tune_compile(
         }
         _CACHE_FILE.write_text(json.dumps(cache, indent=2))
     except Exception:
-        pass
+        logger.debug("Failed to save compile mode cache", exc_info=True)
 
     compiled = torch.compile(model, mode=best_mode, fullgraph=False)
     return best_mode, compiled

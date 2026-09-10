@@ -31,7 +31,6 @@ Usage:
     output = dspark_generate(model, head, input_ids, max_new_tokens=100)
 """
 from collections.abc import Callable
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -292,7 +291,6 @@ class DSparkHead(nn.Module):
         """
         model.eval()
         self.eval()
-        device = input_ids.device
         block_size = min(max_block_size, self.n_predict)
 
         # 1. Forward pass through main model to get hidden states.
@@ -516,7 +514,7 @@ class DSparkTrainer:
                 if offset >= T:
                     break
                 # Target distribution at position t+k+1.
-                shifted = input_ids[:, offset:]
+                input_ids[:, offset:]
                 tgt_hidden = hidden[:, :-offset, :]
                 if hasattr(self.model, "head"):
                     tgt_logits = self.model.head(tgt_hidden)

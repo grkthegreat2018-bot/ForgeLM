@@ -54,7 +54,7 @@ def optimizer_simulate(config: dict, domain=None) -> dict:
 @register("scheduler_simulate")
 def scheduler_simulate(config: dict, domain=None) -> dict:
     """Scheduler type, warmup, min_lr_ratio, decay_steps. Metrics: auc, final_decay, early_lr_jump."""
-    device = domain.device if domain is not None else torch.device("cpu")
+    domain.device if domain is not None else torch.device("cpu")
     base_lr = 1e-3
     ws = config["warmup_steps"]
     ds = config["decay_steps"]
@@ -223,8 +223,8 @@ def mod_simulate(config: dict, domain=None) -> dict:
     """
     device = domain.device if domain is not None else torch.device("cpu")
     kf = config["keep_fraction"]
-    nsl = config["n_skip_layers"]
-    alw = config["aux_loss_weight"]
+    config["n_skip_layers"]
+    config["aux_loss_weight"]
     rt = config["router_type"]
     tokens = torch.randn(128, 512, device=device)
     router = torch.randn(128, device=device)

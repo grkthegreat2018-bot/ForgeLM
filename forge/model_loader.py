@@ -1,39 +1,32 @@
 """Modular model factory and inference engine for ForgeAI research."""
 import copy
+import logging
 import math
 import os
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# Apply ForgeAI's global runtime settings (CUDA env vars, cache dirs, TF32
+# toggles, orphaned-tmp cleanup) via the centralized, idempotent
+# ``forge.runtime.configure()`` entrypoint.  This call is kept at import time
+# here so existing callers that do ``import forge.model_loader`` continue to
+# get the same environment they always did — the side effects are now just
+# centralized in one auditable place instead of inlined below.  See critique
+# finding F17 and ``forge/runtime/configure.py`` for details.
+from forge.runtime.configure import configure
+
+configure()
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Enable safetensors fast CUDA loading (pinned-memory + async DMA to GPU).
-# This dramatically speeds up weight loading on CUDA by using pinned host
-# memory and asynchronous copies instead of synchronous per-tensor CPU→GPU.
-os.environ.setdefault("SAFETENSORS_FAST_CUDA", "1")
-
-# Short Triton/inductor cache dirs. The default (%TEMP%\torchinductor_<user>
-# with a "triton\<device>\<key>" suffix) plus Triton's long fused kernel names
-# (~130 chars) exceeds Windows MAX_PATH (260 chars), so open() fails with
-# FileNotFoundError during torch.compile. Project-local short dirs keep paths
-# well under the limit and persist compiled kernels across runs.
-from research.paths import TORCH_CACHE_DIR  # noqa: E402
-os.environ.setdefault("TRITON_CACHE_DIR", str(TORCH_CACHE_DIR / "triton"))
-os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(TORCH_CACHE_DIR))
-os.environ.setdefault("TORCHINDUCTOR_PERSISTENT_AUTOTUNE_DIR", str(TORCH_CACHE_DIR))
-
-# Enable TensorFloat32 tensor cores for float32 matmuls (RTX 5070 supports this).
-# Free ~8x speedup on fp32 matmuls with negligible precision loss (~1e-5).
-torch.set_float32_matmul_precision("high")
-# Also enable TF32 for cuDNN convolutions (affects conv layers, attention padding ops)
-if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
 from forge.config import ModelConfig
+from forge.keys._tensor_utils import _repeat_kv as _repeat_kv_shared
+from forge.keys._tensor_utils import _rotate_half
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -179,7 +172,7 @@ class PreAllocatedKVCache:
 
 
 def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
-                    device: Optional[torch.device] = None) -> PreAllocatedKVCache:
+                    device: torch.device | None = None) -> PreAllocatedKVCache:
     """Build a PreAllocatedKVCache sized for *model* with per-layer head counts.
 
     Handles hybrid conv/attention architectures (e.g. LFM2.5): conv layers get
@@ -214,7 +207,7 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
     )
 
 
-def unpack_output_with_kv(out) -> Tuple[torch.Tensor, Optional[KVCache]]:
+def unpack_output_with_kv(out) -> tuple[torch.Tensor, KVCache | None]:
     """Unpack a model forward output into (logits, past_kv).
 
     Handles:
@@ -493,11 +486,7 @@ class RotaryEmbedding(nn.Module):
         scale = torch.where(wavelens < low_freq_wavelen, torch.ones_like(scale), scale)
         return inv_freq / scale
 
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
+    _rotate_half = staticmethod(_rotate_half)
 
     def forward(self, x: torch.Tensor, offset: int = 0,
                 position_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -575,10 +564,7 @@ class GroupedQueryAttention(nn.Module):
 
     def _repeat_kv(self, x):
         """Repeat KV heads to match query heads."""
-        if self.n_rep == 1:
-            return x
-        B, n_kv, T, hd = x.shape
-        return x[:, :, None, :, :].expand(B, n_kv, self.n_rep, T, hd).reshape(B, n_kv * self.n_rep, T, hd)
+        return _repeat_kv_shared(x, self.n_rep)
 
     def forward(self, x, past_key_value=None, use_cache=False,
                 preallocated_cache: Optional["PreAllocatedKVCache"] = None, layer_idx: int = 0,
@@ -735,8 +721,7 @@ class DoubleGatedConvLayer(nn.Module):
         self.d_model = d_model
         self.kernel_size = kernel_size
         if use_bitnet and bitnet_config is not None:
-            from forge.keys.quantization.bitnet_b158_key import (
-                build_bitnet_linear, build_bitnet_conv1d)
+            from forge.keys.quantization.bitnet_b158_key import build_bitnet_conv1d, build_bitnet_linear
             self.in_proj = build_bitnet_linear(
                 bitnet_config, d_model, 3 * d_model, bias=bias)
             self.conv = build_bitnet_conv1d(
@@ -846,7 +831,7 @@ class DoubleGatedConvLayer(nn.Module):
             # Initialize state from last (kernel_size - 1) tokens of GATED input
             if use_cache:
                 self._init_conv_state(B, x.device, x.dtype)
-                if T >= self.kernel_size - 1:
+                if self.kernel_size - 1 <= T:
                     self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()
                 else:
                     pad_len = self.kernel_size - 1 - T
@@ -1345,7 +1330,7 @@ def build_attention(config: ModelConfig) -> nn.Module:
                   use_rope=getattr(config, 'use_rope', True))
     # LeRoPE/AdaRoPE: learnable RoPE frequencies (identity init = lossless).
     # Applied post-construction by replacing the RotaryEmbedding module.
-    rope_variant = getattr(config, 'rope_variant', 'standard')
+    getattr(config, 'rope_variant', 'standard')
     if config.attn_type == "gqa":
         attn = GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False))
@@ -1414,7 +1399,7 @@ def _maybe_apply_lerope(config: ModelConfig, attn: nn.Module) -> nn.Module:
     """
     rope_variant = getattr(config, 'rope_variant', 'standard')
     if rope_variant in ("lerope", "adarope"):
-        from forge.keys.position.lerope_key import LeRoPEEmbedding, AdaRoPEEmbedding
+        from forge.keys.position.lerope_key import AdaRoPEEmbedding, LeRoPEEmbedding
         if hasattr(attn, 'rope') and isinstance(attn.rope, RotaryEmbedding):
             head_dim = attn.rope.dim
             max_seq = attn.rope.max_seq_len if hasattr(attn.rope, 'max_seq_len') else config.max_seq_len
@@ -1697,8 +1682,7 @@ def build_ffn(config: ModelConfig) -> nn.Module:
             ffn.w_down = build_bitnet_linear(config, hidden, config.d_model)
         elif getattr(config, 'use_fused_gemm', False):
             # Fused Gate-Up GEMM: single matmul for w_gate + w_up.
-            from forge.keys.quantization.fused_gemm_key import (
-                FusedGateUpLinear, fuse_gateup_weights)
+            from forge.keys.quantization.fused_gemm_key import FusedGateUpLinear, fuse_gateup_weights
             hidden = ffn.w_gate.out_features
             fused_w = fuse_gateup_weights(ffn.w_gate.weight, ffn.w_up.weight)
             fused = FusedGateUpLinear(config.d_model, hidden, bias=False)
@@ -1722,14 +1706,12 @@ class ConfigurableResearchLLM(nn.Module):
         # Init via SVD of original embedding when loading from checkpoint.
         # Combined with BitNet embedding for ~60x total reduction.
         if getattr(config, 'use_factorized_embeddings', False):
-            from forge.keys.architecture.factorized_embed_key import (
-                FactorizedEmbedding, FactorizedLMHead)
+            from forge.keys.architecture.factorized_embed_key import FactorizedEmbedding, FactorizedLMHead
             rank = getattr(config, 'embed_factorized_rank', 256)
             self.embed = FactorizedEmbedding(config.vocab_size, config.d_model, rank=rank)
             # Apply BitNet to factorized embedding when both are enabled
             if getattr(config, 'use_bitnet', False):
-                from forge.keys.quantization.bitnet_b158_key import (
-                    build_bitnet_embedding, build_bitnet_linear)
+                from forge.keys.quantization.bitnet_b158_key import build_bitnet_embedding, build_bitnet_linear
                 self.embed.embed = build_bitnet_embedding(
                     config, config.vocab_size, rank)
                 self.embed.project = build_bitnet_linear(
@@ -1817,7 +1799,6 @@ class ConfigurableResearchLLM(nn.Module):
         self._v0_gates = None
         if self._use_value_residual:
             # Per-layer gate (scalar), init=0 → lossless at start.
-            import torch.nn.init as init
             self._v0_gates = nn.ParameterList([
                 nn.Parameter(torch.zeros(1)) for _ in range(config.n_layers)
             ])
@@ -1915,8 +1896,7 @@ class ConfigurableResearchLLM(nn.Module):
         # the multi-branch residual.
         self.gated_residuals: nn.ModuleList | None = None
         if getattr(config, 'use_gated_residual', False):
-            from forge.keys.architecture.gated_residual_key import (
-                GatedResidualLayer)
+            from forge.keys.architecture.gated_residual_key import GatedResidualLayer
             _gr_rank = min(256, config.d_model)
             self.gated_residuals = nn.ModuleList([
                 GatedResidualLayer(
@@ -1931,8 +1911,7 @@ class ConfigurableResearchLLM(nn.Module):
         # and training fills in useful n-gram embeddings).
         self.ngram_embed: nn.Module | None = None
         if getattr(config, 'use_ngram_embedding', False):
-            from forge.keys.knowledge.ngram_embedding_key import (
-                NGramEmbeddingLayer)
+            from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
             self.ngram_embed = NGramEmbeddingLayer(
                 vocab_size=config.vocab_size, d_model=config.d_model,
                 n_gram=getattr(config, 'ngram_n', 3),
@@ -1993,8 +1972,7 @@ class ConfigurableResearchLLM(nn.Module):
         Returns:
             Number of nn.Linear layers replaced with IRIFP4Linear.
         """
-        from forge.keys.quantization.iri_fp4_key import (
-            convert_model_to_iri_fp4)
+        from forge.keys.quantization.iri_fp4_key import convert_model_to_iri_fp4
         _block = int(getattr(self.config, 'iri_fp4_block_size', 32))
         _rounds = int(getattr(self.config, 'iri_fp4_rounds', 2))
         n_before = sum(1 for m in self.modules()
@@ -2759,7 +2737,7 @@ class ModelLoader:
                             break
                         read += len(chunk)
             except Exception:
-                pass
+                logger.debug("Error reading subprocess output", exc_info=True)
         t = threading.Thread(target=_read, daemon=True)
         t.start()
         return t
@@ -2780,8 +2758,7 @@ class ModelLoader:
             if qk is not None:
                 exp_rows = config.n_heads * (config.d_model // config.n_heads)
                 if state[qk].shape[0] == exp_rows:
-                    from forge.keys.attention.differential_attn_key import (
-                        DifferentialAttentionKey)
+                    from forge.keys.attention.differential_attn_key import DifferentialAttentionKey
                     res = DifferentialAttentionKey(
                         n_layers=config.n_layers,
                         n_heads=config.n_heads, identity=True).forward(state)
@@ -2958,6 +2935,7 @@ class ModelLoader:
         if not getattr(config, 'use_iri_fp4', False) or has_packed:
             return model
         import time
+
         from forge.keys.quantization.iri_fp4_key import convert_model_to_iri_fp4
         _block = getattr(config, 'iri_fp4_block_size', 32)
         _rounds = getattr(config, 'iri_fp4_rounds', 2)
@@ -3069,7 +3047,9 @@ class ModelLoader:
             _has_int8 = any(t.dtype == torch.int8 for t in state.values())
             if _has_int8:
                 from forge.keys.quantization.bitnet_b158_key import (
-                    BitNetLinear, BitNetConv1d, BitNetEmbedding,
+                    BitNetConv1d,
+                    BitNetEmbedding,
+                    BitNetLinear,
                 )
                 # Build module map: param_name → module
                 bitnet_modules = {}
@@ -3672,7 +3652,7 @@ def load_default_model(
             try:
                 model = model.compile_for_inference(mode=compile_mode)
             except Exception:
-                pass
+                logger.debug("compile_for_inference failed, using uncompiled model", exc_info=True)
 
         if tok_fut is not None:
             tokenizer = tok_fut.result()
@@ -3734,18 +3714,20 @@ def quantize_int4(model: torch.nn.Module, group_size: int = 32) -> torch.nn.Modu
 # first model build to module load time. Wrapped in try/except so missing
 # optional dependencies don't break the import.
 try:
-    from forge.keys.architecture.titan_memory_key import TitanMemory  # noqa: F401,E402
-    from forge.keys.architecture.mod_router_key import ModRouter  # noqa: F401,E402
-    from forge.keys.architecture.mhc_key import MHCModule  # noqa: F401,E402
-    from forge.keys.architecture.attn_residual_key import AttnResModule  # noqa: F401,E402
-    from forge.keys.attention.differential_attn_key import DifferentialAttention  # noqa: F401,E402
-    from forge.keys.quantization.bitnet_b158_key import build_bitnet_linear  # noqa: F401,E402
-    from forge.keys.misc.pit_key import PITEmbedding, PITLMHead  # noqa: F401,E402
-    from forge.training.bitnet_lora import convert_to_bitnet_everywhere  # noqa: F401,E402
+    import gigatoken  # noqa: F401
+
     # Pre-import tokenizer dependencies (avoid GIL contention when tokenizer
     # loads in a background thread during fast_load)
-    import tokenizers  # noqa: F401,E402
-    import gigatoken  # noqa: F401,E402
+    import tokenizers  # noqa: F401
+
+    from forge.keys.architecture.attn_residual_key import AttnResModule  # noqa: F401
+    from forge.keys.architecture.mhc_key import MHCModule  # noqa: F401
+    from forge.keys.architecture.mod_router_key import ModRouter  # noqa: F401
+    from forge.keys.architecture.titan_memory_key import TitanMemory  # noqa: F401
+    from forge.keys.attention.differential_attn_key import DifferentialAttention  # noqa: F401
+    from forge.keys.misc.pit_key import PITEmbedding, PITLMHead  # noqa: F401
+    from forge.keys.quantization.bitnet_b158_key import build_bitnet_linear  # noqa: F401
+    from forge.training.bitnet_lora import convert_to_bitnet_everywhere  # noqa: F401
 except ImportError:
     pass
 
@@ -3767,7 +3749,7 @@ try:
     if torch.cuda.is_available():
         torch.cuda.init()
 except Exception:
-    pass
+    logger.debug("CUDA context pre-initialization failed", exc_info=True)
 
 
 if __name__ == "__main__":

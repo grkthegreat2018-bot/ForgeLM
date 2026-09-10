@@ -90,9 +90,9 @@ class FlashOptimAdamW(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0.01, bits=8, companding="sqrt"):
-        if not 0.0 <= lr:
+        if not lr >= 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        if not 0.0 <= eps:
+        if not eps >= 0.0:
             raise ValueError(f"Invalid epsilon: {eps}")
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
                         bits=bits, companding=companding)
@@ -110,7 +110,7 @@ class FlashOptimAdamW(Optimizer):
             beta1, beta2 = group["betas"]
             eps = group["eps"]
             wd = group["weight_decay"]
-            bits = group["bits"]
+            group["bits"]
             companding = group["companding"]
 
             for p in group["params"]:

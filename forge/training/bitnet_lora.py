@@ -11,9 +11,11 @@ Validated in .devin/test_bitnet_native.py on real V3 1.2B:
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn as nn
 
+from forge.quant.protocol import QuantizedLinearMixin, is_quantized_linear
 
 # ── NF4 (NormalFloat 4-bit) QLoRA ────────────────────────────────────────
 # R32-1: Proper NF4 QLoRA path for standard nn.Linear models.
@@ -35,7 +37,7 @@ _NF4_LEVELS = torch.tensor([
 ], dtype=torch.float32)
 
 
-class NF4Linear(nn.Module):
+class NF4Linear(QuantizedLinearMixin):
     """NF4 quantized linear layer with optional LoRA adapter (QLoRA).
 
     Stores weights in NF4 (4-bit normal float) with per-group absmax scale.
@@ -109,7 +111,6 @@ class NF4Linear(nn.Module):
         levels = _NF4_LEVELS.to(idx.device)
         w_norm = levels[idx]  # (out, in)
         # Apply per-group scales
-        gs = self.group_size
         n_groups = scales.shape[1]
         w_grouped = w_norm.reshape(self.out_features, n_groups, -1)
         w_scaled = w_grouped * scales.unsqueeze(-1)
@@ -254,14 +255,18 @@ def add_lora_adapters(
     target_modules: list[str] | None = None,
     min_size: int = 64,
 ) -> tuple[int, list[nn.Parameter]]:
-    """Add LoRA adapters to target layers (works with BitNetLinear + IRIFP4Linear).
+    """Add LoRA adapters to target layers (works with BitNetLinear + quantized linears).
+
+    Quantized linear detection uses :func:`forge.quant.protocol.is_quantized_linear`
+    (protocol-based + ``getattr`` fallback) so any quantized linear class that
+    inherits :class:`QuantizedLinearMixin` is recognized automatically.
 
     Args:
         model: The model to add LoRA to.
         rank: LoRA rank.
         alpha: LoRA alpha (scale = alpha / rank).
         target_modules: List of module name substrings to target (e.g. ["q_proj", "w_gate"]).
-            None = target all Linear/BitNetLinear/IRIFP4Linear with in_features >= min_size.
+            None = target all Linear/BitNetLinear/quantized linears with in_features >= min_size.
         min_size: Skip layers smaller than this (e.g. MoD routers with 1 output).
 
     Returns (n_adapters, lora_params_list).
@@ -269,18 +274,13 @@ def add_lora_adapters(
     n_adapters = 0
     lora_params = []
 
-    # Check for IRIFP4Linear/NF4Linear without importing (avoid circular deps)
-    def is_quant_linear(mod):
-        cls = type(mod).__name__
-        return cls in ("IRIFP4Linear", "NF4Linear")
-
     def find_and_add(module, prefix=""):
         nonlocal n_adapters
         for name, child in module.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
             has_weight = isinstance(getattr(child, 'weight', None), nn.Parameter)
             has_dims = hasattr(child, 'in_features') and hasattr(child, 'out_features')
-            is_quant = is_quant_linear(child)
+            is_quant = is_quantized_linear(child)
 
             # Valid target: has dims + (has Parameter weight OR is quantized linear)
             if has_dims and (has_weight or is_quant):
@@ -295,10 +295,20 @@ def add_lora_adapters(
                     # Use bfloat16 for LoRA params on quantized linears (base is bf16 dequantized)
                     lora_dtype = torch.bfloat16 if is_quant else (
                         child.weight.dtype if child.weight.dtype != torch.float32 else torch.bfloat16)
-                    lora = lora.to(child.weight_packed.device if is_quant else child.weight.device).to(lora_dtype)
-                    setattr(child, 'lora_adapter', lora)
+                    # ForgeQuantLinear uses dense_packed, others use weight_packed
+                    if is_quant:
+                        qdev = getattr(child, 'weight_packed', None)
+                        if qdev is None:
+                            qdev = getattr(child, 'dense_packed', None)
+                        if qdev is None:
+                            qdev = child.weight
+                        lora = lora.to(qdev.device)
+                    else:
+                        lora = lora.to(child.weight.device)
+                    lora = lora.to(lora_dtype)
+                    child.lora_adapter = lora
 
-                    # For IRIFP4Linear/NF4Linear, forward() already checks for lora_adapter
+                    # For quantized linears, forward() already checks for lora_adapter
                     # For BitNetLinear/nn.Linear, we need to wrap forward
                     if not is_quant:
                         orig_forward = child.forward
@@ -331,15 +341,18 @@ def merge_lora_adapters(model: nn.Module) -> int:
     """Merge LoRA adapters into base weights: W += scale * B @ A.
 
     For nn.Linear/BitNetLinear: directly adds delta to weight Parameter.
-    For IRIFP4Linear/NF4Linear: dequantizes → adds delta → re-quantizes.
+    For quantized linears (IRIFP4Linear/NF4Linear/ForgeQuantLinear/…):
+    dequantizes → adds delta → re-quantizes via ``merge_lora()``.
+    Detection uses :func:`forge.quant.protocol.is_quantized_linear` (protocol
+    + ``getattr`` fallback) so new quantized linear classes are recognized
+    automatically.
     Call before saving checkpoint so output is standalone (no LoRA dependency).
     Returns n_merged.
     """
     n_merged = 0
     for module in model.modules():
         if hasattr(module, 'lora_adapter') and isinstance(module.lora_adapter, LoRAAdapter):
-            cls_name = type(module).__name__
-            if cls_name in ("IRIFP4Linear", "NF4Linear"):
+            if is_quantized_linear(module):
                 # QLoRA merge: dequant → merge → re-quantize
                 if module.merge_lora():
                     n_merged += 1

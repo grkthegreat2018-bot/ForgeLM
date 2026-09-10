@@ -12,14 +12,16 @@ to full attention + speedup. Score = -error * 100 + speedup * 10.
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
-import time
 from typing import Any
+
+import torch
+
 from . import BaseDomain
 from .kv_utils import (
-    generate_synthetic_kv, generate_synthetic_q,
-    full_attention_output, measure_speed,
+    full_attention_output,
+    generate_synthetic_kv,
+    generate_synthetic_q,
+    measure_speed,
 )
 
 
@@ -235,7 +237,7 @@ class SparseAttentionDomain(BaseDomain):
             })
         return seeds
 
-    def to_cpu(self) -> "SparseAttentionDomain":
+    def to_cpu(self) -> SparseAttentionDomain:
         """Create CPU copy for parallel evaluation."""
         return SparseAttentionDomain(seq_len=self.seq_len, seed=43,
                                      device=torch.device("cpu"))

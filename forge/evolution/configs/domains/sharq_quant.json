@@ -1,0 +1,20 @@
+{
+  "name": "sharq_quant",
+  "category": "quantization",
+  "description": "SharQ adaptive/non-adaptive quantization. Metrics: err, bits. Score = -err*100 - bits*2.",
+  "simulator": "sharq_simulate",
+  "params": [
+    {"name": "n_levels", "type": "int", "range": [4, 32]},
+    {"name": "adaptive", "type": "bool"},
+    {"name": "warmup_steps", "type": "int", "range": [0, 1000]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["bits", 10, 2, 8]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "bits", "weight": -2.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

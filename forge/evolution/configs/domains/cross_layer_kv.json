@@ -1,0 +1,20 @@
+{
+  "name": "cross_layer_kv",
+  "category": "kv",
+  "description": "Cross-layer KV sharing. Search share_ratio, n_share_groups, share_mode.",
+  "simulator": "cross_layer_kv_simulate",
+  "params": [
+    {"name": "share_ratio", "type": "float", "range": [0.0, 1.0]},
+    {"name": "n_share_groups", "type": "int", "range": [1, 8]},
+    {"name": "share_mode", "type": "choice", "values": ["avg", "max", "learned"]}
+  ],
+  "behavioral_dims": [["param_reduction", 10, 0.0, 1.0], ["recon_error", 10, 0.0, 0.5]],
+  "scoring": {
+    "components": [
+      {"metric": "param_reduction", "weight": 150.0},
+      {"metric": "recon_error", "weight": -100.0},
+      {"metric": "overhead", "weight": -2.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

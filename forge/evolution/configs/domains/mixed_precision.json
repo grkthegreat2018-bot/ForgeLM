@@ -1,0 +1,20 @@
+{
+  "name": "mixed_precision",
+  "category": "quantization",
+  "description": "Mixed precision: n_levels, assignment, bits_base. Score = -err*100 - avg_bits*2.",
+  "simulator": "mixed_precision_simulate",
+  "params": [
+    {"name": "n_levels", "type": "int", "range": [2, 4]},
+    {"name": "assignment", "type": "choice", "values": ["uniform", "importance", "random"]},
+    {"name": "bits_base", "type": "int", "range": [2, 8]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["avg_bits", 10, 2, 16]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "avg_bits", "weight": -2.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

@@ -19,13 +19,11 @@ uncovered topics.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -318,9 +316,9 @@ class TopicScanner:
         """Check which topics already have evolution domains."""
         try:
             from forge.evolution.domains import DOMAINS
-            domain_names = set(DOMAINS.keys())
+            set(DOMAINS.keys())
         except ImportError:
-            domain_names = set()
+            pass
 
         # Also check domain class names (not just registry keys)
         try:

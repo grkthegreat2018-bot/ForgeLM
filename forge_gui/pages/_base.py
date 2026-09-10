@@ -1,13 +1,8 @@
 """Shared helpers for building pages."""
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
-                               QScrollArea, QVBoxLayout, QWidget)
-
-from ..theme import Palette
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 
 def make_card(title: str = "", value: str = "", unit: str = "") -> QFrame:
@@ -32,7 +27,7 @@ def section_label(text: str) -> QLabel:
     return lbl
 
 
-def card_grid(cards: list[QWidget], cols: int = 3, parent: Optional[QWidget] = None) -> QWidget:
+def card_grid(cards: list[QWidget], cols: int = 3, parent: QWidget | None = None) -> QWidget:
     """Wrap cards in a responsive grid layout inside a container."""
     container = QWidget(); container.setObjectName("root")
     grid = QGridLayout(container)

@@ -15,22 +15,47 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QDoubleSpinBox,
-                               QFileDialog, QFrame, QGridLayout, QHeaderView,
-                               QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QPushButton, QProgressBar,
-                               QRadioButton, QScrollArea, QSpinBox, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QTextEdit,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ..api.activation_catalog import (FIELDS, PRESETS, FieldSpec,
-                                       active_diff, default_config,
-                                       fields_by_category, normalize_value,
-                                       preset_config, validate)
+from ..api.activation_catalog import (
+    FIELDS,
+    PRESETS,
+    FieldSpec,
+    active_diff,
+    default_config,
+    fields_by_category,
+    normalize_value,
+    preset_config,
+    validate,
+)
 from ..api.engine_runtime import EngineRuntime
 from ..theme import Palette
 from ..widgets.activation_wizard import ActivationWizard
@@ -188,12 +213,12 @@ def _kv_row(key: str) -> tuple[QFrame, QLabel]:
 
 class EnginePage(QWidget):
     def __init__(self, runtime: EngineRuntime, models_index=None,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.runtime = runtime
         self.models_index = models_index
-        self._maint: Optional[_MaintWorker] = None
-        self._generic: Optional[_GenericWorker] = None
+        self._maint: _MaintWorker | None = None
+        self._generic: _GenericWorker | None = None
         self._preset_group: dict[str, QPushButton] = {}
         self._combo_specs: dict[str, tuple[QComboBox, QLabel]] = {}
         self._spin_fields: dict[str, QWidget] = {}
@@ -1002,7 +1027,7 @@ class EnginePage(QWidget):
                 if cur in ids:
                     combo.setCurrentText(cur)
         except Exception:
-            pass
+            logger.debug("Failed to set current checkpoint in combo", exc_info=True)
 
     def _sess_refresh_stats(self) -> None:
         eng = self.runtime.try_engine()
@@ -1134,7 +1159,7 @@ class EnginePage(QWidget):
                     if m.is_safetensors and "lora" not in m.name.lower():
                         paths.append((m.name, m.path))
             except Exception:
-                pass
+                logger.debug("Failed to list safetensors checkpoints", exc_info=True)
         if not paths:
             paths.append(("ForgeLM_V2.safetensors",
                           "research/checkpoints/ForgeLM_V2.safetensors"))
@@ -1154,7 +1179,7 @@ class EnginePage(QWidget):
             from ..api.status_reader import project_root as _pr
             root = _pr()
         except Exception:
-            pass
+            logger.debug("Failed to get project root", exc_info=True)
         parents = []
         for i in range(t.rowCount()):
             cw = t.cellWidget(i, 0)
@@ -1748,7 +1773,7 @@ class EnginePage(QWidget):
             try:
                 awake = eng.is_awake
             except Exception:
-                pass
+                logger.debug("Failed to check engine.is_awake", exc_info=True)
             self._stat_rows["Power"].setText("awake" if awake else "sleeping")
         except Exception as e:
             logger.warning("stats poll failed: %s", e)

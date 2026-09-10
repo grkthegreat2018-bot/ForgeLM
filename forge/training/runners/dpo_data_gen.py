@@ -41,13 +41,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -55,7 +53,6 @@ from forge.training.runners.curriculum_sft import (
     is_doom_loop,
     ngram_repetition_ratio,
 )
-
 
 # ── Candidate generation ────────────────────────────────────────────────────
 
@@ -258,7 +255,6 @@ def score_candidate_with_judge(
     try:
         # Use the distill_client's _call_model to get a judge response
         # Find the model in the pool
-        from forge.distillation.distill_client import MODEL_POOL
         judge_distill_model = None
         for m in client.models:
             if judge_model in m.model_id or judge_model in m.canonical:
@@ -415,7 +411,7 @@ def main():
     random.seed(42)
 
     print(f"\n{'='*70}")
-    print(f"  DPO PREFERENCE DATA GENERATION")
+    print("  DPO PREFERENCE DATA GENERATION")
     print(f"{'='*70}")
     print(f"Prompts: {args.prompts}")
     print(f"Checkpoint: {args.checkpoint}")
@@ -434,6 +430,7 @@ def main():
     # ── Load model ──
     print(f"\nLoading model ({args.config})...")
     import torch
+
     from forge.config import get_config
     from forge.model_loader import ModelLoader
     from research.tokenizer_cache import get_tokenizer
@@ -446,7 +443,7 @@ def main():
     print(f"Model loaded: {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
 
     # ── Initialize distill client for judge ──
-    print(f"\nInitializing LLM judge client...")
+    print("\nInitializing LLM judge client...")
     try:
         from forge.distillation.distill_client import DistillationClient
         judge_client = DistillationClient(max_tokens=256, timeout=30.0)
@@ -523,18 +520,18 @@ def main():
 
     elapsed = time.time() - t0
     print(f"\n{'='*70}")
-    print(f"  DPO DATA GENERATION COMPLETE")
+    print("  DPO DATA GENERATION COMPLETE")
     print(f"{'='*70}")
     print(f"Prompts processed: {prompts_processed}")
     print(f"Preference pairs generated: {pairs_generated}")
     print(f"Doom-loop candidates found: {doom_loops_found}")
     print(f"Time: {elapsed:.0f}s ({elapsed/max(prompts_processed,1):.1f}s/prompt)")
     print(f"Output: {output_path}")
-    print(f"\nNext: Run DPO training:")
-    print(f"  python -m research.training.runners.dpo_align \\")
+    print("\nNext: Run DPO training:")
+    print("  python -m research.training.runners.dpo_align \\")
     print(f"    --data {output_path} \\")
     print(f"    --checkpoint {args.checkpoint} \\")
-    print(f"    --save <dpo_checkpoint> --optimizer cpu_offload")
+    print("    --save <dpo_checkpoint> --optimizer cpu_offload")
 
 
 if __name__ == "__main__":

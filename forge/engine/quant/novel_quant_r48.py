@@ -28,23 +28,25 @@ compression-quality Pareto frontier below 2 bits/weight.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Reuse existing infrastructure
-from forge.engine.quant.novel_quant_r44 import (
-    _hadamard_matrix, _SKIP_TYPES, _SKIP_NAMES,
-)
-from forge.engine.quant.novel_quant_r46 import _CachedDequantMixin
 from forge.engine.quant.novel_quant import (
-    compute_hessian_proxy, _optimal_fp4_scale_hessian,
-    ternary_to_base3_packed, base3_packed_to_ternary,
-    quantize_ternary_per_channel,
+    base3_packed_to_ternary,
+    compute_hessian_proxy,
+    ternary_to_base3_packed,
 )
 
+# Reuse existing infrastructure
+from forge.engine.quant.novel_quant_r44 import (
+    _SKIP_NAMES,
+    _SKIP_TYPES,
+    _hadamard_matrix,
+)
+from forge.engine.quant.novel_quant_r46 import _CachedDequantMixin
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Binary bit packing helpers (8 binary ±1 values per byte)
@@ -172,8 +174,8 @@ def _cubic_rho(x: float) -> float:
 @torch.no_grad()
 def factorize_admm_nanoquant(
     W: torch.Tensor,
-    i_norm: Optional[torch.Tensor] = None,
-    o_norm: Optional[torch.Tensor] = None,
+    i_norm: torch.Tensor | None = None,
+    o_norm: torch.Tensor | None = None,
     mid_rank: int = 128,
     outer_iters: int = 400,
     inner_iters: int = 5,
@@ -220,11 +222,10 @@ def factorize_admm_nanoquant(
     if i_norm is not None and o_norm is not None:
         norm_i = i_norm.sqrt().clamp(eps)
         norm_o = o_norm.sqrt().clamp(eps).unsqueeze(1)
-        W_norm = W * norm_i.unsqueeze(0) * norm_o
+        W * norm_i.unsqueeze(0) * norm_o
     else:
         norm_i = torch.ones(in_features, device=device, dtype=W.dtype)
         norm_o = torch.ones(out_features, 1, device=device, dtype=W.dtype)
-        W_norm = W
 
     # Compute per-dimension scales from the (unnormalized) weight
     s1 = W.abs().mean(dim=1).clamp(min=eps)  # (out,)
@@ -301,7 +302,7 @@ def factorize_admm_nanoquant(
 # Algorithm 1: NanoQuant — Low-rank binary factorization + ADMM
 # ──────────────────────────────────────────────────────────────────────────
 
-class NanoQuantLinear(nn.Module, _CachedDequantMixin):
+class NanoQuantLinear(QuantizedLinearMixin, _CachedDequantMixin):
     """NanoQuant: Low-rank binary factorization for sub-1-bit compression.
 
     Decomposes W (d_out × d_in) as:
@@ -353,9 +354,9 @@ class NanoQuantLinear(nn.Module, _CachedDequantMixin):
     def from_linear(cls, lin: nn.Linear, rank: int = 128,
                     admm_iters: int = 400,
                     refine_steps: int = 0,
-                    i_norm: Optional[torch.Tensor] = None,
-                    o_norm: Optional[torch.Tensor] = None,
-                    verbose: bool = False) -> "NanoQuantLinear":
+                    i_norm: torch.Tensor | None = None,
+                    o_norm: torch.Tensor | None = None,
+                    verbose: bool = False) -> NanoQuantLinear:
         """Create NanoQuant-quantized layer.
 
         Args:
@@ -453,7 +454,6 @@ class NanoQuantLinear(nn.Module, _CachedDequantMixin):
         return layer
 
     def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-        device = self.U_packed.device
         U = _unpack_binary_bits(self.U_packed, self.U_shape[0] * self.U_shape[1])
         U = U.view(self.U_shape).to(dtype)  # (d_out, r)
         V = _unpack_binary_bits(self.V_packed, self.V_shape[0] * self.V_shape[1])
@@ -482,7 +482,7 @@ class NanoQuantLinear(nn.Module, _CachedDequantMixin):
 # NanoQuant QAT — Quantization-Aware Training with STE binary factors
 # ──────────────────────────────────────────────────────────────────────────
 
-class NanoQuantQATLinear(nn.Module):
+class NanoQuantQATLinear(QuantizedLinearMixin):
     """NanoQuant with quantization-aware training (QAT).
 
     Keeps continuous latent matrices U_latent, V_latent as trainable
@@ -533,7 +533,7 @@ class NanoQuantQATLinear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, rank: int = 128,
                     admm_iters: int = 50,
-                    quick_init: bool = True) -> "NanoQuantQATLinear":
+                    quick_init: bool = True) -> NanoQuantQATLinear:
         """Initialize QAT layer from a pre-trained linear layer.
 
         With quick_init=True (default), skips ADMM and uses SVD-based
@@ -595,7 +595,7 @@ class NanoQuantQATLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # STE: forward sees sign(), backward sees identity
-        U_bin = x.new_tensor(1.0)  # dummy for dtype/device
+        x.new_tensor(1.0)  # dummy for dtype/device
         U_q = self.U_latent + (torch.sign(self.U_latent) - self.U_latent).detach()
         V_q = self.V_latent + (torch.sign(self.V_latent) - self.V_latent).detach()
 
@@ -610,7 +610,7 @@ class NanoQuantQATLinear(nn.Module):
         return F.linear(x, W, bias)
 
     @torch.no_grad()
-    def bake(self) -> "NanoQuantLinear":
+    def bake(self) -> NanoQuantLinear:
         """Convert trained QAT layer to inference-only NanoQuantLinear.
 
         Hardens the latent matrices to binary ±1 and packs them.
@@ -724,7 +724,7 @@ def bake_qat_model(model: nn.Module, verbose: bool = True) -> int:
 # Algorithm 2: BTC-LLM — Binary codebook clustering
 # ──────────────────────────────────────────────────────────────────────────
 
-class BTCQuantLinear(nn.Module, _CachedDequantMixin):
+class BTCQuantLinear(QuantizedLinearMixin, _CachedDequantMixin):
     """BTC-LLM: Binary codebook clustering for sub-1-bit compression.
 
     Instead of storing each weight row as binary ±1, cluster similar binary
@@ -775,7 +775,7 @@ class BTCQuantLinear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, codebook_size: int = 256,
-                    use_rotation: bool = True) -> "BTCQuantLinear":
+                    use_rotation: bool = True) -> BTCQuantLinear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     codebook_size=codebook_size, use_rotation=use_rotation)
@@ -920,7 +920,7 @@ def _binary_kmeans(W_bin: torch.Tensor, K: int, device: torch.device,
 # Algorithm 3: TernaryPTQ — Ternary {-1,0,+1} with calibration refinement
 # ──────────────────────────────────────────────────────────────────────────
 
-class TernaryPTQLinear(nn.Module, _CachedDequantMixin):
+class TernaryPTQLinear(QuantizedLinearMixin, _CachedDequantMixin):
     """TernaryPTQ: Ternary quantization with Hessian-refined per-channel scales.
 
     BitNet b1.58 uses ternary {-1, 0, +1} with absmean scaling:
@@ -958,8 +958,8 @@ class TernaryPTQLinear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear,
-                    activations: Optional[torch.Tensor] = None,
-                    refine_iters: int = 20) -> "TernaryPTQLinear":
+                    activations: torch.Tensor | None = None,
+                    refine_iters: int = 20) -> TernaryPTQLinear:
         """Create ternary-quantized layer.
 
         Args:
@@ -1026,7 +1026,6 @@ class TernaryPTQLinear(nn.Module, _CachedDequantMixin):
         return layer
 
     def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-        device = self.weight_packed.device
         n = self.n_weights.item()
         W_ternary = base3_packed_to_ternary(self.weight_packed, n)  # (d_out*d_in,) int8
         W_ternary = W_ternary[:n].view(self.out_features, self.in_features).to(dtype)
@@ -1087,7 +1086,7 @@ def _replace_linears_r48(model: nn.Module, factory, verbose_name: str,
 def quantize_model_nanoquant(model: nn.Module, rank: int = 128,
                              admm_iters: int = 400, refine_steps: int = 0,
                              verbose: bool = True,
-                             hessian_norms: Optional[dict] = None) -> int:
+                             hessian_norms: dict | None = None) -> int:
     """Replace all nn.Linear with NanoQuantLinear.
 
     Args:
@@ -1140,7 +1139,7 @@ def quantize_model_btc(model: nn.Module, codebook_size: int = 256,
                                 use_rotation=use_rotation)
 
 
-def quantize_model_ternary_ptq(model: nn.Module, activations: Optional[dict] = None,
+def quantize_model_ternary_ptq(model: nn.Module, activations: dict | None = None,
                                refine_iters: int = 20,
                                verbose: bool = True) -> int:
     """Replace all nn.Linear with TernaryPTQLinear.

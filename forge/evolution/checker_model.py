@@ -31,13 +31,15 @@ fallback — this is the designed behavior.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -83,7 +85,7 @@ class _BoundedLRUCache:
         self._max = max_entries
         self._lock = threading.Lock()
 
-    def get(self, key: str) -> Optional[float]:
+    def get(self, key: str) -> float | None:
         with self._lock:
             if key not in self._data:
                 return None
@@ -180,7 +182,7 @@ _SCORE_PATTERNS = [
 ]
 
 
-def _parse_score(text: str) -> Optional[float]:
+def _parse_score(text: str) -> float | None:
     """Extract a numeric score (0-100) from the LLM's response text.
 
     Handles formats like "Score: 85", "85/100", "85", "85 points", etc.
@@ -298,7 +300,7 @@ class SharedCheckerModel:
         if not items:
             return []
 
-        results: list[Optional[float]] = [None] * len(items)
+        results: list[float | None] = [None] * len(items)
         uncached: list[tuple[int, dict]] = []
 
         # Phase 1: cache lookup.
@@ -574,7 +576,7 @@ class SharedCheckerModel:
 
 # ── Singleton Access ───────────────────────────────────────────────────────
 
-_checker_instance: Optional[SharedCheckerModel] = None
+_checker_instance: SharedCheckerModel | None = None
 _checker_lock = threading.Lock()
 
 
@@ -608,5 +610,5 @@ def reset_checker() -> None:
             try:
                 _checker_instance.sleep()
             except Exception:
-                pass
+                logger.debug("Error sleeping checker model", exc_info=True)
         _checker_instance = None

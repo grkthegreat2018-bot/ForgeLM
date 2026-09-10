@@ -31,7 +31,6 @@ Usage:
     # Or as a key:
     key = GatedResidualKey(n_branches=4, bottleneck_rank=256)
 """
-from typing import Dict
 
 import torch
 import torch.nn as nn

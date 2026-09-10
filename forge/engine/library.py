@@ -57,17 +57,18 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
-
 
 # ── Entry categories ──────────────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ class LibraryEntry:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "LibraryEntry":
+    def from_dict(cls, d: dict[str, Any]) -> LibraryEntry:
         """Deserialize from dict."""
         valid = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in d.items() if k in valid}
@@ -688,7 +689,7 @@ class Library:
             return None
 
         try:
-            with open(json_path, "r", encoding="utf-8") as f:
+            with open(json_path, encoding="utf-8") as f:
                 data = json.load(f)
 
             # Load pre-tokenized tokens
@@ -711,7 +712,7 @@ class Library:
                 try:
                     p.unlink()
                 except Exception:
-                    pass
+                    logger.debug("Failed to delete library entry file %s", p, exc_info=True)
 
     def _save_index(self):
         """Save the tag/keyword index to disk."""
@@ -747,12 +748,12 @@ class Library:
         index_path = self.path / "index.json"
         if index_path.exists():
             try:
-                with open(index_path, "r", encoding="utf-8") as f:
+                with open(index_path, encoding="utf-8") as f:
                     idx = json.load(f)
                 self._tag_index = {k: set(v) for k, v in idx.get("tag_index", {}).items()}
                 self._keyword_index = {k: set(v) for k, v in idx.get("keyword_index", {}).items()}
             except Exception:
-                pass
+                logger.debug("Failed to load library index", exc_info=True)
 
         # Load all entries
         entries_dir = self.path / "entries"

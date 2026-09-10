@@ -1,0 +1,21 @@
+{
+  "name": "kv_recompute",
+  "category": "kv",
+  "description": "Selective KV recomputation. Search recompute_layers, strategy, threshold.",
+  "simulator": "kv_recompute_simulate",
+  "params": [
+    {"name": "recompute_layers", "type": "int", "range": [0, 16]},
+    {"name": "recompute_strategy", "type": "choice", "values": ["selective", "full"]},
+    {"name": "threshold", "type": "float", "range": [0.0, 1.0]}
+  ],
+  "behavioral_dims": [["memory_saved", 10, 0.0, 1.0], ["compute_cost", 10, 0.0, 32.0]],
+  "scoring": {
+    "components": [
+      {"metric": "memory_saved", "weight": 100.0},
+      {"metric": "compute_cost", "weight": -2.0},
+      {"metric": "quality", "weight": 20.0},
+      {"metric": "inference_penalty", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

@@ -35,14 +35,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Optional
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -51,14 +49,13 @@ import torch.nn.functional as F
 
 from forge.config import get_config
 from forge.model_loader import ModelLoader
-from research.tokenizer_cache import get_tokenizer
 from forge.training.training_utils import (
     oom_guard,
     patch_triton_cache_for_windows,
     write_heartbeat,
     write_status_json,
 )
-
+from research.tokenizer_cache import get_tokenizer
 
 # ── Verifiable reward functions ─────────────────────────────────────────────
 
@@ -280,7 +277,7 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*70}")
-    print(f"  RLVR: REINFORCEMENT LEARNING WITH VERIFIABLE REWARDS")
+    print("  RLVR: REINFORCEMENT LEARNING WITH VERIFIABLE REWARDS")
     print(f"{'='*70}")
     print(f"Tasks: {args.tasks}")
     print(f"Task type: {args.task_type}")
@@ -325,7 +322,7 @@ def main():
     print(f"Model: {n_params/1e6:.1f}M params")
 
     # ── Configure GRPO trainer ──
-    from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+    from forge.self_play.grpo_trainer import GRPOConfig, GRPOTrainer
 
     grpo_config = GRPOConfig(
         learning_rate=args.lr,
@@ -440,14 +437,14 @@ def main():
     doom_rate = doom_loops / max(total_completions, 1)
     elapsed = time.time() - t0
     print(f"\n{'='*70}")
-    print(f"  RLVR COMPLETE")
+    print("  RLVR COMPLETE")
     print(f"{'='*70}")
     print(f"Steps: {step}")
     print(f"Accuracy: {accuracy:.2%} ({total_correct}/{total_completions})")
     print(f"Doom-loop rate: {doom_rate:.2%} (target: <1%)")
     print(f"Time: {elapsed:.0f}s")
     print(f"Checkpoint: {args.save}")
-    print(f"\nNext: Phase 5 — wire into self-play loop")
+    print("\nNext: Phase 5 — wire into self-play loop")
 
 
 if __name__ == "__main__":

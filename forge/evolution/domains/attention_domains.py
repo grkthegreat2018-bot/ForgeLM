@@ -4,9 +4,10 @@ Each domain explores a different attention configuration search space.
 All use small tensor operations for fast evaluation (no model loading).
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
-from typing import Any
+import torch
+
 from . import BaseDomain
 
 
@@ -404,7 +405,7 @@ class SlidingWindow(BaseDomain):
         stride = config["stride"]
         seq = 512  # reduced from 4096 — coverage pattern is scale-invariant
         # Vectorized sliding window mask — no Python loop
-        positions = torch.arange(seq, device=self.device, dtype=torch.float32)
+        torch.arange(seq, device=self.device, dtype=torch.float32)
         # For each position i, window covers [i-ws//2, i+ws//2]
         # Coverage = fraction of positions that see each column
         half = ws // 2

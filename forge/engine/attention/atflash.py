@@ -65,7 +65,7 @@ def build_wavelength_mask(head_dim: int, seq_len: int,
     This is a 3D mask: for each (query_pos, key_pos, freq_pair) triple,
     determines whether the pair should contribute to the attention score.
     """
-    half_dim = head_dim // 2
+    head_dim // 2
     wavelengths = compute_rope_wavelengths(head_dim, base, device)  # (half_dim,)
 
     # Distance matrix: (seq_len, seq_len)
@@ -125,7 +125,7 @@ def wavelength_pruned_attention(
     window = int(prune_factor * median_wl)
 
     # If sequence is shorter than window, no pruning needed
-    if S <= window:
+    if window >= S:
         return F.scaled_dot_product_attention(q, k, v, is_causal=T > 1)
 
     # Build sliding window causal mask

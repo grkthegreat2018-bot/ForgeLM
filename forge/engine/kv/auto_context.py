@@ -44,9 +44,12 @@ active inner strategy and forwards hot-swap requests to the manager.
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence
+import logging
+from collections.abc import Sequence
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from forge.engine.kv_backend import KVCacheStrategy, build_kv_cache
 
@@ -76,7 +79,7 @@ class AutoContextManager:
         self.vram_budget_bytes = int(vram_budget_gb * 1e9)
         self.task_type = task_type  # "auto" | "coding" | "chat" | "rag"
         self._vram_pressure = 0.0
-        self._current_strategy_name: Optional[str] = None
+        self._current_strategy_name: str | None = None
         self._growth_history: list[int] = []  # seq_len per turn
         self._predicted_growth_rate = 0.0
         self._switch_count = 0
@@ -185,7 +188,7 @@ class AutoContextManager:
         context_length: int,
         entropy_trajectory: Sequence[float],
         vram_pressure: float,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return a new strategy name if a switch is warranted, else None."""
         target = self.select_strategy(
             context_length, entropy_trajectory, vram_pressure)
@@ -221,7 +224,7 @@ class AutoContextManager:
     # Growth prediction
     # ------------------------------------------------------------------ #
     def predict_growth(
-        self, conversation_history: Optional[Sequence[int]]
+        self, conversation_history: Sequence[int] | None
     ) -> float:
         """Predict per-turn context growth (tokens) from recent turns.
 
@@ -252,7 +255,7 @@ class AutoContextManager:
     # KV migration (hot-swap)
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _extract_kv(cache: KVCacheStrategy) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    def _extract_kv(cache: KVCacheStrategy) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Extract full-precision (k, v) tensors from any strategy.
 
         Handles strategies that store quantized/evicted state by calling
@@ -313,14 +316,14 @@ class AutoContextManager:
         current_seq_len: int,
         entropy_trajectory: Sequence[float],
         current_strategy: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Main per-step call. Returns new strategy name or None."""
         vram = self.get_vram_pressure()
         return self.maybe_switch(
             current_strategy, current_seq_len, entropy_trajectory, vram)
 
     @property
-    def current_strategy_name(self) -> Optional[str]:
+    def current_strategy_name(self) -> str | None:
         return self._current_strategy_name
 
     @property
@@ -352,13 +355,13 @@ class AutoContextKVCache(KVCacheStrategy):
 
     def __init__(
         self,
-        manager: Optional[AutoContextManager] = None,
+        manager: AutoContextManager | None = None,
         initial_strategy: str = "standard",
     ):
         self.manager = manager or AutoContextManager()
-        self._inner: Optional[KVCacheStrategy] = None
+        self._inner: KVCacheStrategy | None = None
         self._strategy_name = initial_strategy
-        self._init_args: Optional[tuple] = None
+        self._init_args: tuple | None = None
         self._seq_len = 0
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
@@ -367,7 +370,7 @@ class AutoContextKVCache(KVCacheStrategy):
         self._inner.init(n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype)
         self.manager._current_strategy_name = self._strategy_name
 
-    def _rebuild(self, strategy_name: str) -> Optional[KVCacheStrategy]:
+    def _rebuild(self, strategy_name: str) -> KVCacheStrategy | None:
         if self._init_args is None:
             return None
         n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype = self._init_args
@@ -388,7 +391,7 @@ class AutoContextKVCache(KVCacheStrategy):
             try:
                 new_inner.clear()
             except Exception:
-                pass
+                logger.debug("Failed to clear new inner cache during hot-swap", exc_info=True)
         old = self._inner
         self._inner = new_inner
         self._strategy_name = strategy_name
@@ -397,7 +400,7 @@ class AutoContextKVCache(KVCacheStrategy):
         try:
             old.clear()
         except Exception:
-            pass
+            logger.debug("Failed to clear old cache during hot-swap", exc_info=True)
         if _cuda_available():
             torch.cuda.empty_cache()
         return True
@@ -406,7 +409,7 @@ class AutoContextKVCache(KVCacheStrategy):
         self,
         context_length: int,
         entropy_trajectory: Sequence[float],
-    ) -> Optional[str]:
+    ) -> str | None:
         """Ask the manager whether to swap; perform swap if so."""
         target = self.manager.update(
             context_length, entropy_trajectory, self._strategy_name)

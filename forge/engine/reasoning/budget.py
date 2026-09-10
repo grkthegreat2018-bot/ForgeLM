@@ -17,9 +17,7 @@ This module provides:
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn.functional as F

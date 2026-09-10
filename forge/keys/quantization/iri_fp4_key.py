@@ -25,22 +25,20 @@ Two components:
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from forge.keys.misc.base import Key, KeyClass, KeyResult
 from forge.engine.quant.novel_quant import (
-    quantize_iri_fp4,
-    _optimal_fp4_scale,
     _fp4_quant_dequant_block,
+    _optimal_fp4_scale,
     _pack_fp4_round,
 )
 from forge.engine.quant.nvfp4_quant import _dequantize_fp4
-
+from forge.keys.misc.base import Key, KeyClass, KeyResult
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ── Standalone quantize / dequantize functions ──────────────────────────────
 
@@ -145,7 +143,7 @@ def dequantize_iri_fp4_state(state: dict[str, torch.Tensor],
     Returns:
         state dict with packed tensors replaced by full-precision weights
     """
-    from forge.engine.quant.nvfp4_quant import _dequantize_fp4, _FP8_DTYPE
+    from forge.engine.quant.nvfp4_quant import _FP8_DTYPE, _dequantize_fp4
 
     out = {}
     packed_keys = {}  # base_key -> (iri_packed, iri_scales)
@@ -196,7 +194,7 @@ def dequantize_iri_fp4_state(state: dict[str, torch.Tensor],
 
 # ── IRIFP4Linear: inference module ──────────────────────────────────────────
 
-class IRIFP4Linear(nn.Module):
+class IRIFP4Linear(QuantizedLinearMixin):
     """Linear layer with IRI-FP4 quantized weights for inference.
 
     Stores n_rounds FP4 quantizations (indices + per-block float16 scales +
@@ -244,7 +242,7 @@ class IRIFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    n_rounds: int = 3) -> "IRIFP4Linear":
+                    n_rounds: int = 3) -> IRIFP4Linear:
         """Build from a standard nn.Linear by quantizing its weights."""
         w = lin.weight.data
         out_f, in_f = w.shape

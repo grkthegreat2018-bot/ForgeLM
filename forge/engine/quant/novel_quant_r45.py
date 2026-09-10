@@ -40,23 +40,24 @@ Sources (R45 research round):
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Reuse FP4 primitives from the existing NVFP4 module
-from forge.engine.quant.nvfp4_quant import (
-    _FP4_MAGNITUDES, _FP4_BOUNDARIES,
-)
-
 # Reuse the _replace_linears helper and skip-type list from R44
 from forge.engine.quant.novel_quant_r44 import (
-    _replace_linears, _SKIP_TYPES, _SKIP_NAMES,
-    _hadamard_matrix, AdaptiveBlockFP4Linear,
+    _SKIP_NAMES,
+    _SKIP_TYPES,
+    _hadamard_matrix,
 )
 
+# Reuse FP4 primitives from the existing NVFP4 module
+from forge.engine.quant.nvfp4_quant import (
+    _FP4_BOUNDARIES,
+    _FP4_MAGNITUDES,
+)
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Helper: Haar wavelet transform (1D, in-place, power-of-2)
@@ -103,7 +104,7 @@ def _haar_matrix(n: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 # Algorithm 1: WaveletLift (WL) — Haar wavelet + SVD-init low-rank binary
 # ──────────────────────────────────────────────────────────────────────────
 
-class WaveletLiftLinear(nn.Module):
+class WaveletLiftLinear(QuantizedLinearMixin):
     """WaveletLift: Haar wavelet rotation + SVD-initialized low-rank binary.
 
     Pipeline:
@@ -149,7 +150,7 @@ class WaveletLiftLinear(nn.Module):
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, rank: int = 64) -> "WaveletLiftLinear":
+    def from_linear(cls, lin: nn.Linear, rank: int = 64) -> WaveletLiftLinear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None, rank=rank)
 
@@ -239,7 +240,7 @@ class WaveletLiftLinear(nn.Module):
 # Algorithm 2: SchurAB-FP4 — Schur-complement corrected AB-FP4
 # ──────────────────────────────────────────────────────────────────────────
 
-class SchurABFP4Linear(nn.Module):
+class SchurABFP4Linear(QuantizedLinearMixin):
     """SchurAB-FP4: AB-FP4 with Schur-complement suffix-absorption correction.
 
     Novel combination:
@@ -286,7 +287,7 @@ class SchurABFP4Linear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
                     kurt_low: float = 3.0, kurt_high: float = 7.0,
-                    schur_iters: int = 3) -> "SchurABFP4Linear":
+                    schur_iters: int = 3) -> SchurABFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     block_size=block_size, kurt_low=kurt_low,
@@ -315,8 +316,8 @@ class SchurABFP4Linear(nn.Module):
         # R44 showed that storing full FP4 indices is better than real 3-bit)
         # The Schur scale refinement is the novel contribution, not bit allocation
         bit_alloc = torch.ones(out_f, n_blocks, dtype=torch.uint8, device=device)
-        mask_3bit = torch.zeros(out_f, n_blocks, dtype=torch.bool, device=device)
-        coarse_mag = torch.tensor([0.0, 0.75, 2.0, 5.0], dtype=W.dtype, device=device)
+        torch.zeros(out_f, n_blocks, dtype=torch.bool, device=device)
+        torch.tensor([0.0, 0.75, 2.0, 5.0], dtype=W.dtype, device=device)
 
         # MSE-optimal scale search per block (from AS-FP4)
         absmax = W_blocks.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -377,7 +378,7 @@ class SchurABFP4Linear(nn.Module):
 
         # 6-bit residual for high-kurtosis blocks
         mask_6bit = (bit_alloc == 2)
-        residual_data = torch.zeros(out_f, n_blocks, block_size, device=device)
+        torch.zeros(out_f, n_blocks, block_size, device=device)
         if mask_6bit.any():
             residual = W_blocks - w_fp4 * best_scale.unsqueeze(-1)
             r_absmax = residual.abs().amax(dim=-1, keepdim=True).clamp(min=1e-10)
@@ -385,7 +386,7 @@ class SchurABFP4Linear(nn.Module):
             r_norm = residual / r_scale
             r_q = torch.round(r_norm * 1.5) / 1.5
             r_q = r_q.clamp(-1.5, 1.5)
-            residual_data = r_q * r_scale
+            r_q * r_scale
             # Pack residual (2-bit per element, 4 per byte)
             r_code = ((r_norm * 1.5).round().clamp(-1.5, 1.5) + 1.5).to(torch.int64)
             r_flat = r_code.view(out_f, -1)
@@ -485,7 +486,7 @@ class SchurABFP4Linear(nn.Module):
 # Algorithm 3: SVDLiftBinary — SVD low-rank + binarize (LittleBit PTQ)
 # ──────────────────────────────────────────────────────────────────────────
 
-class SVDLiftBinaryLinear(nn.Module):
+class SVDLiftBinaryLinear(QuantizedLinearMixin):
     """SVDLiftBinary: SVD factorization + binarization (LittleBit-style PTQ).
 
     Pipeline:
@@ -517,7 +518,7 @@ class SVDLiftBinaryLinear(nn.Module):
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, rank: int = 64) -> "SVDLiftBinaryLinear":
+    def from_linear(cls, lin: nn.Linear, rank: int = 64) -> SVDLiftBinaryLinear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None, rank=rank)
 

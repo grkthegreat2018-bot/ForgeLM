@@ -25,7 +25,6 @@ Usage:
         ...
 """
 import math
-from typing import Dict, Optional
 
 import torch
 

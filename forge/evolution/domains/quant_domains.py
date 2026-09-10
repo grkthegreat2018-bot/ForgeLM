@@ -4,9 +4,10 @@ Each domain explores a different quantization configuration search space.
 All use small tensor operations for fast evaluation (no model loading).
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
-from typing import Any
+import torch
+
 from . import BaseDomain
 
 
@@ -103,7 +104,7 @@ class Nvfp4Quant(BaseDomain):
         w = self._randn(256, 512) * 0.02
         # Use ForgeEngine's NVFP4 quantization for real FP4 error
         try:
-            from forge.engine.quant.nvfp4_quant import _quantize_to_fp4, _dequantize_fp4
+            from forge.engine.quant.nvfp4_quant import _dequantize_fp4, _quantize_to_fp4
             packed, scales, global_scale = _quantize_to_fp4(w, bs)
             w_dq = _dequantize_fp4(packed, scales, 256, 512, bs, torch.float32, global_scale)
             err = float((w - w_dq).norm().item() / (w.norm().item() + 1e-8))

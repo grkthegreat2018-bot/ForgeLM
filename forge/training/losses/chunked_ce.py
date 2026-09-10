@@ -35,7 +35,7 @@ class ChunkedLinearCrossEntropy(Function):
     @staticmethod
     def forward(ctx, x, weight, target, chunk_size=512):
         N, H = x.shape
-        V = weight.shape[0]
+        weight.shape[0]
         device = x.device
         ignore_index = -100
         # Cast weight to x's dtype for the matmul (fixes bf16/fp32 mismatch).

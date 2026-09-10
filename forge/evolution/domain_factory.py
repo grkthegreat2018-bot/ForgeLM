@@ -26,9 +26,11 @@ Usage:
 """
 from __future__ import annotations
 
-import torch
 from typing import Any
-from forge.evolution.domains import BaseDomain, DOMAINS
+
+import torch
+
+from forge.evolution.domains import DOMAINS, BaseDomain
 
 
 class RefinementDomain(BaseDomain):
@@ -117,7 +119,7 @@ class RefinementDomain(BaseDomain):
             seeds.append(self.parent.decode(p))
         return seeds
 
-    def to_cpu(self) -> "RefinementDomain":
+    def to_cpu(self) -> RefinementDomain:
         return RefinementDomain(
             parent=self.parent.to_cpu(),
             best_config=self.best_config,

@@ -11,7 +11,6 @@ Supports per-sequence generation settings:
 """
 import torch
 import torch.nn.functional as F
-from typing import Optional
 
 from forge.engine.decoding import DecodingStrategy
 from forge.model_loader import unpack_output_with_kv
@@ -106,7 +105,7 @@ class BatchedDecoding(DecodingStrategy):
         active = torch.ones(B, dtype=torch.bool, device=device)
         generated = [padded_ids[i:i+1, -prompt_lens[i]:].clone() for i in range(B)]
         max_tokens = max(max_tokens_list)
-        eos_tensor = torch.tensor(list(self.eos_set), device=device)
+        torch.tensor(list(self.eos_set), device=device)
 
         # Prefill
         with torch.inference_mode():

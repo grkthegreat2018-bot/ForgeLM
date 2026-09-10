@@ -31,8 +31,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional
 
 
 class KVpopScorer(nn.Module):
@@ -86,7 +84,7 @@ class KVpopCache:
                  long_range_budget: int = 1024,
                  device: str = "cuda",
                  dtype: torch.dtype = torch.bfloat16,
-                 scorer: Optional[KVpopScorer] = None):
+                 scorer: KVpopScorer | None = None):
         self.n_kv = n_kv_heads
         self.head_dim = head_dim
         self.sink_size = sink_size
@@ -219,7 +217,7 @@ def train_kvpop_scorer(model, scorer, training_data, n_steps=1000):
     leaves the protected window. Computed via transposed-attention pass
     during training (avoids materializing dense attention map).
     """
-    optimizer = torch.optim.Adam(scorer.parameters(), lr=1e-3)
+    torch.optim.Adam(scorer.parameters(), lr=1e-3)
 
     for step in range(n_steps):
         # Get a batch of training data

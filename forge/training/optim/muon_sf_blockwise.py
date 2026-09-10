@@ -17,10 +17,74 @@ self-play loops but hurts on short runs.
 """
 from __future__ import annotations
 
-import math
 import torch
 import torch.nn as nn
-from muon import SingleDeviceMuonWithAuxAdam, muon_update
+
+try:
+    from muon import SingleDeviceMuonWithAuxAdam, muon_update
+    _HAS_MUON = True
+except ImportError:
+    _HAS_MUON = False
+    muon_update = None
+
+    class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
+        def step(self, closure=None):
+            return None
+
+try:
+    from schedulefree import AdamWScheduleFree
+    _HAS_SF = True
+except ImportError:
+    _HAS_SF = False
+    AdamWScheduleFree = None
+
+
+def _newton_schulz(G, steps: int = 5):
+    """Keller-Jordan Newton-Schulz orthogonalization (quintic iteration)."""
+    a, b, c = 3.4445, -4.7750, 2.1428
+    X = G.bfloat16()
+    transposed = G.size(-2) > G.size(-1)
+    if transposed:
+        X = X.mT
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    for _ in range(steps):
+        A = X @ X.mT
+        B = b * A + c * (A @ A)
+        X = a * X + B @ X
+    if transposed:
+        X = X.mT
+    return X
+
+
+def _muon_update_fallback(grad, momentum, beta=0.95, ns_steps: int = 5):
+    momentum.lerp_(grad, 1 - beta)
+    update = grad.lerp(momentum, beta)
+    if update.ndim < 2:
+        return update
+    if update.ndim > 2:
+        update = update.view(update.shape[0], -1)
+    update = _newton_schulz(update, steps=ns_steps).to(grad.dtype)
+    return update * max(1.0, grad.size(-2) / grad.size(-1)) ** 0.5
+
+
+def _dion2_update(grad, momentum, beta: float, rank_fraction: float,
+                  ns_steps: int = 5):
+    """Dion2 (arXiv 2512.16928): orthogonalize a random row subset only.
+
+    Full momentum buffer is still updated every step (error feedback via
+    persistence), but Newton-Schulz runs on a `rank_fraction` sample of rows;
+    unselected rows get zero update this step. Matches Muon exactly at
+    rank_fraction=1.0.
+    """
+    momentum.lerp_(grad, 1 - beta)
+    g = grad.lerp(momentum, beta)
+    rows = g.shape[0]
+    k = max(1, int(rank_fraction * rows))
+    idx = torch.randperm(rows, device=g.device)[:k]
+    sub = _newton_schulz(g[idx], steps=ns_steps).to(g.dtype)
+    update = torch.zeros_like(g)
+    update[idx] = sub
+    return update * max(1.0, grad.size(-2) / grad.size(-1)) ** 0.5
 
 
 class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
@@ -28,11 +92,12 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
 
     ScheduleFree eliminates the need for a LR schedule via iterate averaging.
     We delegate non-muon params to an internal AdamWScheduleFree instance.
+
+    rank_fraction < 1.0 enables Dion2-style row-sampled orthogonalization
+    (up to 6x cheaper optimizer steps at 0.25, near-Muon loss quality).
     """
 
-    def __init__(self, param_groups):
-        from schedulefree import AdamWScheduleFree
-
+    def __init__(self, param_groups, rank_fraction: float = 1.0):
         adam_params = []
         muon_groups = []
         adam_lr = 3e-4
@@ -42,12 +107,19 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
             else:
                 adam_params.extend(g["params"])
                 adam_lr = g["lr"]
-        self._sf = AdamWScheduleFree(
-            adam_params, lr=adam_lr, betas=(0.9, 0.95), weight_decay=0.0
-        )
-        super().__init__(muon_groups)
+        if _HAS_SF:
+            self._sf = AdamWScheduleFree(
+                adam_params, lr=adam_lr, betas=(0.9, 0.95), weight_decay=0.0
+            )
+        else:
+            self._sf = torch.optim.AdamW(
+                adam_params, lr=adam_lr, betas=(0.9, 0.95), weight_decay=0.0
+            )
+        super().__init__(muon_groups, {"lr": adam_lr})
         self._adam_params = adam_params
-        self._sf.train()
+        self._rank_fraction = float(rank_fraction)
+        if hasattr(self._sf, "train"):
+            self._sf.train()
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -58,9 +130,17 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
                 state = self.state[p]
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(
-                    p.grad, state["momentum_buffer"], beta=group["momentum"]
-                )
+                if self._rank_fraction < 1.0 and p.grad.ndim == 2:
+                    update = _dion2_update(
+                        p.grad, state["momentum_buffer"],
+                        beta=group["momentum"], rank_fraction=self._rank_fraction)
+                elif _HAS_MUON:
+                    update = muon_update(
+                        p.grad, state["momentum_buffer"], beta=group["momentum"]
+                    )
+                else:
+                    update = _muon_update_fallback(
+                        p.grad, state["momentum_buffer"], beta=group["momentum"])
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
         self._sf.step()
@@ -70,10 +150,12 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
         self._sf.zero_grad(set_to_none=set_to_none)
 
     def eval(self):
-        self._sf.eval()
+        if hasattr(self._sf, "eval"):
+            self._sf.eval()
 
     def train(self):
-        self._sf.train()
+        if hasattr(self._sf, "train"):
+            self._sf.train()
 
 
 class MuonSFBlockwise(MuonScheduleFree):
@@ -100,8 +182,9 @@ class MuonSFBlockwise(MuonScheduleFree):
         sharp_beta: float = 0.9,
         lr_min_ratio: float = 0.3,
         lr_max_ratio: float = 2.5,
+        rank_fraction: float = 1.0,
     ):
-        super().__init__(param_groups)
+        super().__init__(param_groups, rank_fraction=rank_fraction)
         self._n_blocks = n_blocks
         self._refresh_every = refresh_every
         self._sharp_beta = sharp_beta
@@ -152,6 +235,7 @@ def build_muon_sf_blockwise(
     weight_decay: float = 0.1,
     n_blocks: int = 4,
     refresh_every: int = 16,
+    rank_fraction: float = 1.0,
 ) -> MuonSFBlockwise:
     """Build a MuonSFBlockwise optimizer for a ForgeAI model.
 
@@ -161,8 +245,8 @@ def build_muon_sf_blockwise(
 
     LR scaling follows the NanoGPT speedrun ratios, normalized to max_lr.
     """
-    matrix_params = [p for p in model.parameters() if p.ndim >= 2]
-    other_params = [p for p in model.parameters() if p.ndim < 2]
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2 and p.requires_grad]
+    other_params = [p for p in model.parameters() if p.ndim < 2 and p.requires_grad]
 
     embed_ids = set()
     for n, p in model.named_parameters():
@@ -209,7 +293,8 @@ def build_muon_sf_blockwise(
         f"{len(embed_params)} embed + {len(scalar_params)} scalar params. "
         f"Blockwise: n_blocks={n_blocks}, refresh_every={refresh_every}."
     )
-    return MuonSFBlockwise(param_groups, n_blocks=n_blocks, refresh_every=refresh_every)
+    return MuonSFBlockwise(param_groups, n_blocks=n_blocks, refresh_every=refresh_every,
+                           rank_fraction=rank_fraction)
 
 
 def build_muon_sf_plain(
@@ -225,8 +310,8 @@ def build_muon_sf_plain(
 
     Same param splitting as build_muon_sf_blockwise, but no sharpness EMA/scaling.
     """
-    matrix_params = [p for p in model.parameters() if p.ndim >= 2]
-    other_params = [p for p in model.parameters() if p.ndim < 2]
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2 and p.requires_grad]
+    other_params = [p for p in model.parameters() if p.ndim < 2 and p.requires_grad]
 
     embed_ids = set()
     for n, p in model.named_parameters():

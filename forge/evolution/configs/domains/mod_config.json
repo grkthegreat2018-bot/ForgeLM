@@ -1,0 +1,27 @@
+{
+  "name": "mod_config",
+  "category": "training",
+  "description": "MoD keep_fraction, router_type, aux_loss, n_skip. Metrics: compute_saved, accuracy_loss. Scoring fixes: aux_penalty, skip_penalty, router_quality.",
+  "simulator": "mod_simulate",
+  "params": [
+    {"name": "keep_fraction", "type": "float", "range": [0.5, 1.0]},
+    {"name": "router_type", "type": "choice", "values": ["linear", "mlp"]},
+    {"name": "aux_loss_weight", "type": "float", "range": [0.0, 0.1]},
+    {"name": "n_skip_layers", "type": "int", "range": [0, 16]}
+  ],
+  "behavioral_dims": [["compute_saved", 10, 0, 1], ["accuracy_loss", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "base_score", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "skip_penalty"},
+      {"flag": "aux_penalty"}
+    ],
+    "hardening": ["no_nan", "no_trivial"],
+    "trivial_metric": "compute_saved",
+    "trivial_op": "<",
+    "trivial_value": 0.05,
+    "trivial_penalty": -50.0
+  }
+}

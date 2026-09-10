@@ -35,12 +35,9 @@ Usage:
 """
 from __future__ import annotations
 
-from typing import List, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # ---------------------------------------------------------------------------
 # Factorization helpers
@@ -61,7 +58,7 @@ def _count_prime_factors(n: int) -> int:
     return c
 
 
-def _factorize(n: int, n_factors: int = 4) -> List[int]:
+def _factorize(n: int, n_factors: int = 4) -> list[int]:
     """Factorize ``n`` into ``n_factors`` integers (>= 2 when possible).
 
     Distributes prime factors greedily into balanced buckets so the resulting
@@ -69,7 +66,7 @@ def _factorize(n: int, n_factors: int = 4) -> List[int]:
     """
     if n <= 1:
         return [1] * n_factors
-    primes: List[int] = []
+    primes: list[int] = []
     d = 2
     val = n
     while d * d <= val:
@@ -91,7 +88,7 @@ def _factorize(n: int, n_factors: int = 4) -> List[int]:
     return buckets
 
 
-def _pad_dim(n: int, n_factors: int = 4) -> Tuple[int, List[int]]:
+def _pad_dim(n: int, n_factors: int = 4) -> tuple[int, list[int]]:
     """Return (padded_n, factors) so ``padded_n`` has >= n_factors prime factors.
 
     Pads ``n`` upward to the next integer with enough prime factors to split
@@ -108,7 +105,7 @@ def _pad_dim(n: int, n_factors: int = 4) -> Tuple[int, List[int]]:
 # TT-SVD core algorithm
 # ---------------------------------------------------------------------------
 
-def _tt_svd(tensor: torch.Tensor, max_rank: int) -> List[torch.Tensor]:
+def _tt_svd(tensor: torch.Tensor, max_rank: int) -> list[torch.Tensor]:
     """Decompose ``tensor`` of shape (d1, ..., dN) into TT cores via TT-SVD.
 
     Each returned core has shape (r_{k-1}, d_k, r_k) with r_0 = r_N = 1.
@@ -116,10 +113,10 @@ def _tt_svd(tensor: torch.Tensor, max_rank: int) -> List[torch.Tensor]:
 
     Reference: Oseledets 2011, Algorithm 1.
     """
-    device, dtype = tensor.device, tensor.dtype
+    _device, dtype = tensor.device, tensor.dtype
     shape = list(tensor.shape)
     N = len(shape)
-    cores: List[torch.Tensor] = []
+    cores: list[torch.Tensor] = []
 
     r_prev = 1
     current = tensor.reshape(r_prev, -1)  # (1, prod(shape))
@@ -164,8 +161,8 @@ class TTLinear(nn.Module):
         self,
         in_features: int,
         out_features: int,
-        in_factors: List[int],
-        out_factors: List[int],
+        in_factors: list[int],
+        out_factors: list[int],
         tt_rank: int = 4,
         in_pad: int = 0,
         out_pad: int = 0,
@@ -258,7 +255,7 @@ class TTLinear(nn.Module):
         return res
 
     @classmethod
-    def from_dense(cls, weight: torch.Tensor, tt_rank: int = 4) -> "TTLinear":
+    def from_dense(cls, weight: torch.Tensor, tt_rank: int = 4) -> TTLinear:
         """Decompose a dense weight matrix into TT format via TT-SVD.
 
         Args:
@@ -296,7 +293,7 @@ class TTLinear(nn.Module):
 
         # svd_cores[k]: (r_{k}, mode_size_k, r_{k+1}) with r_0 = r_4 = 1.
         # Split each mode_size_k back into (i_k, o_k) -> (r_{k-1}, i_k, o_k, r_k).
-        tt_cores: List[torch.Tensor] = []
+        tt_cores: list[torch.Tensor] = []
         for k, core in enumerate(svd_cores):
             r_left, ms, r_right = core.shape
             ik = in_factors[k]
@@ -385,7 +382,7 @@ class TTSwiGLUFFN(nn.Module):
         return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
     @classmethod
-    def from_dense_ffn(cls, ffn: nn.Module, tt_rank: int = 4) -> "TTSwiGLUFFN":
+    def from_dense_ffn(cls, ffn: nn.Module, tt_rank: int = 4) -> TTSwiGLUFFN:
         """Build a ``TTSwiGLUFFN`` by decomposing a dense ``SwiGLUFFN``'s weights.
 
         Args:

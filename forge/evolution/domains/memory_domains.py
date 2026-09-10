@@ -11,9 +11,11 @@ All evaluations use small synthetic tensor ops (torch) to model tradeoffs.
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
 from typing import Any
+
+import numpy as np
+import torch
+
 from . import BaseDomain
 
 

@@ -12,9 +12,10 @@ subclass BaseDomain and implement:
 """
 from __future__ import annotations
 
-import torch
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
+
+import torch
 
 
 class BaseDomain(ABC):
@@ -81,7 +82,7 @@ class BaseDomain(ABC):
         """
         return []
 
-    def to_cpu(self) -> "BaseDomain":
+    def to_cpu(self) -> BaseDomain:
         """Create a CPU-side copy of this domain for parallel evaluation.
 
         Override in subclasses that hold GPU tensors. The CPU copy should
@@ -95,6 +96,7 @@ class BaseDomain(ABC):
 # Import all domain modules so they're available via DOMAINS dict.
 import importlib
 import inspect
+
 
 def _discover_domains() -> dict[str, type[BaseDomain]]:
     """Auto-discover all BaseDomain subclasses across all domain modules."""
@@ -112,7 +114,7 @@ def _discover_domains() -> dict[str, type[BaseDomain]]:
                 if (issubclass(obj, BaseDomain) and obj is not BaseDomain
                         and obj.__module__ == mod.__name__):
                     registry[obj.__name__] = obj
-        except ImportError as e:
+        except ImportError:
             pass
     return registry
 
@@ -125,7 +127,7 @@ def _discover_json_domains() -> dict[str, type[BaseDomain]]:
     This allows JSON domains to be used everywhere a Python domain class is
     expected (run_evolve.py, rescore_db.py, etc.) without any code changes.
     """
-    from ..domain_spec import list_specs, JSONSpecDomain
+    from ..domain_spec import JSONSpecDomain, list_specs
     registry = {}
     for spec_name in list_specs():
         try:

@@ -14,9 +14,11 @@ Behavioral dims: mean(x), std(x) → MAP-Elites explores diverse param patterns.
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
 from typing import Any
+
+import numpy as np
+import torch
+
 from . import BaseDomain
 
 

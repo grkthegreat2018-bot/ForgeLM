@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from typing import Optional
 
 
 class CoRunScheduler:
@@ -55,14 +54,14 @@ class CoRunScheduler:
 
         # Fixed-shape decode buffers
         config = getattr(model, 'config', None)
-        d_model = getattr(config, 'd_model', 2048) if config else 2048
+        getattr(config, 'd_model', 2048) if config else 2048
         self._decode_input = torch.zeros(max_concurrency, 1, dtype=torch.long,
                                           device=self.device)
         self._decode_pos = torch.zeros(max_concurrency, 1, dtype=torch.long,
                                         device=self.device)
 
         # CUDA graph for fixed-shape decode
-        self._decode_graph: Optional[torch.cuda.CUDAGraph] = None
+        self._decode_graph: torch.cuda.CUDAGraph | None = None
         self._decode_output = None
 
     def capture_decode_graph(self):
@@ -82,14 +81,13 @@ class CoRunScheduler:
 
         # Capture
         self._decode_graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(self._decode_graph):
-                try:
-                    self._decode_output = self.model(
-                        self._decode_input, position_ids=self._decode_pos)
-                except Exception:
-                    self._decode_graph = None
-                    return
+        with torch.inference_mode(), torch.cuda.graph(self._decode_graph):
+            try:
+                self._decode_output = self.model(
+                    self._decode_input, position_ids=self._decode_pos)
+            except Exception:
+                self._decode_graph = None
+                return
 
         print(f"  [CoRun] Captured fixed-shape decode graph "
               f"(concurrency={self.max_concurrency})")

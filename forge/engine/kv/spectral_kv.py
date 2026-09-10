@@ -27,8 +27,8 @@ Memory:
 from __future__ import annotations
 
 import math
+
 import torch
-import torch.nn.functional as F
 
 from forge.engine.kv_backend import KVCacheStrategy
 
@@ -135,7 +135,7 @@ class SpectralKVCache(KVCacheStrategy):
         T = k.shape[2]
         total_seq = pos + T
 
-        if not self._fitted and T >= self.n_coeffs:
+        if not self._fitted and self.n_coeffs <= T:
             # First significant batch: fit coefficients via least-squares
             self._fit_coefficients(k, v, total_seq)
         elif self._fitted:
@@ -197,7 +197,6 @@ class SpectralKVCache(KVCacheStrategy):
         """
         T = k_new.shape[2]
         basis = self._get_basis(total_seq)
-        start = self.sink_size
         # Basis rows for the new tokens
         pos_start = total_seq - T
         basis_new = basis[pos_start:total_seq]  # [T, n_coeffs]
@@ -252,8 +251,6 @@ class SpectralKVCache(KVCacheStrategy):
         if positions is not None:
             # Return only requested positions
             positions = torch.as_tensor(positions, device=self.device)
-            sink_mask = positions < self.sink_size
-            lr_mask = ~sink_mask
             # For simplicity, reconstruct full and index
             k_full = torch.cat([self.sink_k[:, :, :self.sink_size], k_lr], dim=2)
             v_full = torch.cat([self.sink_v[:, :, :self.sink_size], v_lr], dim=2)

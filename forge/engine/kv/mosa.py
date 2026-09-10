@@ -32,6 +32,7 @@ This implementation provides:
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -176,7 +177,7 @@ class MoSAWrapper:
             hd = self.head_dim
 
             # Use MoSA only for long sequences
-            if T < self._mosa_min_seq or attention_bias is not None:
+            if self._mosa_min_seq > T or attention_bias is not None:
                 return original_forward(
                     x, past_key_value=past_key_value, use_cache=use_cache,
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,

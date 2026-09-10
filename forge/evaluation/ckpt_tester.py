@@ -21,7 +21,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-
 # ── Question Bank ─────────────────────────────────────────────────────────
 
 QUESTION_BANK: dict[str, list[dict[str, Any]]] = {

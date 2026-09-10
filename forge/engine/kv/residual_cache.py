@@ -34,10 +34,7 @@ happens inside a custom forward pass or via hooks.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
-import torch.nn as nn
 
 from forge.engine.kv_backend import KVCacheStrategy
 

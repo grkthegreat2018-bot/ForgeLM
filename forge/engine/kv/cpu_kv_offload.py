@@ -37,12 +37,14 @@ Eviction is LRU per tier; fetch cascades disk → CPU → GPU on demand.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import time
-from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from forge.engine.kv_backend import KVCacheStrategy
 
@@ -172,7 +174,6 @@ class CPUKVCache(KVCacheStrategy):
 
         # Check which positions are hot vs cold
         cpu_start = 0
-        cpu_end = self.cpu_len
         gpu_start = self.cpu_len  # GPU positions start after CPU tokens
 
         positions = torch.as_tensor(positions, device=self.device)
@@ -282,10 +283,10 @@ class DiskKVCache(KVCacheStrategy):
     Total effective context = hot + cpu + disk tokens, all in ~2 MB VRAM.
     """
 
-    def __init__(self, disk_path: Optional[str] = None,
+    def __init__(self, disk_path: str | None = None,
                  hot_window_size: int = 8192,
                  cpu_window_size: int = 32768,
-                 disk_capacity: Optional[int] = None,
+                 disk_capacity: int | None = None,
                  persist: bool = False):
         """Configure tier sizes.
 
@@ -391,7 +392,7 @@ class DiskKVCache(KVCacheStrategy):
                 self.disk_k = torch.load(self._disk_k_path, map_location="cpu")
                 self.disk_v = torch.load(self._disk_v_path, map_location="cpu")
             except Exception:
-                pass  # corrupt spool — start fresh
+                logger.debug("Corrupt disk KV spool, starting fresh", exc_info=True)
 
     def append(self, k, v, position, attention_weights=None):
         """Append new K/V tokens, cascading overflow down the tiers."""
@@ -490,7 +491,6 @@ class DiskKVCache(KVCacheStrategy):
         Used when attention must attend to cold tokens (e.g. long-range
         sparse attention).  The returned tensors are GPU-resident.
         """
-        gpu_off = 0
         cpu_off = self.gpu_len  # tokens before GPU window live in CPU/disk
         # Determine which tier holds [start, end)
         if start >= cpu_off:
@@ -560,7 +560,7 @@ class DiskKVCache(KVCacheStrategy):
             if self._owns_tmpdir and hasattr(self, "_tmpdir"):
                 self._tmpdir.cleanup()
         except Exception:
-            pass
+            logger.debug("Error during DiskKVCache cleanup", exc_info=True)
 
     def info(self):
         per_tok = 2 * self.n_kv * self.head_dim * 2

@@ -1,0 +1,19 @@
+{
+  "name": "checkpoint_recompute",
+  "category": "memory",
+  "description": "Activation checkpointing: n_checkpoint_layers, strategy, block_size.",
+  "simulator": "checkpoint_recompute_simulate",
+  "params": [
+    {"name": "n_checkpoint_layers", "type": "int", "range": [0, 16]},
+    {"name": "recompute_strategy", "type": "choice", "values": ["selective", "full", "block"]},
+    {"name": "block_size", "type": "int", "range": [64, 512]}
+  ],
+  "behavioral_dims": [["mem_saved", 10, 0.0, 0.6], ["overhead", 10, 0.0, 5.0]],
+  "scoring": {
+    "components": [
+      {"metric": "mem_saved", "weight": 20.0},
+      {"metric": "overhead", "weight": -1.5}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

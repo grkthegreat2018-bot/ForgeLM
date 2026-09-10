@@ -26,8 +26,12 @@ for that, with the graph-capture approximation as the first step.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class MegakernelDecode:
@@ -142,7 +146,7 @@ class CompiledMegakernelDecode(MegakernelDecode):
         try:
             model = torch.compile(model, mode=compile_mode, fullgraph=False)
         except Exception:
-            pass  # fall back to uncompiled if compile fails
+            logger.debug("torch.compile failed for megakernel, using uncompiled model", exc_info=True)  # fall back to uncompiled if compile fails
         super().__init__(model, device)
 
     def capture(self, max_kv_len: int = 4096, dtype: torch.dtype = torch.bfloat16):
@@ -168,11 +172,10 @@ class CompiledMegakernelDecode(MegakernelDecode):
 
         # Capture
         self._graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(self._graph):
-                self._static_output = self.model(
-                    self._static_input,
-                    use_cache=False,
-                    position_ids=self._static_pos,
-                )
+        with torch.inference_mode(), torch.cuda.graph(self._graph):
+            self._static_output = self.model(
+                self._static_input,
+                use_cache=False,
+                position_ids=self._static_pos,
+            )
         self._captured = True

@@ -24,15 +24,15 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
-from . import BaseDomain
 from ..reward_guard import RewardGuard
 from ..simulators import get_simulator
 from ..simulators.random_task_sim import _safe_eval
-
+from . import BaseDomain
 
 # Generation-parameter ranges (must match the JSON specs).
 _GEN_PARAM_RANGES = {
@@ -104,7 +104,7 @@ class RandomTaskDomain(BaseDomain):
         self.distraction_prob = distraction_prob
 
         # Gen model — set externally via set_gen_model(). None → dummy solver.
-        self._gen_model: Optional[Any] = None
+        self._gen_model: Any | None = None
 
         # The current problem dict, read by the simulator. Set fresh each
         # evaluate() call.
@@ -255,7 +255,6 @@ class RandomTaskDomain(BaseDomain):
     # ---- math --------------------------------------------------------
 
     def _gen_math_problem(self, difficulty: int) -> dict:
-        ops = ["+", "-", "*", "/", "%", "**"]
         if difficulty <= 1:
             a = self._rng.randint(1, 20)
             b = self._rng.randint(1, 20)
@@ -359,7 +358,7 @@ class RandomTaskDomain(BaseDomain):
     # CPU copy for parallel evaluation
     # ------------------------------------------------------------------
 
-    def to_cpu(self) -> "RandomTaskDomain":
+    def to_cpu(self) -> RandomTaskDomain:
         return RandomTaskDomain(
             task_kind=self.task_kind,
             seed=self._rng.randint(0, 1_000_000),

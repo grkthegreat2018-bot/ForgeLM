@@ -185,7 +185,7 @@ class CSAAttention(nn.Module):
         Returns:
             (B, n_heads, seq_q, head_dim) attention output.
         """
-        Sq = q.shape[2]
+        q.shape[2]
         Sk = k.shape[2]
 
         # If sequence is shorter than top_k, use full attention (no sparsity).

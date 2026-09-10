@@ -341,7 +341,7 @@ class METRORouter:
             return 1.0
         mean_load = self.expert_counts.mean().clamp(min=1.0)
         max_load = self.expert_counts.max().clamp(min=1.0)
-        min_load = self.expert_counts.min()
+        self.expert_counts.min()
         return (max_load / mean_load).item()
 
     def reset_stats(self) -> None:
@@ -375,7 +375,7 @@ class METRORouter:
         )
 
     @classmethod
-    def load(cls, path: str, model, tokenizer, device: str = "cuda") -> "SemanticRouter":
+    def load(cls, path: str, model, tokenizer, device: str = "cuda") -> SemanticRouter:
         try:
             data = torch.load(path, map_location=device, weights_only=True)
         except Exception:

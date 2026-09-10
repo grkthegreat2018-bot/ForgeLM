@@ -19,9 +19,7 @@ Usage:
     vram.check_before_generation("task_1")
 """
 import os
-import sys
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from dataclasses import dataclass
 
 import torch
 

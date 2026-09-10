@@ -37,7 +37,6 @@ Sources (cross-domain combinations):
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -45,10 +44,10 @@ import torch.nn.functional as F
 
 # Reuse FP4 primitives from the existing NVFP4 module
 from forge.engine.quant.nvfp4_quant import (
-    _FP4_MAGNITUDES, _FP4_BOUNDARIES, _FP8_DTYPE, _HAS_FP8,
-    _quantize_to_fp4, _dequantize_fp4,
+    _FP4_BOUNDARIES,
+    _FP4_MAGNITUDES,
 )
-
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Algorithm 1: HadamardLift (HLQ) — Rotation + Dimensional Lifting
@@ -64,7 +63,7 @@ def _hadamard_matrix(n: int, device: torch.device, dtype: torch.dtype) -> torch.
     return H / math.sqrt(n)
 
 
-class HadamardLiftLinear(nn.Module):
+class HadamardLiftLinear(QuantizedLinearMixin):
     """HadamardLift: rotate weights with Hadamard, then lift to higher dim and
     project 1-bit lattice back.
 
@@ -121,7 +120,7 @@ class HadamardLiftLinear(nn.Module):
     def from_linear(cls, lin: nn.Linear, lift_ratio: float = 2.0,
                     lift_dim: int = 8, optimize_p: bool = True,
                     p_steps: int = 50, p_lr: float = 0.01,
-                    quant_bits: int = 1) -> "HadamardLiftLinear":
+                    quant_bits: int = 1) -> HadamardLiftLinear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     lift_ratio=lift_ratio, lift_dim=lift_dim,
@@ -144,7 +143,7 @@ class HadamardLiftLinear(nn.Module):
         W_norm = W_rot / scales  # normalize
 
         # Step 3: Reshape into d-dim vectors and project to D-dim
-        d, D = layer.lift_dim, layer.lifted_dim
+        d, _D = layer.lift_dim, layer.lifted_dim
         n_vectors = layer.hadamard_size // d
         assert layer.hadamard_size % d == 0, \
             f"hadamard_size {layer.hadamard_size} not divisible by lift_dim {d}"
@@ -253,7 +252,7 @@ class HadamardLiftLinear(nn.Module):
 # Algorithm 2: AdaptiveBlockFP4 (AB-FP4) — MSE-optimal scale + kurtosis bit alloc
 # ──────────────────────────────────────────────────────────────────────────
 
-class AdaptiveBlockFP4Linear(nn.Module):
+class AdaptiveBlockFP4Linear(QuantizedLinearMixin):
     """AdaptiveBlockFP4: per-block MSE-optimal FP4 scale + kurtosis-based
     variable bit allocation.
 
@@ -304,7 +303,7 @@ class AdaptiveBlockFP4Linear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
                     kurt_low: float = 3.0, kurt_high: float = 7.0,
-                    use_residual: bool = True) -> "AdaptiveBlockFP4Linear":
+                    use_residual: bool = True) -> AdaptiveBlockFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     block_size=block_size, kurt_low=kurt_low, kurt_high=kurt_high,
@@ -376,7 +375,7 @@ class AdaptiveBlockFP4Linear(nn.Module):
 
         # For 6-bit blocks: compute 2-bit residual (only if use_residual)
         mask_6bit = (bit_alloc == 2)
-        residual_data = torch.zeros(out_f, n_blocks, block_size, device=device)
+        torch.zeros(out_f, n_blocks, block_size, device=device)
         if use_residual and mask_6bit.any():
             residual = W_blocks - w_fp4 * best_scale.unsqueeze(-1)
             # 2-bit quantization of residual (4 levels: {-1.5, -0.5, 0.5, 1.5} * r_scale)
@@ -386,7 +385,7 @@ class AdaptiveBlockFP4Linear(nn.Module):
             # 2-bit: round to {-1.5, -0.5, 0.5, 1.5}
             r_q = torch.round(r_norm * 1.5) / 1.5
             r_q = r_q.clamp(-1.5, 1.5)
-            residual_data = r_q * r_scale
+            r_q * r_scale
             # Store residual packed (2-bit per element, 4 per byte)
             r_code = ((r_norm * 1.5).round().clamp(-1.5, 1.5) + 1.5).to(torch.int64)  # 0-3
             r_flat = r_code.view(out_f, -1)
@@ -449,7 +448,7 @@ class AdaptiveBlockFP4Linear(nn.Module):
         w = w.view(out_f, n_blocks, bs) * block_s.unsqueeze(-1) * global_s.unsqueeze(-1)
 
         # Apply 3-bit coarsening for low-kurtosis blocks
-        mask_3bit = (self.bit_alloc == 0).view(out_f, n_blocks, 1)
+        (self.bit_alloc == 0).view(out_f, n_blocks, 1)
         # Already coarse in storage, nothing extra needed
 
         # Apply 6-bit residual for high-kurtosis blocks
@@ -484,7 +483,7 @@ class AdaptiveBlockFP4Linear(nn.Module):
 # Algorithm 3: SparseResidualINT3 (SR-INT3) — INT3 + error-threshold outliers
 # ──────────────────────────────────────────────────────────────────────────
 
-class SparseResidualINT3Linear(nn.Module):
+class SparseResidualINT3Linear(QuantizedLinearMixin):
     """SparseResidualINT3: INT3 dense base + INT8 sparse outlier correction.
 
     Novel combination:
@@ -528,7 +527,7 @@ class SparseResidualINT3Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, group_size: int = 64,
-                    n_std: float = 2.0, base_bits: int = 3) -> "SparseResidualINT3Linear":
+                    n_std: float = 2.0, base_bits: int = 3) -> SparseResidualINT3Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     group_size=group_size, n_std=n_std, base_bits=base_bits)
@@ -645,7 +644,7 @@ class SparseResidualINT3Linear(nn.Module):
 # Algorithm 4: TernaryLift (TL) — Ternary lattice + dimensional lifting
 # ──────────────────────────────────────────────────────────────────────────
 
-class TernaryLiftLinear(nn.Module):
+class TernaryLiftLinear(QuantizedLinearMixin):
     """TernaryLift: ternary {-1, 0, +1} quantization in a lifted space.
 
     Novel combination:
@@ -690,7 +689,7 @@ class TernaryLiftLinear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, lift_ratio: float = 1.5,
                     lift_dim: int = 8, optimize_p: bool = True,
-                    p_steps: int = 50, p_lr: float = 0.01) -> "TernaryLiftLinear":
+                    p_steps: int = 50, p_lr: float = 0.01) -> TernaryLiftLinear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     lift_ratio=lift_ratio, lift_dim=lift_dim)
@@ -698,7 +697,7 @@ class TernaryLiftLinear(nn.Module):
         W = lin.weight.data.float()  # (out, in)
         device = W.device
 
-        d, D = layer.lift_dim, layer.lifted_dim
+        d, _D = layer.lift_dim, layer.lifted_dim
 
         # Pad in_features to be divisible by d
         pad = (d - in_f % d) % d
@@ -763,7 +762,7 @@ class TernaryLiftLinear(nn.Module):
     def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         out_f = self.out_features
         in_f = self.in_features
-        d, D = self.lift_dim, self.lifted_dim
+        _d, D = self.lift_dim, self.lifted_dim
         n_vec = self.q_weights.shape[1]
 
         # Ternary dequant

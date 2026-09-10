@@ -19,12 +19,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import shutil
-import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QMessageBox, QWidget
@@ -63,7 +60,7 @@ class BackupManager(QObject):
     agent_unfreeze = Signal()
 
     def __init__(self, project_root: Path,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.project_root = Path(project_root).resolve()
         self._parent_widget = parent
@@ -174,7 +171,7 @@ class BackupManager(QObject):
             logger.warning("BackupManager check failed: %s", e)
 
     # ── backup creation ───────────────────────────────────────────────
-    def create_backup(self) -> Optional[str]:
+    def create_backup(self) -> str | None:
         """Create a ZIP backup of the project. Returns the backup path."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"{self._project_name}_{timestamp}.zip"
@@ -229,7 +226,7 @@ class BackupManager(QObject):
 
     # ── backup restore (with user confirmation) ───────────────────────
     def request_restore(self, backup_path: str,
-                        parent: Optional[QWidget] = None) -> bool:
+                        parent: QWidget | None = None) -> bool:
         """Request to restore a backup. Shows confirmation dialog.
 
         FREEZES the agent during the dialog. If user confirms:

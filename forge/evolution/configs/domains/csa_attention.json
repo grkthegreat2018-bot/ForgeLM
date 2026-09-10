@@ -1,0 +1,21 @@
+{
+  "name": "csa_attention",
+  "category": "attention",
+  "description": "CSA top-k position selection, pattern type, block size. Metrics: sparsity, coverage, trivial_penalty.",
+  "simulator": "csa_attn_simulate",
+  "params": [
+    {"name": "top_k", "type": "int", "range": [64, 1024]},
+    {"name": "pattern_type", "type": "choice", "values": ["standard", "csa", "csa_hca_hybrid"]},
+    {"name": "block_size", "type": "int", "range": [8, 128]}
+  ],
+  "behavioral_dims": [["sparsity", 10, 0, 1], ["coverage", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "sparsity", "weight": 10.0},
+      {"metric": "coverage", "weight": 5.0},
+      {"metric": "trivial_penalty", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

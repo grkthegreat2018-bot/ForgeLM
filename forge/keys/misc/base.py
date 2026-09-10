@@ -11,7 +11,7 @@ closed-form algorithm that produces the same weights instantly.
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 

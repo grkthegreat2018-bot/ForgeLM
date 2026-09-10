@@ -22,9 +22,11 @@ container returned by ``apply_to_model``.
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn as nn
 
+from forge.quant.protocol import is_quantized_linear
 
 # ── DLoRA adapter ─────────────────────────────────────────────────────────
 
@@ -155,7 +157,7 @@ class DLoRA:
         idx = 0
 
         def is_quant_linear(mod):
-            return type(mod).__name__ in ("IRIFP4Linear", "NF4Linear")
+            return is_quantized_linear(mod)
 
         def find_and_add(module, prefix=""):
             nonlocal n_adapters, idx
@@ -185,7 +187,7 @@ class DLoRA:
                         dev = (child.weight_packed.device if is_quant
                                else child.weight.device)
                         adapter = adapter.to(dev).to(dtype)
-                        setattr(child, 'lora_adapter', adapter)
+                        child.lora_adapter = adapter
                         if not is_quant:
                             orig = child.forward
                             child._lora_orig_forward = orig

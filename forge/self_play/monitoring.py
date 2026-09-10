@@ -13,7 +13,6 @@ Only depends on the Python standard library.
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, List, Optional
 
 
 class SelfPlayMonitor:
@@ -71,7 +70,7 @@ class SelfPlayMonitor:
             return 0.0
         return sum(window) / len(window)
 
-    def _reward_slope(self) -> Optional[float]:
+    def _reward_slope(self) -> float | None:
         """Least-squares slope of mean_reward over the rolling window."""
         n = len(self.mean_reward)
         if n < 2:
@@ -88,7 +87,7 @@ class SelfPlayMonitor:
 
     def _language_mix_ratio(self) -> float:
         """Fraction of tokens in non-dominant languages (0..1)."""
-        totals: Dict[str, float] = {}
+        totals: dict[str, float] = {}
         for dist in self.language_distribution:
             for lang, count in dist.items():
                 totals[lang] = totals.get(lang, 0.0) + count
@@ -101,9 +100,9 @@ class SelfPlayMonitor:
     # ------------------------------------------------------------------ #
     # Alerts
     # ------------------------------------------------------------------ #
-    def check_alerts(self) -> List[dict]:
+    def check_alerts(self) -> list[dict]:
         """Check all alert conditions; return a list of alert dicts."""
-        alerts: List[dict] = []
+        alerts: list[dict] = []
 
         acr = self._avg(self.advantage_collapse_rate)
         if acr > self.ACR_THRESHOLD:

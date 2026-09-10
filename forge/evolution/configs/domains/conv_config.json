@@ -1,0 +1,23 @@
+{
+  "name": "conv_config",
+  "category": "architecture",
+  "description": "Conv: kernel_size, stride, dilation, groups, n_conv_layers. Metrics: receptive_field (normalized), param_ratio, out_quality.",
+  "simulator": "conv_simulate",
+  "params": [
+    {"name": "kernel_size", "type": "choice", "values": [3, 5, 7, 9]},
+    {"name": "stride", "type": "int", "range": [1, 3]},
+    {"name": "dilation", "type": "int", "range": [1, 4]},
+    {"name": "groups", "type": "int", "range": [1, 8]},
+    {"name": "n_conv_layers", "type": "int", "range": [1, 6]}
+  ],
+  "behavioral_dims": [["receptive_field", 10, 0, 1], ["param_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "receptive_field", "weight": 10.0},
+      {"metric": "out_quality", "weight": 5.0},
+      {"metric": "param_ratio", "weight": -3.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

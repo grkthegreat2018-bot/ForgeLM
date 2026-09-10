@@ -1,0 +1,24 @@
+{
+  "name": "factorized_embed",
+  "category": "architecture",
+  "description": "Factorized embedding: rank, init_mode, tie_factor, vocab_size. Metrics: param_reduction, recon_err, total_err.",
+  "simulator": "factorized_embed_simulate",
+  "params": [
+    {"name": "rank", "type": "int", "range": [64, 512]},
+    {"name": "init_mode", "type": "choice", "values": ["svd", "random"]},
+    {"name": "tie_factor", "type": "float", "range": [0.0, 1.0]},
+    {"name": "vocab_size", "type": "int", "range": [32000, 65536]}
+  ],
+  "behavioral_dims": [["param_reduction", 10, 0, 1], ["total_err", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "param_reduction", "weight": 20.0},
+      {"metric": "total_err", "weight": -100.0},
+      {"metric": "flag_adjustment", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "tie_factor_eval"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

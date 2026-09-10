@@ -4,8 +4,10 @@ Each simulator is a port-exact replica of the original evaluate() metric
 computation. Scoring formulas live in the JSON specs.
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
+import torch
+
 from . import register
 
 

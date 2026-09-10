@@ -1,0 +1,21 @@
+{
+  "name": "muon_config",
+  "category": "training",
+  "description": "Muon momentum, nesterov, weight_decay, ns_steps. Metrics: convergence, orthogonality.",
+  "simulator": "muon_simulate",
+  "params": [
+    {"name": "momentum", "type": "float", "range": [0.85, 0.99]},
+    {"name": "nesterov", "type": "bool"},
+    {"name": "weight_decay", "type": "float", "range": [0.0, 0.01]},
+    {"name": "ns_steps", "type": "int", "range": [1, 6]}
+  ],
+  "behavioral_dims": [["convergence", 10, 0, 1], ["orthogonality", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "convergence", "weight": 20.0},
+      {"metric": "orthogonality", "weight": 10.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

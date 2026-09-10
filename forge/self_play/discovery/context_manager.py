@@ -28,15 +28,11 @@ Summarization strategy:
 from __future__ import annotations
 
 import json
-import re
-import time
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from forge.self_play.discovery.qwen_adapter import (
-    qwen_render_messages, IM_START, IM_END,
+    qwen_render_messages,
 )
-
 
 # ── Token counting ─────────────────────────────────────────────────────────
 
@@ -54,7 +50,7 @@ def count_message_tokens(msg: dict, tokenizer=None) -> int:
     Qwen format: <|im_start|>role\n{content}<|im_end|>\n
     Overhead: ~4 tokens for markers per message.
     """
-    role = msg.get("role", "user")
+    msg.get("role", "user")
     content = msg.get("content", "")
     tool_calls = msg.get("tool_calls")
 
@@ -187,7 +183,6 @@ def build_summary_message(messages_to_summarize: list[dict]) -> dict:
     This is a heuristic summarizer (not model-generated) for speed.
     For higher quality, use model_generate_summary() instead.
     """
-    parts = []
     tool_calls_made = []
     findings = []
     user_goal = None
@@ -218,9 +213,9 @@ def build_summary_message(messages_to_summarize: list[dict]) -> dict:
                 try:
                     result = json.loads(content)
                     if isinstance(result, dict):
-                        if "stdout" in result and result["stdout"]:
+                        if result.get("stdout"):
                             findings.append(f"    [{name} output]: {result['stdout'][:150]}")
-                        elif "results" in result and result["results"]:
+                        elif result.get("results"):
                             n = len(result["results"])
                             findings.append(f"    [{name} returned {n} results]")
                         elif "error" in result:
@@ -374,8 +369,8 @@ class ContextManager:
         if not self.needs_compression(messages):
             return messages, False
         new_messages = self.compress(messages)
-        old_count = self.token_count(messages)
-        new_count = self.token_count(new_messages)
+        self.token_count(messages)
+        self.token_count(new_messages)
         return new_messages, True
 
     def stats(self) -> dict:

@@ -10,11 +10,9 @@ status using the `check_training` tool.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +221,7 @@ class LoraTrainingTrigger:
                 "Training in progress..." if running else
                 "Training completed (or stopped). Check output directory.")}}
 
-    def _export_chat_data(self, category: str) -> Optional[Path]:
+    def _export_chat_data(self, category: str) -> Path | None:
         """Export good-rated chat turns as JSONL for training."""
         if self.chat_store is None:
             return None

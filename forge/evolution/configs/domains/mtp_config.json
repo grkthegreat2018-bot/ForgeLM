@@ -1,0 +1,23 @@
+{
+  "name": "mtp_config",
+  "category": "decoding",
+  "description": "Multi-token prediction: n_heads, loss_weight, share_weights, depth_ratio.",
+  "simulator": "mtp_simulate",
+  "params": [
+    {"name": "n_heads", "type": "int", "range": [1, 4]},
+    {"name": "loss_weight", "type": "float", "range": [0.1, 0.5]},
+    {"name": "share_weights", "type": "choice", "values": [false, true]},
+    {"name": "depth_ratio", "type": "float", "range": [0.5, 1.0]}
+  ],
+  "behavioral_dims": [["throughput", 10, 0.0, 1.0], ["pred_acc", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "throughput", "weight": 20.0},
+      {"metric": "pred_acc", "weight": 10.0},
+      {"metric": "signal", "weight": 5.0},
+      {"metric": "lw_penalty", "weight": -1.0},
+      {"metric": "dr_latency", "weight": -1.0}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

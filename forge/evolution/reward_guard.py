@@ -52,11 +52,11 @@ Flags available:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # ScoringSpec — declarative scoring policy (loaded from JSON)
@@ -101,7 +101,7 @@ class PenaltySpec:
     high: float = 1.0
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PenaltySpec":
+    def from_dict(cls, d: dict) -> PenaltySpec:
         return cls(
             flag=d["flag"],
             metric=d.get("metric"),
@@ -133,7 +133,7 @@ class ScoringSpec:
     monotonic_epsilon: float = 1e-6
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ScoringSpec":
+    def from_dict(cls, d: dict) -> ScoringSpec:
         comps = [ScoringComponent(metric=c["metric"],
                                   weight=float(c.get("weight", 1.0)),
                                   transform=c.get("transform", "identity"))

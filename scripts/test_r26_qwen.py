@@ -32,7 +32,7 @@ QWEN_PATH = glob.glob(os.path.join(
     r"C:\Users\tmk68\.cache\huggingface\hub\models--Qwen--Qwen2.5-0.5B\snapshots",
     "*", "model.safetensors"))[0]
 
-from forge.keys.quantization.bitnet_residual_key import ternary_quantize
+from tests.fixtures.keys.quantization.bitnet_residual_key import ternary_quantize
 
 
 def frob_err(ref, q):

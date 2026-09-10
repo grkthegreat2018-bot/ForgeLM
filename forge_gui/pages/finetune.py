@@ -14,14 +14,26 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox,
-                               QPushButton, QScrollArea, QSpinBox, QSplitter,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.chat_store import ChatStore
 from ..api.models_index import ModelsIndex
@@ -58,7 +70,7 @@ def _spin(lo: float, hi: float, val: float, dec: int = 0,
 class FineTunePage(QWidget):
     def __init__(self, store: ChatStore, proc_mgr: ProcessManager,
                  models_index: ModelsIndex | None = None,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.store = store
         self.proc_mgr = proc_mgr
@@ -85,7 +97,7 @@ class FineTunePage(QWidget):
             try:
                 names = [c.name for c in self.models_index.configs()] or names
             except Exception:
-                pass
+                logger.debug("Failed to list model configs", exc_info=True)
         self._config.addItems(names)
         self._ckpt.clear()
         self._ckpt.addItem("research/checkpoints/ForgeLM_V2.safetensors",
@@ -96,7 +108,7 @@ class FineTunePage(QWidget):
                     if "lora" not in m.name.lower() and m.is_safetensors:
                         self._ckpt.addItem(m.name, m.path)
             except Exception:
-                pass
+                logger.debug("Failed to list model checkpoints", exc_info=True)
         self._ckpt.setCurrentIndex(0)
 
     # ── left: datasets ────────────────────────────────────────────────

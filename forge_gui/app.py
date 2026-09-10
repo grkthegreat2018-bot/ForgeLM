@@ -25,8 +25,9 @@ from .api.engine_runtime import EngineRuntime
 from .api.gpu_monitor import GpuMonitor, GpuPoller
 from .api.library_install import LibraryInstallManager
 from .api.log_tailer import LogTailer
-from .api.lorebook import Lorebook
 from .api.lora_store import LoraHarness, LoraManager
+from .api.lora_training_trigger import LoraTrainingTrigger
+from .api.lorebook import Lorebook
 from .api.mcp_client import MCPManager
 from .api.models_index import ModelsIndex
 from .api.process_manager import ProcessManager
@@ -35,7 +36,6 @@ from .api.sub_agent import SubAgentManager
 from .api.time_manager import TimeManager
 from .api.tool_harness import ToolHarness
 from .api.web_tools import WebTools
-from .api.lora_training_trigger import LoraTrainingTrigger
 from .pages.agent import AgentPage
 from .pages.chat import ChatPage
 from .pages.compute import ComputePage
@@ -401,7 +401,11 @@ class MainWindow(QMainWindow):
         try:
             self._gpu_poller.stop(timeout_s=2.0)
         except Exception:
-            pass
+            logger.debug("Error stopping GPU poller on close", exc_info=True)
+        try:
+            self.proc_mgr.shutdown(timeout_s=5.0)
+        except Exception as e:
+            logger.warning("ProcessManager shutdown on close failed: %s", e)
         # wait for an in-flight engine load so the QThread is never
         # destroyed while still running
         try:
@@ -585,7 +589,7 @@ def _install_crash_handlers() -> None:
                                       file=_crash_log)
             _crash_log.flush()
         except Exception:
-            pass
+            logger.debug("Failed to write crash log", exc_info=True)
 
     def _sys_hook(t, exc, tb):
         _log_exc(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] unhandled "
@@ -657,22 +661,22 @@ class _Tee:
         try:
             self._original.write(msg)
         except Exception:
-            pass
+            logger.debug("Failed to write to original stdout", exc_info=True)
         try:
             self._log.write(msg)
             self._log.flush()
         except Exception:
-            pass
+            logger.debug("Failed to write to log file", exc_info=True)
 
     def flush(self) -> None:
         try:
             self._original.flush()
         except Exception:
-            pass
+            logger.debug("Failed to flush original stdout", exc_info=True)
         try:
             self._log.flush()
         except Exception:
-            pass
+            logger.debug("Failed to flush log file", exc_info=True)
 
     def isatty(self) -> bool:
         try:

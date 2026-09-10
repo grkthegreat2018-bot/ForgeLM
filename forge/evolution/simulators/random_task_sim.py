@@ -24,7 +24,6 @@ from typing import Any
 
 from . import register
 
-
 # ---------------------------------------------------------------------------
 # Helpers — safe expression evaluation + answer parsing
 # ---------------------------------------------------------------------------

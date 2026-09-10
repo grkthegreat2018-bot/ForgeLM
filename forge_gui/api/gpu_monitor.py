@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,7 @@ class GpuMonitor:
             return self._torch
         self._torch_loaded = True
         try:
-            import torch  # noqa
+            import torch
             self._torch = torch
         except Exception as e:
             logger.warning("torch unavailable — GPU monitoring disabled: %s", e)
@@ -137,7 +136,7 @@ class GpuPoller:
         self._gpu = gpu
         self._interval_s = interval_s
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -155,7 +154,6 @@ class GpuPoller:
         self._thread = None
 
     def _run(self) -> None:
-        import time as _time
         while not self._stop.is_set():
             try:
                 stats = self._gpu.snapshot()

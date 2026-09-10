@@ -229,7 +229,7 @@ class HqeKVCache(KVCacheStrategy):
                 vals = torch.stack([low, high], dim=-1).reshape(1, self.n_kv, -1)
                 d = self.head_dim
                 n_groups = scale.shape[-1]
-                gs = d // n_groups if d % n_groups == 0 else (d + n_groups - 1) // n_groups
+                d // n_groups if d % n_groups == 0 else (d + n_groups - 1) // n_groups
                 vals = vals[..., :d]
                 vals_g = vals.view(1, self.n_kv, n_groups, -1)
                 s = scale[:, :, idx].unsqueeze(-1)

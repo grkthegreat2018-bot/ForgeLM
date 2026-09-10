@@ -20,11 +20,20 @@ dict is available via ``dialog.result_kwargs``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QFrame, QHBoxLayout,
-                               QLabel, QPushButton, QRadioButton,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 def _section_label(text: str) -> QLabel:
@@ -138,7 +147,7 @@ class ActivationWizard(QDialog):
             runtime.reactivate(wiz.result_kwargs)
     """
 
-    def __init__(self, parent: Optional[QWidget] = None,
+    def __init__(self, parent: QWidget | None = None,
                  default_key: str = "chat") -> None:
         super().__init__(parent)
         self.setWindowTitle("Activation Wizard")

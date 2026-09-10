@@ -1,13 +1,9 @@
 """MetricCard — a small panel showing a title, big value, optional delta + sparkline."""
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from ..theme import Palette
 from .chart import LiveLineChart
 
 
@@ -15,12 +11,12 @@ class MetricCard(QFrame):
     """Compact KPI card: title, big value, unit, delta, optional sparkline."""
 
     def __init__(self, title: str, value: str = "—", unit: str = "",
-                 delta: Optional[str] = None, delta_up: bool = True,
-                 spark_color: Optional[str] = None,
-                 spark_window: int = 80, parent: Optional[QWidget] = None) -> None:
+                 delta: str | None = None, delta_up: bool = True,
+                 spark_color: str | None = None,
+                 spark_window: int = 80, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
-        self._spark: Optional[LiveLineChart] = None
+        self._spark: LiveLineChart | None = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
 
@@ -50,7 +46,7 @@ class MetricCard(QFrame):
             lay.addWidget(self._spark)
 
     def set_value(self, value: str, unit: str = "",
-                  delta: Optional[str] = None, delta_up: bool = True) -> None:
+                  delta: str | None = None, delta_up: bool = True) -> None:
         self._value_lbl.setText(value)
         if delta is not None and hasattr(self, "_delta_lbl"):
             self._delta_lbl.setText(delta)

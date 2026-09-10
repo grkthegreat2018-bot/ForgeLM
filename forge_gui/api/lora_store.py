@@ -30,9 +30,8 @@ import logging
 import re
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -111,7 +110,7 @@ class LoRAEntry:
     size_bytes: int = 0
     size_label: str = ""
     modified: float = 0.0
-    rank: Optional[int] = None
+    rank: int | None = None
     n_tensors: int = 0
     n_params: int = 0
     dtype: str = ""
@@ -216,7 +215,7 @@ class _LoraActionWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, runtime, action: str, path: str = "",
-                 rank: int = 32, alpha: Optional[int] = None,
+                 rank: int = 32, alpha: int | None = None,
                  target_key: str = "default", parent=None) -> None:
         super().__init__(parent)
         self.runtime = runtime
@@ -262,7 +261,7 @@ class _LoraMergeWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, base_checkpoint: str, config_name: str,
-                 adapter_path: str, rank: int, alpha: Optional[int],
+                 adapter_path: str, rank: int, alpha: int | None,
                  out_path: str, parent=None) -> None:
         super().__init__(parent)
         self.base = base_checkpoint
@@ -312,7 +311,7 @@ class _LoraMergeWorker(QThread):
                 import gc
                 gc.collect()
             except Exception:
-                pass
+                logger.debug("Failed to gc.collect() after LoRA unload", exc_info=True)
 
 
 class LoraManager(QObject):
@@ -327,7 +326,7 @@ class LoraManager(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._worker: Optional[QThread] = None
+        self._worker: QThread | None = None
         self._busy = False
 
     def is_busy(self) -> bool:
@@ -360,7 +359,7 @@ class LoraManager(QObject):
 
     # ── public actions ────────────────────────────────────────────────
     def load_on_engine(self, runtime, path: str, rank: int,
-                       alpha: Optional[int] = None,
+                       alpha: int | None = None,
                        target_key: str = "default") -> None:
         """Hot-load an adapter onto the resident engine."""
         self._start(_LoraActionWorker(runtime, "load", path, rank, alpha,
@@ -374,7 +373,7 @@ class LoraManager(QObject):
         self._start(_LoraActionWorker(runtime, "info", parent=self))
 
     def merge(self, base_checkpoint: str, config_name: str, adapter_path: str,
-              rank: int, alpha: Optional[int], out_path: str) -> None:
+              rank: int, alpha: int | None, out_path: str) -> None:
         """Merge adapter → base on CPU, writing a standalone checkpoint."""
         self._start(_LoraMergeWorker(base_checkpoint, config_name, adapter_path,
                                      rank, alpha, out_path, parent=self))
@@ -405,8 +404,8 @@ class LoraHarness(QObject):
         self._mgr = manager
         self._runtime = runtime
         self._mode = "chat"
-        self._pinned: Optional[str] = None   # pinned adapter path
-        self._current: Optional[str] = None   # currently loaded adapter path
+        self._pinned: str | None = None   # pinned adapter path
+        self._current: str | None = None   # currently loaded adapter path
         # track manager signals
         manager.lora_loaded.connect(self._on_loaded)
         manager.lora_unloaded.connect(self._on_unloaded)
@@ -417,11 +416,11 @@ class LoraHarness(QObject):
         return self._mode
 
     @property
-    def current_adapter(self) -> Optional[str]:
+    def current_adapter(self) -> str | None:
         return self._current
 
     @property
-    def pinned_adapter(self) -> Optional[str]:
+    def pinned_adapter(self) -> str | None:
         return self._pinned
 
     # ── mode switching ────────────────────────────────────────────────
@@ -484,7 +483,7 @@ class LoraHarness(QObject):
         self._load(best.path)
 
     def _best_for_categories(self, entries: list[LoRAEntry],
-                             categories: list[str]) -> Optional[LoRAEntry]:
+                             categories: list[str]) -> LoRAEntry | None:
         """Pick the best adapter from the preferred categories.
 
         Selection criteria (in order):
@@ -536,7 +535,7 @@ class LoraHarness(QObject):
             out.setdefault(e.category, []).append(e)
         return out
 
-    def recommend_for_mode(self, mode: str) -> Optional[LoRAEntry]:
+    def recommend_for_mode(self, mode: str) -> LoRAEntry | None:
         """Return the recommended adapter for a mode (without loading)."""
         entries = scan_lora_adapters()
         return self._best_for_categories(

@@ -13,14 +13,15 @@ Usage:
     # INT4 weight-only quantization (3x speedup, ~1-2% quality loss)
     quantize_model_int4(model)
 """
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
 
-class QuantizedLinear(nn.Module):
+
+class QuantizedLinear(QuantizedLinearMixin):
     """Weight-only quantized Linear layer for inference.
     
     Weights are stored as int8/int4 with per-channel scales.
@@ -115,7 +116,7 @@ class QuantizedLinear(nn.Module):
         return f"QuantizedLinear(in={self.in_features}, out={self.out_features}, bits={self.bits})"
 
 
-class FastINT8Linear(nn.Module):
+class FastINT8Linear(QuantizedLinearMixin):
     """FP8 weight-only Linear using torch._scaled_mm (Blackwell-native FP8 matmul).
 
     Stores weights as FP8 (e4m3fn) + per-tensor fp32 scale. Forward quantizes

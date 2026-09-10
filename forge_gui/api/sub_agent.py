@@ -24,9 +24,8 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal
 
@@ -75,7 +74,7 @@ class SubAgentManager(QObject):
         self.max_concurrent = max_concurrent
         self._tasks: dict[str, SubAgentTask] = {}
         self._futures: dict[str, Future] = {}
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._executor: ThreadPoolExecutor | None = None
         self._counter = 0
 
     def _next_id(self) -> str:
@@ -164,7 +163,7 @@ class SubAgentManager(QObject):
             logger.warning("sub-agent %s failed: %s", task.task_id, task.error)
             self.sub_agent_error.emit(task.task_id, task.error)
 
-    def get_result(self, task_id: str) -> Optional[SubAgentTask]:
+    def get_result(self, task_id: str) -> SubAgentTask | None:
         """Get the status/result of a sub-agent task."""
         return self._tasks.get(task_id)
 
@@ -174,7 +173,7 @@ class SubAgentManager(QObject):
             try:
                 fut.result(timeout=timeout_s)
             except Exception:
-                pass  # error already recorded in task
+                logger.debug("Error waiting for sub-agent future (already recorded in task)", exc_info=True)  # error already recorded in task
         self._futures.clear()
         self.all_done.emit()
         return dict(self._tasks)

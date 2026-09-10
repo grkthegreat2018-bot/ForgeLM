@@ -26,15 +26,15 @@ Usage:
 """
 from __future__ import annotations
 
-import os
-import sys
-import json
 import ast
+import logging
 import textwrap
-from typing import Any, Optional
 from dataclasses import dataclass
+from typing import Any
 
-from forge.evolution.domains import BaseDomain, DOMAINS
+logger = logging.getLogger(__name__)
+
+from forge.evolution.domains import DOMAINS, BaseDomain
 from forge.evolution.topic_scanner import OptimizationTopic
 
 
@@ -75,7 +75,6 @@ class GenericDomain(BaseDomain):
         return max(1, len(self._params))
 
     def decode(self, params) -> dict[str, Any]:
-        import torch
         p = params.detach().cpu().numpy() if hasattr(params, 'detach') else params
         config = {}
         for i, param_name in enumerate(self._params):
@@ -121,7 +120,7 @@ class GenericDomain(BaseDomain):
             ("quality", 10, 0.0, 1.0),
         ]
 
-    def to_cpu(self) -> "GenericDomain":
+    def to_cpu(self) -> GenericDomain:
         import torch
         cpu = GenericDomain(self._topic_name, self._params, self._source_file, self._description)
         cpu._device = torch.device("cpu")
@@ -166,7 +165,7 @@ class LLMDomainGenerator:
                 results.append(domain)
         return results
 
-    def _generate_one(self, topic: OptimizationTopic) -> Optional[GeneratedDomain]:
+    def _generate_one(self, topic: OptimizationTopic) -> GeneratedDomain | None:
         """Generate a domain for a single topic.
 
         Tries LLM generation first, falls back to GenericDomain.
@@ -184,9 +183,9 @@ class LLMDomainGenerator:
                     )
                     self.generated.append(domain)
                     return domain
-            except Exception as e:
+            except Exception:
                 # Fall back to GenericDomain
-                pass
+                logger.debug("LLM domain generation failed, falling back to GenericDomain", exc_info=True)
 
         # Fallback: create a GenericDomain
         domain = GeneratedDomain(
@@ -198,7 +197,7 @@ class LLMDomainGenerator:
         self.generated.append(domain)
         return domain
 
-    def _generate_with_llm(self, topic: OptimizationTopic) -> Optional[str]:
+    def _generate_with_llm(self, topic: OptimizationTopic) -> str | None:
         """Use the ForgeEngine to generate a domain class.
 
         Constructs a prompt with the BaseDomain interface + example domains
@@ -258,7 +257,7 @@ class LLMDomainGenerator:
         parts = name.replace("-", "_").replace(".", "_").split("_")
         return "".join(p.capitalize() for p in parts) + "Domain"
 
-    def _extract_code(self, response: str) -> Optional[str]:
+    def _extract_code(self, response: str) -> str | None:
         """Extract Python code from an LLM response."""
         # Look for ```python ... ``` blocks
         import re

@@ -25,8 +25,8 @@ Usage:
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field, asdict
-from typing import Any, Optional
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from forge.engine.activation import ActivationConfig
 
@@ -41,11 +41,11 @@ class EngineSettings:
     # ── Core strategies (require re-activation) ──
     kv_cache: str = "paged"
     decoding: str = "standard"
-    quantize: Optional[str] = None
-    acceleration: Optional[str] = None
+    quantize: str | None = None
+    acceleration: str | None = None
 
     # ── KV cache parameters ──
-    kv_cache_tokens: Optional[int] = None  # None = unlimited (VRAM-bounded)
+    kv_cache_tokens: int | None = None  # None = unlimited (VRAM-bounded)
     kv_bits: int = 4
 
     # ── Context limits ──
@@ -80,12 +80,12 @@ class EngineSettings:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "EngineSettings":
+    def from_dict(cls, d: dict[str, Any]) -> EngineSettings:
         valid = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in d.items() if k in valid}
         return cls(**filtered)
 
-    def diff(self, other: "EngineSettings") -> dict[str, Any]:
+    def diff(self, other: EngineSettings) -> dict[str, Any]:
         """Return fields that differ from `other`."""
         changes = {}
         for f in self.__dataclass_fields__:
@@ -143,7 +143,7 @@ class HotSwapManager:
                 self._pending = EngineSettings(**asdict(self._current))
             self._pending.decoding = strategy
 
-    def set_quantize(self, quant: Optional[str]):
+    def set_quantize(self, quant: str | None):
         """Switch quantization (None, 'int8', 'int4', 'fp8', 'w8a8').
 
         Note: quantization changes require re-loading weights and may
@@ -154,7 +154,7 @@ class HotSwapManager:
                 self._pending = EngineSettings(**asdict(self._current))
             self._pending.quantize = quant
 
-    def set_acceleration(self, accel: Optional[str]):
+    def set_acceleration(self, accel: str | None):
         """Switch acceleration mode (None, 'cuda_graph', 'megakernel')."""
         with self._lock:
             if self._pending is None:
@@ -201,11 +201,11 @@ class HotSwapManager:
 
     def set_generation_defaults(
         self,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        top_k: Optional[int] = None,
-        repetition_penalty: Optional[float] = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        repetition_penalty: float | None = None,
     ):
         """Set default generation parameters. Overridable per-request."""
         with self._lock:
@@ -259,8 +259,8 @@ class HotSwapManager:
 
     # ── Parallel generation ──
 
-    def set_batch_config(self, max_batch: Optional[int] = None,
-                         timeout_ms: Optional[int] = None):
+    def set_batch_config(self, max_batch: int | None = None,
+                         timeout_ms: int | None = None):
         """Configure request batching for parallel generation."""
         with self._lock:
             if self._pending is None:
@@ -356,7 +356,6 @@ class HotSwapManager:
         """Re-activate engine strategies with new settings."""
         engine = self.engine
         old_kv = engine.kv_cache
-        old_decoding = engine.decoding
 
         # Build new ActivationConfig
         config = ActivationConfig(

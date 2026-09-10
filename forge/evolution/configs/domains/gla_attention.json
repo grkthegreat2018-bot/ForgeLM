@@ -1,0 +1,26 @@
+{
+  "name": "gla_attention",
+  "category": "attention",
+  "description": "GLA latent dim, heads, compression ratio. Metrics: reconstruction_err, compression, head_overhead, trivial_penalty.",
+  "simulator": "gla_attn_simulate",
+  "params": [
+    {"name": "latent_dim", "type": "int", "range": [64, 512]},
+    {"name": "n_heads", "type": "int", "range": [4, 32]},
+    {"name": "compression_ratio", "type": "float", "range": [1.0, 8.0]}
+  ],
+  "behavioral_dims": [["reconstruction_err", 10, 0, 1], ["compression", 10, 1, 8]],
+  "scoring": {
+    "components": [
+      {"metric": "reconstruction_err", "weight": -30.0},
+      {"metric": "compression", "weight": 5.0},
+      {"metric": "head_overhead", "weight": -1.0},
+      {"metric": "trivial_penalty", "weight": 1.0},
+      {"metric": "flag_adjustment", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "n_heads_score"},
+      {"flag": "head_overhead"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

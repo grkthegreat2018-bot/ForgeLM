@@ -11,14 +11,15 @@ error + compression + speed. Score = -error * 100 + compression * 5.
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
-import time
 from typing import Any
+
+import torch
+
 from . import BaseDomain
 from .kv_utils import (
-    generate_synthetic_kv, generate_synthetic_q,
-    full_attention_output, measure_speed,
+    full_attention_output,
+    generate_synthetic_kv,
+    generate_synthetic_q,
 )
 
 
@@ -201,7 +202,7 @@ class KARADomain(BaseDomain):
             seeds.append({"sink_size": 4, "window_size": 512, "target_budget": int(sl * bf), "chunk_expand_size": 8})
         return seeds
 
-    def to_cpu(self) -> "KARADomain":
+    def to_cpu(self) -> KARADomain:
         """Create CPU copy for parallel evaluation."""
         return KARADomain(seq_len=self.seq_len, seed=43,
                          device=torch.device("cpu"))

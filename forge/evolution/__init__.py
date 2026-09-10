@@ -10,23 +10,32 @@ Architecture:
 Key insight: 1000 candidates generated, only 50 evaluated → 20:1 compression.
 Surrogate learns which configs tend to work, so its top-50 predictions improve over time.
 """
-from .engine import ForgeEvolve, ForgeEvolveConfig
-from .generators import BatchedGenerator, TemplateGenerator, GeneratorPopulation
-from .surrogate import SurrogateModel
 from .archive import MapElitesArchive
-from .trainer import GeneratorTrainer
-from .database import FindingsDB
-from .checker_model import SharedCheckerModel, HeuristicChecker, get_checker, reset_checker
+from .checker_model import HeuristicChecker, SharedCheckerModel, get_checker, reset_checker
 from .curriculum_finetuner import CurriculumFineTuner
-from .llm_gen_model import LLMGenModel
+from .database import FindingsDB
+from .engine import ForgeEvolve, ForgeEvolveConfig
 from .gen_model_manager import GenModelManager
+from .generators import BatchedGenerator, GeneratorPopulation, TemplateGenerator
+from .llm_gen_model import LLMGenModel
+from .surrogate import SurrogateModel
+from .trainer import GeneratorTrainer
 
 __all__ = [
-    "ForgeEvolve", "ForgeEvolveConfig",
-    "BatchedGenerator", "TemplateGenerator", "GeneratorPopulation",
-    "SurrogateModel", "MapElitesArchive", "GeneratorTrainer",
-    "FindingsDB",
-    "SharedCheckerModel", "HeuristicChecker", "get_checker", "reset_checker",
+    "BatchedGenerator",
     "CurriculumFineTuner",
-    "LLMGenModel", "GenModelManager",
+    "FindingsDB",
+    "ForgeEvolve",
+    "ForgeEvolveConfig",
+    "GenModelManager",
+    "GeneratorPopulation",
+    "GeneratorTrainer",
+    "HeuristicChecker",
+    "LLMGenModel",
+    "MapElitesArchive",
+    "SharedCheckerModel",
+    "SurrogateModel",
+    "TemplateGenerator",
+    "get_checker",
+    "reset_checker",
 ]

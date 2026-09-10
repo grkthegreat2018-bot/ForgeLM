@@ -33,14 +33,13 @@ Lossless warm start (identity mode):
 """
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.keys._tensor_utils import _repeat_kv as _repeat_kv_shared
 from forge.keys.misc.base import Key, KeyClass, KeyResult
-from forge.model_loader import GroupedQueryAttention, RotaryEmbedding
+from forge.model_loader import RotaryEmbedding
 
 
 class GroupedLatentAttention(nn.Module):
@@ -128,11 +127,7 @@ class GroupedLatentAttention(nn.Module):
                 self.compression_gate.fill_(1.0)
 
     def _repeat_kv(self, x):
-        if self.n_rep == 1:
-            return x
-        B, n_kv, T, hd = x.shape
-        return x[:, :, None, :, :].expand(B, n_kv, self.n_rep, T, hd).reshape(
-            B, n_kv * self.n_rep, T, hd)
+        return _repeat_kv_shared(x, self.n_rep)
 
     def forward(self, x, past_key_value=None, use_cache=False,
                 preallocated_cache=None, layer_idx: int = 0,
@@ -312,8 +307,7 @@ class GLAKey(Key):
 
                     # Remove old separate k/v projections
                     del state[kw]
-                    if vw in state:
-                        del state[vw]
+                    state.pop(vw, None)
 
                 # Zero-init k_rope_proj (decoupled RoPE branch)
                 hd = state[f"{base}.q_proj.weight"].shape[0] // self.n_heads if f"{base}.q_proj.weight" in state else 64

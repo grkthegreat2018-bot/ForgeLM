@@ -1,26 +1,32 @@
 """MoE package — core MoE conversion and AirMoE expert library."""
 from .airmoe_hotswap import AirMoEHotswapLoader
 from .airmoe_infinite import InfiniteAirMoE
-from .routers import KeywordRouter, SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS, LASERRouter, METRORouter
 from .moe import (
-    MoELayer, Router, Expert, collect_aux_loss, replace_ffn_with_moe,
-    update_moe_biases, disable_dense_bypass, set_intra_expert_sparsity,
+    Expert,
+    MoELayer,
+    Router,
+    collect_aux_loss,
+    disable_dense_bypass,
+    replace_ffn_with_moe,
+    set_intra_expert_sparsity,
+    update_moe_biases,
 )
+from .routers import DEFAULT_TOPIC_DESCRIPTIONS, KeywordRouter, LASERRouter, METRORouter, SemanticRouter
 
 __all__ = [
+    'DEFAULT_TOPIC_DESCRIPTIONS',
     'AirMoEHotswapLoader',
+    'Expert',
     'InfiniteAirMoE',
     'KeywordRouter',
-    'SemanticRouter',
-    'DEFAULT_TOPIC_DESCRIPTIONS',
     'LASERRouter',
     'METRORouter',
     'MoELayer',
     'Router',
-    'Expert',
+    'SemanticRouter',
     'collect_aux_loss',
-    'replace_ffn_with_moe',
-    'update_moe_biases',
     'disable_dense_bypass',
+    'replace_ffn_with_moe',
     'set_intra_expert_sparsity',
+    'update_moe_biases',
 ]

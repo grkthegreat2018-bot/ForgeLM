@@ -42,7 +42,6 @@ from __future__ import annotations
 import gc
 import logging
 import math
-from typing import Optional, Union, List, Dict, Callable
 
 import torch
 import torch.nn as nn
@@ -97,7 +96,7 @@ def _find_block_list(model: nn.Module) -> tuple[nn.Module, str, nn.ModuleList]:
         "Expected model.model.layers or model.transformer.h")
 
 
-def _find_embed(model: nn.Module) -> Optional[nn.Module]:
+def _find_embed(model: nn.Module) -> nn.Module | None:
     """Find the token embedding module."""
     # Common attribute names across architectures
     names = ["embed_tokens", "wte", "embeddings", "embed", "embedding"]
@@ -133,9 +132,9 @@ class _BlockIOCapture:
     def __init__(self, blocks: nn.ModuleList, device: str):
         self.blocks = blocks
         self.device = device
-        self.inputs: List[torch.Tensor] = []
-        self.outputs: List[torch.Tensor] = []
-        self.kwargs_list: List[dict] = []
+        self.inputs: list[torch.Tensor] = []
+        self.outputs: list[torch.Tensor] = []
+        self.kwargs_list: list[dict] = []
         self._hooks = []
 
     def __enter__(self):
@@ -200,7 +199,7 @@ def _ste_round(x: torch.Tensor) -> torch.Tensor:
 # Quantized parameter extractor — find what to optimize in each block
 # ──────────────────────────────────────────────────────────────────────────
 
-def _get_optimizable_params(block: nn.Module) -> Dict[str, torch.Tensor]:
+def _get_optimizable_params(block: nn.Module) -> dict[str, torch.Tensor]:
     """Find quantized layer parameters that can be optimized via STE.
 
     Returns a dict mapping parameter names to their current values.
@@ -220,12 +219,7 @@ def _get_optimizable_params(block: nn.Module) -> Dict[str, torch.Tensor]:
                 params[f"{name}.s2"] = module.s2.clone()
 
         # BTC: optimize scales (codebook is discrete, hard to optimize)
-        elif cls_name == 'BTCQuantLinear':
-            if module.scales.numel() > 0:
-                params[f"{name}.scales"] = module.scales.clone()
-
-        # TernaryPTQ: optimize scales
-        elif cls_name == 'TernaryPTQLinear':
+        elif cls_name == 'BTCQuantLinear' or cls_name == 'TernaryPTQLinear':
             if module.scales.numel() > 0:
                 params[f"{name}.scales"] = module.scales.clone()
 
@@ -260,7 +254,7 @@ def _unpack_to_soft(module, which: str) -> torch.Tensor:
     return binary
 
 
-def _apply_optimized_params(block: nn.Module, params: Dict[str, torch.Tensor]):
+def _apply_optimized_params(block: nn.Module, params: dict[str, torch.Tensor]):
     """Apply optimized parameters back to the quantized layers."""
     from forge.engine.quant.novel_quant_r48 import _pack_binary_bits
 
@@ -293,12 +287,7 @@ def _apply_optimized_params(block: nn.Module, params: Dict[str, torch.Tensor]):
                 module.s2 = params[f"{name}.s2"].to(torch.float16)
                 module._invalidate_cache()
 
-        elif cls_name == 'BTCQuantLinear':
-            if f"{name}.scales" in params:
-                module.scales = params[f"{name}.scales"].to(torch.float16)
-                module._invalidate_cache()
-
-        elif cls_name == 'TernaryPTQLinear':
+        elif cls_name == 'BTCQuantLinear' or cls_name == 'TernaryPTQLinear':
             if f"{name}.scales" in params:
                 module.scales = params[f"{name}.scales"].to(torch.float16)
                 module._invalidate_cache()
@@ -323,12 +312,11 @@ def _apply_optimized_params(block: nn.Module, params: Dict[str, torch.Tensor]):
 # Soft-forward patching — make quantized layers use STE'd soft params
 # ──────────────────────────────────────────────────────────────────────────
 
-def _install_soft_forward(block: nn.Module, opt_params: Dict[str, torch.Tensor]) -> Dict:
+def _install_soft_forward(block: nn.Module, opt_params: dict[str, torch.Tensor]) -> dict:
     """Patch quantized layers in the block to use soft (STE'd) params.
 
     Returns a dict of patch info for later removal.
     """
-    from forge.engine.quant.novel_quant_r48 import _unpack_binary_bits
 
     patches = {}
     for name, module in block.named_modules():
@@ -416,9 +404,9 @@ def _install_soft_forward(block: nn.Module, opt_params: Dict[str, torch.Tensor])
                     def make_soft_forward_btc(mod, info):
                         def soft_forward(x):
                             from forge.engine.quant.novel_quant_r48 import (
-                                _unpack_binary_bits, _hadamard_matrix,
+                                _hadamard_matrix,
+                                _unpack_binary_bits,
                             )
-                            import math
                             cb = _unpack_binary_bits(mod.codebook_packed,
                                                      mod.codebook_d_in_eff)
                             cb = cb.to(x.dtype)
@@ -474,12 +462,12 @@ def _install_soft_forward(block: nn.Module, opt_params: Dict[str, torch.Tensor])
     return patches
 
 
-def _update_soft_forward(patches: Dict, opt_params: Dict[str, torch.Tensor]):
+def _update_soft_forward(patches: dict, opt_params: dict[str, torch.Tensor]):
     """Update the soft params reference in patches (no-op since we reference opt_params directly)."""
     pass  # The closures reference opt_params directly, so updates are automatic
 
 
-def _uninstall_soft_forward(patches: Dict):
+def _uninstall_soft_forward(patches: dict):
     """Remove soft-forward patches and restore original forward methods."""
     for pid, info in patches.items():
         info['module'].forward = info['orig_forward']
@@ -521,7 +509,7 @@ def _manual_block_forward(block: nn.Module, hidden_states: torch.Tensor,
         head_dim = getattr(cfg, 'head_dim', None) or (
             getattr(cfg, 'hidden_size', 896) // n_heads if cfg else 64)
 
-        d_model = normed.shape[-1]
+        normed.shape[-1]
 
         # QKV projections (these are the quantized layers with soft forward)
         q = attn.q_proj(normed)  # (batch, seq, n_heads * head_dim)
@@ -629,7 +617,7 @@ class BlockReconstructor:
         model_quant: nn.Module,
         calibration_data: torch.Tensor,
         device: str = "cuda",
-        max_blocks: Optional[int] = None,
+        max_blocks: int | None = None,
     ):
         self.device = torch.device(device)
         self.calib_data = calibration_data.to(device)
@@ -656,9 +644,9 @@ class BlockReconstructor:
             raise ValueError("Could not find token embedding layer")
 
         # Captured data (filled by capture_block_io)
-        self._block_inputs: List[torch.Tensor] = []
-        self._block_outputs: List[torch.Tensor] = []
-        self._block_kwargs: List[dict] = []
+        self._block_inputs: list[torch.Tensor] = []
+        self._block_outputs: list[torch.Tensor] = []
+        self._block_kwargs: list[dict] = []
 
         logger.info(f"BlockReconstructor: {self.n_blocks} blocks, "
                      f"device={device}")
@@ -674,16 +662,15 @@ class BlockReconstructor:
         self.model_orig.eval()
         device = self.device
 
-        with _BlockIOCapture(self.blocks_orig, str(device)) as capture:
-            with torch.no_grad():
-                # Disable cache so blocks don't accumulate KV state
-                cfg = getattr(self.model_orig, 'config', None)
-                if cfg is not None and hasattr(cfg, 'use_cache'):
-                    old_use_cache = cfg.use_cache
-                    cfg.use_cache = False
-                self.model_orig(self.calib_data)
-                if cfg is not None and hasattr(cfg, 'use_cache'):
-                    cfg.use_cache = old_use_cache
+        with _BlockIOCapture(self.blocks_orig, str(device)) as capture, torch.no_grad():
+            # Disable cache so blocks don't accumulate KV state
+            cfg = getattr(self.model_orig, 'config', None)
+            if cfg is not None and hasattr(cfg, 'use_cache'):
+                old_use_cache = cfg.use_cache
+                cfg.use_cache = False
+            self.model_orig(self.calib_data)
+            if cfg is not None and hasattr(cfg, 'use_cache'):
+                cfg.use_cache = old_use_cache
 
         self._block_inputs = capture.inputs
         self._block_outputs = capture.outputs
@@ -871,14 +858,14 @@ class BlockReconstructor:
                     output = block(hidden_states, position_embeddings=pos_emb)
                     return output
                 except Exception:
-                    pass
+                    logger.debug("Block forward with position_embeddings failed", exc_info=True)
 
             # Fallback: try without position embeddings
             try:
                 output = block(hidden_states)
                 return output
             except Exception:
-                pass
+                logger.debug("Block forward without position_embeddings failed", exc_info=True)
 
         # Last resort: just run the block
         output = block(hidden_states)
@@ -889,9 +876,9 @@ class BlockReconstructor:
         n_iters: int = 50,
         lr: float = 0.01,
         loss_fn: str = "mse",
-        blocks_to_reconstruct: Optional[List[int]] = None,
+        blocks_to_reconstruct: list[int] | None = None,
         verbose: bool = True,
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         """Reconstruct all (or selected) blocks.
 
         Args:
@@ -905,7 +892,7 @@ class BlockReconstructor:
             dict mapping block_idx → final loss
         """
         if verbose:
-            print(f"BlockReconstructor: capturing block I/O from original model...")
+            print("BlockReconstructor: capturing block I/O from original model...")
 
         self.capture_block_io()
 
@@ -945,7 +932,7 @@ class BlockReconstructor:
         lr: float = 0.01,
         loss_fn: str = "mse",
         verbose: bool = True,
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         """Progressive reconstruction: reconstruct blocks in order,
         using each reconstructed block's output as input for the next.
 
@@ -963,7 +950,7 @@ class BlockReconstructor:
             dict mapping block_idx → final loss
         """
         if verbose:
-            print(f"BlockReconstructor (progressive): capturing initial I/O...")
+            print("BlockReconstructor (progressive): capturing initial I/O...")
 
         self.capture_block_io()
 
@@ -1163,7 +1150,7 @@ class BlockReconstructor:
         loss_fn: str = "mse",
         optimize_binary: bool = True,
         verbose: bool = True,
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         """Sequential reconstruction with error propagation mitigation.
 
         NanoQuant Step 1: Before quantizing each block, adjust the FP weights

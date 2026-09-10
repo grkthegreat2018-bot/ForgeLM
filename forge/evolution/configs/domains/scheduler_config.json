@@ -1,0 +1,24 @@
+{
+  "name": "scheduler_config",
+  "category": "training",
+  "description": "Scheduler type, warmup, min_lr_ratio, decay_steps. Metrics: area_under_curve, final_decay. Scoring fix: stability_penalty + early_lr_jump.",
+  "simulator": "scheduler_simulate",
+  "params": [
+    {"name": "sched_type", "type": "choice", "values": ["cosine", "linear", "warmup_decay", "constant"]},
+    {"name": "warmup_steps", "type": "int", "range": [0, 1000]},
+    {"name": "min_lr_ratio", "type": "float", "range": [0.0, 0.5]},
+    {"name": "decay_steps", "type": "int", "range": [100, 10000]}
+  ],
+  "behavioral_dims": [["area_under_curve", 10, 0, 1], ["final_decay", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "area_under_curve", "weight": 10.0},
+      {"metric": "final_decay", "weight": 5.0}
+    ],
+    "penalties": [
+      {"flag": "stability_penalty"},
+      {"flag": "early_lr_jump"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

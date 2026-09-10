@@ -32,8 +32,7 @@ This implementation provides:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import torch
 
@@ -96,7 +95,7 @@ class SGSConjecturer:
                     temperature=0.9, do_sample=True)
             return self.tokenizer.decode(output[0], skip_special_tokens=True)
         except Exception:
-            return f"Write a function that processes a list of integers."
+            return "Write a function that processes a list of integers."
 
 
 class SGSSolver:

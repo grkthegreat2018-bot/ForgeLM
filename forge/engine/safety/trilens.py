@@ -39,10 +39,11 @@ Both detectors are pure-torch with CPU fallback (no CUDA-specific ops).
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn.functional as F
 
-__all__ = ["TriLensDetector", "PoPDetector", "TriLensPoPEnsemble"]
+__all__ = ["PoPDetector", "TriLensDetector", "TriLensPoPEnsemble"]
 
 
 def _entropy_of_logits(logits: torch.Tensor, dim: int = -1) -> torch.Tensor:

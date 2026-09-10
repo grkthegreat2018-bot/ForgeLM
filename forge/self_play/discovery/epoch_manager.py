@@ -23,9 +23,8 @@ from pathlib import Path
 
 import torch
 
-from research.paths import DATA_DIR
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
+from research.paths import DATA_DIR
 
 _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 _ARCHIVE_DIR = _EPOCHS_DIR / "archive"
@@ -95,8 +94,8 @@ def _load_model_at(checkpoint_path: str | None, device: str):
         engine.load_lora() (hot-loading, no merge needed).
       - Full checkpoint (*.safetensors): Load directly into model weights.
     """
-    from forge.model_loader import load_default_model
     from forge.checkpoint_io import load_checkpoint
+    from forge.model_loader import load_default_model
 
     model, tok = load_default_model("forgelm_v2_light")
 

@@ -17,10 +17,8 @@ Usage:
     k, v = cache.get()  # returns compressed, evicted KV for attention
 """
 from collections import deque
-from typing import Optional, Tuple
 
 import torch
-import torch.nn as nn
 
 
 class KVQuantCache:
@@ -109,7 +107,7 @@ class H2OCache:
         if current_length <= self.max_tokens:
             return torch.ones(current_length, dtype=torch.bool)
 
-        n_keep = int(self.max_tokens * self.keep_ratio)
+        int(self.max_tokens * self.keep_ratio)
         n_evict = current_length - self.max_tokens
 
         # Sort by score, evict lowest n_evict.

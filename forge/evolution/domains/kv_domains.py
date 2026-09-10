@@ -16,11 +16,12 @@ Domains:
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
 from typing import Any
-from . import BaseDomain
 
+import numpy as np
+import torch
+
+from . import BaseDomain
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,7 +103,7 @@ class RotorQuantKV(BaseDomain):
         return [{"rot_type": r, "n_rotations": n, "quant_bits": b}
                 for r in self.ROT_TYPES for n in [1, 4] for b in [4, 8]]
 
-    def to_cpu(self) -> "RotorQuantKV": return self
+    def to_cpu(self) -> RotorQuantKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,7 @@ class HadamardKV(BaseDomain):
         return [{"hadamard_dim": hd, "n_apply": n, "quant_bits": 4}
                 for hd in [64, 128, 256] for n in [1, 2, 4]]
 
-    def to_cpu(self) -> "HadamardKV": return self
+    def to_cpu(self) -> HadamardKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +226,7 @@ class StreamingKV(BaseDomain):
         return [{"chunk_size": cs, "n_sink": ns, "overlap": 0.25}
                 for cs in [256, 512, 1024] for ns in [8, 16]]
 
-    def to_cpu(self) -> "StreamingKV": return self
+    def to_cpu(self) -> StreamingKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +295,7 @@ class KvZipKV(BaseDomain):
         return [{"compression_ratio": cr, "codebook_size": cb, "n_iter": 50}
                 for cr in [4, 8, 16] for cb in [128, 256]]
 
-    def to_cpu(self) -> "KvZipKV": return self
+    def to_cpu(self) -> KvZipKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +333,7 @@ class XQuantKV(BaseDomain):
         n_stored = self.n_layers - n_recompute
         # Memory: stored layers quantized, recomputed layers free
         mem_full = self.n_layers * self.seq_len * 64 * 2   # bf16
-        mem_saved = n_recompute * self.seq_len * 64 * 2
+        n_recompute * self.seq_len * 64 * 2
         mem_quant = n_stored * self.seq_len * 64 * (bits / 16)
         mem_total = mem_quant                              # recomputed layers = 0 storage
         mem_ratio = mem_total / mem_full
@@ -375,7 +376,7 @@ class XQuantKV(BaseDomain):
         return [{"recomputation_ratio": r, "quant_bits": 4, "checkpoint_interval": 8}
                 for r in [0.0, 0.25, 0.5, 0.75, 1.0]]
 
-    def to_cpu(self) -> "XQuantKV": return self
+    def to_cpu(self) -> XQuantKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +423,7 @@ class KvRecompute(BaseDomain):
             n_actual = min(n_recomp, self.n_layers)
         n_stored = self.n_layers - n_actual
         # Memory saved
-        mem_full = self.n_layers * 2048 * 64 * 2
+        self.n_layers * 2048 * 64 * 2
         mem_saved_ratio = n_actual / self.n_layers
         # Compute cost: full recompute = 2x, selective = 1.3x per layer
         cost_per_layer = 2.0 if strat == "full" else 1.3
@@ -457,7 +458,7 @@ class KvRecompute(BaseDomain):
         return [{"recompute_layers": n, "recompute_strategy": s, "threshold": 0.5}
                 for n in [4, 8, 12] for s in self.STRATEGIES]
 
-    def to_cpu(self) -> "KvRecompute": return self
+    def to_cpu(self) -> KvRecompute: return self
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +546,7 @@ class CrossLayerKV(BaseDomain):
         return [{"share_ratio": r, "n_share_groups": 4, "share_mode": m}
                 for r in [0.25, 0.5, 0.75] for m in self.MODES]
 
-    def to_cpu(self) -> "CrossLayerKV": return self
+    def to_cpu(self) -> CrossLayerKV: return self
 
 
 # ---------------------------------------------------------------------------
@@ -627,4 +628,4 @@ class PagedEvictKV(BaseDomain):
         return [{"page_size": ps, "n_pages": 256, "eviction_policy": pol}
                 for ps in [32, 64, 128] for pol in self.POLICIES]
 
-    def to_cpu(self) -> "PagedEvictKV": return self
+    def to_cpu(self) -> PagedEvictKV: return self

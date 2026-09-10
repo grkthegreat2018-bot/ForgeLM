@@ -34,7 +34,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class PagedKVCacheForTraining:
@@ -159,7 +158,7 @@ class ChunkRecurrentTrainer:
 
     def train_sequence(self, input_ids: torch.Tensor,
                         target_ids: torch.Tensor,
-                        loss_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                        loss_mask: torch.Tensor | None = None) -> torch.Tensor:
         """Train on a long sequence using chunk recurrence.
 
         Args:
@@ -197,7 +196,7 @@ class ChunkRecurrentTrainer:
 
     def _forward_chunk(self, input_ids: torch.Tensor,
                         target_ids: torch.Tensor,
-                        loss_mask: Optional[torch.Tensor],
+                        loss_mask: torch.Tensor | None,
                         offset: int) -> tuple[torch.Tensor, int]:
         """Forward pass for a single chunk.
 

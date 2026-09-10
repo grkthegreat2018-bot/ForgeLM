@@ -1,0 +1,20 @@
+{
+  "name": "group_quant",
+  "category": "quantization",
+  "description": "Group quantization: group_size, n_bits, scheme. Score = -err*100 + log2(compression)*5.",
+  "simulator": "group_quant_simulate",
+  "params": [
+    {"name": "group_size", "type": "choice", "values": [16, 32, 64, 128]},
+    {"name": "n_bits", "type": "choice", "values": [2, 3, 4, 8]},
+    {"name": "scheme", "type": "choice", "values": ["symmetric", "asymmetric"]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["compression", 10, 2, 16]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "compression", "weight": 5.0, "transform": "log2"}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

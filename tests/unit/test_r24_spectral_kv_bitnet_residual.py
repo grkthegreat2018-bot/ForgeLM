@@ -14,7 +14,7 @@ from forge.engine.kv.spectral_kv import (
     _fit_fourier,
 )
 from forge.engine.kv_backend import build_kv_cache
-from forge.keys.quantization.bitnet_residual_key import (
+from tests.fixtures.keys.quantization.bitnet_residual_key import (
     BitNetResidualLinear,
     BitNetResidualKey,
     compute_residual,

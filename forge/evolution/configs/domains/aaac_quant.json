@@ -1,0 +1,20 @@
+{
+  "name": "aaac_quant",
+  "category": "quantization",
+  "description": "AAAC n_codebooks, codebook_size, n_bits. Score = -err*100 + log2(compression)*5.",
+  "simulator": "aaac_simulate",
+  "params": [
+    {"name": "n_codebooks", "type": "int", "range": [4, 16]},
+    {"name": "codebook_size", "type": "int", "range": [64, 512]},
+    {"name": "n_bits", "type": "int", "range": [2, 4]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["compression", 10, 2, 32]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "compression", "weight": 5.0, "transform": "log2"}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

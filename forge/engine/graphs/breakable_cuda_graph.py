@@ -29,9 +29,10 @@ This implementation provides:
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
-from typing import Callable, Optional
 
 
 class GraphSegment:
@@ -46,7 +47,7 @@ class GraphSegment:
         self.name = name
         self.fn = fn
         self.static_inputs = static_inputs
-        self.graph: Optional[torch.cuda.CUDAGraph] = None
+        self.graph: torch.cuda.CUDAGraph | None = None
         self.static_output = None
         self.captured = False
 
@@ -60,9 +61,8 @@ class GraphSegment:
 
         # Capture
         self.graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(self.graph):
-                self.static_output = self.fn(**self.static_inputs)
+        with torch.inference_mode(), torch.cuda.graph(self.graph):
+            self.static_output = self.fn(**self.static_inputs)
         self.captured = True
 
     def replay(self, **inputs) -> torch.Tensor:
@@ -114,7 +114,7 @@ class BreakableCudaGraph:
             return
 
         config = getattr(self.model, 'config', None)
-        d_model = getattr(config, 'd_model', 2048) if config else 2048
+        getattr(config, 'd_model', 2048) if config else 2048
 
         for bs in batch_sizes:
             static_input = torch.zeros(bs, seq_len, dtype=torch.long,
@@ -137,13 +137,12 @@ class BreakableCudaGraph:
 
             # Capture
             graph = torch.cuda.CUDAGraph()
-            with torch.inference_mode():
-                with torch.cuda.graph(graph):
-                    try:
-                        output = self.model(static_input, position_ids=static_pos)
-                        self._static_buffers[bs]['output'] = output
-                    except Exception:
-                        continue
+            with torch.inference_mode(), torch.cuda.graph(graph):
+                try:
+                    output = self.model(static_input, position_ids=static_pos)
+                    self._static_buffers[bs]['output'] = output
+                except Exception:
+                    continue
 
             self._decode_graphs[bs] = graph
 
@@ -178,7 +177,7 @@ class BreakableCudaGraph:
 
         # Pad input
         buffers = self._static_buffers[target_bs]
-        if B < target_bs:
+        if target_bs > B:
             padded_input = torch.zeros(target_bs, T, dtype=input_ids.dtype,
                                        device=self.device)
             padded_input[:B] = input_ids
@@ -217,7 +216,7 @@ class BreakableCudaGraph:
         config = getattr(self.model, 'config', None)
         d_model = getattr(config, 'd_model', 2048) if config else 2048
 
-        static_hidden = torch.zeros(1, max_seq_len, d_model,
+        torch.zeros(1, max_seq_len, d_model,
                                      dtype=dtype, device=self.device)
 
         # This is a placeholder — full implementation would split at attention

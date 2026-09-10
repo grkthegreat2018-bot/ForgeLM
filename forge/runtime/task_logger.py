@@ -11,12 +11,15 @@ TaskLogger / task_scope instance.
 """
 import atexit
 import json
+import logging
 import os
 import threading
 import time
 from collections import deque
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 
@@ -182,7 +185,7 @@ class TaskLogger:
                     with open(self.outputs_file, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except Exception:
-                pass
+                logger.debug("Failed to write task output entry", exc_info=True)
 
     def time_phase(self, phase: str):
         """Context manager for timing a training phase (bottleneck profiling).
@@ -201,12 +204,12 @@ class TaskLogger:
                 try:
                     self._log_handle.flush()
                 except Exception:
-                    pass
+                    logger.debug("Failed to flush log handle", exc_info=True)
             if self._outputs_handle is not None:
                 try:
                     self._outputs_handle.flush()
                 except Exception:
-                    pass
+                    logger.debug("Failed to flush outputs handle", exc_info=True)
 
     def _atexit_close(self):
         """Close persistent file handles (called at interpreter exit)."""
@@ -218,7 +221,7 @@ class TaskLogger:
                     try:
                         handle.close()
                     except Exception:
-                        pass
+                        logger.debug("Failed to close %s handle", attr, exc_info=True)
                 setattr(self, attr, None)
 
     def __del__(self):
@@ -226,7 +229,7 @@ class TaskLogger:
         try:
             self._atexit_close()
         except Exception:
-            pass
+            logger.debug("Error during TaskLogger atexit cleanup", exc_info=True)
 
     def finish(self, status="completed", message=None):
         self.status["status"] = status

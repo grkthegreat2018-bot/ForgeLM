@@ -46,8 +46,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
 
-class ForgeQuantLinear(nn.Module):
+
+class ForgeQuantLinear(QuantizedLinearMixin):
     """ForgeQuant quantized linear: INT4 dense + INT8 sparse outlier correction.
 
     The dense path uses INT4 with per-group absmax scaling (group_size=128).
@@ -98,7 +100,6 @@ class ForgeQuantLinear(nn.Module):
     def load_from_weight(self, w: torch.Tensor):
         """Quantize a float weight tensor into ForgeQuant format."""
         assert w.shape == (self.out_features, self.in_features)
-        device = w.device
         gs = self.group_size
 
         # 1. Identify outlier channels by per-row L2 norm
@@ -153,7 +154,6 @@ class ForgeQuantLinear(nn.Module):
         int4_q = idx.to(torch.float32) - 8  # [-8, 7]
         w_norm = int4_q / 7.0  # [-1, 1] approx
         # Apply per-group scales
-        gs = self.group_size
         n_groups = scales.shape[1]
         w_grouped = w_norm.reshape(self.out_features, n_groups, -1)
         w_scaled = w_grouped * scales.unsqueeze(-1)

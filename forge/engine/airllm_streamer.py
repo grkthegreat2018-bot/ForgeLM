@@ -19,8 +19,6 @@ from pathlib import Path
 
 import torch
 
-from forge.model_loader import unpack_output_with_kv
-
 # Lazy imports inside functions to avoid loading safetensors at module import.
 
 

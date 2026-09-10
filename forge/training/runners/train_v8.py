@@ -11,13 +11,15 @@ train_8b_all to avoid duplication.
 from __future__ import annotations
 
 import argparse
-import glob
+import logging
 import math
 import os
 import re
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -26,21 +28,20 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
-        pass
+        logger.debug("Failed to reconfigure stdout/stderr encoding", exc_info=True)
 
 import torch
-import torch.nn.functional as F
 
 # Re-export shared primitives so callers can import them from train_v8 too.
 from forge.training.runners.train_8b_all import (  # noqa: F401
-    freeze_dead_params_,
-    snapshot_state,
+    autocast_ctx,
+    build_model,
     compute_loss,
     forward_model,
-    autocast_ctx,
+    freeze_dead_params_,
     lr_at,
-    build_model,
     save_state,
+    snapshot_state,
     state_size_gb,
     unwrap_compiled,
 )
@@ -253,7 +254,7 @@ def nan_guard_step(opt, loss, step) -> str:
         try:
             opt.zero_grad(set_to_none=True)
         except Exception:
-            pass
+            logger.debug("Failed to zero_grad after NaN skip", exc_info=True)
         return "skipped_nan"
     return "ok"
 

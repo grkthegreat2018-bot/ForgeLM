@@ -4,9 +4,10 @@ Each domain explores an architecture configuration search space.
 All use small tensor operations for fast evaluation (no model loading).
 """
 from __future__ import annotations
-import torch
+
 import numpy as np
-from typing import Any
+import torch
+
 from . import BaseDomain
 
 
@@ -59,7 +60,7 @@ class MoeRouting(BaseDomain):
                 expert_counts[i] = (topk_idx == i).float().sum()
             balance = 1.0 - float(expert_counts.std().item() / (expert_counts.mean().item() + 1e-8))
             util = float((expert_counts > 0).float().mean().item())
-        active_ratio = tk / ne + (0.2 if se else 0)
+        tk / ne + (0.2 if se else 0)
         # Expert diversity: top_k=1 is a trivial solution (no ensemble).
         # Penalize top_k=1 heavily — MoE exists for multi-expert ensembling.
         # top_k >= 2 gives real expert diversity; top_k >= 3 is ideal for ne >= 4.
@@ -107,7 +108,7 @@ class FactorizedEmbed(BaseDomain):
         # Factorized: vs × r + r × d, reduced by tying factor
         # tie_factor shares rows between input/output embeddings
         tied_params = vs * r + r * d * (1 - tf * 0.5)  # tying saves up to 50% output side
-        fact_params = vs * r + r * d
+        vs * r + r * d
         reduction = 1.0 - tied_params / full_params
         # Reconstruction error: SVD gives ~0, random gives higher
         d_sample = min(d, 512)
@@ -212,7 +213,7 @@ class FfnSkip(BaseDomain):
         ], dtype=torch.float32)
     def evaluate(self, config):
         st = config["skip_threshold"]
-        nl = config["n_eval_layers"]
+        config["n_eval_layers"]
         ss = config["skip_strategy"]
         mk = config["min_keep"]
         # Simulate: 16 layers, decide which to skip

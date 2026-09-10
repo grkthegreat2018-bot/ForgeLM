@@ -28,9 +28,6 @@ Usage:
 """
 from __future__ import annotations
 
-import os
-import math
-import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -41,7 +38,6 @@ import torch.nn.functional as F
 
 from forge.config import ModelConfig, get_config
 from forge.model_loader import ModelLoader, create_kv_cache, unpack_output_with_kv
-
 
 # Default tokenizer path (LFM2.5 tokenizer, vocab=65536).
 _DEFAULT_TOKENIZER_PATH = "research/checkpoints/lfm25_tokenizer"

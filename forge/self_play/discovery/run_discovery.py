@@ -20,11 +20,10 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import sys
 
-from research.paths import DATA_DIR
 from forge.self_play.discovery.discovery_db import DiscoveryDB
 from forge.self_play.discovery.discovery_loop import DiscoveryLoop
+from research.paths import DATA_DIR
 
 
 def main(argv: list[str] | None = None) -> int:

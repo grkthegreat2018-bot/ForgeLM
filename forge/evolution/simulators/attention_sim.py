@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import torch
 
 from . import register
@@ -278,7 +277,7 @@ def sliding_window_simulate(config: dict, domain=None) -> dict:
     """
     device = domain.device if domain is not None else torch.device("cpu")
     ws = config["window_size"]
-    stride = config["stride"]
+    config["stride"]
     seq = 512
     half = ws // 2
     dist = torch.arange(seq, device=device)
@@ -304,7 +303,7 @@ def local_global_simulate(config: dict, domain=None) -> dict:
     """
     lw = config["local_window"]
     gr = config["global_ratio"]
-    ngh = config["n_global_heads"]
+    config["n_global_heads"]
     seq = 2048
     rf = (lw + gr * seq) / seq
     compute = (lw / seq) * 0.7 + gr * 0.3

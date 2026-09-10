@@ -6,12 +6,10 @@ rolling buffer and supports level/source filtering and substring search.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from .status_reader import project_root
 
@@ -91,7 +89,7 @@ class LogTailer:
             if size == src.offset:
                 continue
             try:
-                with open(src.path, "r", encoding="utf-8", errors="ignore") as f:
+                with open(src.path, encoding="utf-8", errors="ignore") as f:
                     f.seek(src.offset)
                     chunk = f.read(size - src.offset)
                 src.offset = size
@@ -111,8 +109,8 @@ class LogTailer:
     def filtered(
         self,
         query: str = "",
-        levels: Optional[set[str]] = None,
-        sources: Optional[set[str]] = None,
+        levels: set[str] | None = None,
+        sources: set[str] | None = None,
         limit: int = 2000,
     ) -> list[LogLine]:
         q = query.lower()

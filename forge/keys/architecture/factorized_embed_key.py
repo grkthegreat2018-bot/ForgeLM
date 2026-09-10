@@ -20,8 +20,6 @@ Usage:
 """
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 
@@ -53,7 +51,7 @@ class FactorizedEmbedding(nn.Module):
 
     @classmethod
     def from_embedding(cls, original: nn.Embedding, rank: int = 256
-                       ) -> "FactorizedEmbedding":
+                       ) -> FactorizedEmbedding:
         """Initialize from an existing full-rank embedding via SVD (lossless).
 
         W = U @ diag(S) @ Vh

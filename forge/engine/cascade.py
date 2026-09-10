@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from typing import Any, Protocol
 
-__all__ = ["ModelCascade", "GenerativeModel"]
+__all__ = ["GenerativeModel", "ModelCascade"]
 
 
 class GenerativeModel(Protocol):

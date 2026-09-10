@@ -13,13 +13,22 @@ Right bottom: merge an adapter into a base checkpoint entirely on CPU
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QFrame, QHeaderView, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QSpinBox, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.engine_runtime import EngineRuntime
 from ..api.lora_store import LoraManager, scan_lora_adapters
@@ -52,7 +61,7 @@ class LoraPage(QWidget):
 
     def __init__(self, runtime: EngineRuntime, lora_mgr: LoraManager,
                  models_index: ModelsIndex,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.runtime = runtime
         self.mgr = lora_mgr

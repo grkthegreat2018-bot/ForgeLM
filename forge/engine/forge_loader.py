@@ -17,18 +17,16 @@ Usage:
     model, config = loader.load("research/checkpoints/model.safetensors")
     model, config = loader.load("liquidai/LFM2.5-1.2B-Instruct-GGUF")
 """
-import io
-import json
+import logging
 import mmap
 import os
 import struct
 from pathlib import Path
-from typing import Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 
+logger = logging.getLogger(__name__)
 
 # ── GGUF constants ───────────────────────────────────────────────────────────
 
@@ -101,7 +99,7 @@ GGML_DTYPE_MAP = {
 
 # ── GGUF Parser ──────────────────────────────────────────────────────────────
 
-def _read_string(data: bytes, offset: int) -> Tuple[str, int]:
+def _read_string(data: bytes, offset: int) -> tuple[str, int]:
     """Read a GGUF string at offset. Returns (string, new_offset)."""
     length = struct.unpack_from("<Q", data, offset)[0]
     offset += 8
@@ -110,7 +108,7 @@ def _read_string(data: bytes, offset: int) -> Tuple[str, int]:
     return s, offset
 
 
-def _read_metadata_value(data: bytes, offset: int, value_type: int) -> Tuple[object, int]:
+def _read_metadata_value(data: bytes, offset: int, value_type: int) -> tuple[object, int]:
     """Read a GGUF metadata value. Returns (value, new_offset)."""
     type_name, elem_size = GGUF_TYPES.get(value_type, ("unknown", 0))
 
@@ -239,7 +237,7 @@ def _dequant_q4_k(raw: bytes, n_elem: int) -> torch.Tensor:
         off = b * 144
         # Q4_K super-block: 2-byte d, 2-byte dmin, 12 bytes scales (6×8-bit), 128 bytes quants
         d = np.frombuffer(raw[off:off+2], dtype=np.float16)[0]
-        dmin = np.frombuffer(raw[off+2:off+4], dtype=np.float16)[0]
+        np.frombuffer(raw[off+2:off+4], dtype=np.float16)[0]
         scales_raw = arr[off+4:off+16]  # 12 bytes → 6 scales (6-bit + min)
         quants = arr[off+16:off+144]    # 128 bytes = 256 × 4-bit
 
@@ -249,7 +247,7 @@ def _dequant_q4_k(raw: bytes, n_elem: int) -> torch.Tensor:
         sc[1] = ((scales_raw[0] >> 6) | (scales_raw[1] << 2)) & 0x3F
         sc[2] = ((scales_raw[1] >> 4) | (scales_raw[2] << 4)) & 0x3F
         sc[3] = (scales_raw[2] >> 2) & 0x3F
-        sc[4] = ((scales_raw[3] & 0x3F))
+        sc[4] = (scales_raw[3] & 0x3F)
         sc[5] = ((scales_raw[3] >> 6) | (scales_raw[4] << 2)) & 0x3F
         sc[6] = ((scales_raw[4] >> 4) | (scales_raw[5] << 4)) & 0x3F
         sc[7] = (scales_raw[5] >> 2) & 0x3F
@@ -365,7 +363,7 @@ class GGUFInfo:
             if magic != GGUF_MAGIC:
                 raise ValueError(f"Not a GGUF file: {self.path} (magic={magic!r})")
 
-            version = struct.unpack("<I", f.read(4))[0]
+            struct.unpack("<I", f.read(4))[0]
             tensor_count = struct.unpack("<Q", f.read(8))[0]
             kv_count = struct.unpack("<Q", f.read(8))[0]
 
@@ -498,7 +496,7 @@ class ForgeLoader:
                 if 1 < json_len < 100_000_000:  # reasonable JSON header size
                     return "safetensors"
             except Exception:
-                pass
+                logger.debug("Failed to detect safetensors format", exc_info=True)
             if path.suffix == ".yaml" or path.suffix == ".yml":
                 return "modelyaml"
             return "unknown"
@@ -591,7 +589,7 @@ class ForgeLoader:
         else:
             # Try safetensors via transformers
             try:
-                from transformers import AutoModelForCausalLM, AutoTokenizer
+                from transformers import AutoModelForCausalLM
                 print(f"  [ForgeLoader] Loading {model_id} via transformers...")
                 model = AutoModelForCausalLM.from_pretrained(
                     model_id, torch_dtype=torch.bfloat16, device_map=device,

@@ -31,14 +31,16 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
 import time
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
+
+logger = logging.getLogger(__name__)
 
 from .database import FindingsDB
-
 
 # Default tokenizer path (LFM2.5 tokenizer shipped with ForgeAI).
 _DEFAULT_TOKENIZER_PATH = (
@@ -236,7 +238,7 @@ class CurriculumFineTuner:
                 return bnb.optim.AdamW8bit(
                     params, lr=lr, weight_decay=0.01, optim_bits=8)
             except Exception:
-                pass
+                logger.debug("AdamW8bit unavailable, falling back to standard AdamW", exc_info=True)
             # Fallback: standard AdamW but it will use GPU memory for state.
             # On 12GB this is usually fine for a 1.2B model in bf16.
             return torch.optim.AdamW(

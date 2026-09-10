@@ -1077,7 +1077,7 @@ def run(args: argparse.Namespace) -> None:
             total_b = torch.cuda.get_device_properties(device).total_memory
             peak_b = torch.cuda.max_memory_allocated()
             if peak_b > total_b * 0.92:
-                stats = vram_snapshot("spill check")
+                vram_snapshot("spill check")
                 sys.exit(f"Aborting: peak {peak_b/1e9:.2f} GB ≈ total VRAM — "
                          f"this run would spill (use --allow-spill to override, "
                          f"or reduce --seq-len / --batch-size)")

@@ -12,12 +12,19 @@ Usage (from ``app.py`` — NOT modified here, integration is done in parallel)::
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt, QSettings, Signal
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..theme import Palette
 
@@ -42,7 +49,7 @@ class OnboardingDialog(QDialog):
 
     finished_onboarding = Signal(bool, str)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Welcome to ForgeAI")
         self.setMinimumWidth(480)
@@ -208,8 +215,8 @@ def mark_onboarded(trusted: bool = False, model_path: str = "") -> None:
         s.setValue(_MODEL_PATH_KEY, model_path)
 
 
-def maybe_show_onboarding(parent: Optional[QWidget] = None,
-                          force: bool = False) -> Optional[OnboardingDialog]:
+def maybe_show_onboarding(parent: QWidget | None = None,
+                          force: bool = False) -> OnboardingDialog | None:
     """Show the onboarding dialog if the user hasn't been onboarded yet.
 
     Returns the dialog instance if it was shown (and accepted), ``None`` if

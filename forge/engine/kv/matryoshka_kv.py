@@ -31,8 +31,6 @@ Usage:
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from forge.engine.kv_backend import KVCacheStrategy
@@ -63,8 +61,8 @@ class MatryoshkaKVCache(KVCacheStrategy):
     def __init__(
         self,
         n_levels: int = 3,
-        dims_per_level: Optional[list[int]] = None,
-        dtypes_per_level: Optional[list[torch.dtype]] = None,
+        dims_per_level: list[int] | None = None,
+        dtypes_per_level: list[torch.dtype] | None = None,
         importance_metric: str = "norm",
         ema_decay: float = 0.99,
     ):
@@ -103,16 +101,16 @@ class MatryoshkaKVCache(KVCacheStrategy):
         self.cum_dims: list[int] = []
 
         # Running EMA of per-dimension importance [head_dim]
-        self.importance_ema: Optional[torch.Tensor] = None
+        self.importance_ema: torch.Tensor | None = None
         # Sorted dimension indices (most important first) [head_dim]
-        self.sorted_dims: Optional[torch.Tensor] = None
+        self.sorted_dims: torch.Tensor | None = None
         # Inverse permutation to restore original dim order on retrieval
-        self.inv_perm: Optional[torch.Tensor] = None
+        self.inv_perm: torch.Tensor | None = None
 
         # Per-level storage: list of (k_store, v_store) tensors
         # Each k_store: [B, n_kv, max_seq_len, dims_in_level]
-        self.k_stores: list[Optional[torch.Tensor]] = []
-        self.v_stores: list[Optional[torch.Tensor]] = []
+        self.k_stores: list[torch.Tensor | None] = []
+        self.v_stores: list[torch.Tensor | None] = []
 
         self.seq_len = 0
         self._initialized = False

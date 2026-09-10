@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -108,6 +107,11 @@ class GRPOConfig:
     # "psppo" = Prefix-Sampling PPO (compute-efficient, prefix backprop only)
     # "evpo" = Explained Variance PO (adaptive critic/batch-mean switching)
     # "grpo_or" = GRPO with Output Reset trust region (smooth saturation)
+    # "cispo" = CISPO (MiniMax-M1/M2): clipped importance weight is DETACHED
+    #           (sg) so every token keeps gradient even when the ratio is
+    #           clipped — no zero-gradient dead zones. Matches DAPO-level
+    #           performance in ~half the training time; beats GRPO under
+    #           high off-policy reuse. No KL/ref model needed.
     rl_algorithm: str = "grpo"
 
     # GTPO-specific config (arXiv 2508.03772):
@@ -118,6 +122,20 @@ class GRPOConfig:
     gtpo_entropy_threshold: float = 0.6931  # ln(2)
     # Whether to measure initial entropy on first train_step (auto-calibrate)
     gtpo_auto_init_entropy: bool = True
+
+    # CISPO-specific config (MiniMax):
+    # Asymmetric clip bounds (DAPO-style: looser upper bound encourages
+    # exploration on low-probability tokens).
+    cispo_epsilon_low: float = 0.2
+    cispo_epsilon_high: float = 0.28
+
+    # ETR (Entropy Trend Reward): bonus proportional to the downward entropy
+    # trend across the completion — reasoning that converges (entropy drops
+    # from start to end) is rewarded, doom-looping (flat/rising entropy) is
+    # not. Training-free addition to the outcome reward; +9.9% acc / -67%
+    # CoT length reported at 7B scale.
+    use_etr_reward: bool = False
+    etr_coeff: float = 0.1
 
     # N-gram repetition penalty (LFM2.5-1.2B-Thinking RLVR recipe):
     # Discourages doom-looping early in RL training. Applied as a negative
@@ -242,6 +260,9 @@ class GRPOTrainer:
             # GTPO: no reference model needed (saves VRAM)
             print("  [GRPOTrainer] Using GTPO (Group-relative Trajectory-based PO)")
             print("  [GRPOTrainer] GTPO: KL penalty disabled, ref_model not required")
+        elif self.config.rl_algorithm == "cispo":
+            print("  [GRPOTrainer] Using CISPO (MiniMax: detached clipped IS weight)")
+            print("  [GRPOTrainer] CISPO: KL penalty disabled, ref_model not required")
         elif self.config.rl_algorithm == "sppo":
             from forge.training.losses.advanced_rl import SPPO, SPPOConfig
             self._rl_algo = SPPO(SPPOConfig(lr=self.config.learning_rate))
@@ -464,7 +485,7 @@ class GRPOTrainer:
         with torch.inference_mode():
             ref_logits, _ = self.ref_model(input_ids)
             ref_log_probs = F.log_softmax(ref_logits, dim=-1)
-            ref_probs = ref_log_probs.exp()
+            ref_log_probs.exp()
 
         curr_log_probs = F.log_softmax(current_logits, dim=-1)
         curr_probs = curr_log_probs.exp()
@@ -809,6 +830,17 @@ class GRPOTrainer:
                     clipped_ratio = ratio.clamp(1 - self.config.clip_range,
                                                 1 + self.config.clip_range)
 
+                    # ETR (Entropy Trend Reward): bonus for downward entropy
+                    # trend across the completion (converging reasoning).
+                    if self.config.use_etr_reward:
+                        with torch.no_grad():
+                            _probs = log_probs.exp()
+                            _ent = -(_probs * log_probs).sum(dim=-1)  # (T,)
+                            _half = max(1, _ent.shape[0] // 2)
+                            _trend = ((_ent[:_half].mean() - _ent[_half:].mean())
+                                      / _ent.mean().clamp_min(1e-6))
+                        advantage = advantage + self.config.etr_coeff * _trend.item()
+
                     if self.config.rl_algorithm == "gtpo":
                         # GTPO: conflict-aware gradient correction + entropy control
                         # No KL penalty needed (saves ref model forward pass + VRAM)
@@ -830,7 +862,19 @@ class GRPOTrainer:
                         # GTPO loss: -(A - γ*H) * mean(ratio * λ)
                         adjusted_adv = advantage - self.config.gtpo_entropy_gamma * avg_entropy.item()
                         pg_loss = -(adjusted_adv * lam * ratio).mean()
-                        kl_loss = torch.zeros(1, device=self.device)  # no KL
+                        kl = torch.zeros(1, device=self.device)  # no KL
+                        kl_loss = kl
+                    elif self.config.rl_algorithm == "cispo":
+                        # CISPO (MiniMax): L = -A * sg(clip(r, 1-ε_lo, 1+ε_hi)) * log π.
+                        # The clipped importance weight is DETACHED, so every
+                        # token keeps gradient (no PPO min-clip dead zones).
+                        with torch.no_grad():
+                            cispo_w = ratio.clamp(
+                                1 - self.config.cispo_epsilon_low,
+                                1 + self.config.cispo_epsilon_high)
+                        pg_loss = -(advantage * cispo_w * token_log_probs).mean()
+                        kl = torch.zeros(1, device=self.device)  # no KL
+                        kl_loss = kl
                     else:
                         pg_loss = -torch.min(ratio * advantage, clipped_ratio * advantage).mean()
 

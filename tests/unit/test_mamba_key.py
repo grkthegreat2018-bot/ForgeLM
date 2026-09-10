@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from forge.keys.architecture.mamba_probe import MambaLayer
-from forge.keys.architecture.mamba_key import (
+from tests.fixtures.keys.architecture.mamba_key import (
     MambaKey, Mamba2Key, Mamba1To2Key,
     MAMBA1_WEIGHTS, MAMBA2_EXTRA_WEIGHTS,
 )

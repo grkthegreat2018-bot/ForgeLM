@@ -32,13 +32,11 @@ import ast as _ast
 import json
 import math as _math
 import operator as _op
-import random as _random
-import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from forge.engine.library import CATEGORIES
-from forge.engine.tool_security import ToolSecurityManager, SecurityDecision
-
+from forge.engine.tool_security import SecurityDecision, ToolSecurityManager
 
 # ── Tool definition schema ───────────────────────────────────────────────────
 
@@ -719,7 +717,6 @@ class EngineToolRegistry:
     def _register_handlers(self):
         """Register all built-in tool handlers."""
         h = self._handlers
-        e = self.engine
 
         # ── Library ──
         h["library_save"] = self._library_save
@@ -1210,8 +1207,8 @@ class EngineToolRegistry:
 
     def _web_search(self, args: dict) -> dict:
         """Tavily web search."""
-        import urllib.request
         import urllib.parse
+        import urllib.request
         api_key = self._get_api_key("TAVILY_API_KEY")
         if not api_key:
             return {"error": "TAVILY_API_KEY not set"}
@@ -1375,15 +1372,15 @@ class EngineToolRegistry:
         # Security: ensure path is within workspace
         try:
             p.relative_to(root)
-        except ValueError:
-            raise ValueError(f"Path outside workspace: {path}")
+        except ValueError as e:
+            raise ValueError(f"Path outside workspace: {path}") from e
         return str(p)
 
     def _file_read(self, args: dict) -> dict:
         path = self._resolve_path(args["path"])
         max_chars = args.get("max_chars", 50000)
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 content = f.read(max_chars + 1)
         except FileNotFoundError:
             return {"error": f"File not found: {args['path']}"}
@@ -1419,7 +1416,7 @@ class EngineToolRegistry:
         old_str = args["old_string"]
         new_str = args["new_string"]
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
         except FileNotFoundError:
             return {"error": f"File not found: {args['path']}"}

@@ -27,7 +27,6 @@ Usage:
     # Or as a state dict transform:
     result = key.forward({"state": state, "n_layers": 28})
 """
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn

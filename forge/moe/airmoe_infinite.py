@@ -47,7 +47,6 @@ import os
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -151,7 +150,7 @@ class InfiniteAirMoE:
         # Initialize before try so it's always defined for n_layers below.
         manifest_data: dict = {}
         try:
-            from forge.moe.routers import SemanticRouter, DEFAULT_TOPIC_DESCRIPTIONS
+            from forge.moe.routers import DEFAULT_TOPIC_DESCRIPTIONS, SemanticRouter
             # Build topic descriptions from manifest topics (use cached manifest)
             manifest_data = ExpertRouter._manifest_cache.get(str(manifest_path))
             if manifest_data is None:
@@ -305,7 +304,6 @@ class InfiniteAirMoE:
         """Decompress SVD + int4 expert to full weight matrices on GPU."""
         expert = {}
         dev = self.device
-        gs = 128
         # Support both legacy (w1/w2/w3) and LatentMoE (up/down) formats
         for part in ["w1", "w2", "w3", "up", "down"]:
             U_q = state.get(f"{part}_U_q")

@@ -22,12 +22,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
 import torch
 
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
 
 # Fixed coding-probe battery for the skill axis. Each probe is a prompt that
 # should produce a function definition; we run the generated code against the

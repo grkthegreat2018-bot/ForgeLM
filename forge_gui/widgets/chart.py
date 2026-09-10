@@ -6,10 +6,9 @@ and a current-value readout. No external chart dep.
 from __future__ import annotations
 
 from collections import deque
-from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QLinearGradient, QBrush
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..theme import Palette
@@ -18,10 +17,10 @@ from ..theme import Palette
 class LiveLineChart(QWidget):
     """Scrolling multi-series line chart with gradient area fill."""
 
-    def __init__(self, parent: Optional[QWidget] = None, *,
-                 series: Optional[list[tuple[str, str]]] = None,
-                 window: int = 240, min_y: Optional[float] = None,
-                 max_y: Optional[float] = None, y_label: str = "",
+    def __init__(self, parent: QWidget | None = None, *,
+                 series: list[tuple[str, str]] | None = None,
+                 window: int = 240, min_y: float | None = None,
+                 max_y: float | None = None, y_label: str = "",
                  height: int = 160) -> None:
         super().__init__(parent)
         # series: list of (name, color_hex)
@@ -128,7 +127,7 @@ class LiveLineChart(QWidget):
             if not d or len(d) < 2:
                 continue
             color = QColor(color_hex)
-            n = len(d)
+            len(d)
             pts = []
             for i, v in enumerate(d):
                 x = pad_l + plot_w * i / max(1, self._window - 1)
@@ -143,8 +142,8 @@ class LiveLineChart(QWidget):
             p.setBrush(QBrush(grad))
             p.setPen(Qt.PenStyle.NoPen)
             fill_poly = pts + [(pts[-1][0], pad_t + plot_h), (pts[0][0], pad_t + plot_h)]
-            from PySide6.QtGui import QPolygonF
             from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
             p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in fill_poly]))
             # line
             pen = QPen(color); pen.setWidthF(1.8)

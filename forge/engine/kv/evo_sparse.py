@@ -40,8 +40,6 @@ For RTX 5070 12GB VRAM (V10: 16 layers, 8 KV heads, 128 head_dim, 4096 ctx):
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from forge.engine.kv_backend import KVCacheStrategy
@@ -75,8 +73,8 @@ class EvoSparseKVCache(KVCacheStrategy):
 
         self.capacity = max(self.n_sinks, int(max_seq_len * self.keep_ratio))
 
-        self.k_cache: Optional[torch.Tensor] = None
-        self.v_cache: Optional[torch.Tensor] = None
+        self.k_cache: torch.Tensor | None = None
+        self.v_cache: torch.Tensor | None = None
 
         # Per-layer running importance: (n_layers, max_seq_len)
         self.importance = torch.zeros(self.n_layers, max_seq_len,

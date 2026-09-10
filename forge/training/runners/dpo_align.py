@@ -14,12 +14,9 @@ KTO loss (Ethayarajh et al. 2024, arXiv:2402.01306):
     KTO needs only binary good/bad labels — no paired preference data.
 """
 import argparse
-import json
 import os
 import signal
 import sys
-import time
-from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -41,7 +38,6 @@ from forge.checkpoint_io import (
     step_checkpoint_path,
 )
 from forge.config import get_config
-from research.json_compat import dumps, loads
 from forge.model_loader import ModelLoader
 from forge.runtime.task_logger import task_scope
 from forge.training.training_utils import (
@@ -55,6 +51,7 @@ from forge.training.training_utils import (
     write_heartbeat,
     write_status_json,
 )
+from research.json_compat import loads
 
 
 def _logp_for_completion(model, input_ids, completion_start, device):

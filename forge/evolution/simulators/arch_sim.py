@@ -132,7 +132,7 @@ def ffn_skip_simulate(config: dict, domain=None) -> dict:
     """
     device = domain.device if domain is not None else torch.device("cpu")
     st = config["skip_threshold"]
-    nl = config["n_eval_layers"]
+    config["n_eval_layers"]
     ss = config["skip_strategy"]
     mk = config["min_keep"]
     activations = torch.randn(16, 256, 512, device=device)

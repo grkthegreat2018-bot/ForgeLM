@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import subprocess
 import sys
@@ -296,11 +295,11 @@ def prepare_curriculum_data(args):
     """Prepare Stage 1 (short CoT) and Stage 2 (long CoT) data files."""
     random.seed(42)
     print(f"\n{'='*70}")
-    print(f"  CURRICULUM DATA PREPARATION")
+    print("  CURRICULUM DATA PREPARATION")
     print(f"{'='*70}")
 
     # Load all data
-    print(f"\nLoading data...")
+    print("\nLoading data...")
     examples = load_jsonl(args.input)
     print(f"Total loaded: {len(examples)} examples")
 
@@ -345,20 +344,20 @@ def prepare_curriculum_data(args):
     stage1_path = str(output_dir / "stage1_short.jsonl")
     stage2_path = str(output_dir / "stage2_long.jsonl")
 
-    print(f"\nSaving curriculum data...")
+    print("\nSaving curriculum data...")
     save_jsonl(stage1_data, stage1_path)
     save_jsonl(stage2_data, stage2_path)
 
     # Summary
     print(f"\n{'='*70}")
-    print(f"  CURRICULUM DATA READY")
+    print("  CURRICULUM DATA READY")
     print(f"{'='*70}")
     print(f"Stage 1 (internal solver): {stage1_path} ({len(stage1_data)} examples)")
     print(f"Stage 2 (externalize):     {stage2_path} ({len(stage2_data)} examples)")
-    print(f"\nNext steps:")
-    print(f"  1. Train Stage 1: python -m research.training.runners.curriculum_sft train-stage1 \\")
+    print("\nNext steps:")
+    print("  1. Train Stage 1: python -m research.training.runners.curriculum_sft train-stage1 \\")
     print(f"       --data {stage1_path} --checkpoint <cpt_ckpt> --save <sft1_ckpt>")
-    print(f"  2. Train Stage 2: python -m research.training.runners.curriculum_sft train-stage2 \\")
+    print("  2. Train Stage 2: python -m research.training.runners.curriculum_sft train-stage2 \\")
     print(f"       --data {stage2_path} --checkpoint <sft1_ckpt> --save <sft2_ckpt>")
 
 
@@ -394,7 +393,7 @@ def _run_sft(data: str, checkpoint: str, save: str, lr: float,
 def train_stage1(args):
     """Stage 1: SFT on short CoT + direct answers (internal solver)."""
     print(f"\n{'='*70}")
-    print(f"  STAGE 1: INTERNAL SOLVER (short CoT)")
+    print("  STAGE 1: INTERNAL SOLVER (short CoT)")
     print(f"{'='*70}")
     print(f"Data: {args.data}")
     print(f"Checkpoint: {args.checkpoint} → {args.save}")
@@ -421,7 +420,7 @@ def train_stage1(args):
 def train_stage2(args):
     """Stage 2: SFT on long CoT (externalize reasoning)."""
     print(f"\n{'='*70}")
-    print(f"  STAGE 2: EXTERNALIZE REASONING (long CoT + mix distillation)")
+    print("  STAGE 2: EXTERNALIZE REASONING (long CoT + mix distillation)")
     print(f"{'='*70}")
     print(f"Data: {args.data}")
     print(f"Checkpoint: {args.checkpoint} → {args.save}")
@@ -495,11 +494,11 @@ def run_full_pipeline(args):
         print(f"Stage 2 failed (exit code {rc}).")
     else:
         print(f"\n{'='*70}")
-        print(f"  CURRICULUM SFT COMPLETE")
+        print("  CURRICULUM SFT COMPLETE")
         print(f"{'='*70}")
         print(f"Stage 1 checkpoint: {sft1_save}")
         print(f"Stage 2 checkpoint: {args.save}")
-        print(f"\nNext: DPO doom-loop mitigation (Phase 3)")
+        print("\nNext: DPO doom-loop mitigation (Phase 3)")
     return rc
 
 

@@ -12,7 +12,6 @@ All implement the DecodingStrategy interface:
   generate(model, input_ids, max_new_tokens, temperature, top_p) -> output_ids
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +43,7 @@ def _min_k_filter_logits(logits: torch.Tensor, sensitivity: float) -> torch.Tens
     n = diffs.shape[-1]
     weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
     weighted_diffs = diffs * weights
-    max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
+    weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
     cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)
     positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
     keep = positions <= cliff_pos
@@ -223,7 +222,7 @@ class NGramSpeculativeDecoding(DecodingStrategy):
                  **kwargs):
         ids = input_ids.clone()
         device = input_ids.device
-        prompt_len = input_ids.shape[1]
+        input_ids.shape[1]
         generated = 0
 
         with torch.inference_mode():
@@ -253,12 +252,12 @@ class NGramSpeculativeDecoding(DecodingStrategy):
 
                 # Accept tokens that match
                 accepted = 0
-                prev_token = main_token.squeeze()
+                main_token.squeeze()
                 for i, draft_tok in enumerate(draft_tokens):
                     pred_tok = verify_logits[0, i, :].argmax()
                     if pred_tok.item() == draft_tok:
                         accepted += 1
-                        prev_token = torch.tensor([draft_tok], device=device)
+                        torch.tensor([draft_tok], device=device)
                     else:
                         break
 
@@ -452,7 +451,6 @@ class Eagle3Decoding(DecodingStrategy):
                 top_k=top_k, repetition_penalty=repetition_penalty,
                 **kwargs,
             )
-        from forge.decoding.eagle import eagle3_generate as _eagle_gen
         # eagle3_generate takes a prompt string; here we work with token ids
         # so we use the internal generation loop directly.
         return _eagle_generate_from_ids(
@@ -509,7 +507,6 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                  top_k=80, repetition_penalty=1.05,
                  **kwargs):
         ids = input_ids.clone()
-        device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
 
         # Get MTP module from model if not provided
@@ -715,7 +712,7 @@ class SelfSpeculativeSparse(DecodingStrategy):
         eos_set = {7, 151643, 151645}
         if eos is not None:
             eos_set.add(eos)
-        eos_tensor = torch.tensor(list(eos_set), device=device)
+        torch.tensor(list(eos_set), device=device)
 
         # Prefill with full attention.
         with torch.inference_mode():
@@ -870,7 +867,7 @@ def _eagle_generate_from_ids(
     temperature=0.0, top_k=0, repetition_penalty=1.0, device="cuda",
 ):
     """EAGLE-3 generation from token ids (used by Eagle3Decoding strategy)."""
-    from forge.decoding.eagle import extract_hidden_states, Eagle3Head
+    from forge.decoding.eagle import extract_hidden_states
 
     model.eval()
     head.eval()

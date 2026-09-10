@@ -23,8 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
 
-class W8A8Linear(nn.Module):
+
+class W8A8Linear(QuantizedLinearMixin):
     """Linear layer with W8A8 INT8 quantization (weight + activation).
 
     Weights are quantized to INT8 at construction (static).
@@ -76,7 +78,7 @@ class W8A8Linear(nn.Module):
     @classmethod
     def from_linear(cls, lin: nn.Linear, mode: str = "int8",
                     smoothquant_alpha: float = 0.999,
-                    calibration_activations: torch.Tensor | None = None) -> "W8A8Linear":
+                    calibration_activations: torch.Tensor | None = None) -> W8A8Linear:
         """Quantize an existing nn.Linear to W8A8.
 
         Args:
@@ -181,7 +183,7 @@ class W8A8Linear(nn.Module):
         return out
 
 
-class FP8Linear(nn.Module):
+class FP8Linear(QuantizedLinearMixin):
     """Linear layer with FP8 E4M3 weight quantization (Blackwell/Hopper).
 
     Uses torch.float8_e4m3fn for weights, fp16 activations.
@@ -207,7 +209,7 @@ class FP8Linear(nn.Module):
             self.bias = None
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear) -> "FP8Linear":
+    def from_linear(cls, lin: nn.Linear) -> FP8Linear:
         w = lin.weight.float()
         absmax = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
         scale = absmax / 448.0  # FP8 E4M3 max = 448

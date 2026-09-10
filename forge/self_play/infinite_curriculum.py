@@ -39,16 +39,15 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 
 from forge.engine.scheduler.async_d2h import AsyncTokenReader
-from research.json_compat import dumps, loads
+from research.json_compat import loads
 
 # Pre-compiled regex patterns (avoids 450+ recompilations per session).
 _RE_PYTHON_BLOCK = re.compile(r'```python\s*\n(.*?)```', re.DOTALL)
@@ -1133,7 +1132,7 @@ class InfiniteCurriculum:
         # Extract the reference implementation (for validation)
         # Match from `def solve(...)` to the next assert/#/def or end
         impl_match = _RE_SOLVE_IMPL.search(code)
-        ref_code = impl_match.group(1) if impl_match else ""
+        impl_match.group(1) if impl_match else ""
 
         self._task_counter += 1
         task_id = f"azr_{domain}_{difficulty}_{self._task_counter}"

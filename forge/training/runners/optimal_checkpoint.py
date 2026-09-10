@@ -30,9 +30,7 @@ This implementation provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
-import torch
 import torch.nn as nn
 
 
@@ -73,8 +71,8 @@ def sliding_hirschberg_knapsack(
     # Sliding window DP: only keep 2 rows
     # dp[0] = previous row, dp[1] = current row
     # Value = total runtime savings (higher is better)
-    dp_prev = [0.0] * (W + 1)
-    dp_curr = [0.0] * (W + 1)
+    [0.0] * (W + 1)
+    [0.0] * (W + 1)
 
     # Track which items are selected (using Hirschberg's divide-and-conquer)
     # For simplicity, we use a greedy approximation here

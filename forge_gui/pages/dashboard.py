@@ -1,11 +1,8 @@
 """Dashboard page — top-level overview: GPU gauges, active runs, recent activity."""
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
 from ..api.gpu_monitor import GpuMonitor
 from ..api.models_index import ModelsIndex
@@ -20,7 +17,7 @@ class DashboardPage(QWidget):
     request_open = Signal(int)  # ask app to switch page index
 
     def __init__(self, gpu: GpuMonitor, status_reader: StatusReader,
-                 models_index: ModelsIndex, parent: Optional[QWidget] = None) -> None:
+                 models_index: ModelsIndex, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._gpu = gpu
         self._status = status_reader

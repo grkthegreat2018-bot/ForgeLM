@@ -20,7 +20,7 @@ preserved without duplicating the parameter list.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from typing import Any
 
 
@@ -111,7 +111,7 @@ class ActivationConfig:
     # ── Factory ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> "ActivationConfig":
+    def from_kwargs(cls, **kwargs: Any) -> ActivationConfig:
         """Build from keyword arguments, ignoring unknown keys.
 
         This allows ``activate(**kwargs)`` to pass through extra
@@ -144,7 +144,7 @@ class ActivationConfig:
     # Optimal preset ─────────────────────────────────────────────────────
 
     @classmethod
-    def optimal(cls, **overrides: Any) -> "ActivationConfig":
+    def optimal(cls, **overrides: Any) -> ActivationConfig:
         """Best combination for max VRAM efficiency + speed on current hw.
 
         Mirrors ``ForgeEngine.activate_optimal()`` defaults.

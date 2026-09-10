@@ -21,11 +21,10 @@ Usage:
     out = registry.generate("lfm2.5", "def fibonacci(n):")
     out = registry.generate("qwen2.5", "Explain quantum computing")
 """
-import time
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -362,7 +361,6 @@ class ModelRegistry:
 # ── Quick test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
 
     registry = ModelRegistry()
     print(f"Device: {registry.device}")

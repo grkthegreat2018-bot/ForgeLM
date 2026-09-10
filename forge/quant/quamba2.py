@@ -39,12 +39,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ─── Quamba2Linear: W4 weight + A8 activation ─────────────────────────────
 
-class Quamba2Linear(nn.Module):
+class Quamba2Linear(QuantizedLinearMixin):
     """4-bit weight, 8-bit activation linear layer with group-wise scaling.
 
     Weights are quantized to INT4 with per-group asymmetric (min-max) scaling
@@ -97,14 +97,14 @@ class Quamba2Linear(nn.Module):
         else:
             self.bias = None
 
-        self._cached_weight: Optional[torch.Tensor] = None
+        self._cached_weight: torch.Tensor | None = None
 
     @classmethod
     @torch.no_grad()
     def from_linear(cls, lin: nn.Linear, group_size: int = 128,
                     smoothquant_alpha: float = 0.5,
-                    calibration_activations: Optional[torch.Tensor] = None,
-                    ) -> "Quamba2Linear":
+                    calibration_activations: torch.Tensor | None = None,
+                    ) -> Quamba2Linear:
         """Quantize an existing nn.Linear to Quamba2 W4A8 format.
 
         Args:
@@ -265,11 +265,11 @@ class Quamba2Conv1d(nn.Module):
         else:
             self.bias = None
 
-        self._cached_weight: Optional[torch.Tensor] = None
+        self._cached_weight: torch.Tensor | None = None
 
     @classmethod
     @torch.no_grad()
-    def from_conv1d(cls, conv: nn.Conv1d) -> "Quamba2Conv1d":
+    def from_conv1d(cls, conv: nn.Conv1d) -> Quamba2Conv1d:
         """Quantize an nn.Conv1d (depthwise) to INT4 per-channel."""
         w = conv.weight.float()  # (out_ch, 1, k)
         out_ch = w.shape[0]
@@ -472,7 +472,7 @@ class Quamba2Block(nn.Module):
             if use_cache:
                 x_pre_conv, _ = xz.chunk(2, dim=-1)
                 x_pre_conv_t = x_pre_conv.transpose(1, 2)
-                if T >= self.d_conv - 1:
+                if self.d_conv - 1 <= T:
                     present_conv_state = x_pre_conv_t[:, :, -(self.d_conv - 1):]
                 else:
                     pad = self.d_conv - 1 - T

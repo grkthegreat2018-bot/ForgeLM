@@ -14,15 +14,14 @@ No model parameters or GPU buffers.
 """
 from __future__ import annotations
 
-import json
 import copy
-from typing import Any
+import json
 
 
 class RollbackPoint:
     """A snapshot of the agent conversation state for rollback."""
 
-    __slots__ = ("messages", "tool_calls", "tool_results", "round_idx")
+    __slots__ = ("messages", "round_idx", "tool_calls", "tool_results")
 
     def __init__(self, messages, tool_calls, tool_results, round_idx):
         self.messages = copy.deepcopy(messages)

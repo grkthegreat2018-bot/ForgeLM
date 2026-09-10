@@ -18,8 +18,6 @@ also exposes `update()` for explicit test-time adaptation during inference.
 """
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 

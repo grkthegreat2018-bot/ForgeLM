@@ -30,10 +30,10 @@ with existing ForgeAI techniques (BitNet, NLRQ) and new ideas:
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # ── R21a: HyperNet-BitNet — ternary weight generation ───────────────────────
 
@@ -248,7 +248,7 @@ class HashedNLRQ(nn.Module):
     def param_count(self) -> tuple[int, int]:
         hashed_params = self.budget_u + self.budget_v
         dense_params = self.out_features * self.in_features
-        nlrq_params = self.rank * (self.out_features + self.in_features)
+        self.rank * (self.out_features + self.in_features)
         return hashed_params, dense_params
 
     def compression_ratio(self) -> float:

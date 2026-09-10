@@ -13,7 +13,7 @@ that applying a key does not corrupt the model. The checks are:
 4. **Rollback**: if validation fails, restore the pre-snapshot state.
 
 Usage:
-    from forge.keys.safety import safe_apply, KeySafetyError
+    from tests.fixtures.keys.safety import safe_apply, KeySafetyError
 
     def my_apply_key(model, ...):
         def apply_fn(m):

@@ -35,9 +35,8 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class LoreEntry:
     category: str = "note"
     enabled: bool = True
     created: str = ""
-    last_triggered: Optional[str] = None
+    last_triggered: str | None = None
     trigger_count: int = 0
 
     def matches(self, text: str) -> bool:
@@ -68,7 +67,7 @@ class LoreEntry:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "LoreEntry":
+    def from_dict(cls, d: dict) -> LoreEntry:
         return cls(
             id=d.get("id", str(uuid.uuid4())),
             keys=d.get("keys", []),
@@ -96,7 +95,7 @@ class Lorebook:
     so it can be unit-tested anywhere and used from worker threads.
     """
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root else Path("data/memory")
         self._path = self._root / "lorebook.json"
         self._entries: list[LoreEntry] = []
@@ -128,7 +127,7 @@ class Lorebook:
     def entries(self) -> list[LoreEntry]:
         return self._entries
 
-    def get(self, entry_id: str) -> Optional[LoreEntry]:
+    def get(self, entry_id: str) -> LoreEntry | None:
         for e in self._entries:
             if e.id == entry_id:
                 return e
@@ -151,7 +150,7 @@ class Lorebook:
         self.save()
         return entry
 
-    def update(self, entry_id: str, **kwargs) -> Optional[LoreEntry]:
+    def update(self, entry_id: str, **kwargs) -> LoreEntry | None:
         """Update fields on an entry. Returns the updated entry or None."""
         e = self.get(entry_id)
         if e is None:

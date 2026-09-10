@@ -20,11 +20,11 @@ CUDA: weight matrix, input, and all quantization ops run on GPU when available.
 """
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-import numpy as np
-import time
 from typing import Any
+
+import numpy as np
+import torch
+
 from . import BaseDomain
 
 # ── Triton fused scale-search kernel ──────────────────────────────────────
@@ -36,7 +36,7 @@ try:
     import triton
     import triton.language as tl
     _HAS_TRITON = True
-except Exception:
+except ImportError:
     _HAS_TRITON = False
 
 
@@ -173,7 +173,7 @@ def _quantize_with_options(w: torch.Tensor, block_size: int,
                            device: torch.device) -> tuple:
     """Quantize with expanded options. Returns (packed, scales, global_scale)."""
     from forge.engine.quant.nvfp4_quant import (
-        _quantize_to_fp4, _dequantize_fp4, _FP4_MAGNITUDES, _FP4_BOUNDARIES,
+        _quantize_to_fp4,
     )
 
     if scale_method == "absmax":
@@ -209,7 +209,7 @@ def _custom_scale_search_triton(w: torch.Tensor, block_size: int,
     """Triton-accelerated scale search. Uses fused kernel for the hot loop,
     then does final quantization + packing in PyTorch (cheap, no 4D expansion).
     """
-    from forge.engine.quant.nvfp4_quant import _FP4_MAGNITUDES, _FP4_BOUNDARIES, _HAS_FP8
+    from forge.engine.quant.nvfp4_quant import _FP4_BOUNDARIES, _FP4_MAGNITUDES, _HAS_FP8
 
     best_scales, mse, w_blocks = _triton_scale_search(
         w, block_size, search_range, n_steps, device
@@ -227,7 +227,7 @@ def _custom_scale_search_triton(w: torch.Tensor, block_size: int,
     abs_norm_final = w_norm_final.abs()
     idx_final = torch.searchsorted(_FP4_BOUNDARIES.to(device), abs_norm_final)
     idx_final = idx_final.clamp(0, 7)
-    magnitude_final = _FP4_MAGNITUDES.to(device)[idx_final]
+    _FP4_MAGNITUDES.to(device)[idx_final]
     # w_fp4 not needed for packing, just sign + idx
     sign_bit = (w_norm_final < 0).long() << 3
     mag_idx = idx_final.long()
@@ -256,7 +256,9 @@ def _custom_scale_search(w: torch.Tensor, block_size: int,
     Picks the scale that minimizes MSE per block.
     """
     from forge.engine.quant.nvfp4_quant import (
-        _FP4_MAGNITUDES, _FP4_BOUNDARIES, _HAS_FP8,
+        _FP4_BOUNDARIES,
+        _FP4_MAGNITUDES,
+        _HAS_FP8,
     )
 
     out_f, in_f = w.shape
@@ -312,7 +314,7 @@ def _custom_scale_search(w: torch.Tensor, block_size: int,
     idx_final = torch.searchsorted(_FP4_BOUNDARIES.to(device), abs_norm_final)
     idx_final = idx_final.clamp(0, 7)
     magnitude_final = _FP4_MAGNITUDES.to(device)[idx_final]
-    w_fp4 = torch.sign(w_norm_final) * magnitude_final
+    torch.sign(w_norm_final) * magnitude_final
 
     # Pack
     sign_bit = (w_norm_final < 0).long() << 3
@@ -409,7 +411,7 @@ class QuantDomain(BaseDomain):
         bs_idx = self.BLOCK_SIZES.index(bs) if bs in self.BLOCK_SIZES else 1
         sm_idx = self.SCALE_METHODS.index(sm) if sm in self.SCALE_METHODS else 0
         rm_idx = self.ROUNDING_METHODS.index(rm) if rm in self.ROUNDING_METHODS else 0
-        hd_idx = self.HADAMARD_DIMS.index(hd) if hd in self.HADAMARD_DIMS else 1
+        self.HADAMARD_DIMS.index(hd) if hd in self.HADAMARD_DIMS else 1
         sss_idx = [5, 10, 15, 20].index(sss) if sss in [5, 10, 15, 20] else 1
 
         return torch.tensor([

@@ -32,12 +32,10 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 # ── Security decision ────────────────────────────────────────────────────────
 
@@ -302,7 +300,7 @@ class ToolSecurityManager:
         """
         if self.sandbox_path.exists():
             try:
-                with open(self.sandbox_path, "r", encoding="utf-8") as f:
+                with open(self.sandbox_path, encoding="utf-8") as f:
                     config = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 # Fall back to defaults on parse error

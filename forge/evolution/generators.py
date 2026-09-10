@@ -20,11 +20,12 @@ This turns 500 sequential CPU forward passes into 1 GPU batched op.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass
@@ -190,7 +191,7 @@ class TemplateGenerator:
         self.choices = choices
         self.rng = np.random.RandomState(seed)
         self._keys = list(choices.keys())
-        self._indices = {k: 0 for k in self._keys}
+        self._indices = dict.fromkeys(self._keys, 0)
         self._exhausted = False
         self._score = 0.0
         self._fitness_ema = 0.0
@@ -218,7 +219,7 @@ class TemplateGenerator:
         return results
 
     def reset(self):
-        self._indices = {k: 0 for k in self._keys}
+        self._indices = dict.fromkeys(self._keys, 0)
         self._exhausted = False
 
 
@@ -250,7 +251,6 @@ class GeneratorPopulation:
         # compile simultaneously during concurrent domain execution.
         # The JSONDecodeError "Extra data" is a corrupted inductor cache file.
         # Raw forward pass is fast enough for our generator sizes.
-        compile = False
 
         total_params = self.batched_gen.n_params()
         mem_mb = total_params * 4 / 1e6

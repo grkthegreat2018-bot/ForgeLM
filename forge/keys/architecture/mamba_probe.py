@@ -23,12 +23,12 @@ Forward:
   y = y * silu(z)           # gate
   out = out_proj(y)
 """
+import os
+import sys
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import json
-import sys
-import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -237,7 +237,7 @@ class MambaLayer(nn.Module):
                 # x is the first half of in_proj output (ssm path, before conv)
                 x_pre_conv, _ = xz.chunk(2, dim=-1)
                 x_pre_conv_t = x_pre_conv.transpose(1, 2)  # (B, d_inner, T)
-                if T >= self.d_conv - 1:
+                if self.d_conv - 1 <= T:
                     present_conv_state = x_pre_conv_t[:, :, -(self.d_conv - 1):]
                 else:
                     # Pad if sequence is shorter than conv kernel
@@ -311,17 +311,17 @@ def inspect_weights():
     layer = MambaLayer(d_model=64, d_state=16, d_conv=4, expand=2)
     layer.eval()
 
-    print(f"\nConfig: d_model=64, d_state=16, d_conv=4, expand=2")
+    print("\nConfig: d_model=64, d_state=16, d_conv=4, expand=2")
     print(f"  d_inner = {layer.d_inner}")
     print(f"  dt_rank = {layer.dt_rank}")
     print(f"\nParameters ({sum(p.numel() for p in layer.parameters())} total):")
 
     for name, param in layer.named_parameters():
-        print(f"  {name:30s} {str(tuple(param.shape)):20s} {param.numel():>8d} params")
+        print(f"  {name:30s} {tuple(param.shape)!s:20s} {param.numel():>8d} params")
 
-    print(f"\nBuffers:")
+    print("\nBuffers:")
     for name, buf in layer.named_buffers():
-        print(f"  {name:30s} {str(tuple(buf.shape)):20s}")
+        print(f"  {name:30s} {tuple(buf.shape)!s:20s}")
 
     # Test forward pass
     print("\n--- Forward Pass Test ---")
@@ -348,7 +348,7 @@ def inspect_weights():
     for name, tensor in state.items():
         forge_key = f"blocks.0.attn.{name}"
         forge_keys[forge_key] = tuple(tensor.shape)
-        print(f"  {forge_key:45s} {str(tuple(tensor.shape)):20s}")
+        print(f"  {forge_key:45s} {tuple(tensor.shape)!s:20s}")
 
     return layer, forge_keys
 
@@ -388,7 +388,7 @@ def test_text_to_weights():
 
     print(f"\nHuggingFace-style keys ({len(hf_state)}):")
     for k, v in hf_state.items():
-        print(f"  {k:45s} {str(tuple(v.shape)):20s}")
+        print(f"  {k:45s} {tuple(v.shape)!s:20s}")
 
     # Convert to ForgeAI format
     forge_state = {}
@@ -400,7 +400,7 @@ def test_text_to_weights():
 
     print(f"\nForgeAI-style keys ({len(forge_state)}):")
     for k, v in forge_state.items():
-        print(f"  {k:45s} {str(tuple(v.shape)):20s}")
+        print(f"  {k:45s} {tuple(v.shape)!s:20s}")
 
     # Verify round-trip (lossless)
     rt_state = {}
@@ -446,16 +446,16 @@ def test_mamba2_differences():
     print(f"  n_heads (SSD) = {n_heads}")
     print(f"  A_log shape (Mamba1): ({d_inner}, {d_state})")
     print(f"  A_log shape (Mamba2): ({n_heads}, 1) — scalar per head")
-    print(f"  B shape (Mamba1): (B, d_state, L) — per-channel")
-    print(f"  B shape (Mamba2): (B, n_heads, d_state, L) — per-head")
-    print(f"\n  Extra Mamba2 components:")
-    print(f"    - RMSNorm before out_proj (dt_norm + A_norm + B_norm + C_norm)")
+    print("  B shape (Mamba1): (B, d_state, L) — per-channel")
+    print("  B shape (Mamba2): (B, n_heads, d_state, L) — per-head")
+    print("\n  Extra Mamba2 components:")
+    print("    - RMSNorm before out_proj (dt_norm + A_norm + B_norm + C_norm)")
     print(f"    - norm.weight: ({d_inner},)")
-    print(f"\n  Weight count comparison:")
-    print(f"    Mamba1: in_proj, conv1d, x_proj, dt_proj, A_log, D, out_proj")
-    print(f"    Mamba2: in_proj, conv1d, x_proj, dt_proj, A_log, D,")
-    print(f"            dt_norm, A_norm, B_norm, C_norm, out_proj")
-    print(f"    (Mamba2 has 4 extra norm weights)")
+    print("\n  Weight count comparison:")
+    print("    Mamba1: in_proj, conv1d, x_proj, dt_proj, A_log, D, out_proj")
+    print("    Mamba2: in_proj, conv1d, x_proj, dt_proj, A_log, D,")
+    print("            dt_norm, A_norm, B_norm, C_norm, out_proj")
+    print("    (Mamba2 has 4 extra norm weights)")
 
 
 def test_jamba_weight_mapping():

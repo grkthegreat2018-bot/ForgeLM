@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta
-from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from datetime import time as dtime
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QMessageBox, QWidget
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +161,7 @@ class TimeManager(QObject):
             if qt:
                 qt.start(int(entry.interval_s * 1000))
 
-    def check_timer(self, timer_id: str) -> Optional[dict]:
+    def check_timer(self, timer_id: str) -> dict | None:
         """Check the status of a timer."""
         entry = self._timers.get(timer_id)
         if entry is None:
@@ -261,7 +260,7 @@ class TimeManager(QObject):
 
 # ── helper functions ────────────────────────────────────────────────────
 
-def _parse_time(time_str: str) -> Optional[dtime]:
+def _parse_time(time_str: str) -> dtime | None:
     """Parse a time string in HH:MM or HH:MM AM/PM format."""
     import re
     s = time_str.strip().upper()

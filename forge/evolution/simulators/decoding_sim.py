@@ -1,13 +1,15 @@
 """Decoding domain simulators — pure metric computation, no scoring logic."""
 from __future__ import annotations
-import torch
+
 import numpy as np
+import torch
+
 from . import register
 
 
 @register("spec_decode_simulate")
 def spec_decode_simulate(config: dict, domain=None) -> dict:
-    device = domain.device if domain is not None else torch.device("cpu")
+    domain.device if domain is not None else torch.device("cpu")
     nd = int(config["n_draft_tokens"])
     dr = float(config["draft_model_ratio"])
     at = float(config["acceptance_threshold"])

@@ -30,13 +30,11 @@ Reuses: model_loader, checkpoint_io, training_utils, quality_eval.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 
-from research.paths import DATA_DIR, LFM25_CHECKPOINT
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
+from research.paths import DATA_DIR, LFM25_CHECKPOINT
 
 _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 
@@ -128,14 +126,17 @@ def distill_run(db: DiscoveryDB, teacher_checkpoint: str | None = None,
     Returns:
         Path to the new distilled epoch checkpoint.
     """
+    from forge.checkpoint_io import save_checkpoint
     from forge.config import get_config
     from forge.model_loader import ModelLoader, load_default_model
-    from research.tokenizer_cache import get_tokenizer
-    from forge.training.training_utils import (
-        configure_optimizer, get_lr, compute_ce_loss, has_nan_params,
-        vram_exceeded)
-    from forge.checkpoint_io import save_checkpoint
     from forge.self_play.discovery.finetune import _collate
+    from forge.training.training_utils import (
+        compute_ce_loss,
+        configure_optimizer,
+        get_lr,
+        has_nan_params,
+        vram_exceeded,
+    )
 
     cfg = config or DistillConfig()
 

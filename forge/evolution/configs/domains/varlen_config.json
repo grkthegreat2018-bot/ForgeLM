@@ -1,0 +1,17 @@
+{
+  "name": "varlen_config",
+  "category": "training",
+  "description": "Varlen attention for packed sequences: use_varlen boolean. Metrics: varlen_bonus, speedup, vram_savings.",
+  "simulator": "varlen_simulate",
+  "params": [
+    {"name": "use_varlen", "type": "bool"}
+  ],
+  "behavioral_dims": [["speedup_norm", 10, 0, 1], ["vram_savings", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "varlen_bonus", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

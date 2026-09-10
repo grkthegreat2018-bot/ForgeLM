@@ -12,8 +12,11 @@ VRAM budget: negligible — stores only threshold config and history.
 """
 from __future__ import annotations
 
+import logging
 import time
-from typing import Optional, Callable
+from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 class VRAMPressureMonitor:
@@ -103,7 +106,7 @@ class VRAMPressureMonitor:
                 try:
                     cb(pressure, new_level)
                 except Exception:
-                    pass
+                    logger.debug("VRAM pressure callback failed", exc_info=True)
         self._current_level = new_level
         return new_level
 

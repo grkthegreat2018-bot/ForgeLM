@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from typing import Optional
 
 import torch
 
@@ -39,9 +38,16 @@ import torch
 class PrefixCacheEntry:
     """A single entry in the learned prefix cache."""
 
-    __slots__ = ("prefix_hash", "kv_cache", "length", "last_access",
-                 "access_count", "created_at", "is_conversation",
-                 "continuation_score")
+    __slots__ = (
+        "access_count",
+        "continuation_score",
+        "created_at",
+        "is_conversation",
+        "kv_cache",
+        "last_access",
+        "length",
+        "prefix_hash",
+    )
 
     def __init__(self, prefix_hash: int, kv_cache, length: int):
         self.prefix_hash = prefix_hash
@@ -133,7 +139,7 @@ class LearnedPrefixCache:
         self.predictor = ContinuationPredictor()
         self._cache: OrderedDict[int, PrefixCacheEntry] = OrderedDict()
 
-    def get(self, prefix_hash: int) -> Optional[PrefixCacheEntry]:
+    def get(self, prefix_hash: int) -> PrefixCacheEntry | None:
         """Look up a prefix in the cache."""
         entry = self._cache.get(prefix_hash)
         if entry is not None:

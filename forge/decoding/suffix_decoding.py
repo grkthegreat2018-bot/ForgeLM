@@ -24,16 +24,17 @@ with zero training cost and zero extra memory.
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Optional
+import logging
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class SuffixTreeNode:
     """Node in a suffix tree for suffix decoding."""
 
-    __slots__ = ("children", "token", "depth", "is_end")
+    __slots__ = ("children", "depth", "is_end", "token")
 
     def __init__(self, token: int = -1, depth: int = 0):
         self.children: dict[int, SuffixTreeNode] = {}
@@ -89,7 +90,7 @@ class SuffixTree:
         for i in range(len(tokens)):
             self._insert_suffix(tokens[i:], self.max_depth)
 
-    def lookup(self, tokens: list[int], max_draft_len: int = 8) -> Optional[list[int]]:
+    def lookup(self, tokens: list[int], max_draft_len: int = 8) -> list[int] | None:
         """Find the longest matching continuation.
 
         Args:
@@ -205,8 +206,7 @@ class ComboSpeculativeDecoder:
 
     def __init__(self, eagle_head=None, mtp_module=None,
                  n_gram_size: int = 3, max_draft_len: int = 8):
-        from forge.decoding.adaptive_speculative import (
-            AdaptiveSpeculativeDecoder, NGramCache)
+        from forge.decoding.adaptive_speculative import NGramCache
         self.suffix_decoder = SuffixDecoder(max_draft_len=max_draft_len)
         self.ngram_cache = NGramCache(n=n_gram_size, max_draft_len=max_draft_len)
         self.eagle_head = eagle_head
@@ -248,7 +248,7 @@ class ComboSpeculativeDecoder:
                         best_draft = eagle_draft
                         best_drafter = "eagle"
                 except Exception:
-                    pass
+                    logger.debug("Eagle draft prediction failed", exc_info=True)
             elif self.mtp_module is not None:
                 try:
                     with torch.inference_mode():
@@ -258,7 +258,7 @@ class ComboSpeculativeDecoder:
                         best_draft = mtp_draft
                         best_drafter = "mtp"
                 except Exception:
-                    pass
+                    logger.debug("MTP draft prediction failed", exc_info=True)
 
         return best_draft, best_drafter
 

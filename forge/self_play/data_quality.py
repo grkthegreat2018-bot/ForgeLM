@@ -13,11 +13,9 @@ Research basis:
 from __future__ import annotations
 
 import ast
-import hashlib
 import math
 import re
 from collections import Counter
-from typing import Optional
 
 import numpy as np
 
@@ -161,7 +159,7 @@ class DataQualityPipeline:
     # --- Full pipeline ---
 
     def run_pipeline(
-        self, samples: list[dict], success_rates: Optional[list[float]] = None
+        self, samples: list[dict], success_rates: list[float] | None = None
     ) -> tuple[list[dict], dict]:
         """Run all stages; return filtered samples and a stats dict."""
         stats: dict = {"n_input": len(samples)}

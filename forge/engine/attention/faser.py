@@ -22,12 +22,6 @@ For our model:
 """
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
-from typing import Optional
-
-import torch
-
 
 class FASERController:
     """Online controller for speculative decoding parameters.

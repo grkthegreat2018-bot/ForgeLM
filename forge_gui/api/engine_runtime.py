@@ -27,7 +27,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -53,9 +53,9 @@ class _LoadWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, checkpoint: str, config_name: str,
-                 activation: Optional[dict] = None,
-                 use_compile: Optional[bool] = None,
-                 config_overrides: Optional[dict] = None,
+                 activation: dict | None = None,
+                 use_compile: bool | None = None,
+                 config_overrides: dict | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self.checkpoint = checkpoint
@@ -132,7 +132,7 @@ class _LoadWorker(QThread):
                 if ac is not None:
                     active = ac.to_dict()
             except Exception:
-                pass
+                logger.debug("Failed to get active config dict", exc_info=True)
             info = {
                 "checkpoint": ckpt,
                 "config_name": self.config_name,
@@ -156,7 +156,7 @@ class _ReactivateWorker(QThread):
     finished_ok = Signal(dict)     # new active config
     failed = Signal(str)
 
-    def __init__(self, runtime: "EngineRuntime", activation: dict,
+    def __init__(self, runtime: EngineRuntime, activation: dict,
                  parent=None) -> None:
         super().__init__(parent)
         self._runtime = runtime
@@ -175,7 +175,7 @@ class _ReactivateWorker(QThread):
                     if ac is not None:
                         active = ac.to_dict()
                 except Exception:
-                    pass
+                    logger.debug("Failed to get active config dict during reactivate", exc_info=True)
             self.progress.emit(
                 f"features applied in {time.perf_counter() - t0:.1f}s")
             self.finished_ok.emit(active)
@@ -204,8 +204,8 @@ class EngineRuntime(QObject):
         self._state = "idle"
         self._info: dict[str, Any] = {}
         self._error = ""
-        self._worker: Optional[_LoadWorker] = None
-        self._reworker: Optional[_ReactivateWorker] = None
+        self._worker: _LoadWorker | None = None
+        self._reworker: _ReactivateWorker | None = None
         self._lock = threading.Lock()
 
     # ── state ─────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ class EngineRuntime(QObject):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception:
-                pass
+                logger.debug("Failed to clear CUDA cache during unload", exc_info=True)
         self._info = {}
         self._set_state("idle")
 

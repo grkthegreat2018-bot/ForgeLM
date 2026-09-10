@@ -26,10 +26,8 @@ This implementation provides:
 from __future__ import annotations
 
 import json
-import pickle
 import time
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -85,7 +83,7 @@ class GraphTemplate:
         Path(path).write_text(json.dumps(data, indent=2))
 
     @classmethod
-    def deserialize(cls, path: str) -> "GraphTemplate":
+    def deserialize(cls, path: str) -> GraphTemplate:
         """Load template from disk."""
         data = json.loads(Path(path).read_text())
         template = cls(name=data["name"])
@@ -129,7 +127,7 @@ class FoundryRunner:
             raise RuntimeError("Foundry requires CUDA")
 
         config = getattr(self.model, 'config', None)
-        d_model = getattr(config, 'd_model', 2048) if config else 2048
+        getattr(config, 'd_model', 2048) if config else 2048
 
         # Static buffers
         static_input = torch.zeros(batch_size, seq_len, dtype=torch.long,
@@ -149,13 +147,12 @@ class FoundryRunner:
 
         # Capture
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(graph):
-                try:
-                    static_output = self.model(static_input, position_ids=static_pos)
-                except Exception as e:
-                    print(f"  [Foundry] Graph capture failed: {e}")
-                    return None
+        with torch.inference_mode(), torch.cuda.graph(graph):
+            try:
+                static_output = self.model(static_input, position_ids=static_pos)
+            except Exception as e:
+                print(f"  [Foundry] Graph capture failed: {e}")
+                return None
 
         # Extract template
         template = GraphTemplate(name=f"{name}_bs{batch_size}_seq{seq_len}")
@@ -203,10 +200,8 @@ class FoundryRunner:
         buffers = {}
         for name, shape in template.buffer_shapes.items():
             dtype_str = template.buffer_dtypes.get(name, "torch.int64")
-            dtype = eval(dtype_str) if "torch" in dtype_str else torch.int64
-            if "input" in name:
-                buffers[name] = torch.zeros(shape, dtype=torch.long, device=self.device)
-            elif "position" in name:
+            eval(dtype_str) if "torch" in dtype_str else torch.int64
+            if "input" in name or "position" in name:
                 buffers[name] = torch.zeros(shape, dtype=torch.long, device=self.device)
             else:
                 buffers[name] = torch.zeros(shape, dtype=torch.bfloat16, device=self.device)
@@ -232,12 +227,11 @@ class FoundryRunner:
 
         # Capture
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            with torch.cuda.graph(graph):
-                try:
-                    static_output = self.model(static_input, position_ids=static_pos)
-                except Exception:
-                    return False
+        with torch.inference_mode(), torch.cuda.graph(graph):
+            try:
+                static_output = self.model(static_input, position_ids=static_pos)
+            except Exception:
+                return False
 
         self._graphs[template_name] = graph
         self._buffers[template_name] = buffers

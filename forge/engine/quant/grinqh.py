@@ -57,6 +57,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Level tables
@@ -123,9 +124,8 @@ def _assign_precision_tiers(
     if T <= 3.5:
         frac4 = (T - 2.0) / 3.0
         frac3 = frac4
-        frac2 = 1.0 - 2.0 * frac4
+        1.0 - 2.0 * frac4
     else:
-        frac2 = 0.0
         frac4 = T - 3.0
         frac3 = 4.0 - T
 
@@ -478,7 +478,7 @@ class GRINQHQuantizer:
 # GRINQHLinear: inference module
 # ──────────────────────────────────────────────────────────────────────────
 
-class GRINQHLinear(nn.Module):
+class GRINQHLinear(QuantizedLinearMixin):
     """Linear layer with GRINQH graded-precision quantized weights.
 
     Stores per-channel precision (2/3/4-bit) packed weights. Dequantizes
@@ -550,7 +550,7 @@ class GRINQHLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, group_size: int = 128,
-                    target_effective_bits: float = 2.5) -> "GRINQHLinear":
+                    target_effective_bits: float = 2.5) -> GRINQHLinear:
         """Build from a standard nn.Linear by quantizing its weights."""
         w = lin.weight.data
         out_f, in_f = w.shape
@@ -571,8 +571,6 @@ class GRINQHLinear(nn.Module):
         self.precision.copy_(packed["precision"])
         self._effective_bits = packed["effective_bits"]
 
-        out_f = self.out_features
-        in_f = self.in_features
 
         # Zero out all packed buffers first
         self.packed_2bit.zero_()

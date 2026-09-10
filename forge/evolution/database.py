@@ -17,15 +17,15 @@ Usage:
 """
 from __future__ import annotations
 
-import sqlite3
 import json
 import pickle
-import time
+import sqlite3
 import threading
-import torch
-import numpy as np
+import time
 from pathlib import Path
-from typing import Any, Optional
+
+import numpy as np
+import torch
 
 
 class _NumpyEncoder(json.JSONEncoder):

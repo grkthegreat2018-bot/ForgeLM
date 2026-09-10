@@ -26,7 +26,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class PEAGLEDraftHead(nn.Module):
@@ -283,8 +282,8 @@ class PEAGLEDraftHeadTied(nn.Module):
             return logits.argmax(dim=-1)  # (B, K)
 
     @classmethod
-    def from_existing(cls, existing: 'PEAGLEDraftHead',
-                      lora_rank: int = 32) -> 'PEAGLEDraftHeadTied':
+    def from_existing(cls, existing: PEAGLEDraftHead,
+                      lora_rank: int = 32) -> PEAGLEDraftHeadTied:
         """Convert a PEAGLEDraftHead to PEAGLEDraftHeadTied.
 
         Strategy: average the K existing heads to initialize the shared head,
@@ -333,7 +332,7 @@ class PEAGLESpeculator:
     """
 
     def __init__(self, model: nn.Module,
-                 draft_head: 'PEAGLEDraftHead | PEAGLEDraftHeadTied',
+                 draft_head: PEAGLEDraftHead | PEAGLEDraftHeadTied,
                  n_draft: int = 7, device: str = "cuda"):  # evolution: 7 (was 4)
         self.model = model
         self.draft_head = draft_head
@@ -447,7 +446,7 @@ def train_peagle_head(draft_head: PEAGLEDraftHead, model: nn.Module,
         # Targets: the next K tokens after each position
         B, T = input_ids.shape
         K = draft_head.n_draft
-        targets = input_ids[:, 1:]  # (B, T-1)
+        input_ids[:, 1:]  # (B, T-1)
 
         # For each draft position i, target is token at position +i+1
         # Loss: predict next K tokens from last hidden state

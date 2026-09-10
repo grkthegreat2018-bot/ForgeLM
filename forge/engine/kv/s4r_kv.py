@@ -116,7 +116,7 @@ class S4RKVCache(KVCacheStrategy):
         """Append tokens to low-rank storage."""
         T = k.shape[2]
 
-        if not self._basis_built and T >= self.rank * 2:
+        if not self._basis_built and self.rank * 2 <= T:
             # Build basis from these tokens (first significant batch)
             self._build_basis(k, v)
 

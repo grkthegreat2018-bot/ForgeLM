@@ -24,15 +24,14 @@ and full mode (for the agentic loop).
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from .agent_tools import ToolSandbox, tool_results_to_text
+from .agent_tools import ToolSandbox
 from .backup_manager import BackupManager, backup_tool_defs
 from .library_install import LibraryInstallManager, library_tool_defs
+from .lora_training_trigger import lora_training_tool_defs
 from .lorebook import Lorebook, MemoryTools, memory_tool_defs
-from .lora_training_trigger import LoraTrainingTrigger, lora_training_tool_defs
 from .safety_checker import StrikeTracker, check_ast, check_command, check_edit
-from .status_reader import project_root
 from .sub_agent import SubAgentManager, sub_agent_tool_defs
 from .time_manager import TimeManager, time_tool_defs
 from .web_tools import WebTools, web_tool_defs
@@ -109,15 +108,15 @@ class ToolHarness:
     """
 
     def __init__(self, workspace: str,
-                 lorebook: Optional[Lorebook] = None,
+                 lorebook: Lorebook | None = None,
                  lora_harness=None,
                  mcp_manager=None,
                  lora_training=None,
-                 backup_manager: Optional[BackupManager] = None,
-                 sub_agent_manager: Optional[SubAgentManager] = None,
-                 time_manager: Optional[TimeManager] = None,
-                 library_manager: Optional[LibraryInstallManager] = None,
-                 web_tools: Optional[WebTools] = None,
+                 backup_manager: BackupManager | None = None,
+                 sub_agent_manager: SubAgentManager | None = None,
+                 time_manager: TimeManager | None = None,
+                 library_manager: LibraryInstallManager | None = None,
+                 web_tools: WebTools | None = None,
                  read_only: bool = False,
                  enable_safety: bool = True) -> None:
         self.sandbox = ToolSandbox(workspace)
@@ -262,7 +261,6 @@ class ToolHarness:
 
         # safety check for project_search_replace
         if self.enable_safety and name == "project_search_replace":
-            from .safety_checker import check_path_safety
             verdict = check_edit(args.get("new_text", ""), "snippet.txt",
                                  len(args.get("new_text", "").encode("utf-8")))
             if not verdict:
@@ -408,7 +406,6 @@ class ToolHarness:
             if self.lora_harness._current is None:
                 return {"error": "no LoRA currently loaded"}
             # trigger unload via manager
-            from .lora_store import LoraManager
             # the harness has a reference to the manager
             self.lora_harness._mgr.unload_from_engine(self.lora_harness._runtime)
             return {"ok": True, "result": {"unloaded": True}}

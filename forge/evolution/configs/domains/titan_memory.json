@@ -1,0 +1,30 @@
+{
+  "name": "titan_memory",
+  "category": "architecture",
+  "description": "TITAN: memory_rank, gate_init, n_memory_slots, update_freq. Metrics: memory_capacity, param_ratio, gate, freshness, update_cost, gate_interference.",
+  "simulator": "titan_memory_simulate",
+  "params": [
+    {"name": "memory_rank", "type": "int", "range": [64, 512]},
+    {"name": "gate_init", "type": "float", "range": [0.0, 0.5]},
+    {"name": "n_memory_slots", "type": "int", "range": [1, 8]},
+    {"name": "update_freq", "type": "int", "range": [1, 10]}
+  ],
+  "behavioral_dims": [["memory_capacity", 10, 0, 1], ["param_ratio", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "memory_capacity", "weight": 15.0},
+      {"metric": "param_ratio", "weight": -10.0},
+      {"metric": "gate", "weight": 5.0},
+      {"metric": "freshness", "weight": 3.0},
+      {"metric": "update_cost", "weight": -1.0},
+      {"metric": "gate_interference", "weight": -1.0},
+      {"metric": "flag_adjustment", "weight": 1.0}
+    ],
+    "penalties": [
+      {"flag": "update_freq_score"},
+      {"flag": "freshness_model"},
+      {"flag": "gate_interference"}
+    ],
+    "hardening": ["no_nan"]
+  }
+}

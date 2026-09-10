@@ -19,9 +19,7 @@ For our model (6 GQA attention layers, 32 heads):
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class AutonomyOfHeads:
@@ -173,7 +171,7 @@ class RetMask:
                                   normal_logits: torch.Tensor,
                                   masked_logits: torch.Tensor,
                                   target_tokens: torch.Tensor,
-                                  mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                                  mask: torch.Tensor | None = None) -> torch.Tensor:
         """Compute RetMask contrastive loss.
 
         Args:

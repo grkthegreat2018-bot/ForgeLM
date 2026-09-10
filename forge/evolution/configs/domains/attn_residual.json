@@ -1,0 +1,21 @@
+{
+  "name": "attn_residual",
+  "category": "attention",
+  "description": "AttnRes k layers, gate init, retrieval dim. Metrics: info_recovery, compute_cost, gate.",
+  "simulator": "attn_residual_simulate",
+  "params": [
+    {"name": "k_layers", "type": "int", "range": [1, 8]},
+    {"name": "gate_init", "type": "float", "range": [0.0, 1.0]},
+    {"name": "retrieval_dim", "type": "int", "range": [64, 512]}
+  ],
+  "behavioral_dims": [["info_recovery", 10, 0, 1], ["compute_cost", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "info_recovery", "weight": 10.0},
+      {"metric": "compute_cost", "weight": -2.0},
+      {"metric": "gate", "weight": 3.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

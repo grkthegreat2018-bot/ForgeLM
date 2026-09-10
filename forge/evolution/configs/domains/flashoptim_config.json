@@ -1,0 +1,23 @@
+{
+  "name": "flashoptim_config",
+  "category": "training",
+  "description": "FlashOptim companded optimizer states: bits, companding_mode, companding_strength, quantile_threshold. Metrics: memory_savings, precision, companding_bonus, bit_penalty.",
+  "simulator": "flash_optim_simulate",
+  "params": [
+    {"name": "bits", "type": "choice", "values": [4, 8]},
+    {"name": "companding", "type": "choice", "values": ["sqrt", "log", "linear"]},
+    {"name": "companding_strength", "type": "float", "range": [0.1, 2.0]},
+    {"name": "quantile_threshold", "type": "float", "range": [0.0, 0.1]}
+  ],
+  "behavioral_dims": [["memory_savings", 10, 0, 1], ["precision", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "memory_savings", "weight": 30.0},
+      {"metric": "companding_bonus", "weight": 1.0},
+      {"metric": "bit_penalty", "weight": 1.0},
+      {"metric": "quantile_bonus", "weight": 1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

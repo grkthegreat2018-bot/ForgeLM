@@ -14,14 +14,15 @@ Search space (6 params):
 """
 from __future__ import annotations
 
-import torch
-import numpy as np
-import time
 from typing import Any
+
+import torch
+
 from . import BaseDomain
 from .kv_utils import (
-    generate_synthetic_kv, generate_synthetic_q,
-    full_attention_output, measure_speed,
+    full_attention_output,
+    generate_synthetic_kv,
+    generate_synthetic_q,
 )
 
 
@@ -57,7 +58,7 @@ def _snapkv_evict(k: torch.Tensor, v: torch.Tensor,
 def _streaming_evict(k: torch.Tensor, v: torch.Tensor,
                      n_sinks: int, window_size: int) -> tuple:
     """Simulate StreamingLLM: keep sinks + sliding window."""
-    seq_len = k.shape[2]
+    k.shape[2]
     k_sink = k[:, :, :n_sinks, :]
     v_sink = v[:, :, :n_sinks, :]
     k_window = k[:, :, -window_size:, :]
@@ -73,7 +74,7 @@ def _paged_evict(k: torch.Tensor, v: torch.Tensor,
     if seq_len <= budget + obs_window:
         return k, v
 
-    n_blocks = (seq_len + block_size - 1) // block_size
+    (seq_len + block_size - 1) // block_size
     keep_blocks = budget // block_size
 
     # Vectorized block scoring: single matmul, then reshape
@@ -256,7 +257,7 @@ class KVEvictionDomain(BaseDomain):
                           "n_sinks": 8, "window_size": 1024, "block_size": 32})
         return seeds
 
-    def to_cpu(self) -> "KVEvictionDomain":
+    def to_cpu(self) -> KVEvictionDomain:
         """Create CPU copy for parallel evaluation."""
         cpu = KVEvictionDomain(seq_len=self.seq_len, seed=43,
                                device=torch.device("cpu"))

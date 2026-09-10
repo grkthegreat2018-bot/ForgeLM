@@ -51,10 +51,12 @@ so SIREN is a safe no-op until probes are trained/loaded.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
-from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["SIRENGuard", "SIRENStreamWrapper"]
 
@@ -86,7 +88,7 @@ class SIRENGuard:
         self,
         n_layers: int,
         hidden_dim: int,
-        categories: Optional[list[str]] = None,
+        categories: list[str] | None = None,
     ) -> None:
         self.n_layers = n_layers
         self.hidden_dim = hidden_dim
@@ -99,7 +101,7 @@ class SIRENGuard:
         # Recorded hidden states for the current token: list indexed by
         # layer_idx. Only the latest token's states are kept; reset()
         # clears them between tokens.
-        self._recorded: list[Optional[torch.Tensor]] = [None] * n_layers
+        self._recorded: list[torch.Tensor | None] = [None] * n_layers
         # Device is inferred from the first probe set / first recorded
         # state; defaults to CPU for pure-torch fallback.
         self._device: torch.device = torch.device("cpu")
@@ -186,7 +188,7 @@ class SIRENGuard:
 
     def check_token(
         self, token_str: str, hidden_states: dict[int, torch.Tensor]
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Convenience: record states, evaluate, decide safety.
 
         Args:
@@ -252,7 +254,7 @@ class SIRENStreamWrapper:
     def __iter__(self) -> Iterator[str]:
         for chunk in self._gen:
             scores = self._guard.evaluate()
-            blocked_cat: Optional[str] = None
+            blocked_cat: str | None = None
             for cat, score in scores.items():
                 if score > self._guard.threshold:
                     blocked_cat = cat
@@ -264,7 +266,6 @@ class SIRENStreamWrapper:
                 try:
                     self._gen.close()  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    logger.debug("Error closing generator after safety block", exc_info=True)
                 return
-            self._guard.reset()
             yield chunk

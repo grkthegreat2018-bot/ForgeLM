@@ -19,14 +19,13 @@ Lossless warm start:
 """
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.keys._tensor_utils import _repeat_kv as _repeat_kv_shared
 from forge.keys.misc.base import Key, KeyClass, KeyResult
-from forge.model_loader import GroupedQueryAttention, RotaryEmbedding
+from forge.model_loader import RotaryEmbedding
 
 
 class GroupedTiedAttention(nn.Module):
@@ -80,11 +79,7 @@ class GroupedTiedAttention(nn.Module):
         self._identity = bool(identity)
 
     def _repeat_kv(self, x):
-        if self.n_rep == 1:
-            return x
-        B, n_kv, T, hd = x.shape
-        return x[:, :, None, :, :].expand(B, n_kv, self.n_rep, T, hd).reshape(
-            B, n_kv * self.n_rep, T, hd)
+        return _repeat_kv_shared(x, self.n_rep)
 
     def forward(self, x, past_key_value=None, use_cache=False,
                 preallocated_cache=None, layer_idx: int = 0,

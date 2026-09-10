@@ -25,7 +25,7 @@ For our 1.2B model:
 from __future__ import annotations
 
 import math
-from typing import Iterable
+from collections.abc import Iterable
 
 import torch
 from torch.optim import Optimizer

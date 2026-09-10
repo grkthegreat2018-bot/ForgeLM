@@ -77,7 +77,7 @@ def fused_qk_norm_rope_cache(
         (q_out, k_out, v_out) — normalized + RoPE'd Q/K, and V (unchanged)
     """
     B, n_heads, T, hd = q.shape
-    n_kv = k.shape[1]
+    k.shape[1]
 
     # Slice the RoPE caches to this chunk's absolute positions. The fused
     # kernel indexes cos[t] with t = 0..T-1, so it receives pre-sliced

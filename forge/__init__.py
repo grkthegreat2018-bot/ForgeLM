@@ -18,9 +18,17 @@ Subpackages:
 """
 from __future__ import annotations
 
-# Clean up orphaned .tmp checkpoint files from crashed writes.
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Apply centralized runtime configuration (CUDA env vars, cache dirs, TF32
+# toggles, orphaned-tmp cleanup).  This used to be a direct
+# ``cleanup_orphaned_tmp()`` call plus scattered side effects in
+# ``forge.model_loader``; it now lives in one idempotent place.  See critique
+# finding F17 and ``forge/runtime/configure.py``.
 try:
-    from forge.checkpoint_io import cleanup_orphaned_tmp
-    cleanup_orphaned_tmp()
+    from forge.runtime.configure import configure
+    configure()
 except Exception:
-    pass
+    logger.debug("Runtime configuration failed", exc_info=True)

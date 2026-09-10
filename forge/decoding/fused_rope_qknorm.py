@@ -30,10 +30,11 @@ Fallback: pure PyTorch when Triton is unavailable (CPU, or kernel compile fail).
 """
 from __future__ import annotations
 
-import math
+import logging
 
 import torch
-import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 try:
     import triton
@@ -237,7 +238,7 @@ def fused_qk_norm_rope(q: torch.Tensor, k: torch.Tensor,
             return q_out, k_out
         except Exception:
             # Fall back to PyTorch on any Triton error (compile fail, OOM, etc.)
-            pass
+            logger.debug("Triton fused QK-norm+RoPE failed, falling back to PyTorch", exc_info=True)
 
     # PyTorch fallback
     # Expand cos/sin for broadcasting: [1, 1, T, head_dim]
@@ -274,7 +275,7 @@ def fused_norm_rope_single(x: torch.Tensor, weight: torch.Tensor,
         try:
             return _triton_fused_norm_rope(x, weight, cos, sin, eps)
         except Exception:
-            pass
+            logger.debug("Triton fused norm+RoPE failed, falling back to PyTorch", exc_info=True)
 
     # PyTorch fallback
     cos_b = cos.unsqueeze(0).unsqueeze(0)

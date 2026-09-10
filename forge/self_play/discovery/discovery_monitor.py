@@ -30,9 +30,8 @@ import sys
 import time
 from typing import Any
 
-from research.paths import DATA_DIR
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-
+from research.paths import DATA_DIR
 
 _DB_PATH = DATA_DIR / "discovery" / "discovery.sqlite3"
 

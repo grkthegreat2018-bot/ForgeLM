@@ -5,11 +5,10 @@ button. Uses the shared ``Palette`` tokens so it matches the dark theme.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ..theme import Palette
 
@@ -36,9 +35,9 @@ class EmptyState(QFrame):
     action_triggered = Signal()
 
     def __init__(self, title: str, description: str = "",
-                 icon: str = "📭", action_text: Optional[str] = None,
-                 on_action: Optional[Callable[[], None]] = None,
-                 parent: Optional[QWidget] = None) -> None:
+                 icon: str = "📭", action_text: str | None = None,
+                 on_action: Callable[[], None] | None = None,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -74,7 +73,7 @@ class EmptyState(QFrame):
         lay.addWidget(self._desc_lbl)
 
         # optional action button
-        self._action_btn: Optional[QPushButton] = None
+        self._action_btn: QPushButton | None = None
         if action_text:
             row = QHBoxLayout()
             row.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -98,5 +97,5 @@ class EmptyState(QFrame):
         self._icon_lbl.setText(icon)
 
     @property
-    def action_button(self) -> Optional[QPushButton]:
+    def action_button(self) -> QPushButton | None:
         return self._action_btn

@@ -32,9 +32,7 @@ This implementation provides:
 from __future__ import annotations
 
 import copy
-import itertools
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -44,7 +42,7 @@ import torch.nn as nn
 class DataSource:
     """A training data source with its adapter."""
     name: str
-    adapter: Optional[nn.Module] = None
+    adapter: nn.Module | None = None
     weight: float = 1.0  # current mixing weight
     n_samples: int = 0
     val_loss: float = float('inf')
@@ -231,7 +229,7 @@ class OPMixOptimizer:
 
         # Single-source mixtures
         for s in self.sources:
-            w = {src: 0.0 for src in self.sources}
+            w = dict.fromkeys(self.sources, 0.0)
             w[s] = 1.0
             candidates.append(w)
 

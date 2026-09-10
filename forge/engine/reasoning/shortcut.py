@@ -20,9 +20,8 @@ Both are training-free, plug-and-play, and require no base model updates.
 """
 from __future__ import annotations
 
-import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F

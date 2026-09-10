@@ -7,7 +7,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 def log(m): print(m, flush=True)
 
 def main():
-    from forge.keys.architecture.text_to_weights_key import TextToWeightsKey
+    from tests.fixtures.keys.architecture.text_to_weights_key import TextToWeightsKey
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
     from research.tokenizer_cache import get_tokenizer_no_wrap as load_tokenizer

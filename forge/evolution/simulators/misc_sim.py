@@ -5,11 +5,13 @@ state (synthetic KV tensors, etc). The simulators delegate to the legacy
 Python domain's evaluate() and return raw metrics for JSON-based scoring.
 """
 from __future__ import annotations
-from . import register
-from forge.evolution.domains.kara import KARADomain
+
 from forge.evolution.domains.hqe_kv import HqeKVDomain
-from forge.evolution.domains.sparse_attn import SparseAttentionDomain
+from forge.evolution.domains.kara import KARADomain
 from forge.evolution.domains.kv_eviction import KVEvictionDomain
+from forge.evolution.domains.sparse_attn import SparseAttentionDomain
+
+from . import register
 
 # Cache of legacy domain instances (they hold expensive synthetic KV state).
 # Keyed by (class name, seq_len, seed, device).

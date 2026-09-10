@@ -30,11 +30,9 @@ For our self-play training (infinite_loop.py → GRPOTrainer):
 """
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
+
 import torch
-import torch.nn.functional as F
-from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -87,7 +85,7 @@ class SPPO:
     def compute_loss(self, log_probs: torch.Tensor,
                      old_log_probs: torch.Tensor,
                      advantage: float,
-                     mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     mask: torch.Tensor | None = None) -> torch.Tensor:
         """Compute SPPO loss.
 
         Args:
@@ -164,7 +162,7 @@ class PSPPO:
                      old_log_probs: torch.Tensor,
                      rewards: torch.Tensor,
                      cutoff: int,
-                     mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     mask: torch.Tensor | None = None) -> torch.Tensor:
         """Compute PS-PPO loss with prefix sampling.
 
         Args:
@@ -323,7 +321,7 @@ class GRPOOR:
     def compute_loss(self, log_probs: torch.Tensor,
                      old_log_probs: torch.Tensor,
                      advantages: torch.Tensor,
-                     mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     mask: torch.Tensor | None = None) -> torch.Tensor:
         """Compute GRPO-OR loss.
 
         Args:
@@ -342,7 +340,6 @@ class GRPOOR:
         # For positive advantage: penalize if log_ratio < margin (under-sampling)
         # For negative advantage: penalize if log_ratio > -margin (over-sampling)
         pos_adv = advantages > 0
-        neg_adv = ~pos_adv
 
         # Positive advantage: OR residual = min(0, margin - log_ratio)^2
         or_pos = torch.clamp(margin - log_ratio, max=0).pow(2)

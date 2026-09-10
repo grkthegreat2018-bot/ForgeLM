@@ -248,7 +248,7 @@ def benchmark_cuda_graph(model, input_ids, n_warmup=5, n_runs=20, device="cuda")
     # Warmup.
     with torch.no_grad():
         for _ in range(n_warmup):
-            out = model(input_ids)
+            model(input_ids)
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -257,7 +257,7 @@ def benchmark_cuda_graph(model, input_ids, n_warmup=5, n_runs=20, device="cuda")
     t0 = time.time()
     with torch.no_grad():
         for _ in range(n_runs):
-            out = model(input_ids)
+            model(input_ids)
     torch.cuda.synchronize()
     regular_time = (time.time() - t0) / n_runs
 
@@ -273,7 +273,7 @@ def benchmark_cuda_graph(model, input_ids, n_warmup=5, n_runs=20, device="cuda")
     # Graph inference.
     t0 = time.time()
     for _ in range(n_runs):
-        out = runner.run(input_ids)
+        runner.run(input_ids)
     torch.cuda.synchronize()
     graph_time = (time.time() - t0) / n_runs
 

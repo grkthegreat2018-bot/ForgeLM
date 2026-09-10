@@ -134,7 +134,7 @@ class MonarchLinear(nn.Module):
         # Simple approach: find divisor of in_pad closest to block_size
         def _best_factor(n, target):
             best = 1
-            for d in range(2, int(math.isqrt(n)) + 1):
+            for d in range(2, math.isqrt(n) + 1):
                 if n % d == 0:
                     if abs(d - target) < abs(best - target):
                         best = d
@@ -161,7 +161,7 @@ class MonarchLinear(nn.Module):
 
     @classmethod
     def from_dense(cls, weight: torch.Tensor, block_size: int = 32,
-                   bias: torch.Tensor | None = None) -> 'MonarchLinear':
+                   bias: torch.Tensor | None = None) -> MonarchLinear:
         """Fit Monarch factors from a dense weight matrix via ALS.
 
         The Monarch factorization is: W[o0, o1, i0, i1] = R0[i1, i0, o0] * R1[o0, i1, o1]
@@ -323,7 +323,7 @@ class MonarchSwiGLUFFN(nn.Module):
         self.clamp_limit = clamp_limit
 
     @classmethod
-    def from_dense_ffn(cls, ffn: nn.Module, block_size: int = 32) -> 'MonarchSwiGLUFFN':
+    def from_dense_ffn(cls, ffn: nn.Module, block_size: int = 32) -> MonarchSwiGLUFFN:
         """Convert a dense SwiGLUFFN to MonarchSwiGLUFFN."""
         d_model = ffn.w_gate.in_features
         hidden_dim = ffn.w_gate.out_features

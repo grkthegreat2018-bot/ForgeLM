@@ -16,18 +16,29 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox,
-                               QDoubleSpinBox, QFileDialog, QFrame,
-                               QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
-                               QSpinBox, QSplitter, QToolButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ..api.agent_runner import (APPROVAL_ALL, APPROVAL_DESTRUCTIVE,
-                                APPROVAL_NONE, DEFAULT_SYSTEM, AgentRunner)
+from ..api.agent_runner import APPROVAL_ALL, APPROVAL_DESTRUCTIVE, APPROVAL_NONE, DEFAULT_SYSTEM, AgentRunner
 from ..api.engine_runtime import EngineRuntime
 from ..theme import Palette
 from ._base import section_label
@@ -89,7 +100,7 @@ HARNESS_EXTRA_TOOLS = {
 class _ToolCard(QFrame):
     """Tool call card: name + args + result (result filled in later)."""
 
-    def __init__(self, call: dict, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, call: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("toolCard")
         lay = QVBoxLayout(self); lay.setContentsMargins(10, 8, 10, 8)
@@ -137,7 +148,7 @@ class _ToolCard(QFrame):
 class _RoundBlock(QFrame):
     """One agent round: header + assistant text + tool cards."""
 
-    def __init__(self, round_idx: int, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, round_idx: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("agentRound")
         self.round_idx = round_idx
@@ -211,12 +222,12 @@ class _RoundBlock(QFrame):
 class AgentPage(QWidget):
     def __init__(self, runtime: EngineRuntime,
                  tool_harness=None, lorebook=None,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.runtime = runtime
         self.tool_harness = tool_harness
         self.lorebook = lorebook
-        self._runner: Optional[AgentRunner] = None
+        self._runner: AgentRunner | None = None
         self._round_blocks: dict[int, _RoundBlock] = {}
         self._n_runs = 0
 
@@ -399,7 +410,7 @@ class AgentPage(QWidget):
         else:
             self._status.setText("Idle · engine must be loaded (Engine Console)")
 
-    def _get_enabled_tools(self) -> Optional[list[str]]:
+    def _get_enabled_tools(self) -> list[str] | None:
         """Get the list of enabled coding tools + always-on harness tools."""
         tools = [t for t, cb in self._tool_checks.items() if cb.isChecked()]
         # Always include harness extra tools (memory, LoRA, time, etc.)
@@ -412,7 +423,7 @@ class AgentPage(QWidget):
                     if name in HARNESS_EXTRA_TOOLS:
                         tools.append(name)
             except Exception:
-                pass
+                logger.debug("Failed to collect harness extra tools", exc_info=True)
         return tools
 
     def _build_system_prompt(self, enabled_tools: list[str]) -> str:

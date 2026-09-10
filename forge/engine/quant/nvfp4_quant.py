@@ -30,9 +30,15 @@ This implementation provides:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
+
+from forge.quant.protocol import QuantizedLinearMixin
 
 # FP4 E2M1 representable magnitudes (8 levels, sign bit separate)
 # E2M1: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
@@ -103,7 +109,7 @@ def _quantize_to_fp4(w: torch.Tensor, block_size: int = 32) -> tuple:
     idx = torch.searchsorted(_FP4_BOUNDARIES.to(w.device), abs_norm)
     idx = idx.clamp(0, 7)
     magnitude = _FP4_MAGNITUDES.to(w.device)[idx]
-    w_fp4 = torch.sign(w_norm) * magnitude  # (out, n_blocks, block_size)
+    torch.sign(w_norm) * magnitude  # (out, n_blocks, block_size)
 
     # Pack to 4-bit: map magnitude index (0-7) + sign → 4-bit code
     # Encoding: bit 3 = sign (1=negative), bits 0-2 = magnitude index
@@ -168,7 +174,7 @@ def _dequantize_fp4(
     w_fp4 = sign * magnitudes  # (out, in_padded)
 
     # Apply block scales
-    n_blocks = scales.shape[1]
+    scales.shape[1]
     in_padded = codes.shape[1]
     scales_f32 = scales.to(torch.float32)
     # Expand scales: each scale applies to block_size consecutive elements
@@ -186,7 +192,7 @@ def _dequantize_fp4(
     return w_dequant.to(dtype)
 
 
-class NVFP4Linear(nn.Module):
+class NVFP4Linear(QuantizedLinearMixin):
     """Linear layer with NVFP4 weight quantization (Blackwell native).
 
     Weights stored as FP4 (4-bit) with per-block FP8 scale factors.
@@ -234,7 +240,7 @@ class NVFP4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    w4a8: bool = False) -> "NVFP4Linear":
+                    w4a8: bool = False) -> NVFP4Linear:
         """Quantize an nn.Linear to NVFP4."""
         w = lin.weight.float()  # (out, in)
         out_features, in_features = w.shape
@@ -294,7 +300,7 @@ class NVFP4Linear(nn.Module):
                     out = out + bias
                 return out.reshape(*x.shape[:-1], self.out_features)
             except Exception:
-                pass  # fall through to dequant path
+                logger.debug("FP4 fast path failed, falling through to dequant path", exc_info=True)  # fall through to dequant path
 
         # Standard path: dequant FP4 → bf16, F.linear
         w = self._dequantize_weight(x.dtype)

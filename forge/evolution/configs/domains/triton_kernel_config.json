@@ -1,0 +1,19 @@
+{
+  "name": "triton_kernel_config",
+  "category": "training",
+  "description": "Triton fused kernel block sizes: rms_block_size, swiglu_block_size. Metrics: base_speedup, mismatch_penalty, rms_match, swiglu_match.",
+  "simulator": "triton_kernel_simulate",
+  "params": [
+    {"name": "rms_block_size", "type": "choice", "values": [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]},
+    {"name": "swiglu_block_size", "type": "choice", "values": [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]}
+  ],
+  "behavioral_dims": [["rms_match", 10, 0, 1], ["swiglu_match", 10, 0, 1]],
+  "scoring": {
+    "components": [
+      {"metric": "base_speedup", "weight": 1.0},
+      {"metric": "mismatch_penalty", "weight": -1.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

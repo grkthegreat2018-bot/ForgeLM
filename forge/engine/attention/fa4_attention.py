@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from typing import Optional
 
 
 def get_gpu_arch() -> tuple[int, int]:
@@ -58,7 +57,7 @@ def fa4_available() -> bool:
     if not is_sm120():
         return False
     try:
-        import flash_attn.cute.interface as fa4_iface
+        import flash_attn.cute.interface as fa4_iface  # noqa: F401
         return hasattr(fa4_iface, 'flash_attn_varlen_func')
     except ImportError:
         return False
@@ -95,16 +94,16 @@ class FA4Attention:
         if self._fa4:
             return "fa4"
         try:
-            import flash_attn
+            import flash_attn  # noqa: F401  # noqa: F401
             return "fa2"
         except ImportError:
             return "sdpa"
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                 causal: bool = True,
-                k_descale: Optional[torch.Tensor] = None,
-                v_descale: Optional[torch.Tensor] = None,
-                page_table: Optional[torch.Tensor] = None) -> torch.Tensor:
+                k_descale: torch.Tensor | None = None,
+                v_descale: torch.Tensor | None = None,
+                page_table: torch.Tensor | None = None) -> torch.Tensor:
         """Compute attention using the best available backend.
 
         Args:
@@ -205,7 +204,7 @@ def select_attention_backend() -> str:
     if is_sm120() and fa4_available():
         return "fa4"
     try:
-        import flash_attn
+        import flash_attn  # noqa: F401
         return "fa2"
     except ImportError:
         return "sdpa"

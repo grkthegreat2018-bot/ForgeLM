@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.quant.protocol import QuantizedLinearMixin
 
 _HAS_CUDA = torch.cuda.is_available()
 
@@ -206,7 +207,7 @@ class MixLLMQuantizer:
 # MixLLMLinear module
 # ──────────────────────────────────────────────────────────────────────────
 
-class MixLLMLinear(nn.Module):
+class MixLLMLinear(QuantizedLinearMixin):
     """Mixed-precision Linear with per-output-feature global bit allocation.
 
     Stores weights at two precisions based on a GLOBAL importance mask:
@@ -289,7 +290,7 @@ class MixLLMLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, high_mask: torch.Tensor,
-                    group_size: int = 128) -> "MixLLMLinear":
+                    group_size: int = 128) -> MixLLMLinear:
         """Build a MixLLMLinear from an nn.Linear and a global importance mask.
 
         Partitions the weight rows into INT4 (low) and INT8 (high) based on

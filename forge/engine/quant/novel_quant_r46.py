@@ -38,28 +38,29 @@ Sources (R46 research):
 """
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Reuse FP4 primitives
-from forge.engine.quant.nvfp4_quant import (
-    _FP4_MAGNITUDES, _FP4_BOUNDARIES,
+# Reuse Hessian proxy computation from existing novel_quant
+from forge.engine.quant.novel_quant import (
+    _optimal_fp4_scale_hessian,
+    compute_hessian_proxy,
 )
 
 # Reuse Hadamard matrix and skip-type list from R44
 from forge.engine.quant.novel_quant_r44 import (
-    _hadamard_matrix, _SKIP_TYPES, _SKIP_NAMES,
+    _SKIP_NAMES,
+    _SKIP_TYPES,
+    _hadamard_matrix,
 )
 
-# Reuse Hessian proxy computation from existing novel_quant
-from forge.engine.quant.novel_quant import (
-    compute_hessian_proxy, _optimal_fp4_scale_hessian,
+# Reuse FP4 primitives
+from forge.engine.quant.nvfp4_quant import (
+    _FP4_BOUNDARIES,
+    _FP4_MAGNITUDES,
 )
-
+from forge.quant.protocol import QuantizedLinearMixin
 
 # ──────────────────────────────────────────────────────────────────────────
 # Weight caching mixin — eliminates redundant dequantization (speed fix)
@@ -107,7 +108,7 @@ class _CachedDequantMixin:
 # Algorithm 1: HadamardRotatedFP4 (HR-FP4) — QuaRot-style rotation
 # ──────────────────────────────────────────────────────────────────────────
 
-class HadamardRotatedFP4Linear(nn.Module, _CachedDequantMixin):
+class HadamardRotatedFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """HadamardRotatedFP4: Hadamard rotation + FP4 quantization.
 
     Pipeline:
@@ -153,7 +154,7 @@ class HadamardRotatedFP4Linear(nn.Module, _CachedDequantMixin):
         self._init_cache()
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> "HadamardRotatedFP4Linear":
+    def from_linear(cls, lin: nn.Linear, block_size: int = 32) -> HadamardRotatedFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None, block_size=block_size)
 
@@ -267,7 +268,7 @@ class HadamardRotatedFP4Linear(nn.Module, _CachedDequantMixin):
 # Algorithm 2: GPTQFP4 — GPTQ error compensation
 # ──────────────────────────────────────────────────────────────────────────
 
-class GPTQFP4Linear(nn.Module, _CachedDequantMixin):
+class GPTQFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """GPTQFP4: FP4 quantization with GPTQ-style error compensation.
 
     Pipeline:
@@ -309,7 +310,7 @@ class GPTQFP4Linear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, activations: torch.Tensor,
-                    block_size: int = 32, group_size: int = 128) -> "GPTQFP4Linear":
+                    block_size: int = 32, group_size: int = 128) -> GPTQFP4Linear:
         """Create GPTQ-quantized layer.
 
         Args:
@@ -483,7 +484,7 @@ class GPTQFP4Linear(nn.Module, _CachedDequantMixin):
 # Algorithm 3: AWQFP4 — Activation-aware weighting
 # ──────────────────────────────────────────────────────────────────────────
 
-class AWQFP4Linear(nn.Module, _CachedDequantMixin):
+class AWQFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """AWQFP4: FP4 with activation-aware (Hessian-weighted) scale search.
 
     Pipeline:
@@ -516,7 +517,7 @@ class AWQFP4Linear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, activations: torch.Tensor,
-                    block_size: int = 32) -> "AWQFP4Linear":
+                    block_size: int = 32) -> AWQFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None, block_size=block_size)
 
@@ -605,7 +606,7 @@ class AWQFP4Linear(nn.Module, _CachedDequantMixin):
 # Algorithm 4: OptimalGridFP4 (OG-FP4) — data-dependent 4-bit codebook
 # ──────────────────────────────────────────────────────────────────────────
 
-class OptimalGridFP4Linear(nn.Module, _CachedDequantMixin):
+class OptimalGridFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """OptimalGridFP4: Lloyd-Max optimal 4-bit codebook per layer.
 
     Instead of the fixed FP4 E2M1 magnitudes [0, 0.5, 0.75, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0],
@@ -645,7 +646,7 @@ class OptimalGridFP4Linear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, block_size: int = 32,
-                    n_lloyd_iters: int = 20) -> "OptimalGridFP4Linear":
+                    n_lloyd_iters: int = 20) -> OptimalGridFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     block_size=block_size, n_lloyd_iters=n_lloyd_iters)
@@ -777,7 +778,7 @@ class OptimalGridFP4Linear(nn.Module, _CachedDequantMixin):
 # Combined pipeline: Hadamard → OptimalGrid → GPTQ
 # ──────────────────────────────────────────────────────────────────────────
 
-class HadamardGPTQFP4Linear(nn.Module, _CachedDequantMixin):
+class HadamardGPTQFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """HadamardGPTQFP4: Hadamard rotation + GPTQ error compensation.
 
     The strongest combination: rotation reduces outliers (making FP4 grid
@@ -816,7 +817,7 @@ class HadamardGPTQFP4Linear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, activations: torch.Tensor,
-                    block_size: int = 32, group_size: int = 128) -> "HadamardGPTQFP4Linear":
+                    block_size: int = 32, group_size: int = 128) -> HadamardGPTQFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None,
                     block_size=block_size, group_size=group_size)
@@ -983,7 +984,7 @@ class HadamardGPTQFP4Linear(nn.Module, _CachedDequantMixin):
 # Algorithm 6: HadamardAWQFP4 — rotation + activation-aware weighting
 # ──────────────────────────────────────────────────────────────────────────
 
-class HadamardAWQFP4Linear(nn.Module, _CachedDequantMixin):
+class HadamardAWQFP4Linear(QuantizedLinearMixin, _CachedDequantMixin):
     """HadamardAWQFP4: Hadamard rotation + AWQ-style activation-aware scale.
 
     Combines the two best-performing R46 techniques:
@@ -1022,7 +1023,7 @@ class HadamardAWQFP4Linear(nn.Module, _CachedDequantMixin):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, activations: torch.Tensor,
-                    block_size: int = 32) -> "HadamardAWQFP4Linear":
+                    block_size: int = 32) -> HadamardAWQFP4Linear:
         out_f, in_f = lin.weight.shape
         layer = cls(in_f, out_f, bias=lin.bias is not None, block_size=block_size)
 

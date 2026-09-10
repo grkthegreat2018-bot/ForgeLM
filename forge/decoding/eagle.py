@@ -48,7 +48,6 @@ Usage:
     # Inference
     output = eagle3_generate(model, head, tokenizer, prompt, max_new_tokens=100)
 """
-from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -79,12 +78,12 @@ class Eagle3Head(nn.Module):
         vocab_size: int,
         n_layers: int,
         low_layer: int = 1,
-        mid_layer: Optional[int] = None,
-        high_layer: Optional[int] = None,
+        mid_layer: int | None = None,
+        high_layer: int | None = None,
         n_heads: int = 8,
-        ffn_dim: Optional[int] = None,
+        ffn_dim: int | None = None,
         dropout: float = 0.0,
-        share_embedding: Optional[nn.Embedding] = None,
+        share_embedding: nn.Embedding | None = None,
     ):
         super().__init__()
         self.d_model = d_model
@@ -138,7 +137,7 @@ class Eagle3Head(nn.Module):
         self._causal_mask_cache: dict[int, torch.Tensor] = {}
 
     def fuse_hidden_states(
-        self, hidden_states_list: List[torch.Tensor]
+        self, hidden_states_list: list[torch.Tensor]
     ) -> torch.Tensor:
         """Fuse hidden states from 3 layers into a single representation.
 
@@ -163,9 +162,9 @@ class Eagle3Head(nn.Module):
         self,
         fused_features: torch.Tensor,
         input_ids: torch.Tensor,
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Run the draft decoder layer.
 
         Args:
@@ -218,7 +217,7 @@ class Eagle3Head(nn.Module):
         last_token: torch.Tensor,
         temperature: float = 0.0,
         top_k: int = 0,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict the next token from fused features and last token.
 
         Used during autoregressive drafting.
@@ -252,11 +251,11 @@ class Eagle3Head(nn.Module):
 def extract_hidden_states(
     model: nn.Module,
     input_ids: torch.Tensor,
-    layers: List[int],
+    layers: list[int],
     past_key_values=None,
     use_cache: bool = False,
     attention_mask=None,
-) -> Tuple[List[torch.Tensor], torch.Tensor, Optional[list]]:
+) -> tuple[list[torch.Tensor], torch.Tensor, list | None]:
     """Run the target model and extract hidden states from specified layers.
 
     Args:
@@ -272,7 +271,7 @@ def extract_hidden_states(
         final_hidden: (B, T, d_model) final layer hidden state (after ln_f)
         presents: KV cache if use_cache
     """
-    max_layer = max(layers)
+    max(layers)
     hidden_states_by_layer = {}
 
     # Get embedding
@@ -387,8 +386,8 @@ class Eagle3Trainer:
     def compute_loss(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, dict]:
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict]:
         """Compute EAGLE-3 training loss with TTT.
 
         Args:
@@ -419,9 +418,8 @@ class Eagle3Trainer:
         # and must predict token at t+1.
         # We unroll for ttt_length steps, feeding predictions back.
 
-        total_kl_loss = torch.tensor(0.0, device=device)
-        total_ce_loss = torch.tensor(0.0, device=device)
-        n_steps = 0
+        torch.tensor(0.0, device=device)
+        torch.tensor(0.0, device=device)
 
         # Use teacher forcing: feed ground-truth tokens (not draft predictions)
         # This is the standard TTT training approach.
@@ -431,7 +429,7 @@ class Eagle3Trainer:
         draft_input_ids = input_ids[:, :-1]  # (B, T-1)
         draft_fused = fused[:, :-1]  # (B, T-1, d)
         target_tokens = input_ids[:, 1:]  # (B, T-1)
-        target_p = target_probs[:, 1:]  # (B, T-1, V)
+        target_probs[:, 1:]  # (B, T-1, V)
 
         # Single forward pass through draft (teacher forcing)
         draft_logits, _ = self.head.draft_forward(draft_fused, draft_input_ids)
@@ -487,7 +485,7 @@ class Eagle3Trainer:
     def train_step(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> dict:
         """One training step: compute loss, backprop, update.
 
@@ -558,7 +556,7 @@ def eagle3_generate(
 
     # Tokenize prompt
     ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-    prompt_len = ids.shape[1]
+    ids.shape[1]
 
     # Extract layers for EAGLE-3
     extract_layers = [head.low_layer, head.mid_layer, head.high_layer]
@@ -588,7 +586,6 @@ def eagle3_generate(
     ids = torch.cat([ids, next_token], dim=1)
 
     # KV cache for draft head
-    draft_kv = None
 
     # Generation loop
     while generated_tokens.shape[1] < max_new_tokens:
@@ -709,7 +706,7 @@ def eagle3_generate(
 
 def add_eagle3_to_model(
     model: nn.Module,
-    n_layers: Optional[int] = None,
+    n_layers: int | None = None,
     **kwargs,
 ) -> Eagle3Head:
     """Create an EAGLE-3 head for a given model.

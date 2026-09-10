@@ -25,10 +25,8 @@ Usage:
 """
 import json
 import os
-import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -330,7 +328,7 @@ def main():
         print(f"\n  Query: {query[:50]}")
         print(f"  Topic: {topic}")
 
-        knowledge = loader.load_topic(topic)
+        loader.load_topic(topic)
         context = loader.get_context_prefix()
         print(f"  Context: {len(context)} chars")
 

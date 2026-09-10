@@ -20,8 +20,9 @@ Handler contract
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from forge.engine.forge_engine import ForgeEngine
@@ -48,12 +49,12 @@ class FeatureSpec:
 
 # ── Handler helpers ────────────────────────────────────────────────────────
 
-def _cfg(eng: "ForgeEngine", name: str, default: Any) -> Any:
+def _cfg(eng: ForgeEngine, name: str, default: Any) -> Any:
     """Read an attribute from the model config with a fallback."""
     return getattr(getattr(eng.model, "config", None), name, default)
 
 
-def _kv_dims(eng: "ForgeEngine") -> tuple[int, int]:
+def _kv_dims(eng: ForgeEngine) -> tuple[int, int]:
     return eng._kv_dimensions
 
 
@@ -434,7 +435,7 @@ def _h_replay_ssm(eng, _flags):
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 
-def torch_zeros(eng: "ForgeEngine", *shape: int):
+def torch_zeros(eng: ForgeEngine, *shape: int):
     """Create a long-tensor on the engine's device (used for autotune input)."""
     import torch
     return torch.zeros(*shape, dtype=torch.long, device=eng.device)

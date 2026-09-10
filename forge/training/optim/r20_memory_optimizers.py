@@ -27,16 +27,11 @@ Best practical combo: R20b (NVMe streaming) + R20c (4-bit Muon) = 20.9 GB.
 """
 from __future__ import annotations
 
-import math
 import os
-import threading
-import time
-from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
-
 
 # ── R20a: 4-bit AdamW optimizer states ──────────────────────────────────────
 
@@ -1004,7 +999,7 @@ class TernaryOptimizer(Optimizer):
                     states = self._unpack_2bit(packed, n)
 
                     # Accumulate gradient sign
-                    grad_sign = torch.sign(grad)
+                    torch.sign(grad)
                     grad_mag = grad.abs()
 
                     # For ternary weights: flip based on accumulated gradient

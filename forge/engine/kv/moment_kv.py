@@ -29,7 +29,6 @@ For our model (32K context):
 from __future__ import annotations
 
 import torch
-from typing import Optional
 
 
 class MomentStats:

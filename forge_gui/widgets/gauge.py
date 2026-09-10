@@ -1,11 +1,8 @@
 """Circular gauge widget — used for VRAM %, compute load, progress."""
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt, QSize, QPointF, QRectF
-from PySide6.QtGui import (QColor, QFont, QLinearGradient, QPainter, QPen,
-                           QConicalGradient, QBrush)
+from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtGui import QBrush, QColor, QConicalGradient, QFont, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..theme import Palette
@@ -14,7 +11,7 @@ from ..theme import Palette
 class CircularGauge(QWidget):
     """Arc gauge with a gradient sweep, center % label, and caption."""
 
-    def __init__(self, parent: Optional[QWidget] = None, *,
+    def __init__(self, parent: QWidget | None = None, *,
                  caption: str = "", unit: str = "%",
                  min_val: float = 0.0, max_val: float = 100.0,
                  size: int = 140, start_angle: float = 225.0,

@@ -1,0 +1,20 @@
+{
+  "name": "bitnet_config",
+  "category": "quantization",
+  "description": "BitNet b1.58 ternary / b1.0 binary quantization. Metrics: err, compression.",
+  "simulator": "bitnet_simulate",
+  "params": [
+    {"name": "learned_scale", "type": "bool"},
+    {"name": "quant_mode", "type": "choice", "values": ["ternary", "binary"]},
+    {"name": "init_scale", "type": "float", "range": [0.5, 2.0]}
+  ],
+  "behavioral_dims": [["err", 10, 0, 1], ["compression", 10, 4, 16]],
+  "scoring": {
+    "components": [
+      {"metric": "err", "weight": -100.0},
+      {"metric": "compression", "weight": 2.0}
+    ],
+    "penalties": [],
+    "hardening": ["no_nan"]
+  }
+}

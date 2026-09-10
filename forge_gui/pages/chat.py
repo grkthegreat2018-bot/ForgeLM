@@ -15,26 +15,39 @@ sft_train-compatible JSONL (ChatStore.export_training_data).
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
 import re
-import time
 import urllib.request
-from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSpinBox, QSplitter, QTextEdit,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.chat_store import RATING_BAD, RATING_GOOD, ChatStore
 from ..api.engine_runtime import EngineRuntime
-from ..api.master_prompt import generate_master_prompt, get_default_prompt_for_config
+from ..api.master_prompt import get_default_prompt_for_config
 from ..theme import Palette
 from ._base import section_label
 
@@ -69,9 +82,7 @@ class _EngineChatWorker(QThread):
 
     def run(self) -> None:
         try:
-            from forge.self_play.discovery.qwen_adapter import (
-                render_messages_for_config,
-            )
+            from ..api.chat_render import render_messages_for_config
             cfg_name = self._runtime.info.get("config_name", "")
             rendered = render_messages_for_config(
                 self.messages, config_name=cfg_name,
@@ -132,10 +143,12 @@ class _EngineChatToolWorker(QThread):
 
     def run(self) -> None:
         try:
-            from forge.self_play.discovery.qwen_adapter import (
-                qwen_parse_tool_calls, render_messages_for_config,
-            )
             import json as _json
+
+            from ..api.chat_render import (
+                qwen_parse_tool_calls,
+                render_messages_for_config,
+            )
 
             # use reduced tool set for chat (keeps prompt within KV cache)
             defs = self.tool_harness.chat_tool_defs()
@@ -399,7 +412,7 @@ class _MessageBubble(QFrame):
     rated = Signal(int, str)   # msg_index, rating ('good'|'bad')
 
     def __init__(self, role: str, text: str, msg_index: int = -1,
-                 rating: Optional[str] = None,
+                 rating: str | None = None,
                  model_name: str = "",
                  image_path: str = "") -> None:
         super().__init__()
@@ -487,7 +500,7 @@ class _MessageBubble(QFrame):
     def _rate(self, which: str) -> None:
         self.rated.emit(self.msg_index, which)
 
-    def set_rating(self, rating: Optional[str]) -> None:
+    def set_rating(self, rating: str | None) -> None:
         self._good.setChecked(rating == RATING_GOOD)
         self._bad.setChecked(rating == RATING_BAD)
 
@@ -501,12 +514,12 @@ class _MessageBubble(QFrame):
 # ── page ───────────────────────────────────────────────────────────────
 
 class ChatPage(QWidget):
-    def __init__(self, store: Optional[ChatStore] = None,
-                 runtime: Optional[EngineRuntime] = None,
+    def __init__(self, store: ChatStore | None = None,
+                 runtime: EngineRuntime | None = None,
                  models_index=None, lorebook=None, lora_harness=None,
                  tool_harness=None,
                  base_url: str = "http://localhost:8080/v1",
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.store = store or ChatStore()
         self.runtime = runtime
@@ -515,11 +528,11 @@ class ChatPage(QWidget):
         self.lora_harness = lora_harness
         self.tool_harness = tool_harness
         self._base = base_url.rstrip("/")
-        self._worker: Optional[QThread] = None
-        self._conv_id: Optional[str] = None
+        self._worker: QThread | None = None
+        self._conv_id: str | None = None
         self._pending_msg_idx = -1
         self._assistant_text = ""
-        self._assistant_bubble: Optional[_MessageBubble] = None
+        self._assistant_bubble: _MessageBubble | None = None
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -754,7 +767,7 @@ class ChatPage(QWidget):
             self._reload_conversations()
             self._render_conversation()
 
-    def _conv(self) -> Optional[dict]:
+    def _conv(self) -> dict | None:
         return self.store.get(self._conv_id) if self._conv_id else None
 
     # ── rendering ─────────────────────────────────────────────────────
@@ -783,7 +796,7 @@ class ChatPage(QWidget):
 
     def _add_bubble(self, role: str, text: str,
                     msg_index: int = -1,
-                    rating: Optional[str] = None,
+                    rating: str | None = None,
                     image_path: str = "") -> _MessageBubble:
         model_name = self._get_model_name() if role == "assistant" else ""
         b = _MessageBubble(role, text, msg_index, rating,
@@ -877,10 +890,8 @@ class ChatPage(QWidget):
                     info = self.runtime.info
                     cfg_name = info.get("config_name", "")
                     if cfg_name:
-                        from forge.config import get_config
-                        cfg = get_config(cfg_name)
-                        parts.append(generate_master_prompt(
-                            cfg, cfg_name,
+                        parts.append(get_default_prompt_for_config(
+                            cfg_name,
                             tools_enabled=self._tools_enabled.isChecked(),
                             thinking_enabled=self._thinking.isChecked()))
                 else:

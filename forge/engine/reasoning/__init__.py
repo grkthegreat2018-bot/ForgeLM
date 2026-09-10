@@ -12,20 +12,23 @@ Training-free inference-time techniques for efficient chain-of-thought:
     (Budget Guidance, ACL 2026 findings.1866). Predicts optimal thinking
     length via Gamma distribution predictor with soft token-level guidance.
 """
+from .budget import BudgetConfig, ReasoningBudgetController
 from .shortcut import (
-    ShortcutDecoder, ShortcutConfig,
-    SyncThinkTerminator, SyncThinkConfig,
-    compute_step_entropy, detect_reasoning_saturation,
+    ShortcutConfig,
+    ShortcutDecoder,
+    SyncThinkConfig,
+    SyncThinkTerminator,
+    compute_step_entropy,
+    detect_reasoning_saturation,
 )
-from .budget import ReasoningBudgetController, BudgetConfig
 
 __all__ = [
-    'ShortcutDecoder',
+    'BudgetConfig',
+    'ReasoningBudgetController',
     'ShortcutConfig',
-    'SyncThinkTerminator',
+    'ShortcutDecoder',
     'SyncThinkConfig',
+    'SyncThinkTerminator',
     'compute_step_entropy',
     'detect_reasoning_saturation',
-    'ReasoningBudgetController',
-    'BudgetConfig',
 ]

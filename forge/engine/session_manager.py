@@ -32,20 +32,17 @@ Usage:
     future2 = bq.submit(task_id, "Now make it recursive", max_tokens=128)
 """
 import asyncio
-import json
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
-from forge.engine.decoding import build_decoding
 from forge.engine.batched_decoding import BatchedDecoding
-
 
 # ── Task Boot Config ─────────────────────────────────────────────────────────
 

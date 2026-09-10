@@ -27,7 +27,7 @@ import torch.nn.functional as F
 
 # Check if flex_attention is available (PyTorch 2.5+)
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention  # noqa: F401
     _FLEX_AVAILABLE = True
 except ImportError:
     _FLEX_AVAILABLE = False
@@ -94,10 +94,7 @@ class FlexDecodingWrapper:
 
         from forge.model_loader import GroupedQueryAttention
         for name, module in model.named_modules():
-            if isinstance(module, GroupedQueryAttention):
-                self._patch_attention(module, name)
-            # Also patch GTA and GLA
-            elif type(module).__name__ in ("GroupedTiedAttention", "GroupedLatentAttention"):
+            if isinstance(module, GroupedQueryAttention) or type(module).__name__ in ("GroupedTiedAttention", "GroupedLatentAttention"):
                 self._patch_attention(module, name)
 
         self._active = True

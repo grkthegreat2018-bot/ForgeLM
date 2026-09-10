@@ -16,7 +16,6 @@ import logging
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
 
 from .status_reader import project_root
 
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class _EventSource:
-    __slots__ = ("path", "offset", "partial", "mtime")
+    __slots__ = ("mtime", "offset", "partial", "path")
 
     def __init__(self, path: Path):
         self.path = path
@@ -36,7 +35,7 @@ class _EventSource:
 class EventsReader:
     """Tails events.jsonl + reads status.json for the Self-Play page."""
 
-    def __init__(self, search_dirs: Optional[list[Path]] = None,
+    def __init__(self, search_dirs: list[Path] | None = None,
                  max_events: int = 2000,
                  rescan_interval: float = 5.0) -> None:
         self._search_dirs = search_dirs or [project_root() / "research" / "checkpoints"]
@@ -45,9 +44,9 @@ class EventsReader:
         self._last_rescan = 0.0
         self._rescan_interval = rescan_interval
         # status.json cache
-        self._status_path: Optional[Path] = None
+        self._status_path: Path | None = None
         self._status_mtime = 0.0
-        self._status_cache: Optional[dict] = None
+        self._status_cache: dict | None = None
 
     def _discover(self) -> None:
         """Find events.jsonl files under search dirs (called at most every rescan_interval).
@@ -121,7 +120,7 @@ class EventsReader:
         """Return the bounded rolling buffer (oldest-first, up to maxlen)."""
         return list(self._buffer)
 
-    def latest_status(self) -> Optional[dict]:
+    def latest_status(self) -> dict | None:
         """Cheap read of the newest status.json under checkpoints/self_play/."""
         # Find the status file (prefer self_play/ subdir)
         candidates: list[Path] = []
@@ -152,7 +151,7 @@ class EventsReader:
             return self._status_cache
 
         try:
-            with open(best, "r", encoding="utf-8") as f:
+            with open(best, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 self._status_path = best
@@ -164,7 +163,7 @@ class EventsReader:
 
         return self._status_cache
 
-    def heartbeat_age(self) -> Optional[float]:
+    def heartbeat_age(self) -> float | None:
         """Seconds since the last heartbeat.json write (None if no heartbeat file)."""
         if self._status_path is None:
             self.latest_status()
@@ -174,14 +173,14 @@ class EventsReader:
         if not hb.is_file():
             return None
         try:
-            with open(hb, "r", encoding="utf-8") as f:
+            with open(hb, encoding="utf-8") as f:
                 data = json.load(f)
             ts = float(data.get("ts", 0))
             return time.time() - ts
         except (json.JSONDecodeError, OSError, ValueError):
             return None
 
-    def heartbeat_stalled(self) -> Optional[bool]:
+    def heartbeat_stalled(self) -> bool | None:
         """Check if the training loop has stalled (progress-coupled heartbeat).
 
         Returns True if the heartbeat writer detected no training-loop
@@ -198,7 +197,7 @@ class EventsReader:
         if not hb.is_file():
             return None
         try:
-            with open(hb, "r", encoding="utf-8") as f:
+            with open(hb, encoding="utf-8") as f:
                 data = json.load(f)
             return bool(data.get("stalled", False))
         except (json.JSONDecodeError, OSError, ValueError):

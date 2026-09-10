@@ -179,7 +179,7 @@ class PITLMHead(nn.Module):
         self.bias = nn.Parameter(torch.zeros(memory.shape[0])) if bias else None
 
     @classmethod
-    def from_embedding(cls, embed: PITEmbedding, bias: bool = False) -> "PITLMHead":
+    def from_embedding(cls, embed: PITEmbedding, bias: bool = False) -> PITLMHead:
         """Create a PITLMHead sharing parameters with a PITEmbedding."""
         return cls(embed.memory, embed.L, embed.tril_mask, bias=bias)
 

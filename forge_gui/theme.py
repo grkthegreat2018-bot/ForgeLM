@@ -120,7 +120,7 @@ class ThemeManager:
     _app = None
 
     @classmethod
-    def init(cls, app: "QApplication") -> None:
+    def init(cls, app: QApplication) -> None:
         """Initialize from QSettings."""
         from PySide6.QtCore import QSettings
         cls._app = app
@@ -158,7 +158,7 @@ class ThemeManager:
         cls.apply(cls._app)
 
     @classmethod
-    def apply(cls, app: "QApplication") -> None:
+    def apply(cls, app: QApplication) -> None:
         """Apply current theme + font size to the application."""
         if app is None:
             return
@@ -483,7 +483,7 @@ QTabBar::tab:hover { color: #e8edf5; }
 """)
 
 
-def apply_theme(app: "QApplication") -> None:
+def apply_theme(app: QApplication) -> None:
     """Apply the ForgeAI theme to the application.
 
     R36-1: Now delegates to ThemeManager which respects the persisted

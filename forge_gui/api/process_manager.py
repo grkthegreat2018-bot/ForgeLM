@@ -65,6 +65,15 @@ class _ProcessWorker(QThread):
         if self._proc and self._proc.poll() is None:
             try:
                 self._proc.terminate()
+                # Wait up to 3s for graceful termination, then force-kill.
+                # On Windows, processes in a syscall may ignore SIGTERM.
+                try:
+                    self._proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        self._proc.kill()
+                    except Exception as e:
+                        logger.warning("kill() fallback failed: %s", e)
             except Exception as e:
                 logger.warning("terminate failed: %s", e)
 
@@ -156,6 +165,18 @@ class ProcessManager(QObject):
         if w:
             w.kill_proc()
 
+    def shutdown(self, timeout_s: float = 5.0) -> None:
+        """Terminate all live workers and wait for them to finish.
+
+        Called from MainWindow.closeEvent() to prevent zombie subprocesses.
+        """
+        live = [w for w in self._workers.values() if w.isRunning()]
+        for w in live:
+            w.kill_proc()
+        for w in live:
+            w.wait(int(timeout_s * 1000))  # QThread.wait takes ms
+        logger.info("ProcessManager shutdown: %d workers stopped", len(live))
+
     def remove(self, task_id: str) -> None:
         """Remove a finished task from tracking."""
         if task_id in self.tasks and not self.tasks[task_id].is_live:
@@ -178,7 +199,7 @@ class ProcessManager(QObject):
                     with open(info.log_path, "a", encoding="utf-8") as f:
                         f.write(line + "\n")
                 except Exception:
-                    pass
+                    logger.debug("Failed to write task line to log file", exc_info=True)
         self.line.emit(task_id, line)
 
     def _on_status(self, task_id: str, status: str) -> None:

@@ -14,7 +14,6 @@ Usage:
     from forge.engine.kv.streaming_llm import StreamingKVCache
     cache = StreamingKVCache(n_sinks=4, window_size=512)
 """
-from typing import Dict, Optional, Tuple
 
 import torch
 

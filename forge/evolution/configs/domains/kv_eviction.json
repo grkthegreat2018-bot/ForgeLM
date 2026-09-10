@@ -1,0 +1,27 @@
+{
+  "name": "kv_eviction",
+  "category": "misc",
+  "description": "KV cache eviction: strategy, budget, observation_window, n_sinks, window_size, block_size.",
+  "simulator": "kv_eviction_simulate",
+  "params": [
+    {"name": "strategy", "type": "choice", "values": ["snapkv", "streaming", "paged"]},
+    {"name": "budget", "type": "int", "range": [128, 2048]},
+    {"name": "observation_window", "type": "int", "range": [32, 512]},
+    {"name": "n_sinks", "type": "int", "range": [2, 8]},
+    {"name": "window_size", "type": "int", "range": [128, 1024]},
+    {"name": "block_size", "type": "int", "range": [8, 32]}
+  ],
+  "behavioral_dims": [["compression", 10, 1.0, 16.0], ["fwd_err", 10, 0.0, 1.0]],
+  "scoring": {
+    "components": [
+      {"metric": "fwd_err", "weight": -100.0},
+      {"metric": "compression", "weight": 5.0},
+      {"metric": "cache_ms", "weight": -0.01}
+    ],
+    "hardening": ["no_nan", "no_trivial"],
+    "trivial_metric": "compression",
+    "trivial_op": "<=",
+    "trivial_value": 1.01,
+    "trivial_penalty": -50.0
+  }
+}

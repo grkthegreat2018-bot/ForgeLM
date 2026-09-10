@@ -18,7 +18,6 @@ Usage:
     # Replace FFN in existing model
     replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=1024)
 """
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -47,10 +46,12 @@ class Router(nn.Module):
         noisy_gating: if True, add noise during training (exploration)
         load_balance_loss_weight: weight of auxiliary load balancing loss
         mode: "switch" or "aux_free"
+        gating: "softmax" (default) or "sigmoid" (MiniMax-M2 style: selection
+            on sigmoid scores, weights = renormalized selected scores)
     """
 
     def __init__(self, d_model, n_experts, top_k=2, noisy_gating=True,
-                 load_balance_loss_weight=0.01, mode="switch"):
+                 load_balance_loss_weight=0.01, mode="switch", gating="softmax"):
         super().__init__()
         self.d_model = d_model
         self.n_experts = n_experts
@@ -58,6 +59,7 @@ class Router(nn.Module):
         self.noisy_gating = noisy_gating
         self.load_balance_loss_weight = load_balance_loss_weight
         self.mode = mode
+        self.gating = gating
 
         self.gate = nn.Linear(d_model, n_experts, bias=False)
         if noisy_gating:
@@ -84,7 +86,6 @@ class Router(nn.Module):
             gating_weights: (N, n_experts) — gating weights (0 for non-routed)
             aux_loss: scalar load balancing loss
         """
-        orig_shape = x.shape
         if x.dim() == 3:
             x = x.view(-1, self.d_model)  # (N, d_model)
         N = x.shape[0]
@@ -108,14 +109,22 @@ class Router(nn.Module):
             routing_logits = routing_logits + noise * F.softplus(self.noise(x))
 
         # Top-k selection on routing logits (with bias).
-        top_k_logits, top_k_indices = routing_logits.topk(self.top_k, dim=-1)
-        # Gating weights from gating logits (without bias) — recompute softmax
-        # over the selected top-k experts using the unbiased logits.
-        if self.mode == "aux_free":
-            top_k_gating_logits = gating_logits.gather(1, top_k_indices)
-            top_k_weights = F.softmax(top_k_gating_logits, dim=-1)
+        if self.gating == "sigmoid":
+            # MiniMax-M2: selection on sigmoid scores (bias included via
+            # routing_logits), weights = renormalized selected sigmoid scores.
+            top_k_scores, top_k_indices = torch.sigmoid(routing_logits).topk(
+                self.top_k, dim=-1)
+            top_k_weights = top_k_scores / top_k_scores.sum(
+                dim=-1, keepdim=True).clamp_min(1e-9)
         else:
-            top_k_weights = F.softmax(top_k_logits, dim=-1)  # (N, top_k)
+            top_k_logits, top_k_indices = routing_logits.topk(self.top_k, dim=-1)
+            # Gating weights from gating logits (without bias) — recompute softmax
+            # over the selected top-k experts using the unbiased logits.
+            if self.mode == "aux_free":
+                top_k_gating_logits = gating_logits.gather(1, top_k_indices)
+                top_k_weights = F.softmax(top_k_gating_logits, dim=-1)
+            else:
+                top_k_weights = F.softmax(top_k_logits, dim=-1)  # (N, top_k)
 
         # Build dispatch mask and gating weights.
         dispatch_mask = torch.zeros(N, self.n_experts, device=x.device, dtype=x.dtype)
@@ -138,7 +147,8 @@ class Router(nn.Module):
             # This loss trains the GATE (via P_i) for quality-aware balance.
             # The expert_bias is updated separately by update_bias() using a
             # direct load-statistic rule (not backprop) — DeepSeek-V3 §3.3.
-            probs_full = F.softmax(gating_logits, dim=-1)  # (N, n_experts)
+            probs_full = (torch.sigmoid(gating_logits) if self.gating == "sigmoid"
+                          else F.softmax(gating_logits, dim=-1))  # (N, n_experts)
             f_per_expert = dispatch_mask.detach().float().mean(dim=0)  # (n_experts,)
             mean_prob = probs_full.mean(dim=0)  # (n_experts,)
             aux_loss = self.n_experts * (f_per_expert * mean_prob).sum()
@@ -254,7 +264,7 @@ class MoELayer(nn.Module):
     def __init__(self, d_model, n_experts=4, top_k=2, d_ff=None,
                  shared_expert=True, capacity_factor=None, noisy_gating=True,
                  dense_bypass=False, use_clamp=False, clamp_alpha=1.702,
-                 clamp_limit=7.0, router_mode="switch",
+                 clamp_limit=7.0, router_mode="switch", gating="softmax",
                  intra_sparsity: float = 0.0):
         super().__init__()
         self.d_model = d_model
@@ -272,7 +282,7 @@ class MoELayer(nn.Module):
         self.intra_sparsity = intra_sparsity
 
         self.router = Router(d_model, n_experts, top_k, noisy_gating,
-                             mode=router_mode)
+                             mode=router_mode, gating=gating)
         self.experts = nn.ModuleList([
             Expert(d_model, d_ff, use_clamp=use_clamp,
                    clamp_alpha=clamp_alpha, clamp_limit=clamp_limit,
@@ -381,7 +391,7 @@ class MoELayer(nn.Module):
 
 def replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=None,
                          shared_expert=True, capacity_factor=None, d_ff=None,
-                         dense_bypass=False):
+                         dense_bypass=False, gating="softmax"):
     """Replace FFN layers in a model with MoE layers.
 
     Args:
@@ -413,7 +423,7 @@ def replace_ffn_with_moe(model, n_experts=4, top_k=2, d_model=None,
 
         moe = MoELayer(d, n_experts=n_experts, top_k=top_k, d_ff=d_ff,
                        shared_expert=shared_expert, capacity_factor=capacity_factor,
-                       dense_bypass=dense_bypass)
+                       dense_bypass=dense_bypass, gating=gating)
         block.ffn = moe
         n_replaced += 1
 

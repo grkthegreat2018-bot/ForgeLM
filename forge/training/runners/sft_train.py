@@ -39,14 +39,17 @@ Usage:
 """
 import argparse
 import json
+import logging
 import math
 import os
 import random
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+logger = logging.getLogger(__name__)
 
 import torch
 import torch.nn.functional as F
@@ -60,32 +63,28 @@ from forge.checkpoint_io import (
 from forge.config import get_config
 from forge.model_loader import ModelLoader
 from forge.runtime.task_logger import task_scope
-from research.tokenizer_cache import get_tokenizer
 from forge.training.data.efficient_pipeline import (
-    DiskTokenCache,
     AsyncPrefetcher,
+    DiskTokenCache,
     PackedSequenceDataset,
-    ModelDataCache,
-    get_disk_cache,
-    get_model_cache,
 )
 from forge.training.training_utils import (
     add_safeguard_args,
     configure_optimizer,
     get_lr,
-    grad_accum_for_effective_batch,
     has_nan_params,
     init_ema,
+    load_anchor_cached,
     oom_guard,
-    update_ema,
     patch_triton_cache_for_windows,
     ram_exceeded,
     ram_usage,
+    update_ema,
     vram_exceeded,
     write_heartbeat,
     write_status_json,
-    load_anchor_cached,
 )
+from research.tokenizer_cache import get_tokenizer
 
 # Special token ids from the LFM2.5 tokenizer (Qwen-style).
 IM_START = 6
@@ -231,31 +230,44 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
 
 # ── Dataset loading + tokenization ───────────────────────────────────────────
 
-def load_examples(paths: list[str]) -> list[dict]:
+def load_examples(paths: list[str], strict_data: bool = False) -> list[dict]:
     """Load and deduplicate examples from one or more JSONL files.
 
     Each line should be a JSON object. For tool_use_fc, expects {"messages": [...]}.
     For short_cot/code/tool_use, expects {"prompt": ..., "response": ...}.
+
+    Args:
+        strict_data: If True, raise on the first malformed row instead of
+            skipping it. Useful for catching data corruption during dev.
     """
     examples = []
     seen = set()
     for path in paths:
         p = Path(path)
         if not p.exists():
-            print(f"Warning: {path} not found, skipping.")
+            logger.warning("Training data file not found, skipping: %s", path)
             continue
         n_loaded = 0
         n_skipped = 0
+        skip_by_class: dict[str, int] = defaultdict(int)
         with open(p, encoding="utf-8") as f:
             content = f.read()
-        for line in content.splitlines():
+        for line_no, line in enumerate(content.splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except Exception:
+            except Exception as exc:
                 n_skipped += 1
+                skip_by_class[type(exc).__name__] += 1
+                preview = line[:120]
+                logger.warning(
+                    "JSON parse error in %s:%d [%s]: %s | preview: %r",
+                    path, line_no, type(exc).__name__, exc, preview,
+                )
+                if strict_data:
+                    raise
                 continue
             # Normalize: either messages list or prompt/response.
             if "messages" in obj and isinstance(obj["messages"], list):
@@ -281,11 +293,33 @@ def load_examples(paths: list[str]) -> list[dict]:
                 n_loaded += 1
             else:
                 n_skipped += 1
-        print(f"  {path}: {n_loaded} loaded, {n_skipped} skipped")
+                skip_by_class["SchemaError"] += 1
+                logger.warning(
+                    "Schema mismatch in %s:%d: missing 'messages' or "
+                    "'prompt'/'response' keys | preview: %r",
+                    path, line_no, line[:120],
+                )
+                if strict_data:
+                    raise ValueError(
+                        f"Schema mismatch in {path}:{line_no}: row has "
+                        f"neither 'messages' nor 'prompt'/'response'"
+                    )
+        if n_skipped:
+            class_summary = ", ".join(
+                f"{cls}={n}" for cls, n in sorted(skip_by_class.items())
+            )
+            logger.warning(
+                "  %s: %d loaded, %d skipped (%s)", path, n_loaded,
+                n_skipped, class_summary,
+            )
+        else:
+            logger.info("  %s: %d loaded, 0 skipped", path, n_loaded)
     return examples
 
 
-def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | None]:
+def load_examples_parquet(
+    paths: list[str], strict_data: bool = False
+) -> tuple[list[dict], list[dict] | None]:
     """Load examples from one or more Parquet files.
 
     Returns ``(examples, pre_tokenized)`` where:
@@ -295,6 +329,10 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
       - If the parquet contains raw data (``messages`` or ``prompt``/
         ``response``), ``examples`` is a list of normalised dicts (same format
         as :func:`load_examples`) and ``pre_tokenized`` is ``None``.
+
+    Args:
+        strict_data: If True, raise on the first malformed row instead of
+            skipping it.
     """
     from forge.training.data.parquet_dataset import ParquetDataset
 
@@ -305,7 +343,7 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
     for path in paths:
         p = Path(path)
         if not p.exists():
-            print(f"Warning: {path} not found, skipping.")
+            logger.warning("Training data file not found, skipping: %s", path)
             continue
         ds = ParquetDataset(str(p))
         col_names = set(ds.schema.names)
@@ -320,6 +358,13 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
                 ids = row.get("input_ids")
                 labs = row.get("labels")
                 if ids is None or labs is None:
+                    logger.warning(
+                        "Null input_ids/labels in %s row %d, skipping", path, i
+                    )
+                    if strict_data:
+                        raise ValueError(
+                            f"Null input_ids/labels in {path} row {i}"
+                        )
                     continue
                 pre_tokenized.append({
                     "input_ids": list(ids),
@@ -327,7 +372,7 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
                     "n_comp": sum(1 for x in labs if x != -100),
                 })
                 n_loaded += 1
-            print(f"  {path}: {n_loaded} pre-tokenized rows loaded")
+            logger.info("  %s: %d pre-tokenized rows loaded", path, n_loaded)
             continue
 
         # ── Raw data path: messages or prompt/response ──
@@ -354,7 +399,19 @@ def load_examples_parquet(paths: list[str]) -> tuple[list[dict], list[dict] | No
                 n_loaded += 1
             else:
                 n_skipped += 1
-        print(f"  {path}: {n_loaded} loaded, {n_skipped} skipped")
+                logger.warning(
+                    "Schema mismatch in %s row %d: missing 'messages' or "
+                    "'prompt'/'response' keys", path, i,
+                )
+                if strict_data:
+                    raise ValueError(
+                        f"Schema mismatch in {path} row {i}: row has "
+                        f"neither 'messages' nor 'prompt'/'response'"
+                    )
+        if n_skipped:
+            logger.warning("  %s: %d loaded, %d skipped", path, n_loaded, n_skipped)
+        else:
+            logger.info("  %s: %d loaded, 0 skipped", path, n_loaded)
 
     return examples, pre_tokenized
 
@@ -401,7 +458,22 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
       1. In-memory LRU (fastest, bounded to _CACHE_MAX entries)
       2. Disk-backed cache (persists across runs, memory-mapped reads)
       3. Tokenizer (slowest, result cached in both layers)
+
+    When disk cache is disabled (None), skip the LRU overhead too —
+    direct tokenization is 70x faster than the LRU wrapper for bulk
+    tokenization of unique texts (the LRU dict ops dominate).
     """
+    # Fast path: no disk cache → direct tokenization (70x faster for bulk)
+    if _disk_tok_cache is None:
+        try:
+            enc = tokenizer(text, add_special_tokens=False, return_tensors=None)
+            ids = enc["input_ids"] if isinstance(enc, dict) else enc
+            if not isinstance(ids, list):
+                ids = list(ids)
+            return ids
+        except Exception:
+            return None
+
     # Layer 1: in-memory LRU
     if text in _tokenize_cache:
         _tokenize_cache.move_to_end(text)
@@ -450,8 +522,8 @@ def tokenize_example(ex: dict, tokenizer, max_seq_len: int) -> list[dict]:
     if ex["type"] == "multi_turn":
         pairs = split_multi_turn(ex["messages"])
     else:
-        pairs = [(f"<|im_start|>user\n{ex['prompt']}<|im_end|>\n<|im_start|>assistant\n",
-                  ex["response"] + "<|im_end|>\n")]
+        pairs = [(f"<|startofsegment|>user\n{ex['prompt']}<|endofsegment|>\n<|startofsegment|>assistant\n",
+                  ex["response"] + "<|endofsegment|>\n")]
 
     results = []
     for prompt_text, completion_text in pairs:
@@ -785,6 +857,11 @@ def main():
                         "on I/O-bound workloads). Default: True.")
     p.add_argument("--prefetch-count", type=int, default=4,
                    help="Number of batches to prefetch ahead (default 4).")
+    p.add_argument("--strict-data", action="store_true",
+                   help="Raise on the first malformed training row instead of "
+                        "skipping it. Use during dev to catch data corruption "
+                        "early; leave off for production runs where a few bad "
+                        "rows should not abort the job.")
     p.add_argument("--config", default="forgelm_v2",
                    help="Model config name (default: forgelm_v2)")
     p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2.safetensors",
@@ -811,7 +888,7 @@ def main():
     p.add_argument("--warmup-steps", type=int, default=20)  # warmup needed for stability (evolution 0 was synthetic-only)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq"])
+    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq", "apollo", "flashoptim", "galore", "nvme_muon_4bit"])
     p.add_argument("--qk-clip-tau", type=float, default=0.0,
                    help="QK-Clip tau (Kimi K2 MuonClip): cap per-head max attention "
                         "logit after each optimizer step. 0 = disabled (default). "
@@ -942,6 +1019,12 @@ def main():
                         "Use with --no-bitnet-everywhere. LoRA is auto-enabled.")
     p.add_argument("--nf4-group-size", type=int, default=64,
                    help="NF4 group size for per-group scaling (default 64)")
+    p.add_argument("--forge-quant", action="store_true",
+                   help="Quantize base weights with ForgeQuant (INT4 dense + "
+                        "INT8 sparse outliers) before training. Faster than "
+                        "NF4 and matches inference-time quantization. LoRA "
+                        "adapters train on top of ForgeQuantLinear layers "
+                        "(which have built-in lora_adapter support).")
     p.add_argument("--save-lora-adapter", action="store_true",
                    help="Additionally save ONLY the trained LoRA tensors to "
                         "'<save-stem>.lora.safetensors' (small file, hot-loadable "
@@ -1010,6 +1093,13 @@ def main():
     p.add_argument("--val-size", type=float, default=0.05,
                    help="Fraction of dataset to hold out for validation (default 0.05 = 5%%). "
                         "Only used when --val-every > 0.")
+    p.add_argument("--early-stop-patience", type=int, default=0,
+                   help="Stop training after N validation checks with no improvement "
+                        "(0=disabled). Requires --val-every > 0.")
+    p.add_argument("--min-train-loss", type=float, default=0.0,
+                   help="Stop training when train loss drops below this threshold "
+                        "(0=disabled). Useful for tool-use SFT: stop as soon as the "
+                        "format is learned to prevent overfitting/memorization.")
     add_safeguard_args(p)
 
     # ── Remote Vast.ai cloud backend (offload full fine-tune to rented GPU) ──
@@ -1049,7 +1139,8 @@ def main():
     # ── Remote Vast.ai short-circuit: don't train locally ──
     if args.remote_vast:
         from research.cloud.vast_connector import (
-            VastConnector, build_spec_from_args, DEFAULT_IMAGE,
+            VastConnector,
+            build_spec_from_args,
         )
         vast_control_dests = {
             "remote_vast", "gpu_filter", "max_price", "min_vram_gb",
@@ -1086,9 +1177,11 @@ def main():
           f"[format={args.data_format}]...")
     pre_tokenized = None
     if args.data_format == "parquet":
-        examples, pre_tokenized = load_examples_parquet(args.data)
+        examples, pre_tokenized = load_examples_parquet(
+            args.data, strict_data=args.strict_data
+        )
     else:
-        examples = load_examples(args.data)
+        examples = load_examples(args.data, strict_data=args.strict_data)
 
     # ── Curriculum learning: order examples easy→hard ──
     if args.curriculum != "none" and examples:
@@ -1139,7 +1232,7 @@ def main():
             # 30x speedup on 128-core Vast.ai instances for 150K+ examples.
             # Linux uses fork() so the tokenizer + disk cache are inherited.
             # Windows can't fork, so falls through to single-threaded below.
-            from multiprocessing import Pool, get_context
+            from multiprocessing import get_context
             global _parallel_tokenizer, _parallel_seq_len
             _parallel_tokenizer = tokenizer
             _parallel_seq_len = args.seq_len
@@ -1225,7 +1318,7 @@ def main():
     _from_scratch = args.checkpoint in ("scratch", "none", "") or args.from_scratch
     # ── From-scratch training: "scratch"/"none" = random init, no checkpoint ──
     if _from_scratch:
-        print(f"  Random initialization (from-scratch training, no checkpoint)")
+        print("  Random initialization (from-scratch training, no checkpoint)")
         args.checkpoint = None
         # BitNet int8 training requires BAdam optimizer (Muon's Newton-Schulz
         # conflicts with BitNet weight normalization). Warn if mismatched.
@@ -1286,11 +1379,14 @@ def main():
     # ── From-scratch 8B init: NLRQ reset, BitNet QAT disable, kaiming init,
     #    logit scale normalization (mirrors train_8b_all.build_model) ──
     if _from_scratch:
-        from forge.training.runners.train_8b_all import (
-            reset_nlrq_layers_, disable_bitnet_qat_, initialize_weights_,
-            normalize_logit_scale_,
-        )
         from types import SimpleNamespace
+
+        from forge.training.runners.train_8b_all import (
+            disable_bitnet_qat_,
+            initialize_weights_,
+            normalize_logit_scale_,
+            reset_nlrq_layers_,
+        )
         reset_nlrq_layers_(model)
         disable_bitnet_qat_(model)
         initialize_weights_(model, cfg.n_layers)
@@ -1318,7 +1414,8 @@ def main():
     # ── NanoQuant QAT: convert all Linear → NanoQuantQATLinear (sub-1-bit) ──
     if args.nanoquant_qat:
         from forge.engine.quant.novel_quant_r48 import (
-            convert_model_to_nanoquant_qat, estimate_r48_memory,
+            convert_model_to_nanoquant_qat,
+            estimate_r48_memory,
         )
         n_conv = convert_model_to_nanoquant_qat(
             model, rank=args.nanoquant_rank,
@@ -1341,6 +1438,17 @@ def main():
         print(f"NF4 QLoRA: {n_conv} Linear → NF4Linear ({n_skip} skipped), "
               f"group_size={args.nf4_group_size}")
         # Force manual LoRA (NF4Linear needs manual adapters, PEFT can't handle it)
+        args.lora = True
+        args.manual_lora = True
+
+    # ── ForgeQuant training — quantize base to INT4+sparse, then add LoRA ──
+    if getattr(args, 'forge_quant', False):
+        from forge.engine.quant.forge_quant import quantize_model_forge_quant
+        n_q = quantize_model_forge_quant(
+            model, group_size=128, sparse_ratio=0.10)
+        print(f"ForgeQuant: {n_q} layers quantized (INT4 dense + INT8 sparse, "
+              f"group=128, sparse_ratio=0.10). Training on quantized base.")
+        # ForgeQuantLinear has built-in lora_adapter support — use manual LoRA
         args.lora = True
         args.manual_lora = True
 
@@ -1530,9 +1638,9 @@ def main():
         if args.lazy_train or args.checkpoint_strategy == "lazy":
             try:
                 from forge.training.runners.lazy_train import LazyTrainScheduler, TrainingBudget
-                budget = TrainingBudget(gpu_memory_bytes=int(12 * 1024**3))
+                budget = TrainingBudget(gpu_memory_bytes=(12 * 1024**3))
                 scheduler = LazyTrainScheduler(model, budget)
-                schedules = scheduler.analyze()
+                scheduler.analyze()
                 scheduler.apply()
                 print(f"  [LazyTrain] {scheduler.stats()}")
             except Exception as e:
@@ -1543,7 +1651,7 @@ def main():
             try:
                 from forge.training.runners.optimal_checkpoint import OptimalCheckpointPlanner
                 planner = OptimalCheckpointPlanner(
-                    model, memory_budget_bytes=int(6 * 1024**3))
+                    model, memory_budget_bytes=(6 * 1024**3))
                 plan = planner.plan()
                 planner.apply(plan)
                 print(f"  [OptimalCheckpoint] {planner.memory_estimate()}")
@@ -1551,11 +1659,10 @@ def main():
                 print(f"  [OptimalCheckpoint] unavailable ({e})")
 
     # ── OOMB chunk-recurrent training (long context, O(1) activation memory) ──
-    oomb_trainer = None
     if args.oomb:
         try:
             from forge.training.runners.oomb_trainer import ChunkRecurrentTrainer
-            oomb_trainer = ChunkRecurrentTrainer(
+            ChunkRecurrentTrainer(
                 model, chunk_size=512, max_seq_len=args.seq_len * 4,
                 device=str(device), dtype=dtype)
             print(f"  [OOMB] Chunk-recurrent training: active "
@@ -1649,6 +1756,14 @@ def main():
     print(f"\nTraining {args.max_steps} steps | batch {args.batch_size} | "
           f"grad_accum {grad_accum} | eff_batch {eff_batch} | "
           f"lr {args.lr} | seq_len {args.seq_len} | {len(dataset)} examples")
+    if args.early_stop_patience > 0:
+        print(f"  Early stopping: patience={args.early_stop_patience} val checks")
+    if args.min_train_loss > 0:
+        print(f"  Min train loss threshold: {args.min_train_loss} (stops when format learned)")
+    # Early stopping tracking
+    best_val_loss = float('inf')
+    patience_counter = 0
+    early_stopped = False
     if args.grad_mixup > 1:
         print(f"  Grad mixup: {args.grad_mixup}-way (averaging {args.grad_mixup} batches' gradients per step)")
     if args.entropy_alpha > 0:
@@ -1779,7 +1894,8 @@ def main():
                 # At phase boundaries, freeze/unfreeze LoRA params and rebuild optimizer.
                 if phase_schedule is not None:
                     from forge.training.bitnet_lora import (
-                        get_active_layers_for_step, freeze_unfreeze_lora,
+                        freeze_unfreeze_lora,
+                        get_active_layers_for_step,
                         get_active_lora_params,
                     )
                     active_layers = get_active_layers_for_step(step, phase_schedule)
@@ -1942,14 +2058,14 @@ def main():
                                 m.requantize_from_master()
                     # DeepSeek-V3 aux-loss-free: update expert bias after step.
                     try:
-                        from forge.moe.moe import update_moe_biases, disable_dense_bypass
+                        from forge.moe.moe import disable_dense_bypass, update_moe_biases
                         update_moe_biases(model)
                         # Disable dense_bypass after warmup so router activates.
                         warmup_steps = getattr(cfg, 'moe_dense_bypass_warmup_steps', 0)
                         if warmup_steps > 0 and step + 1 == warmup_steps:
                             disable_dense_bypass(model)
                     except Exception:
-                        pass  # no-op for dense models
+                        logger.debug("MoE dense_bypass disable failed (no-op for dense models)", exc_info=True)  # no-op for dense models
                 accum_count = 0
 
                 # ── FreeToken bandwidth recording + predictive offload (R&D 14) ──
@@ -1960,8 +2076,8 @@ def main():
                     optimizer.record_bandwidth_sample(vram_gb=vram_gb)
                     if step > 0 and step % 10 == 0 and hasattr(optimizer, 'should_preempt_offload'):
                         if optimizer.should_preempt_offload():
-                            print(f"  [FreeToken] Predictive offload: VRAM trend suggests "
-                                  f"approaching limit, increasing offload")
+                            print("  [FreeToken] Predictive offload: VRAM trend suggests "
+                                  "approaching limit, increasing offload")
 
                 # ── Elastic grad_accum (R&D 14) ──
                 # Dynamically adjust grad_accum based on VRAM pressure.
@@ -2055,8 +2171,30 @@ def main():
                         "loss": last_loss, "val_loss": val_loss,
                         "lr": lr, "epoch": epoch,
                     })
+                    # Early stopping: patience-based (val loss not improving)
+                    if args.early_stop_patience > 0:
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            patience_counter = 0
+                        else:
+                            patience_counter += 1
+                            print(f"  [EarlyStop] val_loss not improving "
+                                  f"({patience_counter}/{args.early_stop_patience})")
+                            if patience_counter >= args.early_stop_patience:
+                                print(f"  [EarlyStop] Stopping: val loss hasn't improved "
+                                      f"for {args.early_stop_patience} checks.")
+                                early_stopped = True
+                                break
+                # Early stopping: min train loss (format learned, stop before overfit)
+                # Checked at every logging interval (every 5 steps), not just validation.
+                if args.min_train_loss > 0 and step % 5 == 0:
+                    if last_loss is not None and last_loss < args.min_train_loss:
+                        print(f"  [EarlyStop] Train loss {last_loss:.4f} < "
+                              f"threshold {args.min_train_loss} — format learned, stopping.")
+                        early_stopped = True
+                        break
                 step += 1
-            if aborted or step >= args.max_steps:
+            if aborted or early_stopped or step >= args.max_steps:
                 break
 
         if not aborted:

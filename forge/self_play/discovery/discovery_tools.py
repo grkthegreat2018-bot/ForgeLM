@@ -28,12 +28,15 @@ Tools exposed to the LLM during self-play:
 from __future__ import annotations
 
 import json
-import re
 import time
-from html import unescape
-from typing import Any, Callable
-from urllib.parse import quote_plus
-from urllib.request import Request, urlopen
+from collections.abc import Callable
+
+from forge.web_primitives import (
+    arxiv_search as _arxiv_search,
+    ddg_search as _web_search,
+    fetch_url as _fetch_url,
+    wikipedia_search as _wikipedia_search,
+)
 
 from forge.self_play.discovery.discovery_db import DiscoveryDB
 
@@ -69,103 +72,8 @@ def _run_script(code: str) -> dict:
                 "ok": False}
 
 
-# ── web search (DuckDuckGo HTML, no API key) ──────────────────────────
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-_RE_RESULT = re.compile(
-    r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
-    r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
-_RE_TAG = re.compile(r"<[^>]+>")
-
-
-def _web_search(query: str, n: int = 5) -> dict:
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-    req = Request(url, headers={"User-Agent": _UA, "Accept-Language": "en"})
-    try:
-        with urlopen(req, timeout=12) as r:
-            html = r.read().decode("utf-8", "ignore")
-    except Exception as e:
-        return {"results": [], "error": f"fetch failed: {e}"}
-    results = []
-    for m in _RE_RESULT.finditer(html):
-        if len(results) >= n:
-            break
-        href = unescape(m.group(1))
-        # DDG wraps URLs in a redirect; strip the leading //duckduckgo.com/l/?uddg=
-        if "uddg=" in href:
-            from urllib.parse import parse_qs, urlparse
-            qs = parse_qs(urlparse(href).query)
-            href = qs.get("uddg", [href])[0]
-        title = unescape(_RE_TAG.sub("", m.group(2))).strip()
-        snippet = unescape(_RE_TAG.sub("", m.group(3))).strip()
-        results.append({"url": href, "title": title[:200], "snippet": snippet[:400]})
-    return {"results": results, "error": None if results else "no results parsed"}
-
-
-# ── Wikipedia API (free, no key) ──────────────────────────────────────
-def _wikipedia_search(query: str, n: int = 3) -> dict:
-    """Search Wikipedia via the REST API. Returns summaries."""
-    try:
-        search_url = (f"https://en.wikipedia.org/w/api.php?action=query&list=search"
-                      f"&format=json&srlimit={n}&srsearch={quote_plus(query)}")
-        req = Request(search_url, headers={"User-Agent": _UA})
-        with urlopen(req, timeout=12) as r:
-            data = json.loads(r.read().decode("utf-8", "ignore"))
-        items = data.get("query", {}).get("search", [])
-        results = []
-        for item in items[:n]:
-            title = item.get("title", "")
-            snippet = _RE_TAG.sub("", item.get("snippet", "")).strip()
-            results.append({"title": title, "snippet": snippet[:400],
-                            "url": f"https://en.wikipedia.org/wiki/{quote_plus(title)}"})
-        return {"results": results, "error": None if results else "no results"}
-    except Exception as e:
-        return {"results": [], "error": str(e)}
-
-
-# ── arXiv API (free, no key) ──────────────────────────────────────────
-def _arxiv_search(query: str, n: int = 3) -> dict:
-    """Search arXiv for academic papers."""
-    try:
-        url = (f"http://export.arxiv.org/api/query?search_query=all:{quote_plus(query)}"
-               f"&start=0&max_results={n}")
-        req = Request(url, headers={"User-Agent": _UA})
-        with urlopen(req, timeout=15) as r:
-            xml = r.read().decode("utf-8", "ignore")
-        # Parse atom feed entries (lightweight regex, no lxml dependency)
-        entries = re.findall(r"<entry>(.*?)</entry>", xml, re.DOTALL)
-        results = []
-        for entry in entries[:n]:
-            title = re.search(r"<title>(.*?)</title>", entry, re.DOTALL)
-            summary = re.search(r"<summary>(.*?)</summary>", entry, re.DOTALL)
-            link = re.search(r'<id>(.*?)</id>', entry, re.DOTALL)
-            published = re.search(r"<published>(.*?)</published>", entry, re.DOTALL)
-            if title:
-                results.append({
-                    "title": _RE_TAG.sub("", title.group(1)).strip()[:200],
-                    "summary": summary.group(1).strip()[:400] if summary else "",
-                    "url": link.group(1).strip() if link else "",
-                    "published": published.group(1)[:10] if published else "",
-                })
-        return {"results": results, "error": None if results else "no results"}
-    except Exception as e:
-        return {"results": [], "error": str(e)}
-
-
-# ── fetch URL (extract text from any web page) ────────────────────────
-def _fetch_url(url: str, max_chars: int = 2000) -> dict:
-    """Fetch a URL and extract readable text (strip HTML tags)."""
-    try:
-        req = Request(url, headers={"User-Agent": _UA, "Accept-Language": "en"})
-        with urlopen(req, timeout=12) as r:
-            html = r.read().decode("utf-8", "ignore")
-        # Remove scripts, styles, tags
-        html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = _RE_TAG.sub(" ", html)
-        text = re.sub(r"\s+", " ", text).strip()
-        return {"text": text[:max_chars], "url": url, "chars": len(text), "error": None}
-    except Exception as e:
-        return {"text": "", "url": url, "error": str(e)}
+# ── web search/fetch primitives are now imported from forge.web_primitives ──
+# (critique F20 — extracted shared web primitives to avoid duplication)
 
 
 # ── calculate (safe math evaluation) ──────────────────────────────────

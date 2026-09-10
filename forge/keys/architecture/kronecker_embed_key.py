@@ -42,7 +42,6 @@ import torch.nn as nn
 
 from forge.keys.misc.base import Key, KeyClass, KeyResult
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Byte conversion utilities
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -123,7 +122,7 @@ class KroneckerEmbedding(nn.Module):
     @classmethod
     def from_embedding(cls, original: nn.Embedding,
                        d_char: int = 64, max_char_len: int = 8
-                       ) -> "KroneckerEmbedding":
+                       ) -> KroneckerEmbedding:
         """Initialize from an existing full embedding via SVD + least-squares.
 
         SVD: W ≈ U_k @ S_k @ Vt_k  (top-k, k = d_char * max_char_len)
@@ -255,7 +254,7 @@ class KroneckerEmbedKey(Key):
             return KeyResult(success=False, error="data must contain 'weight' key")
         W = data["weight"]  # (V, d_model)
         V, d = W.shape
-        if V != self.vocab_size:
+        if self.vocab_size != V:
             return KeyResult(
                 success=False,
                 error=f"weight vocab dim {V} != key vocab_size {self.vocab_size}")

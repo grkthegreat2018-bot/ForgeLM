@@ -41,7 +41,7 @@ class GenerationWorker(QThread):
     def cancel(self) -> None:
         self._cancel = True
 
-    def run(self) -> None:  # noqa: C901
+    def run(self) -> None:
         try:
             if not self.runtime.is_ready():
                 self.error.emit(

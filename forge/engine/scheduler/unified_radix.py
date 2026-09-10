@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 
@@ -32,13 +31,13 @@ import torch
 class CacheNode:
     """A node in the radix tree."""
     token_ids: tuple[int, ...]  # tokens stored at this node
-    children: dict[int, 'CacheNode'] = field(default_factory=dict)
-    parent: Optional['CacheNode'] = None
+    children: dict[int, CacheNode] = field(default_factory=dict)
+    parent: CacheNode | None = None
     ref_count: int = 0  # how many active requests reference this node
     last_access: float = field(default_factory=time.time)
     # Component-specific data
-    kv_cache: Optional[torch.Tensor] = None  # full-attn KV
-    state_cache: Optional[torch.Tensor] = None  # recurrent state
+    kv_cache: torch.Tensor | None = None  # full-attn KV
+    state_cache: torch.Tensor | None = None  # recurrent state
     kv_location: str = "gpu"  # "gpu", "host", "external"
 
     @property
@@ -232,8 +231,8 @@ class UnifiedRadixCache:
         return node, total_matched, total_matched
 
     def insert_prefix(self, token_ids: list[int],
-                      kv_cache: Optional[torch.Tensor] = None,
-                      state_cache: Optional[torch.Tensor] = None):
+                      kv_cache: torch.Tensor | None = None,
+                      state_cache: torch.Tensor | None = None):
         """Insert a prefix into the tree with its cache data."""
         node, matched, total = self.match_prefix(token_ids)
 

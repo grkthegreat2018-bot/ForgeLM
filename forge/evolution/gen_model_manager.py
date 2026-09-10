@@ -42,23 +42,19 @@ Usage:
 """
 from __future__ import annotations
 
-import math
-import time
 import json
+import math
 import pickle
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
+import torch
+import torch.nn.functional as F
 
-from forge.evolution.llm_gen_model import LLMGenModel
 from forge.evolution.database import FindingsDB
+from forge.evolution.llm_gen_model import LLMGenModel
 from forge.model_loader import unpack_output_with_kv
-
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -277,7 +273,7 @@ class GenModelManager:
         # Least-squares linear regression: y = A*x + B
         x_arr = np.array(xs)
         y_arr = np.array(ys)
-        n = len(xs)
+        len(xs)
         x_mean = x_arr.mean()
         y_mean = y_arr.mean()
 
@@ -940,7 +936,7 @@ class GenModelManager:
 
         manager_state = json.loads(row[0])
         weights = pickle.loads(row[1])
-        saved_config = json.loads(row[2])
+        json.loads(row[2])
 
         # Restore manager state
         self.config_name = manager_state.get("config_name", self.config_name)

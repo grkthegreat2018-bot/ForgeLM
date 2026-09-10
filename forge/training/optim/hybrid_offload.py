@@ -64,12 +64,15 @@ FreeToken-inspired enhancements (R&D round 14):
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
+from collections.abc import Iterable
+
 import torch
 from torch.optim.optimizer import Optimizer
-from typing import Iterable, Optional
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # int4 gradient compression utilities (EF21 error feedback, R&D round 14)
@@ -252,7 +255,7 @@ class CPUAdamW(Optimizer):
         self.grad_offload = grad_offload
         self._verbose = verbose
         self._initialized = False
-        self._cpu_thread: Optional[threading.Thread] = None
+        self._cpu_thread: threading.Thread | None = None
         self._cpu_event = threading.Event()
         self._grad_hooks: list = []
         self._grad_accum: dict = {}  # param id → CPU grad buffer (accumulated)
@@ -282,7 +285,7 @@ class CPUAdamW(Optimizer):
         if bandwidth_adaptive:
             try:
                 from forge.runtime.bandwidth_profiler import (
-                    BandwidthProfiler, BandwidthPredictor,
+                    BandwidthProfiler,
                 )
                 profiler = BandwidthProfiler()
                 bp, bh = profiler.profile()
@@ -302,8 +305,8 @@ class CPUAdamW(Optimizer):
                     overlap = True
                     self.overlap = True
                     if verbose:
-                        print(f"  [FreeToken] B_P >> B_H: auto-enabled overlap "
-                              f"(PCIe fast enough to hide behind CPU compute)")
+                        print("  [FreeToken] B_P >> B_H: auto-enabled overlap "
+                              "(PCIe fast enough to hide behind CPU compute)")
             except Exception as e:
                 if verbose:
                     print(f"  [FreeToken] Bandwidth profiling failed: {e}, "
@@ -329,7 +332,7 @@ class CPUAdamW(Optimizer):
                 print(f"  [FreeToken] Grad compression: int4 (4x PCIe bandwidth reduction, "
                       f"EF21 error feedback, +{ef_mem:.2f} GB GPU for error buffers)")
             elif grad_compression == "int8":
-                print(f"  Grad compression: int8 (2x reduction) [not yet implemented — pass-through]")
+                print("  Grad compression: int8 (2x reduction) [not yet implemented — pass-through]")
             if prefetch_depth > 0:
                 print(f"  Prefetch depth: {prefetch_depth} steps ahead")
 
@@ -890,7 +893,7 @@ class CPUAdamW(Optimizer):
         try:
             self.cleanup_compression()
         except Exception:
-            pass  # optimizer may be partially initialized during GC
+            logger.debug("Error during hybrid optimizer cleanup", exc_info=True)  # optimizer may be partially initialized during GC
 
 
 def configure_hybrid_optimizer(

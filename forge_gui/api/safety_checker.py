@@ -19,7 +19,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,7 @@ _ALLOWED_IMPORTS = {
     "math", "json", "re", "os.path", "pathlib", "typing",
     "dataclasses", "collections", "itertools", "functools",
     "string", "textwrap", "copy", "datetime", "time",
-    "functools", "abc", "enum", "io", "csv", "hashlib",
+    "abc", "enum", "io", "csv", "hashlib",
     "base64", "struct", "binascii", "statistics", "random",
     "unittest.mock", "pytest", "numpy", "torch",
 }

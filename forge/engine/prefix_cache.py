@@ -524,13 +524,13 @@ class RadixPrefixCache:
     """
 
     class _Node:
-        __slots__ = ("token_ids", "kv_state", "ref_count", "children", "last_used")
+        __slots__ = ("children", "kv_state", "last_used", "ref_count", "token_ids")
 
         def __init__(self):
             self.token_ids: list[int] = []
             self.kv_state = object()  # None until computed
             self.ref_count = 0
-            self.children: dict[int, "RadixPrefixCache._Node"] = {}
+            self.children: dict[int, RadixPrefixCache._Node] = {}
             self.last_used = 0.0
 
     def __init__(self, max_entries: int = _DEFAULT_MAX_ENTRIES):

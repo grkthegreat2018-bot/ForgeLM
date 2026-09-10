@@ -1,6 +1,7 @@
 """Shared helpers for pre-training and SFT."""
 import inspect
 import json
+import logging
 import math
 import os
 import random
@@ -12,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -71,7 +74,7 @@ def oom_guard(device: str = "cuda", *, skip: bool = True, label: str = ""):
 
 
 class _OOMGuardState:
-    __slots__ = ("skipped", "error")
+    __slots__ = ("error", "skipped")
 
     def __init__(self):
         self.skipped = False
@@ -328,7 +331,7 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
             from muon import MuonWithAuxAdam
             scale = max_lr / 0.003  # normalize: speedrun uses max_lr=3e-3
             muon_lr = 0.05 * scale
-            head_lr = 0.22 * scale
+            0.22 * scale
             embed_lr = 0.6 * scale
             scalar_lr = 0.04 * scale
             # Split by param name (use id() to avoid tensor __eq__ pitfalls).
@@ -439,9 +442,10 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
         # momentum + Newton-Schulz orthogonalization. Only 1 layer's 4-bit
         # momentum in RAM; rest streamed from NVMe.
         import tempfile
+
         from forge.training.optim.r20_memory_optimizers import NvmeMuon4Bit
         nvme_dir = tempfile.mkdtemp(prefix="nvme_muon4bit_")
-        print(f"Using NvmeMuon4Bit (NVMe-streamed 4-bit Muon, V8 optimizer).")
+        print("Using NvmeMuon4Bit (NVMe-streamed 4-bit Muon, V8 optimizer).")
         return NvmeMuon4Bit(model, lr=max_lr, momentum=0.95, n_steps=5,
                             weight_decay=weight_decay, nvme_path=nvme_dir,
                             blocks_per_layer=1, switch_every=5, verbose=False)
@@ -1013,7 +1017,7 @@ def patch_triton_cache_for_windows():
 
         tc.FileCacheManager.put = _patched_put
     except Exception:
-        pass
+        logger.debug("Failed to patch FileCacheManager.put", exc_info=True)
 
 
 def evaluate_loss(model, val_dataset, device, n_batches=10, batch_size=2, tag="eval"):
@@ -1177,6 +1181,7 @@ def write_heartbeat(path):
 # ---------------------------------------------------------------------------
 
 from collections import OrderedDict as _OrderedDict
+
 _ANCHOR_CACHE: _OrderedDict[tuple[str, float], dict] = _OrderedDict()
 _ANCHOR_CACHE_MAX = 8  # anchor checkpoints are large; keep only recent few
 

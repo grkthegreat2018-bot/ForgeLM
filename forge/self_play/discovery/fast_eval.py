@@ -5,23 +5,26 @@ Loads one ForgeEngine, swaps state_dict between base and candidate.
 """
 from __future__ import annotations
 
-import os
-import sys
-import time
 import json
-import copy
+import logging
+import os
+import time
+
 import torch
 
-from forge.engine.forge_engine import ForgeEngine
+logger = logging.getLogger(__name__)
+
 from forge.checkpoint_io import load_checkpoint
+from forge.engine.forge_engine import ForgeEngine
 from forge.self_play.discovery.qwen_adapter import (
-    qwen_parse_tool_calls, IM_START, IM_END, EOS_ID,
+    EOS_ID,
+    qwen_parse_tool_calls,
 )
 
 # ── Metrics ────────────────────────────────────────────────────────────────
 
 class GenMetrics:
-    __slots__ = ("tokens", "time_ms", "vram_mb", "quality", "output")
+    __slots__ = ("output", "quality", "time_ms", "tokens", "vram_mb")
     def __init__(self, tokens=0, time_ms=0.0, vram_mb=0.0, quality=0.0, output=""):
         self.tokens = tokens
         self.time_ms = time_ms
@@ -100,7 +103,7 @@ def _check_json_output(output, required_keys):
         obj = json.loads(output.strip())
         if isinstance(obj, dict):
             return sum(1 for k in required_keys if k in obj) / len(required_keys)
-    except Exception: pass
+    except Exception: logger.debug("JSON output check failed", exc_info=True)
     return 0.0
 
 def _check_lowercase(output):
@@ -243,7 +246,6 @@ CATEGORY_MAX_TOKENS = {
 # Research: data contamination literature — ban high-score questions, rotate pool.
 
 import random as _rng
-import string as _str
 
 _BANNED_QUESTIONS: set[str] = set()  # questions that scored > 0.8, banned from reuse
 
@@ -533,7 +535,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
 
     if engine is not None:
         # Reuse existing engine from self-play — just re-activate with standard decoding
-        print(f"  [FastEval] Reusing self-play engine (skipping model reload)")
+        print("  [FastEval] Reusing self-play engine (skipping model reload)")
         # Re-activate: switch from mtp_selfspec to standard decoding for eval
         engine.activate(kv_cache="hadamard_int4", decoding="standard",
                         use_triton_conv=True, use_spec_attn=True,
@@ -555,7 +557,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     base_result.checkpoint = base_checkpoint
 
     # Swap to candidate weights (load directly to GPU)
-    print(f"\n  [FastEval] Swapping weights to candidate...")
+    print("\n  [FastEval] Swapping weights to candidate...")
     t_swap = time.perf_counter()
     candidate_state = _load_state_dict_on_device(candidate_checkpoint, device)
     with torch.no_grad():

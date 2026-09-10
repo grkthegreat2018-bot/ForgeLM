@@ -28,20 +28,21 @@ Usage:
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
-from typing import Any
 
-from research.paths import DATA_DIR
 from forge.self_play.discovery.anti_regression import (
-    FingerprintSet, StuckDetector, is_productive_step, is_neutral_step,
-    is_write_tool, tool_content)
-from forge.self_play.discovery.chat_template import (
-    apply_chat_template, parse_tool_calls)
+    FingerprintSet,
+    StuckDetector,
+    is_neutral_step,
+    is_productive_step,
+    is_write_tool,
+    tool_content,
+)
+from forge.self_play.discovery.chat_template import apply_chat_template, parse_tool_calls
 from forge.self_play.discovery.discovery_db import DiscoveryDB
 from forge.self_play.discovery.discovery_tools import ToolRegistry
-
+from research.paths import DATA_DIR
 
 _DB_PATH = DATA_DIR / "discovery" / "discovery.sqlite3"
 
@@ -106,7 +107,7 @@ class DiscoveryLoop:
 
     # ── model loading ────────────────────────────────────────────────
     @classmethod
-    def from_default_model(cls, db_path: str | None = None, **kw) -> "DiscoveryLoop":
+    def from_default_model(cls, db_path: str | None = None, **kw) -> DiscoveryLoop:
         """Load the most recent ForgeLM V10 model into the discovery loop.
 
         Resolution order (first existing wins):
@@ -370,7 +371,7 @@ class DiscoveryLoop:
                         if hasattr(self, '_engine') and self._engine is not None:
                             self._engine.unload_lora()
                             self._engine.load_lora(new_ckpt, rank=32, alpha=64)
-                            print(f"[discovery] LoRA hot-swapped successfully")
+                            print("[discovery] LoRA hot-swapped successfully")
             except Exception as e:
                 self.db.emit("epoch_error", {"error": str(e)}, self.session_id)
                 epoch_result = {"error": str(e)}

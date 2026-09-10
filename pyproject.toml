@@ -72,9 +72,6 @@ ignore = [
     "E501",   # line too long (we use 120, ruff will flag >120)
     "E402",   # module level import not at top (sys.path hacks need this)
     "B008",   # function call in default argument (dataclass patterns)
-    "B904",   # raise without from (existing pattern, fix gradually)
-    "F401",   # unused import (too many in existing code, fix gradually)
-    "F841",   # unused variable (fix gradually)
     "RUF001", # ambiguous unicode character (existing code has these)
     "RUF002", # ambiguous unicode character in docstring
     "RUF003", # ambiguous unicode character in comment

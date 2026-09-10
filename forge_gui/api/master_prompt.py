@@ -17,7 +17,6 @@ user can still add their own instructions on top.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

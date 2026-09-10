@@ -27,8 +27,6 @@ Pure torch (no CUDA-specific ops), works on CPU as a fallback.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from forge.engine.kv_backend import KVCacheStrategy
@@ -55,10 +53,10 @@ class CaptureKVCache(KVCacheStrategy):
     def __init__(self, mode: str = "act", hybrid_threshold: int = 64):
         self._mode = mode
         self._hybrid_threshold = hybrid_threshold
-        self._w_k: Optional[torch.Tensor] = None
-        self._w_v: Optional[torch.Tensor] = None
-        self._w_q: Optional[torch.Tensor] = None
-        self._w_kv_pinv: Optional[torch.Tensor] = None
+        self._w_k: torch.Tensor | None = None
+        self._w_v: torch.Tensor | None = None
+        self._w_q: torch.Tensor | None = None
+        self._w_kv_pinv: torch.Tensor | None = None
 
     def init(self, n_heads: int, head_dim: int, n_kv_heads: int,
              max_seq_len: int, device, dtype: torch.dtype):
@@ -75,11 +73,11 @@ class CaptureKVCache(KVCacheStrategy):
         self.n_act_stored = 0
         self.n_kv_stored = 0
 
-        self.act_buffer: Optional[torch.Tensor] = None
-        self.kv_k: Optional[torch.Tensor] = None
-        self.kv_v: Optional[torch.Tensor] = None
-        self.act_mask: Optional[torch.Tensor] = None
-        self.kv_mask: Optional[torch.Tensor] = None
+        self.act_buffer: torch.Tensor | None = None
+        self.kv_k: torch.Tensor | None = None
+        self.kv_v: torch.Tensor | None = None
+        self.act_mask: torch.Tensor | None = None
+        self.kv_mask: torch.Tensor | None = None
 
     def _ensure_allocated(self, batch_size: int):
         if self.act_buffer is None:
@@ -97,7 +95,7 @@ class CaptureKVCache(KVCacheStrategy):
                 self.max_seq_len, dtype=torch.bool, device=self.device)
 
     def set_projection_weights(self, w_k: torch.Tensor, w_v: torch.Tensor,
-                               w_q: Optional[torch.Tensor] = None):
+                               w_q: torch.Tensor | None = None):
         """Provide K/V projection weights for on-demand regeneration.
 
         Called during model init. When set, get() regenerates K/V via

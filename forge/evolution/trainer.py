@@ -10,10 +10,9 @@ for mutated generators is reset to avoid stale momentum.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Optional
 
 
 class GeneratorTrainer:

@@ -10,7 +10,6 @@ Building a KeyStack:
   3. Use dummy data to verify the stitching works
   4. The stack can then process real data/weights end-to-end
 """
-from typing import Any, Dict, List, Optional
 
 import torch
 

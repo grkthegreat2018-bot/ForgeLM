@@ -42,7 +42,7 @@ For ``n_layers`` layers, ``max_replay_tokens=512``, ``d_model=2048``,
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -64,7 +64,7 @@ class ReplaySSMCache:
 
         # Per-layer ring buffer storage (allocated lazily on first
         # ``cache_inputs`` call, since we need d_model / device / dtype).
-        self._buffers: list[Optional[torch.Tensor]] = [None] * n_layers
+        self._buffers: list[torch.Tensor | None] = [None] * n_layers
         # Write index into each ring buffer.
         self._write_idx: list[int] = [0] * n_layers
         # Number of valid entries currently stored (capped at capacity).
@@ -129,7 +129,7 @@ class ReplaySSMCache:
         self,
         layer_idx: int,
         ssm_module: Any,
-        initial_state: Optional[torch.Tensor] = None,
+        initial_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Reconstruct the SSM state by replaying cached inputs.
 
@@ -237,7 +237,7 @@ class ReplaySSMCache:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    def _get_ordered_inputs(self, layer_idx: int) -> Optional[torch.Tensor]:
+    def _get_ordered_inputs(self, layer_idx: int) -> torch.Tensor | None:
         """Return cached inputs in chronological order (oldest first).
 
         Always computes the oldest valid entry from ``(write_idx - n_valid)

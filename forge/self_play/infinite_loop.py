@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import os
 import shutil
 import time
@@ -35,7 +36,8 @@ from pathlib import Path
 
 import torch
 
-from research.paths import DATA_DIR
+logger = logging.getLogger(__name__)
+
 from forge.self_play.infinite_curriculum import InfiniteCurriculum
 
 
@@ -225,8 +227,8 @@ class InfiniteSelfPlayLoop:
             return engine
 
         # Legacy bare-model path (no V10 inference features)
-        from forge.model_loader import load_default_model
         from forge.engine.forge_engine import ForgeEngine
+        from forge.model_loader import load_default_model
         model, tokenizer = load_default_model(
             cfg.config_name,
             checkpoint_path=self.best_checkpoint,
@@ -307,7 +309,7 @@ class InfiniteSelfPlayLoop:
             # different reasoning modes (induction/abduction/deduction) forces
             # diverse task generation instead of repeating the same 5-6 tasks.
             import random as _rng
-            rng = _rng.Random(42 + self.epoch)
+            _rng.Random(42 + self.epoch)
             modes = ["induction", "abduction", "deduction"]
 
             propose_attempts = 0
@@ -473,7 +475,7 @@ class InfiniteSelfPlayLoop:
         try:
             engine.sleep(level=2)
         except Exception:
-            pass
+            logger.debug("Error sleeping engine during cleanup", exc_info=True)
         del engine
         self._engine = None
         gc.collect()
@@ -704,7 +706,7 @@ class InfiniteSelfPlayLoop:
 
         # Run in-process (no subprocess spawn overhead)
         if not self._run_subprocess(cmd, "Finetune"):
-            raise RuntimeError(f"Finetune failed (in-process)")
+            raise RuntimeError("Finetune failed (in-process)")
         if not os.path.exists(save_path):
             raise RuntimeError(f"Finetune completed but checkpoint not found: {save_path}")
 
@@ -735,8 +737,8 @@ class InfiniteSelfPlayLoop:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-        import sys
         import importlib
+        import sys
         old_argv = sys.argv
         sys.argv = [module_name] + cli_args
         try:
@@ -790,7 +792,7 @@ class InfiniteSelfPlayLoop:
         re-activated to a standard eval configuration before testing.
         """
         print(f"\n{'='*70}")
-        print(f"  PHASE 3: EVALUATE")
+        print("  PHASE 3: EVALUATE")
         print(f"{'='*70}")
 
         from forge.self_play.discovery.fast_eval import fast_eval
@@ -915,7 +917,7 @@ class InfiniteSelfPlayLoop:
         """Run the infinite loop for max_epochs (or until interrupted)."""
         n = max_epochs or self.config.max_epochs
         print(f"\n{'#'*70}")
-        print(f"#  INFINITE AZR SELF-PLAY LOOP")
+        print("#  INFINITE AZR SELF-PLAY LOOP")
         print(f"#  Starting checkpoint: {self.best_checkpoint}")
         print(f"#  Max epochs: {n}")
         print(f"#  Tasks per epoch: {self.config.tasks_per_epoch}")
@@ -1144,9 +1146,9 @@ def main():
     # Self-play mode dispatch
     if args.self_play_mode == "soar":
         print("[InfiniteLoop] SOAR mode: meta-RL curriculum (escapes learning plateaus)")
-        from forge.self_play.soar import SOARMetaRL
         # Load model + tokenizer for SOAR
         from forge.model_loader import load_default_model
+        from forge.self_play.soar import SOARMetaRL
         from research.tokenizer_cache import get_tokenizer
         model, _ = load_default_model()
         tokenizer = get_tokenizer()
@@ -1159,8 +1161,8 @@ def main():
 
     if args.self_play_mode == "sgs":
         print("[InfiniteLoop] SGS mode: self-guided self-play (prevents Conjecturer collapse)")
-        from forge.self_play.sgs import SGSTrainer
         from forge.model_loader import load_default_model
+        from forge.self_play.sgs import SGSTrainer
         from research.tokenizer_cache import get_tokenizer
         model, _ = load_default_model()
         tokenizer = get_tokenizer()
@@ -1335,8 +1337,8 @@ class ThinkingPipeline:
         # Cleanup VRAM from previous stage before starting new one
         self._cleanup_vram()
 
-        import sys
         import importlib
+        import sys
         old_argv = sys.argv
         sys.argv = [module_name] + cli_args
         try:
@@ -1394,7 +1396,7 @@ class ThinkingPipeline:
         """Stage 1: Midtraining with reasoning traces."""
         output = self._stage_path("CPT")
         print(f"\n{'='*70}")
-        print(f"  STAGE 1/4: CPT (Midtraining with Reasoning Traces)")
+        print("  STAGE 1/4: CPT (Midtraining with Reasoning Traces)")
         print(f"{'='*70}")
 
         if self._stage_completed(output):
@@ -1402,7 +1404,7 @@ class ThinkingPipeline:
             return output
 
         if not self.config.cpt_enabled:
-            print(f"  Skipped (disabled)")
+            print("  Skipped (disabled)")
             return self.base_checkpoint
 
         cmd = [
@@ -1431,7 +1433,7 @@ class ThinkingPipeline:
         """Stage 2: Curriculum SFT (mix distillation + 2-stage curriculum)."""
         output = self._stage_path("SFT2")
         print(f"\n{'='*70}")
-        print(f"  STAGE 2/4: CURRICULUM SFT (Mix Distillation + 2-Stage)")
+        print("  STAGE 2/4: CURRICULUM SFT (Mix Distillation + 2-Stage)")
         print(f"{'='*70}")
 
         if self._stage_completed(output):
@@ -1439,7 +1441,7 @@ class ThinkingPipeline:
             return output
 
         if not self.config.sft_enabled:
-            print(f"  Skipped (disabled)")
+            print("  Skipped (disabled)")
             return cpt_checkpoint
 
         # Step 2a: Prepare curriculum data
@@ -1506,7 +1508,7 @@ class ThinkingPipeline:
         """Stage 3: DPO doom-loop mitigation."""
         output = self._stage_path("DPO")
         print(f"\n{'='*70}")
-        print(f"  STAGE 3/4: DPO (Doom-Loop Mitigation)")
+        print("  STAGE 3/4: DPO (Doom-Loop Mitigation)")
         print(f"{'='*70}")
 
         if self._stage_completed(output):
@@ -1514,7 +1516,7 @@ class ThinkingPipeline:
             return output
 
         if not self.config.dpo_enabled:
-            print(f"  Skipped (disabled)")
+            print("  Skipped (disabled)")
             return sft_checkpoint
 
         # Step 3a: Generate preference data
@@ -1561,7 +1563,7 @@ class ThinkingPipeline:
         """Stage 4: RLVR with GRPO + n-gram repetition penalty."""
         output = self._stage_path("RLVR")
         print(f"\n{'='*70}")
-        print(f"  STAGE 4/4: RLVR (GRPO + Repetition Penalty)")
+        print("  STAGE 4/4: RLVR (GRPO + Repetition Penalty)")
         print(f"{'='*70}")
 
         if self._stage_completed(output):
@@ -1569,7 +1571,7 @@ class ThinkingPipeline:
             return output
 
         if not self.config.rlvr_enabled:
-            print(f"  Skipped (disabled)")
+            print("  Skipped (disabled)")
             return dpo_checkpoint
 
         cmd = [
@@ -1601,7 +1603,7 @@ class ThinkingPipeline:
         """
         t0 = time.time()
         print(f"\n{'#'*70}")
-        print(f"#  FORGELM V10-THINKING PIPELINE")
+        print("#  FORGELM V10-THINKING PIPELINE")
         print(f"#  Base checkpoint: {self.base_checkpoint}")
         print(f"#  Config: {self.config.config_name}")
         print(f"#  Optimizer: {self.config.optimizer}")

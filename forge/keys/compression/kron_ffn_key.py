@@ -67,7 +67,7 @@ class KroneckerLinear(nn.Module):
 
     @classmethod
     def from_dense(cls, weight: torch.Tensor, a: int, b: int, c: int, d,
-                   bias: torch.Tensor | None = None) -> "KroneckerLinear":
+                   bias: torch.Tensor | None = None) -> KroneckerLinear:
         """Fit A, B from a dense weight W (out, in) via rank-1 Kronecker SVD.
 
         Uses the Van Loan & Pitsianis (1993) nearest-Kronecker-product
@@ -201,7 +201,7 @@ class KroneckerSwiGLUFFN(nn.Module):
     @classmethod
     def from_dense_ffn(cls, ffn: nn.Module,
                        gate_kron: tuple[int, int] | None = None,
-                       down_kron: tuple[int, int] | None = None) -> "KroneckerSwiGLUFFN":
+                       down_kron: tuple[int, int] | None = None) -> KroneckerSwiGLUFFN:
         """Build a ``KroneckerSwiGLUFFN`` from a dense ``SwiGLUFFN``.
 
         Extracts w_gate/w_up/w_down weights and fits each with a rank-1

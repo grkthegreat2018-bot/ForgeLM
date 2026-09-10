@@ -7,9 +7,13 @@ This eliminates Python→CUDA dispatch overhead while using PyTorch's optimized 
 Supports quantization domains (10+), KV domains (8+), and attention domains.
 """
 from __future__ import annotations
-import torch
+
+import logging
+
 import numpy as np
-from typing import Any
+import torch
+
+logger = logging.getLogger(__name__)
 
 
 class BatchedEvaluator:
@@ -55,7 +59,7 @@ class BatchedEvaluator:
             elif self.domain_name in self.KV_DOMAINS:
                 return self._batched_kv_eval(configs)
         except Exception:
-            pass  # fallback to sequential
+            logger.debug("Batched eval failed, falling back to sequential", exc_info=True)
 
         return [self.domain.evaluate(c) for c in configs]
 
@@ -150,7 +154,6 @@ class BatchedEvaluator:
 
     def _build_result(self, cfg: dict, err: float, bits: int) -> dict:
         """Build result dict matching domain.evaluate() format."""
-        name = self.domain_name
         score = self._compute_score(cfg, err, bits)
         behavioral = self._compute_behavioral(cfg, err, bits)
         metadata = {"err": err, "bits": bits, "batched": True}

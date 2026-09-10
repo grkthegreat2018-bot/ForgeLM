@@ -39,7 +39,6 @@ Usage:
     sandbox = SelfPlaySandbox(model, tokenizer, log_dir="research/data/self_play")
     sandbox.run_task("Compute fibonacci(10) in Python", expected_output="55")
 """
-import json
 import logging
 import os
 import re
@@ -49,13 +48,12 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from forge.engine.scheduler.async_d2h import AsyncTokenReader, StreamedGenerator
-from research.json_compat import dumps, loads
 from forge.self_play.io_match import io_match, io_similarity
+from research.json_compat import dumps
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +65,7 @@ _RE_DIGITS = re.compile(r'\d+')
 
 # resource is Unix-only; on Windows we skip memory limits
 try:
-    import resource
+    import resource  # noqa: F401
     HAS_RESOURCE = True
 except ImportError:
     HAS_RESOURCE = False
@@ -132,7 +130,7 @@ class SandboxExecutor:
             try:
                 w.close()
             except Exception:
-                pass
+                logger.debug("Error closing worker in sandbox pool", exc_info=True)
         self._pool = []
         self._persistent = None
 
@@ -140,7 +138,7 @@ class SandboxExecutor:
         try:
             self.close()
         except Exception:
-            pass
+            logger.debug("Error during sandbox cleanup", exc_info=True)
 
     def __enter__(self):
         return self
@@ -475,14 +473,14 @@ class SelfPlaySandbox:
         else:
             full_prompt = f'"""{prompt}"""\n'
         input_ids = self.tokenizer(full_prompt, return_tensors="pt").input_ids.to(self.device)
-        prompt_len = input_ids.shape[1]
+        input_ids.shape[1]
 
         t0 = time.time()
         log_probs = []
 
         # Token IDs for stopping
         newline_token = self.tokenizer.encode("\n", add_special_tokens=False)
-        newline_id = newline_token[0] if newline_token else 198
+        newline_token[0] if newline_token else 198
 
         # Build stop string tokens — check for "[stop]" in generated text
         stop_str = "[stop]"
@@ -491,7 +489,6 @@ class SelfPlaySandbox:
         # First pass: process the full prompt, cache KV pairs.
         # Subsequent passes: feed only the new token, reuse cached KV.
         with torch.inference_mode():
-            past_kvs = None
             generated_ids = []
             eos_id = self.tokenizer.eos_token_id
 
@@ -685,7 +682,7 @@ class SelfPlaySandbox:
                 k, v = layer_kvs
                 T = k.shape[2]  # sequence length
                 # Only quantize if we have enough tokens beyond sinks + residual
-                if T <= sink_len + residual_len:
+                if sink_len + residual_len >= T:
                     new_kvs.append((k, v))  # all in fp16
                     continue
                 # Split: [sinks | quantizable | residual]

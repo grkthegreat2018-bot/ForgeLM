@@ -25,12 +25,15 @@ Usage (automatic via ForgeEngine):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from forge.engine.forge_engine import ForgeEngine
@@ -77,7 +80,7 @@ class CrashRecoveryManager:
     using zstd compression for minimal disk I/O.
     """
 
-    def __init__(self, engine: "ForgeEngine",
+    def __init__(self, engine: ForgeEngine,
                  recovery_dir: str = _DEFAULT_RECOVERY_DIR,
                  enabled: bool = True):
         self.engine = engine
@@ -189,6 +192,7 @@ class CrashRecoveryManager:
                 v_data = kv.v_cache.cpu().contiguous()
                 # Store as compressed torch save
                 import io
+
                 import torch
                 buf = io.BytesIO()
                 torch.save({
@@ -265,7 +269,7 @@ class CrashRecoveryManager:
                     result["generation"] = data
                     break
                 except Exception:
-                    pass
+                    logger.debug("Failed to recover generation state from %s", name, exc_info=True)
 
         # Recover event log
         path = self.recovery_dir / "event_log.zst"
@@ -273,7 +277,7 @@ class CrashRecoveryManager:
             try:
                 result["event_log"] = json.loads(_decompress(path.read_bytes()))
             except Exception:
-                pass
+                logger.debug("Failed to recover event log", exc_info=True)
 
         # Recover output history
         path = self.recovery_dir / "output_history.zst"
@@ -281,7 +285,7 @@ class CrashRecoveryManager:
             try:
                 result["output_history"] = json.loads(_decompress(path.read_bytes()))
             except Exception:
-                pass
+                logger.debug("Failed to recover output history", exc_info=True)
 
         # Recover KV cache (find most recent snapshot)
         best_snapshot = None
@@ -291,6 +295,7 @@ class CrashRecoveryManager:
             if path.exists():
                 try:
                     import io
+
                     import torch
                     blob = _decompress(path.read_bytes())
                     # Try weights_only=True first (safe, blocks arbitrary code),
@@ -303,7 +308,7 @@ class CrashRecoveryManager:
                         best_snapshot = snapshot
                         best_token_count = snapshot["token_count"]
                 except Exception:
-                    pass
+                    logger.debug("Failed to recover KV snapshot from slot %d", slot, exc_info=True)
         if best_snapshot is not None:
             result["kv_snapshot"] = best_snapshot
 

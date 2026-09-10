@@ -2,28 +2,24 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox,
-                               QProgressBar, QPushButton, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from ..api.status_reader import RunSnapshot, StatusReader
 from ..theme import Palette
 from ..widgets.chart import LiveLineChart
 from ..widgets.metric_card import MetricCard
-from ._base import card_grid, page_container, section_label, status_tag
+from ._base import card_grid, page_container, section_label
 
 logger = logging.getLogger(__name__)
 
 
 class TrainingPage(QWidget):
-    def __init__(self, status_reader: StatusReader, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, status_reader: StatusReader, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._status = status_reader
         self._runs: list[RunSnapshot] = []
-        self._selected_id: Optional[str] = None
+        self._selected_id: str | None = None
         self._loss_hist: list[float] = []
         self._lr_hist: list[float] = []
 
@@ -130,7 +126,7 @@ class TrainingPage(QWidget):
             QMessageBox.warning(self, "Stop run",
                                 "Failed to write the stop sentinel — see logs.")
 
-    def _selected_run(self) -> Optional[RunSnapshot]:
+    def _selected_run(self) -> RunSnapshot | None:
         for r in self._runs:
             if r.id == self._selected_id:
                 return r

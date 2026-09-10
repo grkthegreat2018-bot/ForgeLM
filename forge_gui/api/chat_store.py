@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 RATING_GOOD = "good"
 RATING_BAD = "bad"
@@ -38,7 +38,7 @@ def _slug(title: str, limit: int = 40) -> str:
 class ChatStore:
     """JSON-persisted conversation list with per-message ratings."""
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         if root is None:
             root = Path(__file__).resolve().parents[2] / "data"
         self.root = Path(root)
@@ -56,7 +56,7 @@ class ChatStore:
             self.conversations = []
             return
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.conversations = data.get("conversations", [])
         except Exception:
@@ -83,7 +83,7 @@ class ChatStore:
         self.save()
         return conv
 
-    def get(self, conv_id: str) -> Optional[dict[str, Any]]:
+    def get(self, conv_id: str) -> dict[str, Any] | None:
         for c in self.conversations:
             if c["id"] == conv_id:
                 return c
@@ -121,7 +121,7 @@ class ChatStore:
 
     # ── messages ──────────────────────────────────────────────────────
     def append_message(self, conv_id: str, role: str, content: str,
-                       rating: Optional[str] = None,
+                       rating: str | None = None,
                        image: str = "") -> int:
         conv = self.get(conv_id)
         if conv is None:
@@ -138,7 +138,7 @@ class ChatStore:
         return len(conv["messages"]) - 1
 
     def rate_message(self, conv_id: str, msg_idx: int,
-                     rating: Optional[str]) -> Optional[str]:
+                     rating: str | None) -> str | None:
         """Set/clear a message rating ('good' | 'bad' | None). Toggles."""
         conv = self.get(conv_id)
         if conv is None or not (0 <= msg_idx < len(conv["messages"])):
@@ -157,8 +157,8 @@ class ChatStore:
         return good, bad
 
     # ── training-data export ──────────────────────────────────────────
-    def export_training_data(self, conv_ids: Optional[list[str]] = None,
-                             out_path: Optional[Path] = None,
+    def export_training_data(self, conv_ids: list[str] | None = None,
+                             out_path: Path | None = None,
                              include_system: bool = True) -> tuple[Path, int]:
         """Export good-rated turns as sft_train-compatible JSONL.
 

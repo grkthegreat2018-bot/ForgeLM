@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -48,7 +47,7 @@ try:
     import triton
     import triton.language as tl
     _HAS_TRITON = True
-except Exception:
+except ImportError:
     _HAS_TRITON = False
 
 if _HAS_TRITON:

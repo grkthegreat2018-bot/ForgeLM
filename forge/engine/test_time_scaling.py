@@ -41,18 +41,20 @@ Design notes
 """
 from __future__ import annotations
 
+import logging
 import math
-import random
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FirstFinishSearch",
     "BeamSearch",
-    "MCTSDecoder",
+    "FirstFinishSearch",
     "GenerativeModel",
+    "MCTSDecoder",
 ]
 
 
@@ -87,7 +89,7 @@ def _looks_finished(text: str) -> bool:
     return stripped[-1] in ".!?)]}\n"
 
 
-def _get_logprobs(model: Any, prompt: str) -> Optional[list[float]]:
+def _get_logprobs(model: Any, prompt: str) -> list[float] | None:
     """If the model exposes ``next_token_logprobs``, return a vocab-sized
     log-prob list for the next token given *prompt*; else ``None``."""
     fn = getattr(model, "next_token_logprobs", None)
@@ -112,7 +114,7 @@ class FirstFinishSearch:
 
     def __init__(self, n_samples: int = 8, max_tokens: int = 512,
                  temperature: float = 0.8, top_p: float = 0.95,
-                 n_workers: Optional[int] = None):
+                 n_workers: int | None = None):
         self.n_samples = n_samples
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -122,8 +124,8 @@ class FirstFinishSearch:
     # -- public API ---------------------------------------------------------
 
     def generate(self, model: GenerativeModel, prompt: str,
-                 n_samples: Optional[int] = None,
-                 max_tokens: Optional[int] = None) -> str:
+                 n_samples: int | None = None,
+                 max_tokens: int | None = None) -> str:
         """Run FFS and return the first-finished (or best) sample."""
         n = n_samples if n_samples is not None else self.n_samples
         mt = max_tokens if max_tokens is not None else self.max_tokens
@@ -142,7 +144,7 @@ class FirstFinishSearch:
                 for seed in range(n)
             }
             # Collect results as they complete; short-circuit on finish.
-            best: Optional[str] = None
+            best: str | None = None
             best_len = math.inf
             for fut in as_completed(futs):
                 out = fut.result()
@@ -169,7 +171,7 @@ class FirstFinishSearch:
             try:
                 model.seed(seed)  # type: ignore[attr-defined]
             except Exception:
-                pass
+                logger.debug("model.seed() failed", exc_info=True)
         elif "seed" in getattr(model, "generate_kwargs", {}):
             kwargs["seed"] = seed
         return model.generate(prompt, **kwargs)
@@ -204,8 +206,8 @@ class BeamSearch:
     # -- public API ---------------------------------------------------------
 
     def generate(self, model: GenerativeModel, prompt: str,
-                 beam_width: Optional[int] = None,
-                 max_tokens: Optional[int] = None) -> str:
+                 beam_width: int | None = None,
+                 max_tokens: int | None = None) -> str:
         bw = beam_width if beam_width is not None else self.beam_width
         mt = max_tokens if max_tokens is not None else self.max_tokens
         return self._search(model, prompt, bw, mt)
@@ -328,12 +330,12 @@ class BeamSearch:
             try:
                 return tok.decode([token_id])
             except Exception:
-                pass
+                logger.debug("tok.decode([token_id]) failed", exc_info=True)
         if hasattr(model, "id_to_token"):
             try:
                 return model.id_to_token(token_id)  # type: ignore[attr-defined]
             except Exception:
-                pass
+                logger.debug("model.id_to_token() failed", exc_info=True)
         # Fallback: represent token as a single char.
         return chr(32 + (token_id % 95))
 
@@ -344,8 +346,8 @@ class BeamSearch:
 class _MCTSNode:
     """A node in the MCTS search tree (partial sequence)."""
     text: str
-    parent: Optional["_MCTSNode"] = None
-    children: list["_MCTSNode"] = field(default_factory=list)
+    parent: _MCTSNode | None = None
+    children: list[_MCTSNode] = field(default_factory=list)
     visits: int = 0
     value: float = 0.0  # cumulative reward from rollouts
     unexpanded: list[str] = field(default_factory=list)  # pending child texts
@@ -393,10 +395,10 @@ class MCTSDecoder:
     # -- public API ---------------------------------------------------------
 
     def generate(self, model: GenerativeModel, prompt: str,
-                 n_iterations: Optional[int] = None,
-                 n_children: Optional[int] = None,
-                 c: Optional[float] = None,
-                 max_tokens: Optional[int] = None) -> str:
+                 n_iterations: int | None = None,
+                 n_children: int | None = None,
+                 c: float | None = None,
+                 max_tokens: int | None = None) -> str:
         ni = n_iterations if n_iterations is not None else self.n_iterations
         nc = n_children if n_children is not None else self.n_children
         cc = c if c is not None else self.c
@@ -436,7 +438,7 @@ class MCTSDecoder:
         node = root
         while node.children:
             parent_n = node.visits
-            best_child: Optional[_MCTSNode] = None
+            best_child: _MCTSNode | None = None
             best_score = -math.inf
             for child in node.children:
                 score = child.ucb(parent_n, c)
@@ -523,7 +525,7 @@ class MCTSDecoder:
     # -- backprop -----------------------------------------------------------
 
     def _backprop(self, node: _MCTSNode, reward: float) -> None:
-        cur: Optional[_MCTSNode] = node
+        cur: _MCTSNode | None = node
         while cur is not None:
             cur.visits += 1
             cur.value += reward
@@ -531,9 +533,9 @@ class MCTSDecoder:
 
     # -- best leaf ----------------------------------------------------------
 
-    def _best_leaf(self, root: _MCTSNode) -> Optional[_MCTSNode]:
+    def _best_leaf(self, root: _MCTSNode) -> _MCTSNode | None:
         """Return the leaf with the highest mean value (min 1 visit)."""
-        best: Optional[_MCTSNode] = None
+        best: _MCTSNode | None = None
         best_q = -math.inf
 
         def walk(n: _MCTSNode) -> None:

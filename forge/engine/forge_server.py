@@ -32,7 +32,7 @@ import os
 import tempfile
 import time
 import uuid
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -42,9 +42,10 @@ from pydantic import BaseModel, Field
 
 from forge.engine.model_registry import ModelRegistry, VRAMBudgetExceeded
 from forge.engine.session_manager import (
-    SessionManager, BatchQueue, TaskBootConfig,
+    BatchQueue,
+    SessionManager,
+    TaskBootConfig,
 )
-from research.paths import LFM25_CHECKPOINT, LFM25_HF_DIR
 from forge.self_play.discovery.qwen_adapter import (
     IM_END,
     IM_START,
@@ -53,6 +54,7 @@ from forge.self_play.discovery.qwen_adapter import (
     qwen_parse_tool_calls,
     qwen_render_messages,
 )
+from research.paths import LFM25_CHECKPOINT, LFM25_HF_DIR
 
 
 def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
@@ -83,8 +85,8 @@ def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
 
 class ToolFunction(BaseModel):
     name: str
-    description: Optional[str] = None
-    parameters: Optional[dict] = None
+    description: str | None = None
+    parameters: dict | None = None
 
 class ToolDefinition(BaseModel):
     type: Literal["function"] = "function"
@@ -92,27 +94,27 @@ class ToolDefinition(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str
-    content: Optional[str] = None
-    tool_calls: Optional[list[dict]] = None
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None
+    content: str | None = None
+    tool_calls: list[dict] | None = None
+    name: str | None = None
+    tool_call_id: str | None = None
 
 class ChatCompletionRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
     messages: list[ChatMessage]
-    tools: Optional[list[ToolDefinition]] = None
-    tool_choice: Optional[Any] = None
+    tools: list[ToolDefinition] | None = None
+    tool_choice: Any | None = None
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 80
     max_tokens: int = 256
     stream: bool = False
-    stop: Optional[list[str]] = None
+    stop: list[str] | None = None
     repetition_penalty: float = 1.05
-    seed: Optional[int] = None
-    logprobs: Optional[bool] = None
-    top_logprobs: Optional[int] = None
-    lora_adapter: Optional[str] = None
+    seed: int | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
+    lora_adapter: str | None = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -141,11 +143,11 @@ class CompletionRequest(BaseModel):
     top_k: int = 80
     max_tokens: int = 256
     stream: bool = False
-    stop: Optional[list[str]] = None
+    stop: list[str] | None = None
     repetition_penalty: float = 1.05
-    seed: Optional[int] = None
-    logprobs: Optional[int] = None
-    prompt_logprobs: Optional[int] = None
+    seed: int | None = None
+    logprobs: int | None = None
+    prompt_logprobs: int | None = None
 
 class EmbeddingRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
@@ -191,8 +193,8 @@ class RouterRegisterRequest(BaseModel):
     model_id: str
     checkpoint: str
     config_name: str = "forgelm_v2_light"
-    tokenizer_path: Optional[str] = None
-    vram_budget_gb: Optional[float] = None
+    tokenizer_path: str | None = None
+    vram_budget_gb: float | None = None
 
 class KVCacheTypeRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
@@ -206,7 +208,7 @@ class LoRALoadRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
     adapter_path: str
     rank: int = 32
-    alpha: Optional[int] = None
+    alpha: int | None = None
 
 
 # ── Task API models ──────────────────────────────────────────────────────────
@@ -214,9 +216,9 @@ class LoRALoadRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
     system_prompt: str = ""
-    seed: Optional[int] = None  # default seed for this task's generations
-    boot_params: Optional[dict] = None  # per-task engine boot configuration
-    metadata: Optional[dict] = None
+    seed: int | None = None  # default seed for this task's generations
+    boot_params: dict | None = None  # per-task engine boot configuration
+    metadata: dict | None = None
 
 class TaskMessageRequest(BaseModel):
     content: str
@@ -225,27 +227,27 @@ class TaskMessageRequest(BaseModel):
     top_p: float = 1.0
     top_k: int = 80
     repetition_penalty: float = 1.05
-    seed: Optional[int] = None  # override task's default seed for this message
+    seed: int | None = None  # override task's default seed for this message
     stream: bool = False
-    stop: Optional[list[str]] = None
-    tools: Optional[list[ToolDefinition]] = None
+    stop: list[str] | None = None
+    tools: list[ToolDefinition] | None = None
 
 class UpdateBootConfigRequest(BaseModel):
     """Update a task's boot-time engine configuration."""
-    kv_cache: Optional[str] = None  # standard, paged, hadamard_int4, snapkv, snapkv_4bit
-    decoding: Optional[str] = None  # standard, speculative, batched, mtp_selfspec
-    quantize: Optional[str] = None  # None, int8, int4, fp8
-    acceleration: Optional[str] = None  # None, cuda_graph, airllm_streaming
-    kv_cache_tokens: Optional[int] = None  # Limit KV cache allocation
-    kv_bits: Optional[int] = None  # 4 or 8
-    mrl_keep_ratio: Optional[float] = None
-    use_v0_warm: Optional[bool] = None
-    use_progressive_kv: Optional[bool] = None
-    use_compile: Optional[bool] = None
-    use_triton_conv: Optional[bool] = None
-    use_prefix_cache: Optional[bool] = None
-    use_spec_attn: Optional[bool] = None
-    warmup: Optional[bool] = None
+    kv_cache: str | None = None  # standard, paged, hadamard_int4, snapkv, snapkv_4bit
+    decoding: str | None = None  # standard, speculative, batched, mtp_selfspec
+    quantize: str | None = None  # None, int8, int4, fp8
+    acceleration: str | None = None  # None, cuda_graph, airllm_streaming
+    kv_cache_tokens: int | None = None  # Limit KV cache allocation
+    kv_bits: int | None = None  # 4 or 8
+    mrl_keep_ratio: float | None = None
+    use_v0_warm: bool | None = None
+    use_progressive_kv: bool | None = None
+    use_compile: bool | None = None
+    use_triton_conv: bool | None = None
+    use_prefix_cache: bool | None = None
+    use_spec_attn: bool | None = None
+    warmup: bool | None = None
 
 class TaskResponse(BaseModel):
     task_id: str
@@ -271,29 +273,29 @@ class TaskMessageResponse(BaseModel):
 class UpdateEngineSettingsRequest(BaseModel):
     """Hot-edit any engine setting. Only set fields are updated."""
     model: str = "lfm2.5-1.2b"
-    kv_cache: Optional[str] = None
-    decoding: Optional[str] = None
-    quantize: Optional[str] = None
-    acceleration: Optional[str] = None
-    kv_cache_tokens: Optional[int] = None
-    kv_bits: Optional[int] = None
-    max_context_tokens: Optional[int] = None
-    infinite_context: Optional[bool] = None
-    default_temperature: Optional[float] = None
-    default_max_tokens: Optional[int] = None
-    default_top_p: Optional[float] = None
-    default_top_k: Optional[int] = None
-    default_repetition_penalty: Optional[float] = None
-    use_compile: Optional[bool] = None
-    use_triton_conv: Optional[bool] = None
-    use_prefix_cache: Optional[bool] = None
-    use_chunked_prefill: Optional[bool] = None
-    use_fused_qk_norm_rope_cache: Optional[bool] = None
-    use_seq_split: Optional[bool] = None
-    vram_safety_margin_gb: Optional[float] = None
-    auto_offload: Optional[bool] = None
-    max_batch_size: Optional[int] = None
-    batch_timeout_ms: Optional[int] = None
+    kv_cache: str | None = None
+    decoding: str | None = None
+    quantize: str | None = None
+    acceleration: str | None = None
+    kv_cache_tokens: int | None = None
+    kv_bits: int | None = None
+    max_context_tokens: int | None = None
+    infinite_context: bool | None = None
+    default_temperature: float | None = None
+    default_max_tokens: int | None = None
+    default_top_p: float | None = None
+    default_top_k: int | None = None
+    default_repetition_penalty: float | None = None
+    use_compile: bool | None = None
+    use_triton_conv: bool | None = None
+    use_prefix_cache: bool | None = None
+    use_chunked_prefill: bool | None = None
+    use_fused_qk_norm_rope_cache: bool | None = None
+    use_seq_split: bool | None = None
+    vram_safety_margin_gb: float | None = None
+    auto_offload: bool | None = None
+    max_batch_size: int | None = None
+    batch_timeout_ms: int | None = None
 
 class InfiniteContextRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
@@ -333,16 +335,16 @@ class LibrarySaveRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
     content: str
     category: str = "custom"  # failure, win, research, common_data, custom
-    tags: Optional[list[str]] = None
+    tags: list[str] | None = None
     description: str = ""
-    triggers: Optional[list[str]] = None
+    triggers: list[str] | None = None
     priority: int = 0
     max_tokens: int = 2048
 
 class LibraryLookupRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
-    tags: Optional[list[str]] = None
-    category: Optional[str] = None
+    tags: list[str] | None = None
+    category: str | None = None
     limit: int = 50
 
 class LibrarySearchRequest(BaseModel):
@@ -364,8 +366,8 @@ class LibraryEntryResponse(BaseModel):
 
 class LibraryConfigRequest(BaseModel):
     model: str = "lfm2.5-1.2b"
-    enabled: Optional[bool] = None
-    injection_budget: Optional[int] = None
+    enabled: bool | None = None
+    injection_budget: int | None = None
 
 
 class AgentChatRequest(BaseModel):
@@ -378,7 +380,7 @@ class AgentChatRequest(BaseModel):
     top_p: float = 1.0
     top_k: int = 80
     repetition_penalty: float = 1.05
-    tools: Optional[list[ToolDefinition]] = None  # extra user-defined tools
+    tools: list[ToolDefinition] | None = None  # extra user-defined tools
 
 
 class AgentChatResponse(BaseModel):
@@ -511,7 +513,7 @@ class ForgeServer:
             except FileExistsError:
                 # Check if the PID in the lock file is still alive
                 try:
-                    with open(lock_path, "r") as f:
+                    with open(lock_path) as f:
                         old_pid = int(f.read().strip())
                     # Cross-platform alive check: os.kill(pid, 0) on Unix,
                     # or ctypes OpenProcess on Windows
@@ -570,15 +572,15 @@ class ForgeServer:
         """Start the HTTP server (blocking)."""
         self.batch_queue.start()
         print(f"\n  {'='*60}")
-        print(f"  ForgeAI Inference Server v3.0.0")
+        print("  ForgeAI Inference Server v3.0.0")
         print(f"  Listening on http://{host}:{port}")
         print(f"  Models: {[m['id'] for m in self.registry.list_models()]}")
         print(f"  Batch queue: window={self.batch_queue.batch_window*1000:.0f}ms, "
               f"max_batch={self.batch_queue.max_batch_size}")
         print(f"  Session manager: max={self.session_manager.max_sessions} tasks")
-        print(f"  Endpoints: /v1/chat/completions, /v1/completions, /v1/models,")
-        print(f"             /v1/tasks, /v1/tasks/{{id}}/messages,")
-        print(f"             /v1/tasks/{{id}}/config (PATCH), /health")
+        print("  Endpoints: /v1/chat/completions, /v1/completions, /v1/models,")
+        print("             /v1/tasks, /v1/tasks/{id}/messages,")
+        print("             /v1/tasks/{id}/config (PATCH), /health")
         print(f"  {'='*60}\n")
         try:
             uvicorn.run(self.app, host=host, port=port, log_level="warning")
@@ -1008,15 +1010,15 @@ class ForgeServer:
         @app.patch("/v1/security/config")
         async def update_security_config(
             model_id: str = "lfm2.5-1.2b",
-            auto_mode: Optional[str] = None,
-            set_access_rules: Optional[dict[str, str]] = None,
-            remove_access_rules: Optional[list[str]] = None,
-            add_file_blacklist: Optional[list[str]] = None,
-            remove_file_blacklist: Optional[list[str]] = None,
-            add_website_whitelist: Optional[list[str]] = None,
-            remove_website_whitelist: Optional[list[str]] = None,
-            add_website_blacklist: Optional[list[str]] = None,
-            remove_website_blacklist: Optional[list[str]] = None,
+            auto_mode: str | None = None,
+            set_access_rules: dict[str, str] | None = None,
+            remove_access_rules: list[str] | None = None,
+            add_file_blacklist: list[str] | None = None,
+            remove_file_blacklist: list[str] | None = None,
+            add_website_whitelist: list[str] | None = None,
+            remove_website_whitelist: list[str] | None = None,
+            add_website_blacklist: list[str] | None = None,
+            remove_website_blacklist: list[str] | None = None,
         ):
             """Update security configuration.
 
@@ -1152,7 +1154,7 @@ class ForgeServer:
                 n = engine.load_lora(req.adapter_path, rank=req.rank, alpha=req.alpha)
                 return {"status": "ok", "model": req.model, "n_adapters": n}
             except Exception as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
 
         @app.post("/v1/lora/unload")
         async def lora_unload(model_id: str = "lfm2.5-1.2b"):
@@ -1171,7 +1173,7 @@ class ForgeServer:
             try:
                 registry.wake(model_id)
             except VRAMBudgetExceeded as e:
-                raise HTTPException(507, str(e))
+                raise HTTPException(507, str(e)) from e
             return {"status": "ok", "model": model_id}
 
         @app.get("/v1/models/{model_id}/stats")
@@ -1297,10 +1299,10 @@ class ForgeServer:
                         None, future.result),
                     timeout=120.0,
                 )
-            except asyncio.TimeoutError:
-                raise HTTPException(504, "Generation timed out")
+            except TimeoutError:
+                raise HTTPException(504, "Generation timed out") from None
             except Exception as e:
-                raise HTTPException(500, str(e))
+                raise HTTPException(500, str(e)) from e
 
             # Parse tool calls if present
             tool_calls, content = _parse_tool_calls_openai(result)
@@ -1479,7 +1481,7 @@ class ForgeServer:
                 return {"status": "ok", "cache_type_k": req.cache_type_k,
                         "cache_type_v": req.cache_type_v, "k_bits": k_bits, "v_bits": v_bits}
             except Exception as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
 
         @app.post("/v1/engine/decoding")
         async def switch_decoding(req: SwitchStrategyRequest):
@@ -1639,8 +1641,8 @@ class ForgeServer:
         @app.get("/v1/library/list")
         async def library_list(
             model_id: str = "lfm2.5-1.2b",
-            category: Optional[str] = None,
-            tag: Optional[str] = None,
+            category: str | None = None,
+            tag: str | None = None,
             limit: int = 100,
             offset: int = 0,
         ):
@@ -1671,7 +1673,7 @@ class ForgeServer:
                 return {"status": "ok", "model_id": req.model_id,
                         "loaded": engine is not None}
             except Exception as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
 
         @app.delete("/v1/router/{model_id}")
         async def router_unregister(model_id: str):

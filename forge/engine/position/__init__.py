@@ -12,11 +12,8 @@ key/query cluster separation across sequence lengths for length generalization.
 """
 from __future__ import annotations
 
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 
 # ── LeRoPE ─────────────────────────────────────────────────────────────
 
@@ -146,7 +143,7 @@ class RoPEID:
 
         d = head_dim // 2
         n_rotated = max(1, int(d * rotation_fraction))
-        n_free = d - n_rotated
+        d - n_rotated
 
         # Standard frequencies for non-rotated channels (low frequency)
         freqs_standard = 1.0 / (base ** (torch.arange(0, d).float() / d))
@@ -191,7 +188,7 @@ class RoPEID:
 
         # Split into rotated and free channels
         x_rot = x[..., :d]
-        x_pass = x[..., d:]
+        x[..., d:]
 
         # Apply rotation only to rotated channels
         x1 = x_rot * cos - self._shift(x_rot) * sin

@@ -60,11 +60,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
-from forge.engine.prefix_cache import _chunk_hash, _prefix_hash
+from forge.engine.prefix_cache import _chunk_hash
+from forge.keys._tensor_utils import _rotate_half
 
 if TYPE_CHECKING:
     from forge.engine.forge_engine import ForgeEngine
@@ -134,7 +135,7 @@ class ChunkStore:
             del self._chunks[oldest]
         return h
 
-    def get(self, chunk_hash: int) -> Optional[ChunkRecord]:
+    def get(self, chunk_hash: int) -> ChunkRecord | None:
         rec = self._chunks.get(chunk_hash)
         if rec is not None:
             rec.access_count += 1
@@ -211,12 +212,6 @@ class RangeMatcher:
 
 
 # ── RoPE re-rotation for reused K ─────────────────────────────────────────
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=-1)
 
 
 def reposition_keys(k: torch.Tensor, rope, old_positions: torch.Tensor,
@@ -419,7 +414,7 @@ class CacheBlend:
         """Pre-compute and store a chunk's KV for future reuse."""
         return self.store.register_chunk(token_ids, past_kv)
 
-    def register_text(self, engine: "ForgeEngine", text: str) -> int:
+    def register_text(self, engine: ForgeEngine, text: str) -> int:
         """Tokenize ``text``, run a prefill, and store the resulting KV."""
         ids = engine.tokenizer(
             text, return_tensors="pt", add_special_tokens=False
@@ -437,7 +432,7 @@ class CacheBlend:
     def lookup(self, token_ids: list[int]) -> list[BlendMatch]:
         return self.matcher.find_matches(token_ids, skip_prefix=True)
 
-    def _get_rope_modules(self, engine: "ForgeEngine") -> list:
+    def _get_rope_modules(self, engine: ForgeEngine) -> list:
         """Collect per-layer RoPE modules from the model's attention blocks."""
         rope_modules = []
         blocks = getattr(engine.model, "blocks", None) or \
@@ -448,8 +443,8 @@ class CacheBlend:
             rope_modules.append(rope)
         return rope_modules
 
-    def blend_prefill(self, engine: "ForgeEngine",
-                      ids: torch.Tensor) -> Optional[tuple]:
+    def blend_prefill(self, engine: ForgeEngine,
+                      ids: torch.Tensor) -> tuple | None:
         """Attempt a CacheBlend prefill for ``ids``.
 
         Returns ``(past_kv, covered_len)`` on a productive blend (the
@@ -496,7 +491,7 @@ class CacheBlend:
         self._tokens_recomputed += plan.recompute_tokens
         return plan.past_kv, plan.covered_len
 
-    def _recompute_regions(self, engine: "ForgeEngine", ids: torch.Tensor,
+    def _recompute_regions(self, engine: ForgeEngine, ids: torch.Tensor,
                            plan: BlendPlan) -> None:
         """Recompute boundary/gap tokens in-context, splicing into ``plan``."""
         from forge.model_loader import unpack_output_with_kv

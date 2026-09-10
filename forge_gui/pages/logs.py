@@ -1,11 +1,17 @@
 """Logs page — multi-source tailed log console with level/source filters + search."""
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.log_tailer import LogTailer
 from ..theme import Palette
@@ -13,12 +19,11 @@ from ..widgets.log_view import LogView
 from ..widgets.metric_card import MetricCard
 from ._base import card_grid, page_container, section_label
 
-
 LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"]
 
 
 class LogsPage(QWidget):
-    def __init__(self, tailer: LogTailer, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, tailer: LogTailer, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tailer = tailer
         self._levels: set[str] = set(LEVELS)

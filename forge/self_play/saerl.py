@@ -29,8 +29,6 @@ This implementation provides:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -131,7 +129,7 @@ class SAERLDiversityController:
 
     def __init__(self, n_clusters: int = 8):
         self.n_clusters = n_clusters
-        self._cluster_centers: Optional[torch.Tensor] = None
+        self._cluster_centers: torch.Tensor | None = None
         self._assignments: dict[int, int] = {}  # sample_id → cluster
 
     def fit(self, features: torch.Tensor):
@@ -229,7 +227,7 @@ class SAERLQualityFilter:
 
     def __init__(self, quality_threshold: float = 0.3):
         self.quality_threshold = quality_threshold
-        self._quality_centroid: Optional[torch.Tensor] = None
+        self._quality_centroid: torch.Tensor | None = None
         self._quality_scores: dict[int, float] = {}
 
     def fit(self, features: torch.Tensor, rewards: torch.Tensor):
@@ -254,7 +252,7 @@ class SAERLQualityFilter:
             quality_scores: sample_id → quality (0=low, 1=high)
         """
         if self._quality_centroid is None:
-            return {sid: 0.5 for sid in sample_ids}
+            return dict.fromkeys(sample_ids, 0.5)
 
         # Quality = negative distance to quality centroid
         distances = torch.norm(features - self._quality_centroid, dim=-1)

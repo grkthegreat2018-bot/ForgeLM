@@ -40,13 +40,9 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import threading
-import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +81,7 @@ class MCPServerConfig:
     auto_start: bool = True
 
     @classmethod
-    def from_dict(cls, d: dict) -> "MCPServerConfig":
+    def from_dict(cls, d: dict) -> MCPServerConfig:
         return cls(
             name=d.get("name", "unnamed"),
             transport=d.get("transport", "stdio"),
@@ -142,7 +138,7 @@ class MCPClient:
         try:
             self._send_notification("notifications/initialized", {})
         except Exception:
-            pass
+            logger.debug("Failed to send initialized notification to MCP server", exc_info=True)
         return result
 
     def list_tools(self) -> list[MCPTool]:
@@ -183,8 +179,8 @@ class StdioMCPClient(MCPClient):
 
     def __init__(self, config: MCPServerConfig) -> None:
         super().__init__(config)
-        self._proc: Optional[subprocess.Popen] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._proc: subprocess.Popen | None = None
+        self._stderr_thread: threading.Thread | None = None
 
     def _send_request(self, method: str, params: dict | None = None) -> dict:
         if self._proc is None or self._proc.poll() is not None:
@@ -222,7 +218,7 @@ class StdioMCPClient(MCPClient):
             self._proc.stdin.write(line)
             self._proc.stdin.flush()
         except Exception:
-            pass
+            logger.debug("Failed to write to MCP server stdin", exc_info=True)
 
     def start(self) -> None:
         """Launch the MCP server subprocess."""
@@ -259,7 +255,7 @@ class StdioMCPClient(MCPClient):
                 try:
                     self._proc.kill()
                 except Exception:
-                    pass
+                    logger.debug("Failed to kill MCP server process", exc_info=True)
             self._proc = None
         self._connected = False
         super().close()
@@ -320,7 +316,7 @@ class MCPManager:
     Pure-stdlib (no Qt) so it can be unit-tested anywhere.
     """
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root else Path("data/mcp")
         self._path = self._root / "servers.json"
         self._servers: list[MCPServerConfig] = []
@@ -367,7 +363,7 @@ class MCPManager:
             return True
         return False
 
-    def get_server(self, name: str) -> Optional[MCPServerConfig]:
+    def get_server(self, name: str) -> MCPServerConfig | None:
         for s in self._servers:
             if s.name == name:
                 return s

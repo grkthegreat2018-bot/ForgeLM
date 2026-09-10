@@ -12,10 +12,10 @@ Example for quant domain:
 from __future__ import annotations
 
 import collections
-import torch
-import numpy as np
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
+
+import numpy as np
 
 
 @dataclass
@@ -45,7 +45,7 @@ class MapElitesArchive:
         self._init_grid()
         self.n_filled = 0
         self.best_score = -float("inf")
-        self.best_entry: Optional[ArchiveEntry] = None
+        self.best_entry: ArchiveEntry | None = None
         self.max_history = max_history  # cap to prevent OOM on long runs
         self.history = collections.deque(maxlen=self.max_history)
         self._pareto_cache: list[ArchiveEntry] | None = None  # cached Pareto front
@@ -94,7 +94,7 @@ class MapElitesArchive:
             return True
         return False
 
-    def sample_elite(self) -> Optional[ArchiveEntry]:
+    def sample_elite(self) -> ArchiveEntry | None:
         """Sample a random non-empty cell's entry (for crossover/mutation)."""
         filled = [v for v in self.grid.values() if v is not None]
         if not filled:
@@ -102,7 +102,7 @@ class MapElitesArchive:
         return np.random.choice(filled)
 
     def sample_elite_ucb(self, current_gen: int = 0,
-                         c: float = 1.0) -> Optional[ArchiveEntry]:
+                         c: float = 1.0) -> ArchiveEntry | None:
         """UCB-based parent selection (Monte Carlo Elites).
 
         From "Monte Carlo Elites" (Gaier 2021): treat parent selection as

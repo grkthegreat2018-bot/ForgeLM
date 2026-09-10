@@ -57,10 +57,11 @@ Usage:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass, field
 
 
 def _to_complex(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
@@ -520,7 +521,7 @@ class Mamba3Block(nn.Module):
             if use_cache:
                 # Save conv state (last d_conv-1 pre-conv inputs)
                 x_pre_conv_t = x_ssm.transpose(1, 2)  # (B, d_inner, T)
-                if T >= self.d_conv - 1:
+                if self.d_conv - 1 <= T:
                     present_conv_state = x_pre_conv_t[:, :, -(self.d_conv - 1):]
                 else:
                     pad = self.d_conv - 1 - T

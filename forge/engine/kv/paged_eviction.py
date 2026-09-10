@@ -144,7 +144,7 @@ class PagedEvictionKVCache(KVCacheStrategy):
         - "lfu": evict least-frequently-accessed blocks
         - "importance": evict lowest L2-norm blocks (original behavior)
         """
-        n_valid = self.block_valid.sum().item()
+        self.block_valid.sum().item()
         n_to_evict = (self.seq_len - self.budget) // self.block_size + 1
         if n_to_evict <= 0:
             return

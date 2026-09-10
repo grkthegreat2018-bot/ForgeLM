@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import math
-import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,8 +23,9 @@ from .domains import BaseDomain
 from .reward_guard import RewardGuard, ScoringSpec
 from .simulators import get_simulator
 
-
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "tests" / "evolution" / "configs" / "domains"
+CONFIG_DIR = Path(__file__).resolve().parent / "configs" / "domains"
+# Fallback to old tests/ location for backward compat (critique F24 migration)
+_LEGACY_CONFIG_DIR = Path(__file__).resolve().parents[2] / "tests" / "evolution" / "configs" / "domains"
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ class ParamSpec:
     threshold: float = 0.5
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ParamSpec":
+    def from_dict(cls, d: dict) -> ParamSpec:
         return cls(
             name=d["name"],
             kind=d["type"],
@@ -122,7 +123,7 @@ class DomainSpec:
     # When set, decode_params combines all param values into a single array
     # under this key (e.g. synthetic domain: 8 params → {"x": [v0..v7]}).
     # encode_config reads the array back into individual params.
-    array_output: Optional[str] = None
+    array_output: str | None = None
     # Gen model type: "mlp" (default, fast param search) | "llm" (task-solving)
     gen_model_type: str = "mlp"
     # Checker type: "script" (default, fast) | "llm_judge" | "model_boot"
@@ -137,7 +138,7 @@ class DomainSpec:
         return len(self.params)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DomainSpec":
+    def from_dict(cls, d: dict) -> DomainSpec:
         params = [ParamSpec.from_dict(p) for p in d["params"]]
         behav = [tuple(b) for b in d["behavioral_dims"]]
         scoring = ScoringSpec.from_dict(d["scoring"])
@@ -160,7 +161,7 @@ class DomainSpec:
         )
 
     @classmethod
-    def from_json_file(cls, path: str | Path) -> "DomainSpec":
+    def from_json_file(cls, path: str | Path) -> DomainSpec:
         with open(path) as f:
             return cls.from_dict(json.load(f))
 
@@ -212,7 +213,7 @@ class DomainSpec:
 # ---------------------------------------------------------------------------
 
 _SPEC_CACHE: dict[str, DomainSpec] = {}
-_SPEC_DIR_OVERRIDE: Optional[Path] = None
+_SPEC_DIR_OVERRIDE: Path | None = None
 
 
 def set_spec_dir(path: str | Path | None) -> None:
@@ -223,7 +224,13 @@ def set_spec_dir(path: str | Path | None) -> None:
 
 
 def spec_dir() -> Path:
-    return _SPEC_DIR_OVERRIDE if _SPEC_DIR_OVERRIDE is not None else CONFIG_DIR
+    if _SPEC_DIR_OVERRIDE is not None:
+        return _SPEC_DIR_OVERRIDE
+    # Prefer the production location; fall back to legacy tests/ location
+    # (critique F24 — specs moved from tests/ to forge/evolution/configs/)
+    if CONFIG_DIR.exists():
+        return CONFIG_DIR
+    return _LEGACY_CONFIG_DIR
 
 
 def load_spec(name: str) -> DomainSpec:
@@ -311,7 +318,7 @@ class JSONSpecDomain(BaseDomain):
         metrics = self.simulate(config)
         return self._guard.score(config, metrics)
 
-    def to_cpu(self) -> "JSONSpecDomain":
+    def to_cpu(self) -> JSONSpecDomain:
         """CPU copy for parallel evaluation."""
         return JSONSpecDomain(spec=self.spec, seq_len=self.seq_len,
                               seed=self._seed, device=torch.device("cpu"))

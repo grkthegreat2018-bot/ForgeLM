@@ -24,6 +24,7 @@ Usage in SFTTrainer:
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from typing import Any
 
 import torch
 
+logger = logging.getLogger(__name__)
 
 # ── EventLog ──────────────────────────────────────────────────────────────
 
@@ -333,7 +335,7 @@ def build_health_report(engine) -> dict:
             info = engine.kv_cache.info()
             report["kv_cache"] = info
         except Exception:
-            pass
+            logger.debug("Failed to get KV cache info for diagnostics", exc_info=True)
 
     # Recent errors from event log
     if hasattr(engine, "events"):

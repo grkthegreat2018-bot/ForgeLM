@@ -29,7 +29,6 @@ Usage:
     # Or as a key:
     key = QSAKey(block_size=4, budget_blocks=512)
 """
-from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -129,7 +128,7 @@ class QSALayer(nn.Module):
         return scores, n_blocks
 
     def forward(self, x: torch.Tensor, past_key_value=None,
-                use_cache: bool = False) -> tuple[torch.Tensor, Optional[dict]]:
+                use_cache: bool = False) -> tuple[torch.Tensor, dict | None]:
         """Forward pass with micro-block sparse attention.
 
         Args:

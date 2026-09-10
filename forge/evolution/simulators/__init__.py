@@ -15,7 +15,8 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # Type: simulate(config: dict, domain: BaseDomain) -> dict[str, float]
 SimulatorFn = Callable[[dict, Any], dict]

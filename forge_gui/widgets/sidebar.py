@@ -14,13 +14,19 @@ Features:
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QScrollArea, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..api.status_reader import project_root
 
@@ -32,7 +38,7 @@ class NavButton(QPushButton):
     """Flat selectable nav button with an [active] property for QSS styling."""
 
     def __init__(self, text: str, icon: str = "",
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._label = text
         self._full_text = ("  " + icon + "  " if icon else "    ") + text
@@ -79,7 +85,7 @@ class NavSidebar(QFrame):
     collapsed_changed = Signal(bool)
 
     def __init__(self, items: list[tuple[str, str]],
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
         self._full_width = _FULL_WIDTH

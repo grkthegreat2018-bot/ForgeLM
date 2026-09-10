@@ -30,7 +30,6 @@ Usage:
     # Inference with speculative decoding
     output = medusa_generate(model, heads, tokenizer, prompt, max_new_tokens=100)
 """
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn

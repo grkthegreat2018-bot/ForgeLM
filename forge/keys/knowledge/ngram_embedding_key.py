@@ -35,7 +35,6 @@ Usage:
     # Or as a key:
     key = NGramEmbeddingKey(n_gram=2, table_size=2_000_000)
 """
-from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -119,7 +118,7 @@ class NGramEmbeddingLayer(nn.Module):
         """
         B, T = input_ids.shape
 
-        if T < self.n_gram:
+        if self.n_gram > T:
             # Not enough context for n-gram — return unchanged
             return token_embeddings
 
@@ -191,7 +190,7 @@ class NGramEmbeddingKey(Key):
         Returns KeyResult with weights:
             {"ngram_table": (table_size, d_model) — all zeros}
         """
-        vocab_size = data["vocab_size"]
+        data["vocab_size"]
         d_model = data["d_model"]
 
         table = torch.zeros(self.table_size, d_model, dtype=torch.float32)

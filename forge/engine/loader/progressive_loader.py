@@ -10,11 +10,14 @@ tensors stream in background via a daemon thread.
 """
 from __future__ import annotations
 
+import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressiveLoader:
@@ -98,7 +101,7 @@ class ProgressiveLoader:
                     self._essential_loaded.add(name)
                 result[name] = t
             except Exception:
-                pass
+                logger.debug("Failed to load essential tensor %s", name, exc_info=True)
         return result
 
     def load_remaining_background(self, callback: Callable | None = None):
@@ -118,7 +121,7 @@ class ProgressiveLoader:
                         self._tensors[name] = t
                         self._loaded_names.add(name)
                 except Exception:
-                    pass
+                    logger.debug("Failed to load tensor %s in background", name, exc_info=True)
             self._bg_done.set()
             if callback:
                 callback()

@@ -18,12 +18,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from ..theme import Palette
@@ -115,7 +121,7 @@ _FALLBACK_CATALOG: tuple[ModelSearchResult, ...] = (
 
 
 def search_models(query: str,
-                  catalog: Optional[tuple[ModelSearchResult, ...]] = None
+                  catalog: tuple[ModelSearchResult, ...] | None = None
                   ) -> list[ModelSearchResult]:
     """Filter the catalog by substring match on repo_id (case-insensitive).
 
@@ -158,7 +164,7 @@ class DownloadThread(QThread):
     def cancel(self) -> None:
         self._cancel = True
 
-    def run(self) -> None:  # noqa: C901
+    def run(self) -> None:
         try:
             self.status.emit(f"Resolving {self.repo_id}…")
             try:
@@ -215,9 +221,9 @@ class DownloadThread(QThread):
 class DownloadManager(QWidget):
     """Search HuggingFace models, preview post-quant VRAM, download."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._thread: Optional[DownloadThread] = None
+        self._thread: DownloadThread | None = None
         self._results: list[ModelSearchResult] = []
         self._build_ui()
         self._refresh_results()

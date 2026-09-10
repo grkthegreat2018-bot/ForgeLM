@@ -21,12 +21,9 @@ import json
 import logging
 import subprocess
 import sys
-from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
-                               QMessageBox, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .status_reader import project_root
 
@@ -70,8 +67,8 @@ class LibraryInstallManager(QObject):
     agent_unfreeze = Signal()
     allowlist_updated = Signal(str)
 
-    def __init__(self, venv_python: Optional[str] = None,
-                 parent: Optional[QWidget] = None) -> None:
+    def __init__(self, venv_python: str | None = None,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._parent_widget = parent
         self._venv_python = venv_python or sys.executable
@@ -130,7 +127,7 @@ class LibraryInstallManager(QObject):
 
     # ── install flow ──────────────────────────────────────────────────
     def request_install(self, package: str,
-                        parent: Optional[QWidget] = None) -> dict:
+                        parent: QWidget | None = None) -> dict:
         """Request to install a package. Shows dialog if not in allowlist.
 
         Returns dict with:
@@ -157,7 +154,7 @@ class LibraryInstallManager(QObject):
             self.agent_unfreeze.emit()
 
     def _show_approval_dialog(self, package: str,
-                              parent: Optional[QWidget]) -> tuple[bool, bool]:
+                              parent: QWidget | None) -> tuple[bool, bool]:
         """Show the approval dialog. Returns (approved, save_to_allowlist)."""
         dialog = QDialog(parent or self._parent_widget)
         dialog.setWindowTitle("Library Install Request")

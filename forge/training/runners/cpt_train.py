@@ -41,11 +41,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import logging
 import random
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -61,24 +63,22 @@ from forge.checkpoint_io import (
 from forge.config import get_config
 from forge.model_loader import ModelLoader
 from forge.runtime.task_logger import task_scope
-from research.tokenizer_cache import get_tokenizer
 from forge.training.training_utils import (
     add_safeguard_args,
     configure_optimizer,
     get_lr,
-    grad_accum_for_effective_batch,
     has_nan_params,
     init_ema,
+    load_anchor_cached,
     oom_guard,
+    patch_triton_cache_for_windows,
     restore_ema,
     update_ema,
-    patch_triton_cache_for_windows,
     vram_exceeded,
     write_heartbeat,
     write_status_json,
-    load_anchor_cached,
 )
-
+from research.tokenizer_cache import get_tokenizer
 
 # ── Data loading ────────────────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ def tokenize_and_pack(
     n_full = len(all_tokens) // seq_len
     remainder = len(all_tokens) % seq_len
     if n_full == 0 and remainder == 0:
-        print(f"Warning: 0 tokens, nothing to pack")
+        print("Warning: 0 tokens, nothing to pack")
         return torch.empty(0, seq_len, dtype=torch.long)
     if remainder > 0:
         # Pad the final partial chunk to seq_len so all data is used.
@@ -301,7 +301,7 @@ def main():
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
 
     print(f"\n{'='*70}")
-    print(f"  CPT WITH REASONING TRACE INJECTION")
+    print("  CPT WITH REASONING TRACE INJECTION")
     print(f"{'='*70}")
     print(f"Config: {args.config}")
     print(f"Checkpoint: {args.checkpoint}")
@@ -315,13 +315,13 @@ def main():
     print(f"Tokenizer: vocab={tokenizer.vocab_size}, pad_id={pad_id}")
 
     # ── Load data ──
-    print(f"\nLoading reasoning data...")
+    print("\nLoading reasoning data...")
     reasoning_examples = load_jsonl_examples(args.reasoning_data, args.max_examples)
     print(f"Total reasoning examples: {len(reasoning_examples)}")
 
     general_examples = []
     if args.general_data:
-        print(f"\nLoading general data...")
+        print("\nLoading general data...")
         general_examples = load_jsonl_examples(args.general_data, args.max_examples)
         print(f"Total general examples: {len(general_examples)}")
 
@@ -385,7 +385,6 @@ def main():
     anchor_named_params = None
     if args.anchor and args.l2_lambda > 0:
         print(f"Loading anchor checkpoint for L2-SP: {args.anchor}")
-        from safetensors.torch import load_file as safetensors_load
         anchor_sd = load_anchor_cached(args.anchor)
         anchor_named_params = {}
         for name, p in model.named_parameters():
@@ -405,7 +404,7 @@ def main():
     last_loss = 0.0
     t0 = time.time()
 
-    with task_scope("cpt") as log:
+    with task_scope("cpt"):
         while step < args.max_steps:
             if vram_exceeded(args.vram_limit_gb, device):
                 print("VRAM limit exceeded; emergency save + abort.")
@@ -465,14 +464,14 @@ def main():
             optimizer.zero_grad()
             # DeepSeek-V3 aux-loss-free: update expert bias after step.
             try:
-                from forge.moe.moe import update_moe_biases, disable_dense_bypass
+                from forge.moe.moe import disable_dense_bypass, update_moe_biases
                 update_moe_biases(model)
                 # Disable dense_bypass after warmup so router activates.
                 warmup_steps = getattr(config, 'moe_dense_bypass_warmup_steps', 0)
                 if warmup_steps > 0 and step == warmup_steps:
                     disable_dense_bypass(model)
             except Exception:
-                pass  # no-op for dense models
+                logger.debug("MoE dense_bypass disable failed (no-op for dense models)", exc_info=True)  # no-op for dense models
             accum_count = 0
 
             # EMA update
