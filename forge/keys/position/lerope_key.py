@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 
 from forge.keys._tensor_utils import _rotate_half
+from forge.model_loader import RotaryEmbedding
 
 
 class LeRoPEEmbedding(nn.Module):

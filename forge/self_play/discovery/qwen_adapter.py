@@ -22,6 +22,8 @@ import json
 import re
 from typing import Any
 
+import torch
+
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 # Jamba Reasoning 3B token IDs
@@ -37,6 +39,15 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 TOOL_CALL_START_ID = 531
 TOOL_CALL_END_ID = 532
+
+# Aliases for the constrained-decoding helpers below. In the legacy LFM2.5
+# tokenizer these were the first BPE ids of the <|tool_call_start|> text
+# markers (10/11) and EOS_ID was <|im_end|> (7). With the Jamba tokenizer
+# the markers are single special tokens, so the aliases point at 531/532
+# and <|im_end|> (519).
+TOOL_CALL_START_FIRST_ID = TOOL_CALL_START_ID
+TOOL_CALL_END_FIRST_ID = TOOL_CALL_END_ID
+EOS_ID = EOS_IDS[1]  # <|im_end|>
 
 # Jamba tool result markers (single tokens: 539/540)
 TOOL_RESP_START = "<|tool_resp_start|>"
@@ -355,8 +366,8 @@ def qwen_generate(model, tokenizer, prompt: str, max_new_tokens: int = 256,
                     add_special_tokens=False).input_ids.to(device)
     prompt_len = ids.shape[1]
 
-    # Constrained decoding: trigger on the start marker (token 10).
-    # In constrained mode, skip the end marker (token 11) and newline tokens
+    # Constrained decoding: trigger on the start marker (token 531).
+    # In constrained mode, skip the end marker (token 532) and newline tokens
     # (structural tokens between markers and JSON, not part of the JSON grammar).
     newline_ids = set(tokenizer.encode("\n", add_special_tokens=False))
     skip_token_ids = {TOOL_CALL_END_FIRST_ID} | newline_ids
@@ -517,11 +528,12 @@ def make_grammar_logits_processor(grammar_matcher, bitmask, tokenizer):
     """Build a logits_processor callback for ForgeEngine.generate_raw().
 
     Implements the same two-phase constrained decoding as qwen_generate():
-      - Phase 1 (free text): no masking. When TOOL_CALL_START_FIRST_ID (10)
-        is emitted, switch to constrained mode.
+      - Phase 1 (free text): no masking. When the start marker
+        (<tool_call>, id 531) is emitted, switch to constrained mode.
       - Phase 2 (constrained): apply xgrammar bitmask to enforce valid
         tool-call JSON. Skip structural tokens (end marker, newlines).
-        When TOOL_CALL_END_FIRST_ID (11) is emitted, switch back to free text.
+        When the end marker (</tool_call>, id 532) is emitted, switch
+        back to free text.
 
     The processor is stateful (tracks constrained mode + accepted tokens).
     """
@@ -536,7 +548,7 @@ def make_grammar_logits_processor(grammar_matcher, bitmask, tokenizer):
         # after fill_next_token_bitmask leaves the mask one step stale and
         # lets the model re-emit tokens it already generated (garbage like
         # {"{"namename"") — only visible when the model emits the real
-        # <|tool_call_start|> special token (id 10).
+        # <tool_call> special token (id 531).
         if state["constrained"] and generated_ids and grammar_matcher is not None:
             last_tok = generated_ids[-1]
             if last_tok == TOOL_CALL_END_FIRST_ID:

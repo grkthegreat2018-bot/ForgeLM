@@ -459,7 +459,7 @@ def _frozen_dim_detect(pen: PenaltySpec, config: dict, metrics: dict) -> float:
     return -frozen * 2.0
 
 
-def _long_range_diversity(pen: PenaltySpec, config: config, metrics: dict) -> float:
+def _long_range_diversity(pen: PenaltySpec, config: dict, metrics: dict) -> float:
     """Require rotation diversity at long positions."""
     div = float(metrics.get("long_range_diversity", 1.0))
     if div < 0.3:

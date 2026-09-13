@@ -99,15 +99,15 @@ class KVpopCache:
             self.scorer = self.scorer.to(device)
 
         # Storage
-        self.k_sink = torch.zeros(1, n_kv, sink_size, head_dim, dtype=dtype, device=device)
+        self.k_sink = torch.zeros(1, n_kv_heads, sink_size, head_dim, dtype=dtype, device=device)
         self.v_sink = torch.zeros_like(self.k_sink)
         self.sink_len = 0
 
-        self.k_window = torch.zeros(1, n_kv, window_size, head_dim, dtype=dtype, device=device)
+        self.k_window = torch.zeros(1, n_kv_heads, window_size, head_dim, dtype=dtype, device=device)
         self.v_window = torch.zeros_like(self.k_window)
         self.window_len = 0
 
-        self.k_long = torch.zeros(1, n_kv, long_range_budget, head_dim, dtype=dtype, device=device)
+        self.k_long = torch.zeros(1, n_kv_heads, long_range_budget, head_dim, dtype=dtype, device=device)
         self.v_long = torch.zeros_like(self.k_long)
         self.long_len = 0
         self.long_scores = torch.zeros(long_range_budget, device=device)

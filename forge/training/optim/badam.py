@@ -517,10 +517,11 @@ class BAdam(Optimizer):
         # After the CPU master weight is updated by Adam, the int8 ternary
         # buffer on GPU must be refreshed (STE re-projection).
         if updated_modules:
-            for mod_id, mod in [(mid, m) for mid, m in
-                                ((k, v) for k, v in self._param_to_module.items())
-                                if k in updated_modules]:
-                mod.requantize_from_master()
+            seen = set()
+            for mod in self._param_to_module.values():
+                if id(mod) in updated_modules and id(mod) not in seen:
+                    seen.add(id(mod))
+                    mod.requantize_from_master()
 
         # Switch to next block if we've done enough steps
         if self._steps_in_block >= self.switch_every:

@@ -32,6 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from forge.engine.decoding import StandardDecoding
+from forge.model_loader import unpack_output_with_kv as unpack_kv
 
 
 class NgramProposer:
@@ -208,20 +209,6 @@ class UnoDecoding(StandardDecoding):
                 self.proposer.update(context[-self.proposer.n:])
 
         return torch.tensor(context, dtype=torch.long, device=device).unsqueeze(0)
-
-
-def sample_token(logits, top_p: float = 1.0, top_k: int = 80) -> int:
-    l = logits[0].float().clone()
-    if top_k > 0 and top_k < l.shape[-1]:
-        thresh = torch.topk(l, top_k)[0][-1]
-        l[l < thresh] = float("-inf")
-    if top_p < 1.0:
-        sorted_l, sorted_idx = torch.sort(l, descending=True)
-        cum = torch.cumsum(F.softmax(sorted_l, dim=-1), dim=-1)
-        mask = cum - F.softmax(sorted_l, dim=-1) > top_p
-        sorted_l[mask] = float("-inf")
-        l = torch.zeros_like(l).scatter(0, sorted_idx, sorted_l)
-    return int(F.softmax(l, dim=-1).multinomial(1))
 
 
 def sample_token(logits, top_p: float = 1.0, top_k: int = 80) -> int:

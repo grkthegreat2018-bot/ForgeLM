@@ -910,7 +910,7 @@ def _eagle_generate_from_ids(
             cur_token = draft_tok
 
         # Verify with target
-        draft_tensor = torch.tensor([draft_tokens], device=device, dtype=ids.dtype)
+        draft_tensor = torch.tensor([draft_tokens], device=device, dtype=input_ids.dtype)
         verify_hidden, verify_final, presents = extract_hidden_states(
             model, draft_tensor, extract_layers,
             past_key_values=presents, use_cache=True,

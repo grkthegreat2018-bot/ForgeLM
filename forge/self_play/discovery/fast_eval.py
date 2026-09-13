@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from forge.checkpoint_io import load_checkpoint
 from forge.engine.forge_engine import ForgeEngine
 from forge.self_play.discovery.qwen_adapter import (
-    EOS_ID,
+    EOS_IDS,
     qwen_parse_tool_calls,
 )
 
@@ -451,7 +451,7 @@ def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda"):
         temperature=0.0,
         top_k=80,
         repetition_penalty=1.05,
-        eos_token_ids=[EOS_ID],
+        eos_token_ids=list(EOS_IDS),
         skip_special_tokens=False,
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000

@@ -28,6 +28,9 @@ except ImportError:
     muon_update = None
 
     class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
+        def __init__(self, param_groups):
+            super().__init__(param_groups, dict())
+
         def step(self, closure=None):
             return None
 
@@ -115,7 +118,10 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
             self._sf = torch.optim.AdamW(
                 adam_params, lr=adam_lr, betas=(0.9, 0.95), weight_decay=0.0
             )
-        super().__init__(muon_groups, {"lr": adam_lr})
+        # muon>=0.2: SingleDeviceMuonWithAuxAdam(param_groups) — per-group
+        # dicts carry their own lr/momentum/weight_decay (aux AdamW params
+        # were split out above and are owned by self._sf).
+        super().__init__(muon_groups)
         self._adam_params = adam_params
         self._rank_fraction = float(rank_fraction)
         if hasattr(self._sf, "train"):
@@ -134,7 +140,9 @@ class MuonScheduleFree(SingleDeviceMuonWithAuxAdam):
                     update = _dion2_update(
                         p.grad, state["momentum_buffer"],
                         beta=group["momentum"], rank_fraction=self._rank_fraction)
-                elif _HAS_MUON:
+                elif _HAS_MUON and p.grad.ndim >= 2:
+                    # muon_update asserts ndim>=2 (batched Newton-Schulz);
+                    # 1-D params (biases, norms) in use_muon groups fall back.
                     update = muon_update(
                         p.grad, state["momentum_buffer"], beta=group["momentum"]
                     )

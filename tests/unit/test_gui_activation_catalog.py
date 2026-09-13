@@ -18,14 +18,42 @@ def _activation_config_fields():
     return {f.name for f in dataclasses.fields(ActivationConfig)}
 
 
+ARCH_OVERRIDE_CATEGORY = "Architecture Overrides"
+
+
+def _model_config_fields():
+    """Get ModelConfig field names (import lazily — pulls in torch)."""
+    from forge.config import ModelConfig
+    return {f.name for f in dataclasses.fields(ModelConfig)}
+
+
 def test_catalog_covers_all_activation_config_fields():
-    """Every ActivationConfig field must appear in the catalog exactly once."""
+    """Every ActivationConfig field must appear in the catalog exactly once.
+
+    The "Architecture Overrides" category is exempt: those fields are
+    construction-time ModelConfig overrides (passed via
+    ``from_checkpoint(config_overrides=...)``), not activate() kwargs.
+    They are checked against ModelConfig by
+    ``test_arch_overrides_are_model_config_fields`` instead.
+    """
     cfg_fields = _activation_config_fields()
-    catalog_names = {f.name for f in cat.FIELDS}
+    catalog_names = {f.name for f in cat.FIELDS
+                     if f.category != ARCH_OVERRIDE_CATEGORY}
     missing = cfg_fields - catalog_names
     extra = catalog_names - cfg_fields
     assert not missing, f"ActivationConfig fields missing from catalog: {missing}"
     assert not extra, f"Catalog has fields not in ActivationConfig: {extra}"
+
+
+def test_arch_overrides_are_model_config_fields():
+    """Architecture Override catalog entries must name real ModelConfig
+    fields — they are applied via config_overrides at model construction."""
+    model_fields = _model_config_fields()
+    arch_names = {f.name for f in cat.FIELDS
+                  if f.category == ARCH_OVERRIDE_CATEGORY}
+    assert arch_names, "expected at least one Architecture Overrides field"
+    bogus = arch_names - model_fields
+    assert not bogus, f"Arch overrides not in ModelConfig: {bogus}"
 
 
 def test_no_duplicate_field_names():

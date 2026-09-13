@@ -155,10 +155,6 @@ def fused_gated_conv_forward(
         conv_state.copy_(window[:, :, 1:])  # update state
         out = conv_out.transpose(1, 2) * C_gate  # (B, 1, D)
         return out
-
-        # Apply output gate
-        out = out_t.transpose(1, 2) * C_gate  # (B, 1, D)
-        return out
     else:
         # Prefill or no Triton: use PyTorch Conv1d (cuDNN is fast for prefill)
         x_t = Bx.transpose(1, 2)  # (B, D, T)

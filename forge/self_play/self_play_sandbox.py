@@ -48,8 +48,12 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from research.training_free.solver import TrainingFreeSolver
 
 from forge.engine.scheduler.async_d2h import AsyncTokenReader, StreamedGenerator
 from forge.self_play.io_match import io_match, io_similarity

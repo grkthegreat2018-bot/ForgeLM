@@ -367,10 +367,14 @@ class InfiniteSelfPlayLoop:
         # for correctness.
         _solve_lock = Lock()
 
-        def _solve_and_record(task):
-            """Solve a single task and return (task, result)."""
+        def _solve_and_record(task, _curr=curriculum):
+            """Solve a single task and return (task, result).
+
+            ``curriculum`` is bound as a default arg so the closure survives
+            the ``del curriculum`` in the early-return path above.
+            """
             with _solve_lock:
-                result = curriculum.solve_task(task)
+                result = _curr.solve_task(task)
             return task, result
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
