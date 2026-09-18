@@ -231,3 +231,186 @@ but the GUI call sites did not pass it.
 ### Verification
 - `tests/unit/test_gui_agent_tools.py` (14) + `test_gui_chat_store.py`
   (8) pass: 22 passed, 0 failed.
+
+
+## 2026-09-13 - ForgeLM V2 Jamba: decorrelated outputs (use_rope), bf16 SSM scan drift, EOS blind spot, Quamba2+LoRA dtype crashes
+
+### Symptom
+Booting ForgeLM V2 (Jamba-Reasoning-3B port) produced fluent but semantically
+incoherent text: think-traces hallucinated alternate user prompts, never
+converged to answers, and ran past <|im_end|> to the token cap. Full-model
+parity vs HF JambaForCausalLM showed logit cosine ~0.0 (per-layer probe:
+divergence jumped at attention blocks 7/21). Separately, Quamba2+LoRA crashed
+in add_lora_adapters (no .weight on Quamba2Linear) and warmup hit
+fp32-vs-bf16 matmul errors.
+
+### Root Cause
+- forgelm_v2 preset set use_rope=True, but Jamba attention layers carry NO
+  positional encoding (HF JambaAttention has no rotary call - Mamba supplies
+  position). RoPE-scrambled Q/K decorrelated the only 2 attention layers.
+- MambaLayer._selective_scan_ref ran the SSM recurrence in bf16; HF keeps the
+  state and discretization in fp32 (~8%/element/layer drift, compounded over
+  26 layers). Same issue in Quamba2Block._selective_scan_ref and _rmsnorm.
+- StandardDecoding hardcoded eos_set={7,151643,151645} (LFM/Qwen only),
+  ignoring engine _DEFAULT_EOS_TOKEN_IDS - Jamba 2/519 never stopped decode.
+  eos_set.add(list) would also crash on HF list-valued eos_token_id.
+- add_lora_adapters only probed weight/weight_packed/dense_packed; Quamba2
+  uses weight_int4_packed. Quamba2Linear.forward never applied lora_adapter.
+- Quamba2Block cast the SSM core to fp16, promoting activations to fp32 and
+  breaking downstream bf16 matmuls (out_proj/LoRA).
+
+### Resolution
+- forge/config.py: forgelm_v2 use_rope=False (Jamba attention is
+  position-agnostic; rope_base kept for API shape only).
+- mamba_probe.py + quamba2.py: fp32 SSM recurrence (h/A_bar/B_bar/x in fp32,
+  per-step output cast to activation dtype like HF), fp32 RMSNorm.
+- quamba2.py: Quamba2Linear.forward applies lora_adapter with dtype
+  alignment; block output cast back to model dtype.
+- bitnet_lora.py: device detection falls back to weight_int4_packed.
+- decoding.py: eos_set now includes Jamba {2,519} at both StandardDecoding
+  and speculative fallback sites; list-valued eos handled.
+- forge_engine.py: AVMP/VirtualTensorPool log lines divided bytes by 1024^2
+  labeled GB -> now GiB (printed 12226GB for a 12GB GPU).
+
+### Files Modified
+- forge/config.py, forge/keys/architecture/mamba_probe.py,
+  forge/quant/quamba2.py, forge/training/bitnet_lora.py,
+  forge/engine/decoding.py, forge/engine/forge_engine.py,
+  tests/unit/test_forgelm_v2_jamba.py, tests/unit/test_quamba2.py
+
+### Verification
+- Layer parity vs HF Jamba (bf16, GPU): cos >= 0.9993 every block, logit
+  max diff 0.44, identical argmax (was cos ~0.0).
+- 61 unit tests pass (test_forgelm_v2_jamba incl. 3 new EOS/RoPE
+  regressions, test_quamba2 incl. LoRA coverage, test_r39_sparse_grammar).
+- End-to-end boot: correct rate arithmetic, correct Python-semantics answer
+  ([36,81]), well-formed <tool_call> JSON, clean <|im_end|> stop.
+
+## 2026-09-13 — GUI boot blocked: VRAM pre-flight demanded ~16GB for ForgeLM V2
+
+### Symptom
+Booting ForgeLM V2 from the GUI always failed with "not enough free VRAM:
+~11.5 GB free, loading this checkpoint needs ~16.0 GB" on the 12GB RTX 5070.
+
+### Root Cause
+`_LoadWorker` in forge_gui/api/engine_runtime.py estimated the load
+requirement as `ckpt_size * 2.5` (~16GB for the 6.39GB checkpoint) while the
+engine's own fast-path gate in ForgeEngine.from_checkpoint uses
+`ckpt_size * 1.3` (~8.3GB). The GUI gate could never pass on 12GB even though
+the validated mamba_hybrid profile peaks at ~7.5GB.
+
+### Resolution
+- engine_common.py: new `_FAST_LOAD_VRAM_HEADROOM = 1.3` +
+  `_fast_load_vram_required(ckpt_size)` shared by both checks so the GUI and
+  engine thresholds can never drift apart again.
+- engine_checkpoints.py + engine_runtime.py: both call the shared helper.
+
+### Files Modified
+- forge/engine/engine_common.py, forge/engine/engine_checkpoints.py,
+  forge_gui/api/engine_runtime.py, tests/unit/test_engine_checkpoint_guard.py
+
+### Verification
+- 12/12 tests pass in test_engine_checkpoint_guard.py (3 new: headroom value,
+  preflight blocks below gate, preflight passes and reaches from_checkpoint).
+- End-to-end load via from_checkpoint: 80s, peak 7.37GB allocated, 4.0GB
+  free; auto-activated rotorquant 4-bit KV, QuaRot-KV, Quamba2 W4A8 (26 SSM
+  blocks), AVMP, VirtualTensorPool, prefix cache, CacheBlend, chunked
+  prefill, adaptive+suffix spec decode, FASER, SeqSplit, ReplaySSM.
+
+### Follow-up (same boot session): chat crash on `thinking` kwarg
+- **Symptom:** every Chat Studio send failed with
+  `TypeError: render_messages_for_config() got an unexpected keyword
+  argument 'thinking'`.
+- **Root cause:** the GUI wrapper `forge_gui/api/chat_render.py` never
+  forwarded `thinking` to the engine renderer
+  (`forge/self_play/discovery/qwen_adapter.py`, which accepts it).
+- **Resolution:** wrapper now takes `thinking: bool = True` and forwards
+  it. Regression test in tests/unit/test_gui_chat_stream.py
+  (TestChatRenderWrapper).
+
+## 2026-09-16 — Mixin split dropped heavy imports: NameError at class-def / call time
+
+### Symptom
+`ForgeEngine` was unimportable in the working tree: `NameError: name
+'CacheBlend' is not defined` at class-definition time in
+engine_generation.py. After that was repaired, runtime probing plus the
+evolutionary-merge suite surfaced further `NameError`s at call time:
+`build_kv_cache`, `build_decoding` (engine_activation.py),
+`build_health_report` (engine_diagnostics.py), and
+`unpack_output_with_kv` (engine_sessions.py).
+
+### Root Cause
+The uncommitted monolith-to-mixin split of forge_engine.py moved methods
+into engine_*.py files but dropped the heavy imports the monolith relied
+on (engine_common.py intentionally stays import-light). Annotations and
+call sites referenced symbols that were never imported into the new
+modules.
+
+### Resolution
+Restored per-mixin imports for every symbol each file actually uses:
+- engine_generation.py: CacheBlend, StandardDecoding, and other
+  generation-path deps.
+- forge_engine.py: StandardDecoding and core-path deps.
+- engine_activation.py: build_kv_cache (kv_backend), build_decoding
+  (decoding), plus activation-path deps.
+- engine_checkpoints.py / engine_diagnostics.py / engine_lifecycle.py /
+  engine_merging.py: their respective call-site deps (incl.
+  build_health_report in engine_diagnostics).
+- engine_sessions.py: unpack_output_with_kv from forge.model_loader.
+- SemanticKVAnchors imported from prefix_cache; GGUFInfo from
+  forge_loader; CREATIVE_SAMPLING resolved as class attribute.
+
+### Files Modified
+- forge/engine/forge_engine.py, engine_activation.py,
+  engine_checkpoints.py, engine_diagnostics.py, engine_generation.py,
+  engine_lifecycle.py, engine_merging.py, engine_sessions.py
+
+### Verification
+- `import forge.engine.forge_engine` succeeds; end-to-end `decide()`
+  smoke test runs on CPU.
+- tests/unit/test_evolutionary_merge.py: 8 errors -> all pass.
+- 157 passed across test_evolutionary_merge, test_decide,
+  test_forge_engine_fixes, test_engine_concurrency_fixes,
+  test_chat_features.
+
+### Follow-up (same session): Windows MAX_PATH triton cache crash
+- **Symptom:** `test_model_loader.py::test_compile_for_inference_gpu`
+  failed with `InductorError: FileNotFoundError` writing
+  `triton_poi_fused_..._10.source` into the torchinductor cache.
+- **Root cause:** the triton cache `put()` path is 268 chars —
+  `%TEMP%/torchinductor_tmk68/triton/0/<48-char hash>/tmp.<id>/<138-char
+  kernel name>.source` exceeds the 260-char Windows MAX_PATH, so
+  `open(temp_path)` fails even though `os.makedirs` succeeded.
+- **Resolution:** `tests/conftest.py` sets
+  `TORCHINDUCTOR_CACHE_DIR=%TEMP%/ti` (short base) on Windows before
+  torch import. Test passes; no repo code change needed.
+
+### Follow-up (System One work): silent random-weight load + reasoning-template prompt
+
+- **Symptom:** `load_default_model("forgelm_v2")` produced a model that
+  generated pure gibberish on every prompt (flat ~2.0 logits, nonsense
+  tokens). `decide()` on it returned near-uniform probabilities.
+- **Root cause (two bugs):**
+  1. `load_default_model` documented "checkpoint_path defaults to config
+     default" but passed `None` through — `build_model_fast` then skipped
+     the weight-load branch and printed only a generic `Total:` line.
+     **Silent random weights.** (The pending-bug list had flagged this.)
+  2. `decide.py` built a plain ChatML prompt ending at `assistant\n` —
+     ForgeLM V2 is a reasoning model: the canonical template (see
+     `qwen_adapter.render_messages_for_config`) primes
+     `assistant\n<think>\n`, so the first generated token is reasoning
+     text and answer tokens sat ~15 logits below the top.
+- **Resolution:**
+  - `model_loader.py`: `checkpoint_path=None` now resolves to
+    `V2_CHECKPOINT` when it exists; `build_model_fast` prints a loud
+    "no checkpoint_path — RANDOM weights" warning when it doesn't.
+  - `decide.py`: prompt now uses the canonical think-hint injection and
+    ends `assistant\n<think>\n</think>\nAnswer:` (empty think block +
+    explicit answer field); candidates are space-prefixed
+    (" yes"/" no", " finance", " 3") matching what the model emits
+    after `Answer:`.
+- **Verification:** real ForgeLM V2 via `ForgeEngine.from_checkpoint`
+  + `activate_optimal` (GUI path): sector choices 0.99/0.95 correct,
+  sentiment/hype scores land on the right level, noul directions all
+  correct (0.65-0.79 true / 0.13-0.15 false — direction right,
+  calibration soft as expected pre-Tier-1). 31 decide tests pass.

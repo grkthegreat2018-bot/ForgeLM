@@ -180,7 +180,7 @@ class DifferentialAttention(nn.Module):
             else:
                 out = F.scaled_dot_product_attention(q, k, v,
                                                      is_causal=T > 1)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         # ── Full differential path ───────────────────────────────────────
@@ -246,7 +246,7 @@ class DifferentialAttention(nn.Module):
         # Per-head RMSNorm + head scaling (paper eq. 7).
         out = self.rms_norm(diff.float()).to(x.dtype) * self.scale
 
-        out = out.transpose(1, 2).reshape(B, T, C)
+        out = out.transpose(1, 2).reshape(B, T, -1)
         return self.out_proj(out), new_kv
 
 

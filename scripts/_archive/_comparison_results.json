@@ -1,0 +1,39 @@
+{
+  "lfm25": {
+    "load_time": 2.953904867172241,
+    "params": 1304558336,
+    "gpu_mb": 2441.352192,
+    "gpu_peak_mb": 2512.786432,
+    "ram_mb": 1420.374016
+  },
+  "v9": {
+    "load_time": 2.0052833557128906,
+    "params": 1304558336,
+    "gpu_mb": 4886.893568,
+    "gpu_peak_mb": 6644.875264,
+    "ram_mb": 1571.221504
+  },
+  "lossless": true,
+  "max_logit_diff": 0.0,
+  "LFM2.5": {
+    "tokens_per_sec": 83.12776529720888,
+    "gen_gpu_mb": 4897.250304,
+    "gen_gpu_peak_mb": 4935.27808,
+    "gen_ram_mb": 2071.535616,
+    "accuracy": 0.0,
+    "correct": 0,
+    "total": 10
+  },
+  "V9": {
+    "tokens_per_sec": 152.17786739405705,
+    "gen_gpu_mb": 4897.250304,
+    "gen_gpu_peak_mb": 4935.27808,
+    "gen_ram_mb": 2071.199744,
+    "accuracy": 0.0,
+    "correct": 0,
+    "total": 10
+  },
+  "kv_standard_mb": 67.108864,
+  "kv_spectral_mb": 4.358144,
+  "kv_compression": 15.398496240601503
+}

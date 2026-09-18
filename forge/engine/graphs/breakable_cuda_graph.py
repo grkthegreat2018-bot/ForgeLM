@@ -30,9 +30,12 @@ This implementation provides:
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class GraphSegment:
@@ -147,7 +150,7 @@ class BreakableCudaGraph:
             self._decode_graphs[bs] = graph
 
         self._captured = True
-        print(f"  [BCG] Captured {len(self._decode_graphs)} decode graphs "
+        logger.info(f"  [BCG] Captured {len(self._decode_graphs)} decode graphs "
               f"(batch sizes: {sorted(self._decode_graphs.keys())})")
 
     def run_decode(self, input_ids: torch.Tensor,

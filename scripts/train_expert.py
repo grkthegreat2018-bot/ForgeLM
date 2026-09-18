@@ -38,8 +38,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from research import paths as _paths
 
-V2_EXPERTS_DIR = _paths.as_str(_paths.FORGELM_V2_EXPERTS_DIR)
-V2_CHECKPOINT = _paths.as_str(_paths.FORGELM_V2_CHECKPOINT)
+V2_EXPERTS_DIR = _paths.as_str(_paths.AIRMOE_MODULES_DIR)
+V2_CHECKPOINT = _paths.as_str(_paths.V2_CHECKPOINT)
 # Backward compat
 V4_DIR = V2_EXPERTS_DIR
 N_LAYERS = 28

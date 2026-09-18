@@ -109,6 +109,7 @@ cloud_smoke*.log
 .mimosa/
 
 # Experiment output databases & training logs (regenerable, large)
+research/results/
 research/results/*.db
 research/results/*.db-journal
 research/results/*.db-wal

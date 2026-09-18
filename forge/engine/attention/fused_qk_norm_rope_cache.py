@@ -29,8 +29,12 @@ For our model (32 heads, 8 KV heads, head_dim=64):
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 # Try to import our existing fused RoPE+QKNorm
 try:
@@ -189,7 +193,7 @@ class FusedQKNormRopeCacheWrapper:
                     self._patch(module, name)
                     count += 1
         self._active = True
-        print(f"  [FusedQKNormRopeCache] Patched {count} attention layers "
+        logger.info(f"  [FusedQKNormRopeCache] Patched {count} attention layers "
               f"(kv_quant={self.kv_quant_bits})")
 
     def _patch(self, attn_module, name: str):
@@ -289,7 +293,7 @@ class FusedQKNormRopeCacheWrapper:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attention_bias)
             else:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=T > 1)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module._fused_kv_quant = self.kv_quant_bits

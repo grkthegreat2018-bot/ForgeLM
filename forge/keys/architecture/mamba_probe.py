@@ -120,9 +120,12 @@ class MambaLayer(nn.Module):
         self._conv_state = None
 
     def _rmsnorm(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """RMSNorm: x / rms(x) * weight"""
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.norm_eps).rsqrt()
-        return x * rms * weight
+        """RMSNorm: x / rms(x) * weight — fp32 normalization (matches HF
+        JambaRMSNorm: norm in fp32, cast back, then scale by weight)."""
+        dtype = x.dtype
+        xf = x.float()
+        rms = xf.pow(2).mean(dim=-1, keepdim=True).add(self.norm_eps).rsqrt()
+        return weight * (xf * rms).to(dtype)
 
     def reset_state(self):
         """Reset SSM and conv state (call at start of new generation)."""
@@ -150,27 +153,37 @@ class MambaLayer(nn.Module):
         """
         B_b, d_inner, L = x.shape
         d_state = A.shape[1]
+        out_dtype = x.dtype
 
-        A_neg = -torch.exp(A)  # (d_inner, d_state) — ensure negative
+        # Recurrence runs in fp32 (HF Jamba slow path keeps the SSM state and
+        # the discretized A/B/delta*x terms in fp32 — bf16 state drifts ~8%
+        # per element per layer and wrecks multi-layer coherence).
+        delta_f = delta.float()
+        B_f = B.float()
+        x_f = x.float()
+        A_neg = -torch.exp(A.float())  # (d_inner, d_state) — ensure negative
         if h_init is not None:
-            h = h_init
+            h = h_init.float()
         else:
-            h = torch.zeros(B_b, d_inner, d_state, device=x.device, dtype=x.dtype)
+            h = torch.zeros(B_b, d_inner, d_state, device=x.device,
+                            dtype=torch.float32)
         ys = []
 
         for t in range(L):
-            dt = delta[:, :, t:t+1]  # (B, d_inner, 1)
+            dt = delta_f[:, :, t:t+1]  # (B, d_inner, 1)
             # A_bar = exp(dt * A_neg) — (B, d_inner, d_state)
             A_bar = torch.exp(dt * A_neg.unsqueeze(0))
             # B_bar = dt * B_t — (B, d_inner, d_state)
-            B_t = B[:, :, t]  # (B, d_state)
+            B_t = B_f[:, :, t]  # (B, d_state)
             B_bar = dt * B_t.unsqueeze(1)  # (B, d_inner, d_state)
             # h_t = A_bar * h + B_bar * x_t
-            x_t = x[:, :, t:t+1]  # (B, d_inner, 1)
+            x_t = x_f[:, :, t:t+1]  # (B, d_inner, 1)
             h = A_bar * h + B_bar * x_t
-            # y_t = C_t @ h + D * x_t
+            # y_t = C_t @ h + D * x_t — output cast back to input dtype like
+            # HF (ssm_state.to(dtype) @ C), skip term in input dtype
             C_t = C[:, :, t]  # (B, d_state)
-            y_t = (h * C_t.unsqueeze(1)).sum(dim=-1) + D * x_t.squeeze(-1)
+            y_t = (h.to(out_dtype) * C_t.unsqueeze(1)).sum(dim=-1) \
+                + D * x[:, :, t]
             ys.append(y_t)
 
         return torch.stack(ys, dim=-1), h  # (B, d_inner, L), (B, d_inner, d_state)

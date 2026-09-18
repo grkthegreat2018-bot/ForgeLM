@@ -35,11 +35,14 @@ This implementation provides:
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 class TriRouteController(nn.Module):
@@ -239,7 +242,7 @@ class TriRouteWrapper:
                 self._patch(module, name)
                 count += 1
         self._active = True
-        print(f"  [TriRoute] Patched {count} attention layers "
+        logger.info(f"  [TriRoute] Patched {count} attention layers "
               f"(window={self.local_window}, min_seq={self.min_seq_len})")
 
     def _patch(self, attn_module, name: str):
@@ -294,7 +297,7 @@ class TriRouteWrapper:
                 self.n_heads, hd, self.n_kv_heads,
                 local_window=self._triroute_window)
             out = triroute_attn(q, k_cache, v_cache, attn_mode_idx)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module._triroute_min_seq = self.min_seq_len

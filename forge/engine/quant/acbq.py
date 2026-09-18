@@ -37,11 +37,15 @@ Self-contained: depends only on torch.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 _ATTN_PATTERNS = (
     "q_proj", "k_proj", "v_proj", "o_proj", "out_proj",
@@ -554,13 +558,13 @@ def quantize_model_acbq(model: nn.Module, group_size: int = 128,
                 n_ffn += 1
         except Exception as e:
             if verbose:
-                print(f"  [ACBQ] Skipped {name}: {e}")
+                logger.warning(f"  [ACBQ] Skipped {name}: {e}")
 
     if verbose and n > 0:
         mode = "W4A4" if attn_bits == 4 and ffn_bits == 4 else f"W{attn_bits}/W{ffn_bits}"
-        print(f"  [ACBQ] {n} layers quantized ({mode}, group={group_size}): "
+        logger.info(f"  [ACBQ] {n} layers quantized ({mode}, group={group_size}): "
               f"{n_attn} attn ({attn_bits}bit), {n_ffn} ffn ({ffn_bits}bit)")
-        print(f"  [ACBQ] Cross-block error feedback: "
+        logger.info(f"  [ACBQ] Cross-block error feedback: "
               f"strength={compensation_strength}, decay={error_decay}, "
               f"layers_traversed={quantizer._layer_count}")
 

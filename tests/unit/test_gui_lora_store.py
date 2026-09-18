@@ -36,7 +36,7 @@ def test_human_bytes_small():
 # ── _base_hint ─────────────────────────────────────────────────────────
 
 def test_base_hint_underscore_lora():
-    assert _base_hint("ForgeLM_V2_Light_R31_lora.safetensors") == "ForgeLM_V2_Light_R31"
+    assert _base_hint("forgelm_v2_tooluse.lora.safetensors") == "forgelm_v2_tooluse"
 
 
 def test_base_hint_dot_lora():

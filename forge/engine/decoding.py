@@ -37,17 +37,16 @@ def _min_k_filter_logits(logits: torch.Tensor, sensitivity: float) -> torch.Tens
     """
     if sensitivity <= 0:
         return logits
-    sorted_logits, _ = torch.sort(logits, descending=True, dim=-1)
-    eps = 1e-8
+    # Single sort: reuse the sorted indices for the scatter mask.
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
     diffs = sorted_logits[..., :-1] - sorted_logits[..., 1:]
     n = diffs.shape[-1]
     weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
     weighted_diffs = diffs * weights
-    weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
+    weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
     cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)
     positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
     keep = positions <= cliff_pos
-    sorted_indices = torch.sort(logits, descending=True, dim=-1).indices
     mask = torch.zeros_like(logits, dtype=torch.bool)
     mask.scatter_(-1, sorted_indices, ~keep)
     return logits.masked_fill(mask, float("-inf"))
@@ -88,18 +87,18 @@ class StandardDecoding(DecodingStrategy):
                  min_p: float = 0.0, min_k: float = 0.0):
         ids = input_ids.clone()
         device = input_ids.device
-        # EOS detection: check model attr, config, then Qwen defaults
+        # EOS detection: check model attr, config, then known defaults
         eos = getattr(model, "eos_token_id", None)
         if eos is None:
             cfg = getattr(model, "config", None)
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
-        # Qwen2.5 EOS tokens: <|endoftext|>=151643, <|im_end|>=151645
-        eos_set = {7, 151643, 151645}  # LFM2.5 <|im_end|>=7 + Qwen2.5
-        if eos is not None:
+        # LFM2.5 <|im_end|>=7, Qwen2.5 151643/151645,
+        # Jamba <|endoftext|>=2, <|im_end|>=519
+        eos_set = {2, 7, 519, 151643, 151645}
+        if isinstance(eos, (list, tuple, set, frozenset)):
+            eos_set.update(eos)
+        elif eos is not None:
             eos_set.add(eos)
-        eos_tensor = torch.tensor(list(eos_set), device=device)
-        # Pinned memory for async D2H (reduces CPU sync spikes).
-        token_pinned = torch.zeros(1, 1, dtype=torch.long, pin_memory=True)
         # Track generated token ids for repetition penalty + degeneration
         generated_ids: list[int] = []
         # Collect generated token tensors for a single final cat (O(n) vs O(n²))
@@ -147,12 +146,11 @@ class StandardDecoding(DecodingStrategy):
                 next_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
 
-            # GPU-side EOS check: single sync only if token matches EOS.
+            # Single GPU->CPU sync per token: .item() brings the id over,
+            # then the EOS check runs on the CPU scalar (no second sync).
             tok_id = next_token.item()
             generated_ids.append(tok_id)
-            is_eos = (next_token == eos_tensor).any()
-            token_pinned.copy_(next_token, non_blocking=True)
-            if is_eos.item():
+            if tok_id in eos_set:
                 break
 
             # Degeneration guard: detect repetitive garbage and stop early.
@@ -709,8 +707,10 @@ class SelfSpeculativeSparse(DecodingStrategy):
         ids = input_ids.clone()
         device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
-        eos_set = {7, 151643, 151645}
-        if eos is not None:
+        eos_set = {2, 7, 519, 151643, 151645}
+        if isinstance(eos, (list, tuple, set, frozenset)):
+            eos_set.update(eos)
+        elif eos is not None:
             eos_set.add(eos)
         torch.tensor(list(eos_set), device=device)
 

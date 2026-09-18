@@ -8,9 +8,8 @@ unless the user explicitly overrides them for a specific task.
 ### A. Model Versioning — Build On The Prior, Never Beside It
 - **Every new custom model version MUST be derived from the immediately
   preceding version**, carrying forward all prior keys/architecture as the
-  baseline, then adding or replacing only what's new. Example chain:
-  `lfm25_1.2b` → `forgelm_v2_light` (V3/V4/V5/V7/V8/V9 presets were superseded by V10;
-  their architecture keys are preserved in V10's config).
+  baseline, then adding or replacing only what's new. Current chain:
+  `forgelm_v2` (Jamba base) → `forgelm_v12_jamba` (R37 keys).
 - **Port-first, train-second**: when introducing a new architecture key or
   attention variant, write the lossless checkpoint-conversion path
   (`XxxKey` class, identity/zero-init warm start, bit-exact load test)
@@ -87,7 +86,7 @@ unless the user explicitly overrides them for a specific task.
 ### F. Math Thinking + Script Testing — Find The True Optimum
 - **Every optimization claim must be backed by a number from a script**,
   not a paper citation. Papers report numbers on different hardware/models;
-  our numbers come from RTX 5070 + LFM2.5-1.2B.
+  our numbers come from RTX 5070 + ForgeLM V2 (Jamba-3B).
 - **Write the smallest possible test script first** (see Novel Discovery
   Protocol step 1 in `docs/CHANGELOG.md`). A 20-line script that runs in 5 seconds > a 200-line
   design doc.
@@ -122,9 +121,10 @@ unless the user explicitly overrides them for a specific task.
 - **Subagent delegation**: use `subagent_explore` for read-only research
   (file indexing, paper lookups) and `subagent_general` for parallel
   implementation tasks. Spawn 2-3 in parallel for independent work.
-- **Skills**: invoke `.devin/skills/` skills (`log-bug`, `sync-memory`,
-  `systemspecs`, `glm-supercharge`) when they match the task — they encode
-  project-specific workflows.
+- **Skills**: invoke user-level skills (`log-bug`, `sync-memory`,
+  `systemspecs`, `glm-supercharge`) — they live in
+  `~/.codeium/windsurf/skills/`, not `.devin/skills/` (which does not
+  exist). They encode project-specific workflows.
 - **IDE crash trigger — batch QA/training-data edits**: The IDE crashes when
   a single edit contains 25+ lines matching Question/Answer or similar
   training-data-like patterns. **Code edits do NOT need batching** — only
@@ -148,53 +148,108 @@ unless the user explicitly overrides them for a specific task.
 
 Production code: `forge/` (was `research/`, migrated commit f1a7542)
 - `forge/config.py` — ModelConfig dataclass + presets
-- `forge/model_loader.py` — ConfigurableResearchLLM, ModelLoader
-- `forge/engine/forge_engine.py` — ForgeEngine (inference engine)
+- `forge/model_loader.py` — facade re-exporting `forge/model/` (kv_cache,
+  attention_ops, layers, builders, llm/ConfigurableResearchLLM, loader/ModelLoader)
+- `forge/engine/forge_engine.py` — ForgeEngine (inference engine; core init +
+  8 mixins: engine_checkpoints, engine_activation, engine_generation,
+  engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,
+  engine_sessions; shared helpers in engine_common.py)
 - `forge/engine/decoding.py` — Decoding strategies
+- `forge/engine/gated.py` — ForgeGate three-probe gated generation
+  (route/doom/convergence); `ForgeEngine.load_gate_probes()` +
+  `generate_gated()`; probe bundle `research/checkpoints/gate_probes.pt`
+  (~44KB, version-guarded). VRAM overhead ~0 (logistic heads on hidden
+  states the model already computes). Trained on the gate_r 1450-label
+  self-verified corpus; retrain pipeline documented in
+  `.devin/scratchpad.md` (R&D: ForgeGate probes). Held-out eval on
+  ForgeLM V2: +16.4pts acc at −34% tokens vs always-think; numbers are
+  corpus-dependent — recalibrate probes on new domains/checkpoints
+  before trusting thresholds.
+- `forge/engine/decide.py` — SystemOneEvaluator: TypeSafe AI "System One"-
+  compatible typed decisions (noul/choice/score questions → TypeSafe-style
+  probability answers) via candidate-continuation scoring — single forward
+  passes, no generation. Reasoning-model aware: primes
+  `assistant\n<think>\n</think>\nAnswer:` so answer tokens land at the
+  read position. `ForgeEngine.decide(state, questions)` wraps it.
+  Server exposes `POST /v1/systemone` (typesafe_sdk drop-in: point
+  `base_url` at Forge; `/v1/models` sniffs `X-TypeSafe-SDK` header and
+  returns the TypeSafe `{"models": [...]}` shape). Without a scorer,
+  probabilities are raw LM softmax — consistent within a question but
+  NOT calibrated.
+- `forge/engine/decision_head.py` — Tier-1 `DecisionScorer`: linear
+  verifier head on last-token hidden states, `s(q,c) = w·h(prompt+" "+cand)`
+  softmaxed per question; covers noul/choice/score with one head.
+  Train via `fit_decision_scorer(model, tok, device, dataset)` —
+  dataset rows `(state, question_spec, correct_candidate_idx)`, group
+  softmax CE (proper scoring rule) + LBFGS temperature scaling; ~10 KB
+  weights, `scorer.save()`/`DecisionScorer.load()`. Attach with
+  `engine.load_decision_scorer(path)` or `decide(..., scorer=...)`.
+  Real-model check (340 mixed templated examples): ECE 0.067 vs 0.141
+  raw at equal accuracy — calibrated-style, not production-calibrated;
+  validate on non-templated data before confidence gating.
 - `forge/keys/` — KeyStack architecture keys (25 canonical)
 - `forge/quant/` — Quantization implementations
 - `forge/decoding/` — Decoding implementations
 - `forge/training/` — Training runners + optimizers
 - `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains)
-- `forge/self_play/` — Self-play + discovery
-- `forge_gui/` — PySide6 GUI
+- `forge/self_play/` — Self-play + discovery (`infinite_loop.py` is the RSI
+  loop; `live_status.py` writes live telemetry — status.json, heartbeat.json
+  with progress-coupled stall detection, events.jsonl — to
+  `research/checkpoints/self_play/` for the GUI Self-Play page + CLI polling;
+  `--status-dir`/`--no-live-status` flags on the loop)
+- `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed)
+- `forge_gui_server/` — FastAPI GUI backend (REST `/api` + WebSocket `/ws`)
+  serving the React UI; ports `forge_gui/api/` to plain async services.
+  Launch: `python -m forge_gui_server` (desktop window via pywebview),
+  `--browser`, `--no-window`, or `--dev` (API only, Vite dev on :5173)
+- `forge_ui/` — React 19 + TS + Vite + Tailwind v4 frontend
+  (`npm run dev` / `npm run build`; design tokens in `src/index.css`)
 - `tests/unit/` — Unit tests (CPU-runnable where possible)
 - `tests/integration/` — Integration tests (GPU required)
 - `docs/` — Documentation + R&D round notes
 - `scripts/` — Standalone scripts
 - `research/` — Legacy paths (tokenizer cache, checkpoints only)
 
-## Current Architecture: ForgeLM V2 Light-1.2B (SOLE BASE)
+## Current Architecture: ForgeLM V2 Jamba-3B (SOLE BASE)
 
-**Base model**: ForgeLM V2 Light-1.2B — lossless 1:1 port of LFM2.5-1.2B + V10 inference features.
-- Same architecture as LFM2.5: 16 layers (10 conv + 6 GQA), d_model=2048, 32 heads, 8 KV heads
-- V10 additions: IRI-FP4 weight quantization (9.0 bits/w, lossless, 3.5× vs fp32)
-- 1304.6M params, 1.87 GB checkpoint (IRI-FP4 compressed)
-- All prior ForgeLM models (V2/V4/V5/V7/V8/V9) deleted — V10 is the sole base
+**Base model**: ForgeLM V2 — lossless port of AI21 Jamba-Reasoning-3B.
+- 28-layer hybrid: 26 Mamba-2 SSM + 2 GQA attention layers
+- d_model=2560, 20 heads, 1 KV head (MQA), vocab=65536, max_seq_len=262144
+- No RoPE (Mamba handles position), untied embeddings, ~3.2B params
+- bf16 checkpoint ~6.1 GB; server VRAM budget 8.0 GB
 
-**Porting fix (2026-08-30)**: LFM2.5's `embedding_norm` is the FINAL norm (applied
-after all layers, before head), NOT a post-embedding norm. The HF name is misleading.
-Config uses `use_final_norm=True, use_embed_norm=False` to match. Port script:
-`forge/architecture/port_lfm25_to_v10.py`.
+**Base checkpoint**: `research/checkpoints/ForgeLM_V2.safetensors`
+**Tokenizer**: `research/checkpoints/forgelm_v2_tokenizer/`
+**Default config**: `forgelm_v2` (load_default_model() defaults to this)
+**Path constant**: `research.paths.V2_CHECKPOINT`, `research.paths.FORGE_TOKENIZER_DIR`
+**Server model ID**: `forgelm-v2-jamba` (DEFAULT_MODELS in forge_server.py)
 
-**Base checkpoint**: `research/checkpoints/ForgeLM_V2_Light.safetensors`
-**Tokenizer**: `research/checkpoints/lfm25_tokenizer/`
-**Default config**: `forgelm_v2_light` (load_default_model() defaults to this)
-**Path constant**: `research.paths.V10_CHECKPOINT` (LFM25_CHECKPOINT and V9_CHECKPOINT are backward-compat aliases to V10_CHECKPOINT)
-
-### LFM2.5 original architecture (preserved in V10)
-- 16 layers: 10 double-gated conv + 6 GQA attention (layers 2,5,8,10,12,14)
-- d_model=2048, 32 heads, 8 KV heads (GQA 4x), head_dim=64
-- SwiGLU FFN (intermediate=8192), RMSNorm, QK-layernorm on attention
-- RoPE theta=1M, 128K context (32K for VRAM budget)
-- Vocab=65536, tied embeddings
+All prior checkpoints (Jamba_Reasoning_3B source port, ForgeLM_V2_Light*,
+evolution R30/R31 artifacts, LFM2.5 GGUFs) were deleted 2026-09 — ForgeLM V2
+Jamba is the sole base model.
 
 ## Config Presets
 
-Config presets (V3/V4/V5/V7/V8/V9 superseded and checkpoints deleted; V2-Light-1.2B is the sole base):
-- `forgelm_v2_light` — **ForgeLM V2 Light-1.2B: THE DEFAULT AND SOLE BASE.** Lossless 1:1 port of LFM2.5-1.2B + V10 inference features (IRI-FP4 weight quantization, 9.0 bits/w, lossless, 3.5× vs fp32). Same architecture as LFM2.5 (d_model=2048, 16 layers, 1304.6M params). `load_default_model()` defaults to this. All tests run against this checkpoint.
-- `lfm25_tiny` — 4-layer tiny model for fast testing (no checkpoint, config-only)
-- Other presets (`forgelm_v7*`, `forgelm_v8_8b`, `forgelm_v9*`, `lfm25_1.2b`) have been DELETED from `forge/config.py`. Only `forgelm_v2_light`, `lfm25_tiny`, and `gen_model_tiny` remain.
+Config presets in `forge/config.py`:
+- `forgelm_v2` — **ForgeLM V2 Jamba-3B: THE DEFAULT AND SOLE BASE.** 28 layers
+  (26 Mamba + 2 GQA), d_model=2560, ~3.2B params.
+- `forgelm_v12_jamba` — R37 research preset derived from `forgelm_v2`
+  (parent declared; Mamba-3, Kronecker embed, PIT, OutRo, ForgeHybrid — all
+  zero/identity-init for lossless warm start).
+- `forgelm_tiny` — 4-layer tiny conv+attention model for fast tests
+  (no checkpoint, config-only).
+- `gen_model_tiny` — tiny generator config for evolution experiments.
+- `qwen25_05b` — HF-compat preset for Qwen2.5-0.5B checkpoint detection.
+- `qwen3_4b` — HF-compat preset for the Qwen3-4B-Instruct-2507 family
+  (e.g. `0xA50C1A1/Qwen3-4B-Nymphaea-RP`). First preset to use the
+  explicit `ModelConfig.head_dim` field (128; `d_model/n_heads`=80 would
+  be wrong). GQA 32Q/8KV, QK-norm, no QKV bias, RoPE 5M, 256K ctx, tied
+  embed. Auto-detected by `_detect_config_from_header` on
+  (vocab=151936, d_model=2560, n_layers=36).
+
+All legacy presets (`forgelm_v2_light`, `forgelm_v2_pro`, `forgelm_v12`,
+`forgelm_v10_1.2b`, `forgelm_v11_3b_vl`, `lfm25_tiny`, `lfm25_1.2b`, V3–V9)
+have been DELETED.
 
 ### Evolution-Discovered Promotions (2026-08-24, from forge_evolve.db)
 Promoted after validation against evolution data (39,631 discoveries scanned):

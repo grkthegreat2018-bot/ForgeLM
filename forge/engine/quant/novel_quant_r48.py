@@ -27,6 +27,7 @@ compression-quality Pareto frontier below 2 bits/weight.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
@@ -47,6 +48,8 @@ from forge.engine.quant.novel_quant_r44 import (
 )
 from forge.engine.quant.novel_quant_r46 import _CachedDequantMixin
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Binary bit packing helpers (8 binary ±1 values per byte)
@@ -266,7 +269,7 @@ def factorize_admm_nanoquant(
         if verbose and (i == 0 or (i + 1) % 100 == 0 or i == outer_iters - 1):
             W_approx = s1.unsqueeze(1) * (U @ V.T) * s2.unsqueeze(0)
             err = (W - W_approx).norm().item() / W.norm().item()
-            print(f"  [ADMM {i+1:04d}/{outer_iters}] rel_err={err:.5e}")
+            logger.info(f"  [ADMM {i+1:04d}/{outer_iters}] rel_err={err:.5e}")
 
     # Magnitude balancing (Appendix A)
     norm_U = U.norm().clamp(min=eps)
@@ -687,13 +690,13 @@ def convert_model_to_nanoquant_qat(model: nn.Module, rank: int = 128,
                 n += 1
                 if verbose and (n % 20 == 0 or n == total):
                     elapsed = _time.time() - t0
-                    print(f"  [NanoQuantQAT] {n}/{total} layers converted "
+                    logger.info(f"  [NanoQuantQAT] {n}/{total} layers converted "
                           f"({elapsed:.1f}s, {elapsed/n:.3f}s/layer)")
             except Exception as e:
                 if verbose:
-                    print(f"  [NanoQuantQAT] Skipped {name}: {e}")
+                    logger.warning(f"  [NanoQuantQAT] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [NanoQuantQAT] {n} layers converted to QAT "
+        logger.info(f"  [NanoQuantQAT] {n} layers converted to QAT "
               f"({_time.time()-t0:.1f}s total)")
     return n
 
@@ -716,7 +719,7 @@ def bake_qat_model(model: nn.Module, verbose: bool = True) -> int:
             setattr(parent, parts[-1], nq)
             n += 1
     if verbose and n > 0:
-        print(f"  [NanoQuantQAT] {n} layers baked to inference mode")
+        logger.info(f"  [NanoQuantQAT] {n} layers baked to inference mode")
     return n
 
 
@@ -1077,9 +1080,9 @@ def _replace_linears_r48(model: nn.Module, factory, verbose_name: str,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [{verbose_name}] Skipped {name}: {e}")
+                    logger.warning(f"  [{verbose_name}] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [{verbose_name}] {n} layers quantized")
+        logger.info(f"  [{verbose_name}] {n} layers quantized")
     return n
 
 
@@ -1120,9 +1123,9 @@ def quantize_model_nanoquant(model: nn.Module, rank: int = 128,
                     n += 1
                 except Exception as e:
                     if verbose:
-                        print(f"  [NanoQuant] Skipped {name}: {e}")
+                        logger.warning(f"  [NanoQuant] Skipped {name}: {e}")
         if verbose and n > 0:
-            print(f"  [NanoQuant] {n} layers quantized")
+            logger.info(f"  [NanoQuant] {n} layers quantized")
         return n
     else:
         return _replace_linears_r48(model, NanoQuantLinear.from_linear,
@@ -1167,9 +1170,9 @@ def quantize_model_ternary_ptq(model: nn.Module, activations: dict | None = None
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [TernaryPTQ] Skipped {name}: {e}")
+                    logger.warning(f"  [TernaryPTQ] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [TernaryPTQ] {n} layers quantized")
+        logger.info(f"  [TernaryPTQ] {n} layers quantized")
     return n
 
 

@@ -25,9 +25,13 @@ XP model checkpoint:
     Inspired by Lynx (arxiv 2607.01831).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 class MRLAdaptiveContext:
@@ -111,7 +115,7 @@ class MRLAdaptiveContext:
             model.config.d_model = d_k
             model.config.n_heads = max(1, d_k // 128)  # Keep head_dim=128
 
-        print(f"  [MRL-AdaptiveContext] Truncated {d}→{d_k} dims "
+        logger.info(f"  [MRL-AdaptiveContext] Truncated {d}→{d_k} dims "
               f"({self.keep_ratio*100:.0f}% kept, {(1-self.keep_ratio)*100:.0f}% saved)")
 
     def info(self) -> dict:

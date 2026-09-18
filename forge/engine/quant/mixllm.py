@@ -28,11 +28,15 @@ Self-contained: depends only on torch.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 _HAS_CUDA = torch.cuda.is_available()
 
@@ -409,7 +413,7 @@ def quantize_model_mixllm(model: nn.Module, group_size: int = 128,
         total_features = sum(n.numel() for n in quantizer.layer_norms.values())
         n_high = sum(int((n >= threshold).sum().item())
                      for n in quantizer.layer_norms.values())
-        print(f"  [MixLLM] Global threshold: {threshold:.4f} "
+        logger.info(f"  [MixLLM] Global threshold: {threshold:.4f} "
               f"({n_high}/{total_features} features -> INT8, "
               f"{total_features - n_high}/{total_features} -> INT4)")
 
@@ -435,10 +439,10 @@ def quantize_model_mixllm(model: nn.Module, group_size: int = 128,
             n += 1
         except Exception as e:
             if verbose:
-                print(f"  [MixLLM] Skipped {name}: {e}")
+                logger.warning(f"  [MixLLM] Skipped {name}: {e}")
 
     if verbose and n > 0:
         avg_bits = (1 - high_fraction) * low_bit + high_fraction * high_bit
-        print(f"  [MixLLM] {n} layers quantized "
+        logger.info(f"  [MixLLM] {n} layers quantized "
               f"(global mixed-precision, ~{avg_bits:.1f} avg bits/weight)")
     return n

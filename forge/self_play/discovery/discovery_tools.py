@@ -31,14 +31,19 @@ import json
 import time
 from collections.abc import Callable
 
+from forge.self_play.discovery.discovery_db import DiscoveryDB
 from forge.web_primitives import (
     arxiv_search as _arxiv_search,
+)
+from forge.web_primitives import (
     ddg_search as _web_search,
+)
+from forge.web_primitives import (
     fetch_url as _fetch_url,
+)
+from forge.web_primitives import (
     wikipedia_search as _wikipedia_search,
 )
-
-from forge.self_play.discovery.discovery_db import DiscoveryDB
 
 
 # ── sandboxed script execution ────────────────────────────────────────

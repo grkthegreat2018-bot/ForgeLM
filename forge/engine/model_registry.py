@@ -14,13 +14,14 @@ Usage:
     from forge.engine.model_registry import ModelRegistry
 
     registry = ModelRegistry()
-    registry.register("forgelm-v10", checkpoint="...", config="forgelm_v2_light", vram_budget_gb=2.5)
+    registry.register("forgelm-v2-jamba", checkpoint="...", config="forgelm_v2", vram_budget_gb=8.0)
     registry.register("qwen2.5", checkpoint="...", config="qwen25_05b", vram_budget_gb=3.5)
 
     # Generate with either model — registry handles wake/sleep automatically
-    out = registry.generate("lfm2.5", "def fibonacci(n):")
+    out = registry.generate("forgelm-v2-jamba", "def fibonacci(n):")
     out = registry.generate("qwen2.5", "Explain quantum computing")
 """
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ from pathlib import Path
 import torch
 
 from forge.engine.forge_engine import ForgeEngine, _checkpoint_size_cache
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -105,14 +108,14 @@ class ModelRegistry:
                     ckpt_size = Path(checkpoint).stat().st_size
                     _checkpoint_size_cache[checkpoint] = ckpt_size
                 vram_budget_gb = (ckpt_size * 1.5) / 1e9  # 50% overhead for KV + activations
-                print(f"  [Registry] Auto budget for {model_id}: {vram_budget_gb:.2f} GB")
+                logger.info("Auto budget for %s: %.2f GB", model_id, vram_budget_gb)
             budget_bytes = int(vram_budget_gb * 1e9)
 
             # Ensure VRAM is available
             self._make_room(budget_bytes, exclude=model_id)
 
             # Load the model
-            tok_path = tokenizer_path or "research/checkpoints/lfm25_tokenizer"
+            tok_path = tokenizer_path or "research/checkpoints/forgelm_v2_tokenizer"
             engine = ForgeEngine.from_checkpoint(
                 checkpoint=checkpoint,
                 config_name=config_name,
@@ -131,9 +134,8 @@ class ModelRegistry:
             )
             self._entries[model_id] = entry
 
-            print(f"  [Registry] Registered: {model_id} "
-                  f"(budget={vram_budget_gb:.2f}GB, "
-                  f"free={self._free_vram()/1e9:.2f}GB)")
+            logger.info("Registered: %s (budget=%.2fGB, free=%.2fGB)",
+                        model_id, vram_budget_gb, self._free_vram() / 1e9)
             return engine
 
     def generate(self, model_id: str, prompt: str, max_new_tokens: int = 100,
@@ -172,10 +174,16 @@ class ModelRegistry:
         return output
 
     def generate_stream(self, model_id: str, prompt: str, max_new_tokens: int = 256,
-                        temperature: float = 0.0, top_p: float = 1.0):
+                        temperature: float = 0.0, top_p: float = 1.0,
+                        top_k: int = 80, repetition_penalty: float = 1.05,
+                        min_p: float = 0.0, min_k: float = 0.0,
+                        eos_token_ids: list[int] | None = None,
+                        skip_special_tokens: bool = True,
+                        logits_processor=None):
         """Token-by-token streaming generator. Auto-wakes if asleep.
 
         Yields decoded text chunks (one per token) as they are generated.
+        Sampling args mirror ForgeEngine.generate_stream.
         """
         with self._lock:
             if model_id not in self._entries:
@@ -188,7 +196,11 @@ class ModelRegistry:
 
         for chunk in engine.generate_stream(
             prompt, max_new_tokens=max_new_tokens,
-            temperature=temperature, top_p=top_p,
+            temperature=temperature, top_p=top_p, top_k=top_k,
+            repetition_penalty=repetition_penalty, min_p=min_p,
+            min_k=min_k, eos_token_ids=eos_token_ids,
+            skip_special_tokens=skip_special_tokens,
+            logits_processor=logits_processor,
         ):
             yield chunk
 
@@ -205,8 +217,8 @@ class ModelRegistry:
             if entry.is_awake:
                 entry.engine.sleep(level=level)
                 entry.is_awake = False
-                print(f"  [Registry] {model_id} → sleep level {level} "
-                      f"(free={self._free_vram()/1e9:.2f}GB)")
+                logger.info("%s → sleep level %s (free=%.2fGB)",
+                            model_id, level, self._free_vram() / 1e9)
 
     def wake(self, model_id: str):
         """Wake a sleeping model."""
@@ -230,7 +242,7 @@ class ModelRegistry:
             del entry.engine
             del self._entries[model_id]
             torch.cuda.empty_cache()
-            print(f"  [Registry] Unregistered: {model_id}")
+            logger.info("Unregistered: %s", model_id)
 
     def list_models(self) -> list[dict]:
         """List all registered models with status."""
@@ -346,9 +358,9 @@ class ModelRegistry:
             entry.engine.sleep(level=1)
             entry.is_awake = False
             freed += entry.vram_budget_bytes
-            print(f"  [Registry] Evicted {entry.model_id} "
-                  f"(idle {time.time() - entry.last_used:.0f}s, "
-                  f"freed {entry.vram_budget_bytes/1e9:.2f}GB)")
+            logger.info("Evicted %s (idle %.0fs, freed %.2fGB)",
+                        entry.model_id, time.time() - entry.last_used,
+                        entry.vram_budget_bytes / 1e9)
             if freed >= needed_bytes:
                 break
         else:

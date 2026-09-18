@@ -69,16 +69,16 @@ class BlockFusionRunner:
         # Find all blocks in the model
         blocks = self._find_blocks()
         if not blocks:
-            print("  [BlockFusion] No blocks found in model")
+            logger.info("  [BlockFusion] No blocks found in model")
             return
 
-        print(f"  [BlockFusion] Capturing {len(blocks)} blocks...")
+        logger.info(f"  [BlockFusion] Capturing {len(blocks)} blocks...")
 
         for block_idx, block in blocks.items():
             self._capture_block(block_idx, block, dtype)
 
         self._captured = True
-        print(f"  [BlockFusion] Captured {len(self._block_graphs)} block graphs")
+        logger.info(f"  [BlockFusion] Captured {len(self._block_graphs)} block graphs")
 
     def _find_blocks(self) -> dict[int, nn.Module]:
         """Find transformer blocks in the model."""

@@ -32,8 +32,12 @@ This implementation provides:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 def kap_score_blocks(
@@ -178,7 +182,7 @@ class CoSAWrapper:
                 self._patch(module, name)
                 count += 1
         self._active = True
-        print(f"  [CoSA] Patched {count} attention layers "
+        logger.info(f"  [CoSA] Patched {count} attention layers "
               f"(budget={self.budget_ratio}, min_seq={self.min_seq_len})")
 
     def _patch(self, attn_module, name: str):
@@ -231,7 +235,7 @@ class CoSAWrapper:
             out = cosa_attention(q, k_cache, v_cache,
                                  block_size=16,
                                  budget_ratio=self._cosa_budget)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module._cosa_min_seq = self.min_seq_len

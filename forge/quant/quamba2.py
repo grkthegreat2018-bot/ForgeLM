@@ -213,7 +213,12 @@ class Quamba2Linear(QuantizedLinearMixin):
         w = self._dequantize_weight(x.dtype, cache=True)
         x_q = self._quantize_activation(x)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x_q, w, bias)
+        out = F.linear(x_q, w, bias)
+        # LoRA adapter support — same convention as ForgeQuantLinear et al.
+        lora = getattr(self, 'lora_adapter', None)
+        if lora is not None:
+            out = out + lora(x)
+        return out
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, "
@@ -412,38 +417,52 @@ class Quamba2Block(nn.Module):
         self._conv_state = None
 
     def _rmsnorm(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.norm_eps).rsqrt()
-        return x * rms * weight
+        dtype = x.dtype
+        xf = x.float()
+        rms = xf.pow(2).mean(dim=-1, keepdim=True).add(self.norm_eps).rsqrt()
+        return weight.to(dtype) * (xf * rms).to(dtype)
 
     def reset_state(self):
         self._ssm_state = None
         self._conv_state = None
 
     def _selective_scan_ref(self, x, delta, A, B, C, D, h_init=None):
-        """Reference selective scan in FP16 (unquantized SSM core)."""
+        """Reference selective scan — fp32 recurrence (unquantized SSM core),
+        per-step output cast back to activation dtype like HF Jamba."""
         B_b, d_inner, L = x.shape
         d_state = A.shape[1]
-        A_neg = -torch.exp(A)  # (d_inner, d_state)
+        out_dtype = x.dtype
+        delta_f = delta.float()
+        B_f = B.float()
+        x_f = x.float()
+        A_neg = -torch.exp(A.float())  # (d_inner, d_state)
         if h_init is not None:
-            h = h_init
+            h = h_init.float()
         else:
-            h = torch.zeros(B_b, d_inner, d_state, device=x.device, dtype=x.dtype)
+            h = torch.zeros(B_b, d_inner, d_state, device=x.device,
+                            dtype=torch.float32)
         ys = []
         for t in range(L):
-            dt = delta[:, :, t:t + 1]
+            dt = delta_f[:, :, t:t + 1]
             A_bar = torch.exp(dt * A_neg.unsqueeze(0))
-            B_t = B[:, :, t]
+            B_t = B_f[:, :, t]
             B_bar = dt * B_t.unsqueeze(1)
-            x_t = x[:, :, t:t + 1]
+            x_t = x_f[:, :, t:t + 1]
             h = A_bar * h + B_bar * x_t
             C_t = C[:, :, t]
-            y_t = (h * C_t.unsqueeze(1)).sum(dim=-1) + D * x_t.squeeze(-1)
+            y_t = (h.to(out_dtype) * C_t.unsqueeze(1)).sum(dim=-1) \
+                + D.to(out_dtype) * x[:, :, t]
             ys.append(y_t)
         return torch.stack(ys, dim=-1), h
 
     def forward(self, x, past_key_value=None, use_cache=False, **kwargs):
         """Forward pass mirroring MambaLayer.forward but with quantized projections."""
         B, T, D = x.shape
+        # The SSM core (A_log, D, jamba norms) is stored in FP16 — mixed with
+        # bf16 activations it promotes to fp32 mid-scan. Record the incoming
+        # dtype so the block output is cast back before the residual stream
+        # (fp32 output would break downstream bf16 matmuls).
+        model_dtype = x.dtype
 
         # in_proj (W4A8) → split into x (ssm) and z (gate)
         xz = self.in_proj(x)  # (B, T, 2*d_inner)
@@ -520,10 +539,16 @@ class Quamba2Block(nn.Module):
             h_init=h_init)
 
         y = y.transpose(1, 2)  # (B, T, d_inner)
-        y = y * F.silu(z)
+        # The FP16 SSM core promotes the scan output to fp32 — cast back to
+        # the activation dtype before gating so out_proj (and any attached
+        # lora_adapter) receive model-dtype input.
+        y = y.to(z.dtype) * F.silu(z)
 
         # out_proj (W4A8)
         out = self.out_proj(y)
+        # Restore the model dtype — internal fp16/fp32 promotion would
+        # otherwise emit fp32 and break the next block's bf16 matmuls.
+        out = out.to(model_dtype)
 
         present = None
         if use_cache:

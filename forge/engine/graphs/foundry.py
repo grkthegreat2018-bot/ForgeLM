@@ -26,11 +26,14 @@ This implementation provides:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class GraphTemplate:
@@ -141,7 +144,7 @@ class FoundryRunner:
                 try:
                     static_output = self.model(static_input, position_ids=static_pos)
                 except Exception as e:
-                    print(f"  [Foundry] Capture warmup failed: {e}")
+                    logger.info(f"  [Foundry] Capture warmup failed: {e}")
                     return None
             torch.cuda.synchronize()
 
@@ -151,7 +154,7 @@ class FoundryRunner:
             try:
                 static_output = self.model(static_input, position_ids=static_pos)
             except Exception as e:
-                print(f"  [Foundry] Graph capture failed: {e}")
+                logger.info(f"  [Foundry] Graph capture failed: {e}")
                 return None
 
         # Extract template
@@ -175,7 +178,7 @@ class FoundryRunner:
             'output': static_output,
         }
 
-        print(f"  [Foundry] Captured and saved template: {template.name}")
+        logger.info(f"  [Foundry] Captured and saved template: {template.name}")
         return template
 
     def materialize(self, template_name: str) -> bool:

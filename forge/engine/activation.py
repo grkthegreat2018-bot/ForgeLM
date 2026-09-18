@@ -165,3 +165,55 @@ class ActivationConfig:
         }
         defaults.update(overrides)
         return cls.from_kwargs(**defaults)
+
+    @classmethod
+    def mamba_hybrid(cls, **overrides: Any) -> ActivationConfig:
+        """Validated best-case profile for Jamba/Mamba hybrid models.
+
+        Verified end-to-end on ForgeLM V2 (AI21-Jamba-Reasoning-3B port,
+        RTX 5070): correct responses + tool calls at ~7.5GB peak VRAM.
+
+        Deliberately excluded vs the attention-only ``optimal()``:
+          - use_compile: the Python-loop selective scan makes graph
+            capture slow/unsafe.
+          - use_chunked_prefix_cache / use_learned_prefix_cache: KV slicing
+            assumes (k, v) tuples; mamba layers store dict states.
+          - position/attention-pruning features (lerope, mosa, jet_long,
+            ...): they alter outputs and target the (rare) attn layers.
+        """
+        defaults = {
+            "kv_cache": "rotorquant",      # 4-bit rotated KV (attn layers)
+            "decoding": "standard",
+            "quantize": None,              # bf16 best-case; pass "forge_quant" for smaller
+            "kv_bits": 4,
+            "use_prefix_cache": True,      # LRU prefix reuse (stores mamba states)
+            "use_chunked_prefill": True,   # 512-token chunks
+            "use_triton_conv": True,       # no-op on mamba, kept for conv models
+            "use_fused_qk_norm_rope_cache": True,
+            "use_seq_split": True,
+            "use_cache_blend": True,       # CacheBlend non-prefix KV reuse
+            "use_replay_ssm": True,        # SSM-state input caching
+            "use_quamba2": True,           # W4A8 SSM quant
+            "use_avmp": True,              # asymmetric KV/SSM virtual paging
+            "use_virtual_tensor": True,    # elastic GPU/CPU tensor pool
+            "use_suffix_spec": True,       # training-free suffix decoding
+            "use_adaptive_spec": True,     # n-gram + EAGLE-3 spec decode
+            "use_faser": True,             # dynamic spec length controller
+            "warmup": True,
+        }
+        defaults.update(overrides)
+        return cls.from_kwargs(**defaults)
+
+    @classmethod
+    def optimal_for(cls, model_config: Any,
+                    **overrides: Any) -> ActivationConfig:
+        """Pick the best profile for a given ModelConfig.
+
+        Routes mamba/SSM hybrids to ``mamba_hybrid()`` (avoids
+        torch.compile and KV-slicing features that assume pure-attention
+        state layouts); everything else gets ``optimal()``.
+        """
+        layer_types = getattr(model_config, "layer_types", None) or []
+        if any(lt in ("mamba", "mamba3") for lt in layer_types):
+            return cls.mamba_hybrid(**overrides)
+        return cls.optimal(**overrides)

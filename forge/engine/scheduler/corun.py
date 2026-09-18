@@ -31,8 +31,12 @@ For our setup:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class CoRunScheduler:
@@ -89,7 +93,7 @@ class CoRunScheduler:
                 self._decode_graph = None
                 return
 
-        print(f"  [CoRun] Captured fixed-shape decode graph "
+        logger.info(f"  [CoRun] Captured fixed-shape decode graph "
               f"(concurrency={self.max_concurrency})")
 
     def prefill_isolated(self, input_ids: torch.Tensor,

@@ -24,7 +24,7 @@ the first 16 layers (the new layers 16-29 are zero-init residual = identity).
 
 Usage:
     python -m research.vision.port_v10_to_v11 \
-        --v10-checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \
+        --v10-checkpoint research/checkpoints/ForgeLM_V2.safetensors \
         --output research/checkpoints/ForgeLM_V2_Pro.safetensors \
         [--siglip2-checkpoint path/to/siglip2.safetensors]
 """

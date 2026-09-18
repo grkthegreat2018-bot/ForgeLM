@@ -1,0 +1,296 @@
+[
+  {
+    "tag": "S0_fp32_b1",
+    "batch": 1,
+    "autocast": false,
+    "lora_dtype": "float32",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 4.262085857062504,
+      "ms_step": 42.62085857062504,
+      "steps": 3000,
+      "total_s": 128.11742615699768,
+      "final_loss": 0.2878844141960144
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "per_type": {
+        "code": 2,
+        "vocab": 20,
+        "spec": 12,
+        "serial": 13
+      },
+      "total": 47,
+      "known": 1,
+      "held": 0,
+      "ppl": 118.00119277366979
+    },
+    "recall": 47,
+    "known_reg": 8,
+    "held_reg": 9,
+    "ppl_delta_pct": 329.68780178518233
+  },
+  {
+    "tag": "S1_bf16_b1",
+    "batch": 1,
+    "autocast": true,
+    "lora_dtype": "float32",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 5.403578503378506,
+      "ms_step": 54.03578503378506,
+      "steps": 3000,
+      "total_s": 163.53384470939636,
+      "final_loss": 0.3952122628688812
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "per_type": {
+        "code": 1,
+        "vocab": 24,
+        "spec": 3,
+        "serial": 15
+      },
+      "total": 43,
+      "known": 0,
+      "held": 0,
+      "ppl": 81.83021071475359
+    },
+    "recall": 43,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 197.97532156375365
+  },
+  {
+    "tag": "S2_bf16_b16",
+    "batch": 16,
+    "autocast": true,
+    "lora_dtype": "float32",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 0.3355900336956156,
+      "ms_step": 47.94143338508793,
+      "steps": 210,
+      "total_s": 11.230652093887329,
+      "final_loss": 0.5377465486526489
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "per_type": {
+        "code": 0,
+        "vocab": 3,
+        "spec": 14,
+        "serial": 5
+      },
+      "total": 22,
+      "known": 0,
+      "held": 0,
+      "ppl": 31.556742293569346
+    },
+    "recall": 22,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 14.910255641508353
+  },
+  {
+    "tag": "S2b_bf16lora_b16",
+    "batch": 16,
+    "autocast": true,
+    "lora_dtype": "bfloat16",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 0.35161865168604356,
+      "ms_step": 50.23123595514908,
+      "steps": 210,
+      "total_s": 10.99686336517334,
+      "final_loss": 0.5519396662712097
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "per_type": {
+        "code": 0,
+        "vocab": 7,
+        "spec": 16,
+        "serial": 4
+      },
+      "total": 27,
+      "known": 0,
+      "held": 0,
+      "ppl": 33.499021684212444
+    },
+    "recall": 27,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 21.98284314847395
+  },
+  {
+    "tag": "S2c_bf16_b16_90ep",
+    "batch": 16,
+    "autocast": true,
+    "lora_dtype": "float32",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 0.3432595890559507,
+      "ms_step": 49.0370841508501,
+      "steps": 630,
+      "total_s": 30.895415782928467,
+      "final_loss": 0.3454098701477051
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "per_type": {
+        "code": 22,
+        "vocab": 25,
+        "spec": 25,
+        "serial": 24
+      },
+      "total": 96,
+      "known": 0,
+      "held": 0,
+      "ppl": 35.44830866340181
+    },
+    "recall": 96,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 29.080947984946857
+  },
+  {
+    "tag": "S3_int8_bf16lora_b16",
+    "batch": 16,
+    "autocast": true,
+    "lora_dtype": "bfloat16",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 0.4310601908585121,
+      "ms_step": 61.58002726550173,
+      "steps": 210,
+      "total_s": 13.350366830825806,
+      "final_loss": 0.5255112648010254
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 9,
+      "held": 9,
+      "ppl": 28.434475644511394
+    },
+    "final": {
+      "per_type": {
+        "code": 0,
+        "vocab": 12,
+        "spec": 5,
+        "serial": 0
+      },
+      "total": 17,
+      "known": 0,
+      "held": 0,
+      "ppl": 34.662369628849945
+    },
+    "recall": 17,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 21.902615902610105
+  },
+  {
+    "tag": "S4_nf4_bf16lora_b16",
+    "batch": 16,
+    "autocast": true,
+    "lora_dtype": "bfloat16",
+    "lora_params": 276480,
+    "timing": {
+      "epoch_s": 0.588861999840572,
+      "ms_step": 84.12314283436741,
+      "steps": 210,
+      "total_s": 17.813823223114014,
+      "final_loss": 0.5329586267471313
+    },
+    "base": {
+      "per_type": {
+        "code": 0,
+        "vocab": 0,
+        "spec": 0,
+        "serial": 0
+      },
+      "total": 0,
+      "known": 8,
+      "held": 9,
+      "ppl": 42.76371512084478
+    },
+    "final": {
+      "per_type": {
+        "code": 2,
+        "vocab": 20,
+        "spec": 9,
+        "serial": 1
+      },
+      "total": 32,
+      "known": 0,
+      "held": 0,
+      "ppl": 121.27133830687819
+    },
+    "recall": 32,
+    "known_reg": 8,
+    "held_reg": 9,
+    "ppl_delta_pct": 183.5846650932477
+  }
+]

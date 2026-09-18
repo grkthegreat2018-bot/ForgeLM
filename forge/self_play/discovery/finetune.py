@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 
 from forge.self_play.discovery.discovery_db import DiscoveryDB
-from research.paths import DATA_DIR, V10_CHECKPOINT
+from research.paths import DATA_DIR, V2_CHECKPOINT
 
 _EPOCHS_DIR = DATA_DIR / "discovery" / "epochs"
 
@@ -116,12 +116,15 @@ def _build_trajectory_pairs(db: DiscoveryDB,
             prompt = qwen_render_messages(
                 prompt_msgs, tools=None, add_generation_prompt=True)
 
+            body_parts = []
+            if msg.get("content"):
+                body_parts.append(msg["content"])
             if msg.get("tool_calls"):
-                import json as _json
-                body = "\n".join(
-                    _json.dumps(tc, ensure_ascii=False) for tc in msg["tool_calls"])
-            else:
-                body = msg.get("content", "")
+                from forge.self_play.discovery.chat_template import (
+                    render_tool_calls,
+                )
+                body_parts.append(render_tool_calls(msg["tool_calls"]))
+            body = "\n".join(body_parts)
 
             completion = f"{body}{IM_END}\n"
 
@@ -170,9 +173,9 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
     cfg = config or FinetuneConfig()
 
     # Load base model via ForgeEngine (IRI-FP4 quantized, stays packed in VRAM)
-    ckpt = base_checkpoint or str(V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R30.safetensors")
+    ckpt = base_checkpoint or str(V2_CHECKPOINT.parent / "ForgeLM_V2.safetensors")
     print(f"  [finetune] Loading base: {ckpt}")
-    engine = ForgeEngine.from_checkpoint(ckpt, config_name="forgelm_v2_light",
+    engine = ForgeEngine.from_checkpoint(ckpt, config_name="forgelm_v2",
                                           device=device, auto_activate=False)
     model = engine.model
     model.train()

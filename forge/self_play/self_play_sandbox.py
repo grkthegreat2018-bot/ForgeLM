@@ -1475,11 +1475,11 @@ def main():
 
     # Load model
     print("\n[1] Loading ForgeLM V10 (IRI-FP4 + BitNet QAT + TITAN + MoD)...")
-    cfg = get_config("forgelm_v2_light", device="cuda")
+    cfg = get_config("forgelm_v2", device="cuda")
     model = ModelLoader.build_model_fast(cfg,
-        checkpoint_path="research/checkpoints/ForgeLM_V2_Light.safetensors")
+        checkpoint_path="research/checkpoints/ForgeLM_V2.safetensors")
     model.to("cuda").eval()
-    tokenizer = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tokenizer = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
 
     # Create sandbox
     print("\n[2] Creating sandbox...")

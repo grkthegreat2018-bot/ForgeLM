@@ -1,0 +1,158 @@
+[
+  {
+    "condition": "naive_ft",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 0.002731317273719469
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 0.0033110866335846366
+      },
+      "inject": {
+        "correct": 20,
+        "total": 20,
+        "avg_prob": 0.8114320382475853
+      },
+      "ppl": 201.6013146056584
+    }
+  },
+  {
+    "condition": "full_delta",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.6335527837276459
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.5900494240224361
+      },
+      "inject": {
+        "correct": 20,
+        "total": 20,
+        "avg_prob": 0.9347261250019073
+      },
+      "ppl": 16.511224658889482
+    }
+  },
+  {
+    "condition": "full_delta_unfreeze",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.9981945157051086
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.836892868578434
+      },
+      "inject": {
+        "correct": 17,
+        "total": 20,
+        "avg_prob": 0.3789412352896761
+      },
+      "ppl": 6.699920599249701
+    }
+  },
+  {
+    "condition": "lora_64",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.7956511884927749
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.7810414284467697
+      },
+      "inject": {
+        "correct": 18,
+        "total": 20,
+        "avg_prob": 0.532998814759776
+      },
+      "ppl": 10.32220273070797
+    }
+  }
+]

@@ -16,6 +16,8 @@ Both are drop-in replacements for NVFP4Linear with the same interface.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,6 +31,8 @@ from forge.engine.quant.nvfp4_quant import (
     _quantize_to_fp4,
 )
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Novel Algorithm 1: AdaptScale FP4 (AS-FP4)
@@ -408,9 +412,9 @@ def quantize_model_asfp4(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [AS-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [AS-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [AS-FP4] {n} layers quantized (MSE-optimal scales)")
+        logger.info(f"  [AS-FP4] {n} layers quantized (MSE-optimal scales)")
     return n
 
 
@@ -437,9 +441,9 @@ def quantize_model_residual_fp4(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [R-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [R-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [R-FP4] {n} layers quantized (FP4 + {residual_ratio*100:.0f}% residual)")
+        logger.info(f"  [R-FP4] {n} layers quantized (FP4 + {residual_ratio*100:.0f}% residual)")
     return n
 
 
@@ -1360,9 +1364,9 @@ def quantize_model_sr_fp4(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [SR-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [SR-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [SR-FP4] {n} layers quantized (stochastic-rounding FP4)")
+        logger.info(f"  [SR-FP4] {n} layers quantized (stochastic-rounding FP4)")
     return n
 
 
@@ -1389,9 +1393,9 @@ def quantize_model_iri_fp4(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [IRI-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [IRI-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [IRI-FP4] {n} layers quantized ({n_rounds}-round residual FP4)")
+        logger.info(f"  [IRI-FP4] {n} layers quantized ({n_rounds}-round residual FP4)")
     return n
 
 
@@ -1419,9 +1423,9 @@ def quantize_model_tsd_fp4(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [TSDS-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [TSDS-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [TSDS-FP4] {n} layers quantized (dual-scale split-{split_quantile} FP4)")
+        logger.info(f"  [TSDS-FP4] {n} layers quantized (dual-scale split-{split_quantile} FP4)")
     return n
 
 
@@ -1655,7 +1659,7 @@ def calibrate_hw_fp4_model(model: nn.Module, sample_input: torch.Tensor,
 
     if not hw_layers:
         if verbose:
-            print("  [HW-FP4-v2] No HWFP4CalibratedLinear layers found")
+            logger.info("  [HW-FP4-v2] No HWFP4CalibratedLinear layers found")
         return 0
 
     with torch.inference_mode():
@@ -1672,7 +1676,7 @@ def calibrate_hw_fp4_model(model: nn.Module, sample_input: torch.Tensor,
             n_calibrated += 1
 
     if verbose:
-        print(f"  [HW-FP4-v2] {n_calibrated} layers calibrated with real activations")
+        logger.info(f"  [HW-FP4-v2] {n_calibrated} layers calibrated with real activations")
     return n_calibrated
 
 
@@ -1704,9 +1708,9 @@ def quantize_model_hw_fp4_v2(model: nn.Module, block_size: int = 32,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [HW-FP4-v2] Skipped {name}: {e}")
+                    logger.warning(f"  [HW-FP4-v2] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [HW-FP4-v2] {n} layers replaced (call calibrate_hw_fp4_model() next)")
+        logger.info(f"  [HW-FP4-v2] {n} layers replaced (call calibrate_hw_fp4_model() next)")
     return n
 
 
@@ -2072,7 +2076,7 @@ def quantize_model_adaptive(model: nn.Module, block_size: int = 32,
                             IRIFP4Linear.from_linear(module, block_size, iri_rounds))
                     counts["IRI-FP4"] += 1
                     if verbose:
-                        print(f"  [Adaptive] {name}: IRI-FP4 x{iri_rounds} (high-value)")
+                        logger.info(f"  [Adaptive] {name}: IRI-FP4 x{iri_rounds} (high-value)")
                 else:
                     stats = analyze_weight_distribution(module.weight.float())
                     algo = stats["recommendation"]
@@ -2095,16 +2099,16 @@ def quantize_model_adaptive(model: nn.Module, block_size: int = 32,
                                 ASFP4Linear.from_linear(module, block_size))
                         counts["AS-FP4"] += 1
                     if verbose:
-                        print(f"  [Adaptive] {name}: {algo} "
+                        logger.info(f"  [Adaptive] {name}: {algo} "
                               f"(kurt={stats['kurtosis']:.1f}, "
                               f"dr={stats['dynamic_range']:.1f}, "
                               f"asym={stats['asymmetry']:.3f})")
             except Exception as e:
                 if verbose:
-                    print(f"  [Adaptive] Skipped {name}: {e}")
+                    logger.warning(f"  [Adaptive] Skipped {name}: {e}")
 
     if verbose:
-        print(f"  [Adaptive] Summary: {counts}")
+        logger.info(f"  [Adaptive] Summary: {counts}")
     return counts
 
 

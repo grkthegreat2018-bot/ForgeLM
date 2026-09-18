@@ -1,0 +1,612 @@
+﻿D:\windsurf\ForgeAI\venv\Scripts\python.exe : D:\windsurf\ForgeAI\venv\Lib\site-packages\torch\cuda\__init__.py:61: 
+FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml 
+directly, please report this to the maintainers of the package that installed pynvml for you.
+At line:1 char:71
++ ... f\ForgeAI'; D:\windsurf\ForgeAI\venv\Scripts\python.exe scripts\test_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (D:\windsurf\For...pynvml for you.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  import pynvml  # type: ignore[import]
+
+######################################################################
+# Running with kv='standard'
+######################################################################
+======================================================================
+ForgeEngine Test Sheet ΓÇö ForgeLM V9-1.2B
+KV strategy: standard
+======================================================================
+
+[1] Loading V9-1.2B...
+D:\windsurf\ForgeAI\research\model_loader.py:2224: UserWarning: expandable_segments not supported on this platform 
+(Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\c10/cuda/CUDAAllocatorConfig.h:39.)
+  state[key] = f.get_tensor(key)
+  [FastBuild] Meta-init architecture in 0.0s
+Unexpected keys: ['head.residual_mask', 'head.residual_values', 'blocks.0.attn.in_proj.residual_mask', 'blocks.0.attn.in_proj.residual_values', 'blocks.0.attn.out_proj.residual_mask'] ...
+  [FastBuild] Weights: 2.0s | assign: 0.1s | Total: 2.8s (1304.6M params)
+  Loaded in 2.8s | 1304.6M params
+
+[2] Creating ForgeEngine...
+  [ForgeEngine] ForgeEngine initialized
+  [Recovery] Crash recovery enabled
+  [ForgeEngine] KeyStack features detected: ['quarot', 'mrl']
+  Engine created. KV cache: None
+
+[3] Activating with kv_cache='standard'...
+  [VRAM] KV budget: 6535 MB / 32768 bytes/token = 2048 max tokens
+  [ForgeEngine] VRAM-aware KV cap: 2048 tokens (was 32768, free VRAM limited)
+  [ForgeEngine] KV cache: {'type': 'standard_prealloc', 'seq_len': 0, 'max_seq_len': 2048, 'size_mb': 0, 'compression': 1.0}
+  [ForgeEngine] Decoding: StandardDecoding
+  [ForgeEngine] Warmup: all CUDA kernels pre-compiled (conv + attn + KV cache)
+  [ForgeEngine] VRAM: 5.53 GB used, 7.29 GB free
+  Activated: <research.inference.kv_backend.StandardKVCache object at 0x0000020B8388EE50>
+
+[4] Engine stats:
+  generation_count: 0
+  total_tokens_generated: 0
+  keystack_features: ['quarot', 'mrl']
+  kv_cache:
+    type: standard_prealloc
+    seq_len: 0
+    max_seq_len: 2048
+    size_mb: 0
+    compression: 1.0
+  decoding: StandardDecoding
+  quantization: None
+  acceleration: None
+  mrl_adapter: None
+  quarot_kv: None
+  v0_warm: None
+  progressive_kv: None
+  vram:
+    total_gb: 12.82048
+    free_gb: 7.29284608
+    used_gb: 5.52763392
+    model_weights_gb: 2.609116672
+    percent: 43.115654952076675
+  active_config:
+    kv_cache: standard
+    decoding: standard
+    quantize: None
+    acceleration: None
+    mrl_keep_ratio: None
+    kv_bits: 4
+    use_v0_warm: False
+    use_progressive_kv: False
+    use_compile: False
+    use_triton_conv: False
+    use_prefix_cache: False
+    use_chunked_prefix_cache: False
+    use_cache_blend: False
+    use_spec_attn: False
+    kv_cache_tokens: None
+    use_chunked_prefill: False
+    use_wavelength_pruning: False
+    use_pod_attention: False
+    use_adaptive_spec: False
+    use_cosa: False
+    use_seq_split: False
+    use_compact_attn: False
+    use_suffix_spec: False
+    use_fused_qk_norm_rope_cache: False
+    use_block_fusion: False
+    use_compile_autotune: False
+    use_hybrid_prefill: False
+    use_learned_prefix_cache: False
+    use_hotprefix: False
+    use_mosa: False
+    use_triroute: False
+    use_breakable_cuda_graph: False
+    use_corun: False
+    use_foundry: False
+    use_fa4: False
+    use_kara_kv: False
+    use_moment_kv: False
+    use_kvpop: False
+    use_conf_kv: False
+    use_jet_long: False
+    use_rope_id: False
+    use_lerope: False
+    use_lampe: False
+    use_peagle: False
+    use_lookahead_gate: False
+    use_fastserve: False
+    use_libra: False
+    use_faser: False
+    use_kairos: False
+    use_unified_radix: False
+    use_elbow_moe: False
+    use_alloc_moe: False
+    use_lda_moe: False
+    use_adamx: False
+    use_sharq: False
+    use_mosaic_quant: False
+    use_aoh: False
+    warmup: True
+
+==================================================
+TEST 1: Generation speed (kv=standard)
+==================================================
+  Short: 661.8 tok/s (32 tok in 0.05s)
+    Output: ' rights rights rights rights rights rights rights...'
+  Medium: 1338.5 tok/s (64 tok in 0.05s)
+    Output: 'fasstefasstefasstefasstefasstefasstefasste...'
+  Long: 2663.4 tok/s (128 tok in 0.05s)
+    Output: ' precise precise precise precise precise precise precise...'
+
+==================================================
+TEST 2: Memory usage (kv=standard)
+==================================================
+  VRAM: 5.53 GB used / 12.82 GB total (43%)
+  Model weights: 2.61 GB
+  Free VRAM: 7.29 GB
+  RAM: 1920 MB
+  KV cache info: {'type': 'standard_prealloc', 'seq_len': 0, 'max_seq_len': 2048, 'size_mb': 0, 'compression': 1.0}
+
+==================================================
+TEST 3: Accuracy (10 questions, greedy)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' yo yo yo yo yo yo yo'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> '?adesadesadesadesadesadesades'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> 'errorerrorerrorerrorerrorerrorerror'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> '? gene gene gene gene gene gene gene'
+  Q10 Γ£ù: What does CPU stand for? -> '?╤ç╨░╨╡╤é╤ü╤Å╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗'
+
+  Accuracy: 0/10 = 0%
+
+==================================================
+TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' maja maja maja maja maja maja maja'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> 'adesadesadesadesadesadesades'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> 'errorerrorerrorerrorerrorerrorerror'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> ' Physiol35353535353535'
+  Q10 Γ£ù: What does CPU stand for? -> '? lane lane lane lane lane lane lane'
+
+  Accuracy (sampled): 0/10 = 0%
+
+==================================================
+TEST 5: KV cache comparison
+==================================================
+  Standard KV @ 2048 tokens: 67.1 MB
+  SpectralKV @ 2048 tokens: 4.4 MB
+  Compression: 15.4├ù
+
+==================================================
+FINAL ENGINE STATS
+==================================================
+  Generation count: 26
+  Total tokens generated: 277
+  KV cache: {'type': 'standard_prealloc', 'seq_len': 0, 'max_seq_len': 2048, 'size_mb': 0, 'compression': 1.0}
+  VRAM: {'total_gb': 12.82048, 'free_gb': 7.290748928, 'used_gb': 5.529731072, 'model_weights_gb': 2.609116672, 'percent': 43.13201277955272}
+
+======================================================================
+SUMMARY (kv=standard)
+======================================================================
+  Load time: 2.8s
+  Params: 1304.6M
+  Speed (Short): 661.8 tok/s
+  Speed (Medium): 1338.5 tok/s
+  Speed (Long): 2663.4 tok/s
+  Accuracy (greedy): 0/10 = 0%
+  Accuracy (sampled): 0/10 = 0%
+  VRAM: 5.53 GB / 12.82 GB
+  RAM: 1920 MB
+  KV compression: 15.4├ù
+
+  Results saved to scripts/_test_sheet_standard.json
+
+######################################################################
+# Running with kv='spectral'
+######################################################################
+======================================================================
+ForgeEngine Test Sheet ΓÇö ForgeLM V9-1.2B
+KV strategy: spectral
+======================================================================
+
+[1] Loading V9-1.2B...
+  [FastBuild] Meta-init architecture in 0.0s
+Unexpected keys: ['head.residual_mask', 'head.residual_values', 'blocks.0.attn.in_proj.residual_mask', 'blocks.0.attn.in_proj.residual_values', 'blocks.0.attn.out_proj.residual_mask'] ...
+  [FastBuild] Weights: 1.9s | assign: 0.0s | Total: 2.0s (1304.6M params)
+  Loaded in 2.0s | 1304.6M params
+
+[2] Creating ForgeEngine...
+  [ForgeEngine] ForgeEngine initialized
+  [Recovery] Crash recovery enabled
+  [ForgeEngine] KeyStack features detected: ['quarot', 'mrl']
+  Engine created. KV cache: None
+
+[3] Activating with kv_cache='spectral'...
+  [ForgeEngine] KV cache limited to 64 tokens (was 32768)
+  [VRAM] KV budget: 4050 MB / 32768 bytes/token = 2048 max tokens
+  [ForgeEngine] KV cache: {'type': 'spectral_fourier', 'seq_len': 0, 'max_freq': 64, 'n_coeffs': 129, 'sink_size': 4, 'fitted': False, 'bytes': 272384, 'compression': 0.007518796992481203}
+  [ForgeEngine] Decoding: StandardDecoding
+  [ForgeEngine] Warmup: all CUDA kernels pre-compiled (conv + attn + KV cache)
+  [ForgeEngine] VRAM: 8.00 GB used, 4.82 GB free
+  Activated: <research.inference.kv.spectral_kv.SpectralKVCache object at 0x0000020BBC372C90>
+
+[4] Engine stats:
+  generation_count: 0
+  total_tokens_generated: 0
+  keystack_features: ['quarot', 'mrl']
+  kv_cache:
+    type: spectral_fourier
+    seq_len: 0
+    max_freq: 64
+    n_coeffs: 129
+    sink_size: 4
+    fitted: False
+    bytes: 272384
+    compression: 0.007518796992481203
+  decoding: StandardDecoding
+  quantization: None
+  acceleration: None
+  mrl_adapter: None
+  quarot_kv: None
+  v0_warm: None
+  progressive_kv: None
+  vram:
+    total_gb: 12.82048
+    free_gb: 4.81820672
+    used_gb: 8.00227328
+    model_weights_gb: 2.609116672
+    percent: 62.417891373801915
+  active_config:
+    kv_cache: spectral
+    decoding: standard
+    quantize: None
+    acceleration: None
+    mrl_keep_ratio: None
+    kv_bits: 4
+    use_v0_warm: False
+    use_progressive_kv: False
+    use_compile: False
+    use_triton_conv: False
+    use_prefix_cache: False
+    use_chunked_prefix_cache: False
+    use_cache_blend: False
+    use_spec_attn: False
+    kv_cache_tokens: 64
+    use_chunked_prefill: False
+    use_wavelength_pruning: False
+    use_pod_attention: False
+    use_adaptive_spec: False
+    use_cosa: False
+    use_seq_split: False
+    use_compact_attn: False
+    use_suffix_spec: False
+    use_fused_qk_norm_rope_cache: False
+    use_block_fusion: False
+    use_compile_autotune: False
+    use_hybrid_prefill: False
+    use_learned_prefix_cache: False
+    use_hotprefix: False
+    use_mosa: False
+    use_triroute: False
+    use_breakable_cuda_graph: False
+    use_corun: False
+    use_foundry: False
+    use_fa4: False
+    use_kara_kv: False
+    use_moment_kv: False
+    use_kvpop: False
+    use_conf_kv: False
+    use_jet_long: False
+    use_rope_id: False
+    use_lerope: False
+    use_lampe: False
+    use_peagle: False
+    use_lookahead_gate: False
+    use_fastserve: False
+    use_libra: False
+    use_faser: False
+    use_kairos: False
+    use_unified_radix: False
+    use_elbow_moe: False
+    use_alloc_moe: False
+    use_lda_moe: False
+    use_adamx: False
+    use_sharq: False
+    use_mosaic_quant: False
+    use_aoh: False
+    warmup: True
+
+==================================================
+TEST 1: Generation speed (kv=spectral)
+==================================================
+  Short: 370.0 tok/s (32 tok in 0.09s)
+    Output: ' rights rights rights rights rights rights rights...'
+  Medium: 1338.5 tok/s (64 tok in 0.05s)
+    Output: 'fasstefasstefasstefasstefasstefasstefasste...'
+  Long: 2647.7 tok/s (128 tok in 0.05s)
+    Output: ' precise precise precise precise precise precise precise...'
+
+==================================================
+TEST 2: Memory usage (kv=spectral)
+==================================================
+  VRAM: 8.00 GB used / 12.82 GB total (62%)
+  Model weights: 2.61 GB
+  Free VRAM: 4.82 GB
+  RAM: 2290 MB
+  KV cache info: {'type': 'spectral_fourier', 'seq_len': 0, 'max_freq': 64, 'n_coeffs': 129, 'sink_size': 4, 'fitted': False, 'bytes': 272384, 'compression': 0.007518796992481203}
+
+==================================================
+TEST 3: Accuracy (10 questions, greedy)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' yo yo yo yo yo yo yo'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> '?adesadesadesadesadesadesades'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> 'errorerrorerrorerrorerrorerrorerror'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> '? gene gene gene gene gene gene gene'
+  Q10 Γ£ù: What does CPU stand for? -> '?╤ç╨░╨╡╤é╤ü╤Å╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗'
+
+  Accuracy: 0/10 = 0%
+
+==================================================
+TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' maja maja maja maja maja maja maja'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> '∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> ' ╨╛╤å╨╡╨╜ k├ñmp k├ñmp k├ñmp k├ñmp k├ñmp k├ñmp k├ñmp'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> ' gene gene gene gene gene gene gene'
+  Q10 Γ£ù: What does CPU stand for? -> '?.array.array.array.array.array.array.array'
+
+  Accuracy (sampled): 0/10 = 0%
+
+==================================================
+TEST 5: KV cache comparison
+==================================================
+  Standard KV @ 2048 tokens: 67.1 MB
+  SpectralKV @ 2048 tokens: 4.4 MB
+  Compression: 15.4├ù
+
+==================================================
+FINAL ENGINE STATS
+==================================================
+  Generation count: 26
+  Total tokens generated: 277
+  KV cache: {'type': 'spectral_fourier', 'seq_len': 0, 'max_freq': 64, 'n_coeffs': 129, 'sink_size': 4, 'fitted': False, 'bytes': 272384, 'compression': 0.007518796992481203}
+  VRAM: {'total_gb': 12.82048, 'free_gb': 4.81820672, 'used_gb': 8.00227328, 'model_weights_gb': 2.609116672, 'percent': 62.417891373801915}
+
+======================================================================
+SUMMARY (kv=spectral)
+======================================================================
+  Load time: 2.0s
+  Params: 1304.6M
+  Speed (Short): 370.0 tok/s
+  Speed (Medium): 1338.5 tok/s
+  Speed (Long): 2647.7 tok/s
+  Accuracy (greedy): 0/10 = 0%
+  Accuracy (sampled): 0/10 = 0%
+  VRAM: 8.00 GB / 12.82 GB
+  RAM: 2290 MB
+  KV compression: 15.4├ù
+
+  Results saved to scripts/_test_sheet_spectral.json
+
+######################################################################
+# Running with kv='s4r'
+######################################################################
+======================================================================
+ForgeEngine Test Sheet ΓÇö ForgeLM V9-1.2B
+KV strategy: s4r
+======================================================================
+
+[1] Loading V9-1.2B...
+  [FastBuild] Meta-init architecture in 0.1s
+Unexpected keys: ['head.residual_mask', 'head.residual_values', 'blocks.0.attn.in_proj.residual_mask', 'blocks.0.attn.in_proj.residual_values', 'blocks.0.attn.out_proj.residual_mask'] ...
+  [FastBuild] Weights: 2.0s | assign: 0.0s | Total: 2.1s (1304.6M params)
+  Loaded in 2.1s | 1304.6M params
+
+[2] Creating ForgeEngine...
+  [ForgeEngine] ForgeEngine initialized
+  [Recovery] Crash recovery enabled
+  [ForgeEngine] KeyStack features detected: ['quarot', 'mrl']
+  Engine created. KV cache: None
+
+[3] Activating with kv_cache='s4r'...
+  [VRAM] KV budget: 1597 MB / 32768 bytes/token = 2048 max tokens
+  [ForgeEngine] VRAM-aware KV cap: 2048 tokens (was 32768, free VRAM limited)
+  [ForgeEngine] KV cache: {'type': 's4r_lowrank', 'seq_len': 0, 'rank': 64, 'sink_size': 4, 'sparse_topk': 256, 'basis_built': False, 'bytes': 139264, 'compression': 0.0}
+  [ForgeEngine] Decoding: StandardDecoding
+  [ForgeEngine] Warmup: all CUDA kernels pre-compiled (conv + attn + KV cache)
+  [ForgeEngine] VRAM: 10.46 GB used, 2.36 GB free
+  Activated: <research.inference.kv.s4r_kv.S4RKVCache object at 0x0000020BBC3FED50>
+
+[4] Engine stats:
+  generation_count: 0
+  total_tokens_generated: 0
+  keystack_features: ['quarot', 'mrl']
+  kv_cache:
+    type: s4r_lowrank
+    seq_len: 0
+    rank: 64
+    sink_size: 4
+    sparse_topk: 256
+    basis_built: False
+    bytes: 139264
+    compression: 0.0
+  decoding: StandardDecoding
+  quantization: None
+  acceleration: None
+  mrl_adapter: None
+  quarot_kv: None
+  v0_warm: None
+  progressive_kv: None
+  vram:
+    total_gb: 12.82048
+    free_gb: 2.36453888
+    used_gb: 10.45594112
+    model_weights_gb: 2.609116672
+    percent: 81.55654952076678
+  active_config:
+    kv_cache: s4r
+    decoding: standard
+    quantize: None
+    acceleration: None
+    mrl_keep_ratio: None
+    kv_bits: 4
+    use_v0_warm: False
+    use_progressive_kv: False
+    use_compile: False
+    use_triton_conv: False
+    use_prefix_cache: False
+    use_chunked_prefix_cache: False
+    use_cache_blend: False
+    use_spec_attn: False
+    kv_cache_tokens: None
+    use_chunked_prefill: False
+    use_wavelength_pruning: False
+    use_pod_attention: False
+    use_adaptive_spec: False
+    use_cosa: False
+    use_seq_split: False
+    use_compact_attn: False
+    use_suffix_spec: False
+    use_fused_qk_norm_rope_cache: False
+    use_block_fusion: False
+    use_compile_autotune: False
+    use_hybrid_prefill: False
+    use_learned_prefix_cache: False
+    use_hotprefix: False
+    use_mosa: False
+    use_triroute: False
+    use_breakable_cuda_graph: False
+    use_corun: False
+    use_foundry: False
+    use_fa4: False
+    use_kara_kv: False
+    use_moment_kv: False
+    use_kvpop: False
+    use_conf_kv: False
+    use_jet_long: False
+    use_rope_id: False
+    use_lerope: False
+    use_lampe: False
+    use_peagle: False
+    use_lookahead_gate: False
+    use_fastserve: False
+    use_libra: False
+    use_faser: False
+    use_kairos: False
+    use_unified_radix: False
+    use_elbow_moe: False
+    use_alloc_moe: False
+    use_lda_moe: False
+    use_adamx: False
+    use_sharq: False
+    use_mosaic_quant: False
+    use_aoh: False
+    warmup: True
+
+==================================================
+TEST 1: Generation speed (kv=s4r)
+==================================================
+  Short: 664.0 tok/s (32 tok in 0.05s)
+    Output: ' rights rights rights rights rights rights rights...'
+  Medium: 1330.1 tok/s (64 tok in 0.05s)
+    Output: 'fasstefasstefasstefasstefasstefasstefasste...'
+  Long: 2656.4 tok/s (128 tok in 0.05s)
+    Output: ' precise precise precise precise precise precise precise...'
+
+==================================================
+TEST 2: Memory usage (kv=s4r)
+==================================================
+  VRAM: 10.46 GB used / 12.82 GB total (82%)
+  Model weights: 2.61 GB
+  Free VRAM: 2.36 GB
+  RAM: 2290 MB
+  KV cache info: {'type': 's4r_lowrank', 'seq_len': 0, 'rank': 64, 'sink_size': 4, 'sparse_topk': 256, 'basis_built': False, 'bytes': 139264, 'compression': 0.0}
+
+==================================================
+TEST 3: Accuracy (10 questions, greedy)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' yo yo yo yo yo yo yo'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> '?adesadesadesadesadesadesades'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> 'errorerrorerrorerrorerrorerrorerror'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> '? gene gene gene gene gene gene gene'
+  Q10 Γ£ù: What does CPU stand for? -> '?╤ç╨░╨╡╤é╤ü╤Å╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗╨▓╨╕╨╗'
+
+  Accuracy: 0/10 = 0%
+
+==================================================
+TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)
+==================================================
+  Q1 Γ£ù: What is 2+2? Answer with just the number -> ' maja maja maja maja maja maja maja'
+  Q2 Γ£ù: What is 10 minus 3? Answer with just the -> ' maja maja maja maja maja maja maja'
+  Q3 Γ£ù: What is 5 times 6? Answer with just the  -> ' maja maja maja maja maja maja maja'
+  Q4 Γ£ù: What is the capital of France? -> '???????'
+  Q5 Γ£ù: What is the chemical symbol for water? -> 'adesadesadesadesadesadesades'
+  Q6 Γ£ù: What is the largest planet in our solar  -> ' victories victories victories victories victories victories'
+  Q7 Γ£ù: If I have 3 apples and eat 1, how many a -> 'errorerrorerrorerrorerrorerrorerror'
+  Q8 Γ£ù: What comes after Monday? -> '?qlqlqlqlqlqlql'
+  Q9 Γ£ù: In Python, what function prints text to  -> ' gene gene gene gene gene gene gene'
+  Q10 Γ£ù: What does CPU stand for? -> '??╨╗╨░╨┤╨░-Un-Un-Un-Un-Un-Un-Un'
+
+  Accuracy (sampled): 0/10 = 0%
+
+==================================================
+TEST 5: KV cache comparison
+==================================================
+  Standard KV @ 2048 tokens: 67.1 MB
+  SpectralKV @ 2048 tokens: 4.4 MB
+  Compression: 15.4├ù
+
+==================================================
+FINAL ENGINE STATS
+==================================================
+  Generation count: 26
+  Total tokens generated: 278
+  KV cache: {'type': 's4r_lowrank', 'seq_len': 0, 'rank': 64, 'sink_size': 4, 'sparse_topk': 256, 'basis_built': False, 'bytes': 139264, 'compression': 0.0}
+  VRAM: {'total_gb': 12.82048, 'free_gb': 2.36453888, 'used_gb': 10.45594112, 'model_weights_gb': 2.609116672, 'percent': 81.55654952076678}
+
+======================================================================
+SUMMARY (kv=s4r)
+======================================================================
+  Load time: 2.1s
+  Params: 1304.6M
+  Speed (Short): 664.0 tok/s
+  Speed (Medium): 1330.1 tok/s
+  Speed (Long): 2656.4 tok/s
+  Accuracy (greedy): 0/10 = 0%
+  Accuracy (sampled): 0/10 = 0%
+  VRAM: 10.46 GB / 12.82 GB
+  RAM: 2290 MB
+  KV compression: 15.4├ù
+
+  Results saved to scripts/_test_sheet_s4r.json
+
+======================================================================
+KV STRATEGY COMPARISON
+======================================================================
+Strategy          Speed (tok/s)   Accuracy  VRAM (GB)      KV MB
+------------------------------------------------------------
+standard                 1338.5        0%       5.53       67.1
+spectral                 1338.5        0%       8.00        4.4
+s4r                      1330.1        0%      10.46       67.1
+
+Comparison saved to scripts/_test_sheet_comparison.json

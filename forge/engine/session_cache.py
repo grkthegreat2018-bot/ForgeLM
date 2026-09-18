@@ -36,12 +36,28 @@ if TYPE_CHECKING:
     from forge.engine.forge_engine import ForgeEngine
 
 
+def _kv_seq_len(past_kv) -> int | None:
+    """Sequence length covered by a per-layer KV cache, or None if the
+    cache has no length-bearing (attention) layers."""
+    if past_kv is None:
+        return None
+    for layer in past_kv:
+        if layer is None or isinstance(layer, dict):
+            continue
+        try:
+            return layer[0].shape[2]  # (B, n_kv, seq, head_dim)
+        except (TypeError, IndexError):
+            continue
+    return None
+
+
 @dataclass
 class SessionState:
     """Per-session KV cache state."""
     session_id: str
     token_ids: list[int] = field(default_factory=list)
     past_kv: Any = None  # KV cache tensor from model
+    recurrent_state: Any = None  # conv/SSM snapshot (prefix_cache.capture_recurrent_state)
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ttl: float | None = None  # seconds until auto-eviction (None = no TTL)
@@ -71,12 +87,11 @@ class SessionCacheManager:
     """Manages per-session KV cache with radix tree prefix matching + TTL.
 
     Features:
-      - Radix tree prefix matching: finds longest cached prefix across ALL
-        sessions, not just the current one. If session A cached "Hello, how
-        are you?" and session B sends "Hello, how are you? Tell me about X",
-        session B gets a prefix hit on the first 6 tokens.
-      - Session-aware: each session maintains its own KV state. When a
-        session continues, only the delta (new tokens) needs prefilling.
+      - Session-aware: each session maintains its own KV + recurrent state.
+        When a session continues, only the delta (new tokens) needs
+        prefilling.  (Cross-session prefix sharing lives in the separate
+        ``ChunkedPrefixCache``/``RadixPrefixCache`` — this manager is
+        strictly per-session.)
       - TTL: when a session pauses (e.g. tool call), pin its KV cache with
         a time-to-live. Auto-evict when TTL expires.
       - LRU eviction: when GPU memory is tight, evict least-recently-used
@@ -135,6 +150,7 @@ class SessionCacheManager:
             token_ids: full token IDs (session history + new prompt)
             past_kv: cached KV state (from previous turns + prefix match)
             cached_len: number of tokens that hit the cache (skip prefill)
+            recurrent_state: conv/SSM snapshot for boundary restoration
         """
         if session_id not in self._sessions:
             # Auto-create session if it doesn't exist
@@ -158,15 +174,28 @@ class SessionCacheManager:
         # Check for prefix cache hit
         cached_len = 0
         past_kv = session.past_kv
+        recurrent = session.recurrent_state
 
         if past_kv is not None and session.token_ids:
-            # We have cached KV from previous turns — only prefill the delta
-            cached_len = len(session.token_ids)
-            self._prefix_hits += 1
-            self.engine._log(
-                f"Session prefix hit: {cached_len} tokens cached, "
-                f"{len(new_ids)} new tokens to prefill",
-                source="session", level="profile")
+            # Verify the stored KV actually covers all prior tokens — an
+            # evicting KV strategy (paged/snapkv) may have shrunk it.
+            kv_len = _kv_seq_len(past_kv)
+            if kv_len is not None and kv_len != len(session.token_ids):
+                self._prefix_misses += 1
+                self.engine._log(
+                    f"Session KV length mismatch: {kv_len} != "
+                    f"{len(session.token_ids)} tokens — full prefill",
+                    source="session", level="warn")
+                past_kv = None
+                recurrent = None
+            else:
+                # We have cached KV from previous turns — only prefill the delta
+                cached_len = len(session.token_ids)
+                self._prefix_hits += 1
+                self.engine._log(
+                    f"Session prefix hit: {cached_len} tokens cached, "
+                    f"{len(new_ids)} new tokens to prefill",
+                    source="session", level="profile")
         else:
             self._prefix_misses += 1
 
@@ -174,12 +203,14 @@ class SessionCacheManager:
         session.token_ids = full_ids
 
         ids_tensor = torch.tensor([full_ids], device=self.engine.device)
-        return ids_tensor, past_kv, cached_len
+        return ids_tensor, past_kv, cached_len, recurrent
 
-    def update_session_kv(self, session_id: str, past_kv: Any):
-        """Update the session's cached KV state after generation."""
+    def update_session_kv(self, session_id: str, past_kv: Any,
+                          recurrent_state: Any = None):
+        """Update the session's cached KV + recurrent state after generation."""
         if session_id in self._sessions:
             self._sessions[session_id].past_kv = past_kv
+            self._sessions[session_id].recurrent_state = recurrent_state
             self._sessions[session_id].touch()
 
     def pin_session(self, session_id: str, ttl: float | None = None):
@@ -215,7 +246,6 @@ class SessionCacheManager:
         if self._access_count % self.eviction_check_interval != 0:
             return
 
-        time.time()
         # Evict expired sessions
         expired = [sid for sid, s in self._sessions.items()
                    if s.is_expired and not s.pinned]
@@ -263,6 +293,7 @@ class SessionCacheManager:
         """Clear all sessions and release KV cache tensors."""
         for session in self._sessions.values():
             session.past_kv = None
+            session.recurrent_state = None
         self._sessions.clear()
         self._prefix_hits = 0
         self._prefix_misses = 0

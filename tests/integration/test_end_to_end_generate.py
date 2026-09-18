@@ -22,7 +22,7 @@ from forge.engine.forge_engine import ForgeEngine
 CUDA_AVAILABLE = torch.cuda.is_available()
 
 
-def _build_engine(preset="lfm25_tiny", vocab=65536, activate=True):
+def _build_engine(preset="forgelm_tiny", vocab=65536, activate=True):
     """Build a ForgeEngine with the given preset. GPU-first, CPU fallback.
 
     Uses vocab=65536 to match the lfm25 tokenizer (tiny vocab causes
@@ -43,7 +43,7 @@ def _build_engine(preset="lfm25_tiny", vocab=65536, activate=True):
     model.eval()
 
     from research.tokenizer_cache import get_tokenizer
-    tok = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device=cfg.device)
     if activate:
         engine.activate_optimal()
@@ -137,6 +137,63 @@ class TestEndToEndGenerate:
         finally:
             del engine, model
             torch.cuda.empty_cache()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+class TestQuantAndKVCombinations:
+    """Parametrized across quant modes × KV strategies (critique NC5).
+
+    The real bugs live at the interaction boundary — quant + KV + decoding
+    interacting — which single-mode tests miss.
+    """
+
+    @pytest.mark.parametrize("kv", ["standard", "paged"])
+    @pytest.mark.parametrize("quant", ["none", "int8", "fp8"])
+    def test_quant_kv_combination_generates(self, quant, kv):
+        engine, model = _build_engine(activate=False)
+        try:
+            engine._activate_kv_cache(kv, None)
+            if quant != "none":
+                engine._apply_quantization(quant)
+            result = engine.generate("test", max_new_tokens=5,
+                                     finish_sentence=False, temperature=0.0)
+            assert isinstance(result, str) and len(result) > 0, (
+                f"quant={quant} kv={kv} produced no output "
+                f"(active KV: {getattr(engine, '_active_kv_cache_name', '?')})"
+            )
+        except (ImportError, RuntimeError, ValueError) as e:
+            if "All quantization modes failed" in str(e):
+                pytest.fail(f"quant={quant} kv={kv}: all fallbacks failed: {e}")
+            pytest.skip(f"quant={quant} kv={kv} unsupported here: {e}")
+        finally:
+            del engine, model
+            torch.cuda.empty_cache()
+
+
+class TestEndToEndCPU:
+    """CPU tier — runs without CUDA so the integration boundary is exercised
+    in CPU-only CI environments too (critique NC5)."""
+
+    def _build_cpu_engine(self):
+        cfg = get_config("forgelm_tiny")
+        cfg.vocab_size = 65536
+        cfg.dtype = "float32"
+        cfg.device = "cpu"
+        with torch.device("cpu"):
+            model = ConfigurableResearchLLM(cfg)
+        model.eval()
+        from research.tokenizer_cache import get_tokenizer
+        tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
+        return ForgeEngine(model, tok, device="cpu"), model
+
+    def test_cpu_generation_returns_string(self):
+        engine, model = self._build_cpu_engine()
+        try:
+            result = engine.generate("Hello", max_new_tokens=3,
+                                     finish_sentence=False, temperature=0.0)
+            assert isinstance(result, str) and len(result) > 0
+        finally:
+            del engine, model
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")

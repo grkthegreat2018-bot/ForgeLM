@@ -1,0 +1,40 @@
+{
+  "tag": "U1_unsloth4bit_l12",
+  "lora_params": 276480,
+  "timing": {
+    "total_s": 48.8093695640564,
+    "steps": 563,
+    "ms_step": 86.69515020258685,
+    "epoch_s": 0.5423263284895156,
+    "final_loss": null
+  },
+  "base": {
+    "per_type": {
+      "code": 0,
+      "vocab": 0,
+      "spec": 0,
+      "serial": 0
+    },
+    "total": 0,
+    "known": 8,
+    "held": 9,
+    "ppl": 43.15099340929854
+  },
+  "final": {
+    "per_type": {
+      "code": 22,
+      "vocab": 25,
+      "spec": 25,
+      "serial": 23
+    },
+    "total": 95,
+    "known": 0,
+    "held": 0,
+    "ppl": 104.3900124518404
+  },
+  "known_reg": 8,
+  "held_reg": 9,
+  "ppl_delta_pct": 141.91798196086387,
+  "lora_dtype": "bfloat16",
+  "base_quant": "unsloth bnb-4bit"
+}

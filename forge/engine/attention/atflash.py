@@ -29,10 +29,13 @@ flex_attention, or as a custom mask in SDPA.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 def compute_rope_wavelengths(head_dim: int, base: float = 1_000_000.0,
@@ -176,7 +179,7 @@ class WavelengthPrunedAttention:
                 self._patch(module, name)
                 count += 1
         self._active = True
-        print(f"  [ATFlash] Patched {count} attention layers "
+        logger.info(f"  [ATFlash] Patched {count} attention layers "
               f"(rope_base={self.rope_base}, prune_factor={self.prune_factor})")
 
     def _patch(self, attn_module, name: str):
@@ -235,7 +238,7 @@ class WavelengthPrunedAttention:
                 rope_base=self.rope.base if hasattr(self.rope, 'base') else 1_000_000.0,
                 prune_factor=1.0,
             )
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module.forward = patched_forward.__get__(attn_module, type(attn_module))

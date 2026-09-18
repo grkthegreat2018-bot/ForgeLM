@@ -821,7 +821,7 @@ class BlockReconstructor:
                     logger.info(f"  Block {block_idx} iter {iter}: loss={loss_val:.6f}")
                     # Also print for visibility when logger isn't configured
                     if not logger.handlers:
-                        print(f"    iter {iter}: loss={loss_val:.6f}")
+                        logger.info(f"    iter {iter}: loss={loss_val:.6f}")
         finally:
             _uninstall_soft_forward(patches)
 
@@ -892,7 +892,7 @@ class BlockReconstructor:
             dict mapping block_idx → final loss
         """
         if verbose:
-            print("BlockReconstructor: capturing block I/O from original model...")
+            logger.info("BlockReconstructor: capturing block I/O from original model...")
 
         self.capture_block_io()
 
@@ -902,17 +902,17 @@ class BlockReconstructor:
         results = {}
         for i, idx in enumerate(blocks_to_reconstruct):
             if verbose:
-                print(f"  [{i+1}/{len(blocks_to_reconstruct)}] Reconstructing block {idx}...")
+                logger.info(f"  [{i+1}/{len(blocks_to_reconstruct)}] Reconstructing block {idx}...")
 
             try:
                 loss = self.reconstruct_block(idx, n_iters=n_iters, lr=lr,
                                               loss_fn=loss_fn)
                 results[idx] = loss
                 if verbose:
-                    print(f"    Final loss: {loss:.6f}")
+                    logger.info(f"    Final loss: {loss:.6f}")
             except Exception as e:
                 if verbose:
-                    print(f"    FAILED: {e}")
+                    logger.info(f"    FAILED: {e}")
                 results[idx] = float('inf')
 
             # Clean up between blocks
@@ -922,7 +922,7 @@ class BlockReconstructor:
 
         if verbose:
             avg_loss = sum(results.values()) / max(len(results), 1)
-            print(f"\nBlockReconstructor complete: avg loss={avg_loss:.6f}")
+            logger.info(f"BlockReconstructor complete: avg loss={avg_loss:.6f}")
 
         return results
 
@@ -950,7 +950,7 @@ class BlockReconstructor:
             dict mapping block_idx → final loss
         """
         if verbose:
-            print("BlockReconstructor (progressive): capturing initial I/O...")
+            logger.info("BlockReconstructor (progressive): capturing initial I/O...")
 
         self.capture_block_io()
 
@@ -959,7 +959,7 @@ class BlockReconstructor:
 
         for idx in range(self.n_blocks):
             if verbose:
-                print(f"  [{idx+1}/{self.n_blocks}] Progressive block {idx}...")
+                logger.info(f"  [{idx+1}/{self.n_blocks}] Progressive block {idx}...")
 
             # Update this block's target to use the current (propagated) input
             # but keep the original target output
@@ -974,10 +974,10 @@ class BlockReconstructor:
                                               loss_fn=loss_fn)
                 results[idx] = loss
                 if verbose:
-                    print(f"    Final loss: {loss:.6f}")
+                    logger.info(f"    Final loss: {loss:.6f}")
             except Exception as e:
                 if verbose:
-                    print(f"    FAILED: {e}")
+                    logger.info(f"    FAILED: {e}")
                 results[idx] = float('inf')
 
             # Restore original input
@@ -1005,7 +1005,7 @@ class BlockReconstructor:
 
         if verbose:
             avg_loss = sum(results.values()) / max(len(results), 1)
-            print(f"\nProgressive reconstruction complete: avg loss={avg_loss:.6f}")
+            logger.info(f"Progressive reconstruction complete: avg loss={avg_loss:.6f}")
 
         return results
 
@@ -1031,7 +1031,7 @@ class BlockReconstructor:
             final KL loss
         """
         if verbose:
-            print("KL calibration: capturing original model output...")
+            logger.info("KL calibration: capturing original model output...")
 
         # Capture original model output
         self.model_orig.eval()
@@ -1056,7 +1056,7 @@ class BlockReconstructor:
 
         if not all_scale_params:
             if verbose:
-                print("  No scale parameters found for KL calibration")
+                logger.info("  No scale parameters found for KL calibration")
             return 0.0
 
         # Install soft forward patches on all blocks
@@ -1117,7 +1117,7 @@ class BlockReconstructor:
                                    for k, v in all_scale_params.items()}
 
                 if verbose and (iter % 5 == 0 or iter == n_iters - 1):
-                    print(f"  KL iter {iter}: loss={loss_val:.6f}")
+                    logger.info(f"  KL iter {iter}: loss={loss_val:.6f}")
         finally:
             # Remove patches
             for i, (block, patches) in all_patches.items():
@@ -1135,7 +1135,7 @@ class BlockReconstructor:
                         m._invalidate_cache()
 
         if verbose:
-            print(f"KL calibration complete: best loss={best_loss:.6f}")
+            logger.info(f"KL calibration complete: best loss={best_loss:.6f}")
 
         del all_scale_params, optimizer
         if self.device.type == 'cuda':
@@ -1173,7 +1173,7 @@ class BlockReconstructor:
             dict mapping block_idx → final loss
         """
         if verbose:
-            print("Error-mitigated reconstruction: capturing block I/O...")
+            logger.info("Error-mitigated reconstruction: capturing block I/O...")
 
         self.capture_block_io()
 
@@ -1182,7 +1182,7 @@ class BlockReconstructor:
 
         for idx in range(self.n_blocks):
             if verbose:
-                print(f"  [{idx+1}/{self.n_blocks}] Error-mitigated block {idx}...")
+                logger.info(f"  [{idx+1}/{self.n_blocks}] Error-mitigated block {idx}...")
 
             # Original target: what the original block produced from original input
             target_orig = self._block_outputs[idx].to(self.device)
@@ -1229,10 +1229,10 @@ class BlockReconstructor:
                                               optimize_binary=optimize_binary)
                 results[idx] = loss
                 if verbose:
-                    print(f"    Final loss: {loss:.6f}")
+                    logger.info(f"    Final loss: {loss:.6f}")
             except Exception as e:
                 if verbose:
-                    print(f"    FAILED: {e}")
+                    logger.info(f"    FAILED: {e}")
                 results[idx] = float('inf')
 
             # Restore original I/O
@@ -1259,7 +1259,7 @@ class BlockReconstructor:
 
         if verbose:
             avg_loss = sum(results.values()) / max(len(results), 1)
-            print(f"\nError-mitigated reconstruction complete: "
+            logger.info(f"Error-mitigated reconstruction complete: "
                   f"avg loss={avg_loss:.6f}")
 
         return results

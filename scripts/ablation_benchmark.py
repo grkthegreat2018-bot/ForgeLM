@@ -25,8 +25,8 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from research import paths as _paths
 
-V2_CHECKPOINT = _paths.as_str(_paths.FORGELM_V2_CHECKPOINT)
-TOKENIZER_PATH = _paths.as_str(_paths.QWEN_HF_TOKENIZER_DIR)
+V2_CHECKPOINT = _paths.as_str(_paths.V2_CHECKPOINT)
+TOKENIZER_PATH = _paths.as_str(_paths.FORGE_TOKENIZER_DIR)
 RESULTS_DIR = _paths.as_str(_paths.ABLATION_RESULTS_DIR)
 
 # Test prompts for perplexity + generation speed

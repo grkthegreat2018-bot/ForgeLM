@@ -29,8 +29,12 @@ This module provides a wrapper that:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 def get_gpu_arch() -> tuple[int, int]:
@@ -57,7 +61,7 @@ def fa4_available() -> bool:
     if not is_sm120():
         return False
     try:
-        import flash_attn.cute.interface as fa4_iface  # noqa: F401
+        import flash_attn.cute.interface as fa4_iface
         return hasattr(fa4_iface, 'flash_attn_varlen_func')
     except ImportError:
         return False
@@ -84,10 +88,10 @@ class FA4Attention:
         self._backend = self._detect_backend()
 
         if self._fa4:
-            print(f"  [FA4] FlashAttention-4 active (sm_120, "
+            logger.info(f"  [FA4] FlashAttention-4 active (sm_120, "
                   f"fp8_kv={use_fp8_kv}, page_size={page_size})")
         else:
-            print(f"  [FA4] FA4 not available, using {self._backend}")
+            logger.info(f"  [FA4] FA4 not available, using {self._backend}")
 
     def _detect_backend(self) -> str:
         """Detect the best available attention backend."""

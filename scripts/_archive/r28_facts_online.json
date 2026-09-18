@@ -1,0 +1,1720 @@
+{
+ "known": [
+  [
+   "What is the capital of France?",
+   "Paris"
+  ],
+  [
+   "What is the capital of Japan?",
+   "Tokyo"
+  ],
+  [
+   "What is the capital of Germany?",
+   "Berlin"
+  ],
+  [
+   "What is the largest planet in the solar system?",
+   "Jupiter"
+  ],
+  [
+   "Who wrote Romeo and Juliet?",
+   "Shakespeare"
+  ],
+  [
+   "What is the chemical symbol for water?",
+   "H2O"
+  ],
+  [
+   "What is the capital of Italy?",
+   "Rome"
+  ],
+  [
+   "What is the capital of Spain?",
+   "Madrid"
+  ],
+  [
+   "What is the capital of Russia?",
+   "Moscow"
+  ],
+  [
+   "What is the capital of England?",
+   "London"
+  ]
+ ],
+ "held": [
+  [
+   "What is the capital of China?",
+   "Beijing"
+  ],
+  [
+   "What is the capital of Canada?",
+   "Ottawa"
+  ],
+  [
+   "What is the capital of Australia?",
+   "Canberra"
+  ],
+  [
+   "What is the capital of Brazil?",
+   "Brasilia"
+  ],
+  [
+   "What is the capital of India?",
+   "New Delhi"
+  ],
+  [
+   "What is the capital of Egypt?",
+   "Cairo"
+  ],
+  [
+   "What is the capital of Greece?",
+   "Athens"
+  ],
+  [
+   "What is the capital of Mexico?",
+   "Mexico City"
+  ],
+  [
+   "What is the capital of Norway?",
+   "Oslo"
+  ],
+  [
+   "What is the capital of Sweden?",
+   "Stockholm"
+  ]
+ ],
+ "inject": [
+  [
+   "What was a popular Hacker News story on August 28, 2026?",
+   "State of the Map 2026"
+  ],
+  [
+   "What score did the Hacker News story 'State of the Map 2026' receive?",
+   "187"
+  ],
+  [
+   "Who posted the Hacker News story 'State of the Map 2026'?",
+   "lode"
+  ],
+  [
+   "What was a popular Hacker News story on August 27, 2026?",
+   "Humanity has the debate about AI consciousness backwards"
+  ],
+  [
+   "What score did the Hacker News story 'Humanity has the debate about AI consciousness bac' receive?",
+   "118"
+  ],
+  [
+   "Who posted the Hacker News story 'Humanity has the debate about AI conscio'?",
+   "semiquaver"
+  ],
+  [
+   "What was a popular Hacker News story on August 31, 2026?",
+   "Why do I lose my passion and want to do nothing?"
+  ],
+  [
+   "What score did the Hacker News story 'Why do I lose my passion and want to do nothing?' receive?",
+   "84"
+  ],
+  [
+   "Who posted the Hacker News story 'Why do I lose my passion and want to do '?",
+   "hanstyle"
+  ],
+  [
+   "What was a popular Hacker News story on August 30, 2026?",
+   "Europe's summer drought is so extreme that desertification is a growing threat"
+  ],
+  [
+   "What score did the Hacker News story 'Europe's summer drought is so extreme that deserti' receive?",
+   "320"
+  ],
+  [
+   "Who posted the Hacker News story 'Europe's summer drought is so extreme th'?",
+   "Brajeshwar"
+  ],
+  [
+   "What was a popular Hacker News story on August 29, 2026?",
+   "Nancy Grace Roman Space Telescope"
+  ],
+  [
+   "What score did the Hacker News story 'Nancy Grace Roman Space Telescope' receive?",
+   "289"
+  ],
+  [
+   "Who posted the Hacker News story 'Nancy Grace Roman Space Telescope'?",
+   "JumpCrisscross"
+  ],
+  [
+   "What was a popular Hacker News story on August 26, 2026?",
+   "Nebula Sans"
+  ],
+  [
+   "What score did the Hacker News story 'Nebula Sans' receive?",
+   "473"
+  ],
+  [
+   "Who posted the Hacker News story 'Nebula Sans'?",
+   "GavinAnderegg"
+  ],
+  [
+   "What was a popular Hacker News story on August 25, 2026?",
+   "C2PA Cameras Do Not Survive Contact with Reality"
+  ],
+  [
+   "What score did the Hacker News story 'C2PA Cameras Do Not Survive Contact with Reality' receive?",
+   "182"
+  ],
+  [
+   "Who posted the Hacker News story 'C2PA Cameras Do Not Survive Contact with'?",
+   "Retr0id"
+  ],
+  [
+   "What score did the Hacker News story 'Disrupting a new covert influence campaign from Ru' receive?",
+   "97"
+  ],
+  [
+   "Who posted the Hacker News story 'Disrupting a new covert influence campai'?",
+   "sam_lowry_"
+  ],
+  [
+   "What score did the Hacker News story 'CoMaps integration with the wider FLOSS ecosystem' receive?",
+   "142"
+  ],
+  [
+   "Who posted the Hacker News story 'CoMaps integration with the wider FLOSS '?",
+   "janandonly"
+  ],
+  [
+   "What score did the Hacker News story 'Gemini Omni 1.1 Flash' receive?",
+   "296"
+  ],
+  [
+   "Who posted the Hacker News story 'Gemini Omni 1.1 Flash'?",
+   "saretup"
+  ],
+  [
+   "What score did the Hacker News story 'Our decision on Cursor following its acquisition b' receive?",
+   "839"
+  ],
+  [
+   "Who posted the Hacker News story 'Our decision on Cursor following its acq'?",
+   "meetpateltech"
+  ],
+  [
+   "What score did the Hacker News story 'Launching Route 53 Files' receive?",
+   "119"
+  ],
+  [
+   "Who posted the Hacker News story 'Launching Route 53 Files'?",
+   "louis-paul"
+  ],
+  [
+   "What score did the Hacker News story 'Claude Session URL appended to commit messages and' receive?",
+   "204"
+  ],
+  [
+   "Who posted the Hacker News story 'Claude Session URL appended to commit me'?",
+   "sparsesignal"
+  ],
+  [
+   "What score did the Hacker News story 'RAG Is Simpler Than You Think' receive?",
+   "512"
+  ],
+  [
+   "Who posted the Hacker News story 'RAG Is Simpler Than You Think'?",
+   "j0selit0"
+  ],
+  [
+   "What score did the Hacker News story 'Inception-style curved map for turn-by-turn direct' receive?",
+   "622"
+  ],
+  [
+   "Who posted the Hacker News story 'Inception-style curved map for turn-by-t'?",
+   "smoser"
+  ],
+  [
+   "What score did the Hacker News story 'The turbulent AI era is here' receive?",
+   "197"
+  ],
+  [
+   "Who posted the Hacker News story 'The turbulent AI era is here'?",
+   "ilamont"
+  ],
+  [
+   "What score did the Hacker News story 'Iceland votes on whether to restart talks on joini' receive?",
+   "339"
+  ],
+  [
+   "Who posted the Hacker News story 'Iceland votes on whether to restart talk'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Yen weakens past \u00a5160 per dollar, eroding interven' receive?",
+   "59"
+  ],
+  [
+   "Who posted the Hacker News story 'Yen weakens past \u00a5160 per dollar, erodin'?",
+   "rguiscard"
+  ],
+  [
+   "What score did the Hacker News story 'Get your Windows license refund' receive?",
+   "734"
+  ],
+  [
+   "Who posted the Hacker News story 'Get your Windows license refund'?",
+   "smartmic"
+  ],
+  [
+   "What score did the Hacker News story 'Verschlimmbesserung: The Word Your Software Update' receive?",
+   "178"
+  ],
+  [
+   "Who posted the Hacker News story 'Verschlimmbesserung: The Word Your Softw'?",
+   "speckx"
+  ],
+  [
+   "What was a popular Hacker News story on August 24, 2026?",
+   "Show HN: GlassBox \u2013 what the browser reveals, and how identifiable you are"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: GlassBox \u2013 what the browser reveals, and ' receive?",
+   "132"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: GlassBox \u2013 what the browser rev'?",
+   "DavidD"
+  ],
+  [
+   "What score did the Hacker News story 'An investigation into the state of corvid\u2013human re' receive?",
+   "145"
+  ],
+  [
+   "Who posted the Hacker News story 'An investigation into the state of corvi'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: My Claude quota ran out in 10 minutes, so' receive?",
+   "88"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: My Claude quota ran out in 10 m'?",
+   "sachinneravath"
+  ],
+  [
+   "What score did the Hacker News story 'Processing in Memory: DRAM Is About to Do Math' receive?",
+   "93"
+  ],
+  [
+   "Who posted the Hacker News story 'Processing in Memory: DRAM Is About to D'?",
+   "bhouston"
+  ],
+  [
+   "What score did the Hacker News story 'A 12TB Steam \"teraleak\" spills more than a decade ' receive?",
+   "220"
+  ],
+  [
+   "Who posted the Hacker News story 'A 12TB Steam \"teraleak\" spills more than'?",
+   "WithinReason"
+  ],
+  [
+   "What score did the Hacker News story 'Barrier lake continues to pose flood risk, China w' receive?",
+   "90"
+  ],
+  [
+   "Who posted the Hacker News story 'Barrier lake continues to pose flood ris'?",
+   "r721"
+  ],
+  [
+   "What score did the Hacker News story 'Tmp.0ut Volume 5' receive?",
+   "54"
+  ],
+  [
+   "Who posted the Hacker News story 'Tmp.0ut Volume 5'?",
+   "guitmz"
+  ],
+  [
+   "What score did the Hacker News story 'Corporate profits hit highest share since WWII, as' receive?",
+   "137"
+  ],
+  [
+   "Who posted the Hacker News story 'Corporate profits hit highest share sinc'?",
+   "marojejian"
+  ],
+  [
+   "What score did the Hacker News story 'METR and Redwood Offer Holy %^ Postmortem of the H' receive?",
+   "257"
+  ],
+  [
+   "Who posted the Hacker News story 'METR and Redwood Offer Holy %^ Postmorte'?",
+   "catbird"
+  ],
+  [
+   "What score did the Hacker News story 'Tracking Costco gas prices' receive?",
+   "128"
+  ],
+  [
+   "Who posted the Hacker News story 'Tracking Costco gas prices'?",
+   "lafond"
+  ],
+  [
+   "What score did the Hacker News story 'Mold: A Massively Parallel Linker' receive?",
+   "186"
+  ],
+  [
+   "Who posted the Hacker News story 'Mold: A Massively Parallel Linker'?",
+   "matt_d"
+  ],
+  [
+   "What score did the Hacker News story 'Harvest (IBM 7950): Supercomputer for cryptanalysi' receive?",
+   "101"
+  ],
+  [
+   "Who posted the Hacker News story 'Harvest (IBM 7950): Supercomputer for cr'?",
+   "jnord"
+  ],
+  [
+   "What score did the Hacker News story 'Experiments with Plotter Art' receive?",
+   "99"
+  ],
+  [
+   "Who posted the Hacker News story 'Experiments with Plotter Art'?",
+   "surprisetalk"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: I missed the moving blocks, so I built a ' receive?",
+   "94"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: I missed the moving blocks, so '?",
+   "gbin"
+  ],
+  [
+   "What score did the Hacker News story 'Serve Markdown to AI Agents with Accept Headers' receive?",
+   "176"
+  ],
+  [
+   "Who posted the Hacker News story 'Serve Markdown to AI Agents with Accept '?",
+   "tilt"
+  ],
+  [
+   "What score did the Hacker News story 'How credit card rewards became a $9.2B wealth tran' receive?",
+   "256"
+  ],
+  [
+   "Who posted the Hacker News story 'How credit card rewards became a $9.2B w'?",
+   "conbrian"
+  ],
+  [
+   "What score did the Hacker News story 'One Nix flake to rule them all' receive?",
+   "86"
+  ],
+  [
+   "Who posted the Hacker News story 'One Nix flake to rule them all'?",
+   "ingve"
+  ],
+  [
+   "What score did the Hacker News story 'Sleepwalker: Passive Backdoor with Its Own Command' receive?",
+   "80"
+  ],
+  [
+   "Who posted the Hacker News story 'Sleepwalker: Passive Backdoor with Its O'?",
+   "defrost"
+  ],
+  [
+   "What score did the Hacker News story 'UC Berkeley indefinitely suspends international st' receive?",
+   "93"
+  ],
+  [
+   "Who posted the Hacker News story 'UC Berkeley indefinitely suspends intern'?",
+   "cbzbc"
+  ],
+  [
+   "What score did the Hacker News story 'How Dactyl Works' receive?",
+   "72"
+  ],
+  [
+   "Who posted the Hacker News story 'How Dactyl Works'?",
+   "anorak27"
+  ],
+  [
+   "What score did the Hacker News story 'Terminal-Bench-Science: Evaluating AI agents on sc' receive?",
+   "117"
+  ],
+  [
+   "Who posted the Hacker News story 'Terminal-Bench-Science: Evaluating AI ag'?",
+   "matt_d"
+  ],
+  [
+   "What score did the Hacker News story 'A safe MySQL upgrade that wasn't so safe' receive?",
+   "51"
+  ],
+  [
+   "Who posted the Hacker News story 'A safe MySQL upgrade that wasn't so safe'?",
+   "el1s7"
+  ],
+  [
+   "What score did the Hacker News story '11,000-year-old sculpture of man riding a leopard ' receive?",
+   "165"
+  ],
+  [
+   "Who posted the Hacker News story '11,000-year-old sculpture of man riding '?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Creating the Aetheryte Radio' receive?",
+   "79"
+  ],
+  [
+   "Who posted the Hacker News story 'Creating the Aetheryte Radio'?",
+   "wonger_"
+  ],
+  [
+   "What score did the Hacker News story 'Lawmakers added $1 to car insurance policies. That' receive?",
+   "427"
+  ],
+  [
+   "Who posted the Hacker News story 'Lawmakers added $1 to car insurance poli'?",
+   "DeepLogin"
+  ],
+  [
+   "What score did the Hacker News story 'A curmudgeon tries a language server' receive?",
+   "106"
+  ],
+  [
+   "Who posted the Hacker News story 'A curmudgeon tries a language server'?",
+   "crescit_eundo"
+  ],
+  [
+   "What score did the Hacker News story 'Fair Work Commission condemns 'plain wrong' AI leg' receive?",
+   "59"
+  ],
+  [
+   "Who posted the Hacker News story 'Fair Work Commission condemns 'plain wro'?",
+   "martyvis"
+  ],
+  [
+   "What score did the Hacker News story 'California lawmakers unanimously pass Linux exempt' receive?",
+   "757"
+  ],
+  [
+   "Who posted the Hacker News story 'California lawmakers unanimously pass Li'?",
+   "shscs911"
+  ],
+  [
+   "What score did the Hacker News story 'Manifesto \u2013 who we are and what do we want (2002)' receive?",
+   "112"
+  ],
+  [
+   "Who posted the Hacker News story 'Manifesto \u2013 who we are and what do we wa'?",
+   "wise_blood"
+  ],
+  [
+   "What score did the Hacker News story 'GitHub Publishes IPv6 Addresses for Git SSH remote' receive?",
+   "55"
+  ],
+  [
+   "Who posted the Hacker News story 'GitHub Publishes IPv6 Addresses for Git '?",
+   "tonymet"
+  ],
+  [
+   "What score did the Hacker News story 'Kumander Linux \u2013 A Linux Distro with a Windows 7 D' receive?",
+   "75"
+  ],
+  [
+   "Who posted the Hacker News story 'Kumander Linux \u2013 A Linux Distro with a W'?",
+   "linuxkernal"
+  ],
+  [
+   "What score did the Hacker News story 'Longest Straight Line Paths on Water or Land on th' receive?",
+   "207"
+  ],
+  [
+   "Who posted the Hacker News story 'Longest Straight Line Paths on Water or '?",
+   "joebig"
+  ],
+  [
+   "What score did the Hacker News story 'Sovereign Tech Agency invests \u20ac500k in Flatpak' receive?",
+   "274"
+  ],
+  [
+   "Who posted the Hacker News story 'Sovereign Tech Agency invests \u20ac500k in F'?",
+   "eigenspace"
+  ],
+  [
+   "What score did the Hacker News story '9th Circuit sides with states in Kalshi gambling f' receive?",
+   "170"
+  ],
+  [
+   "Who posted the Hacker News story '9th Circuit sides with states in Kalshi '?",
+   "hungryhobbit"
+  ],
+  [
+   "What score did the Hacker News story 'The Tariff Cost: analysis of the costs to American' receive?",
+   "231"
+  ],
+  [
+   "Who posted the Hacker News story 'The Tariff Cost: analysis of the costs t'?",
+   "mikestorrent"
+  ],
+  [
+   "What score did the Hacker News story 'Arbitrary code execution in QubesOS via copy-to-VM' receive?",
+   "244"
+  ],
+  [
+   "Who posted the Hacker News story 'Arbitrary code execution in QubesOS via '?",
+   "vntok"
+  ],
+  [
+   "What score did the Hacker News story 'IBM Unveils Next Generation Dual-Architecture Proc' receive?",
+   "175"
+  ],
+  [
+   "Who posted the Hacker News story 'IBM Unveils Next Generation Dual-Archite'?",
+   "porridgeraisin"
+  ],
+  [
+   "What score did the Hacker News story 'VMs won't contain cyber-capable agents' receive?",
+   "191"
+  ],
+  [
+   "Who posted the Hacker News story 'VMs won't contain cyber-capable agents'?",
+   "polyrand"
+  ],
+  [
+   "What score did the Hacker News story 'Mechanical Turk shutting down September 30' receive?",
+   "534"
+  ],
+  [
+   "Who posted the Hacker News story 'Mechanical Turk shutting down September '?",
+   "tmp10423288442"
+  ],
+  [
+   "What score did the Hacker News story 'LLMs are making me lose my savviness' receive?",
+   "60"
+  ],
+  [
+   "Who posted the Hacker News story 'LLMs are making me lose my savviness'?",
+   "me2too"
+  ],
+  [
+   "What score did the Hacker News story 'How Universities Should Prepare Founders' receive?",
+   "248"
+  ],
+  [
+   "Who posted the Hacker News story 'How Universities Should Prepare Founders'?",
+   "gmays"
+  ],
+  [
+   "What score did the Hacker News story 'Bomb fishing is wreaking havoc on Indonesia's cora' receive?",
+   "364"
+  ],
+  [
+   "Who posted the Hacker News story 'Bomb fishing is wreaking havoc on Indone'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'The growing divide between AI hype and software en' receive?",
+   "66"
+  ],
+  [
+   "Who posted the Hacker News story 'The growing divide between AI hype and s'?",
+   "jruohonen"
+  ],
+  [
+   "What score did the Hacker News story 'FDA approves first in class targeted therapy for m' receive?",
+   "286"
+  ],
+  [
+   "Who posted the Hacker News story 'FDA approves first in class targeted the'?",
+   "leopoldj"
+  ],
+  [
+   "What score did the Hacker News story 'Saving 100 terabytes of memory by optimizing 1.1.1' receive?",
+   "919"
+  ],
+  [
+   "Who posted the Hacker News story 'Saving 100 terabytes of memory by optimi'?",
+   "TangerineDream"
+  ],
+  [
+   "What score did the Hacker News story 'Recovering Corrupt Zip Files' receive?",
+   "74"
+  ],
+  [
+   "Who posted the Hacker News story 'Recovering Corrupt Zip Files'?",
+   "AshleysBrain"
+  ],
+  [
+   "What score did the Hacker News story 'Time complexity of operations on Python's built-in' receive?",
+   "111"
+  ],
+  [
+   "Who posted the Hacker News story 'Time complexity of operations on Python''?",
+   "theanonymousone"
+  ],
+  [
+   "What score did the Hacker News story 'TurboKV: Insanely fast Rust key-value store' receive?",
+   "180"
+  ],
+  [
+   "Who posted the Hacker News story 'TurboKV: Insanely fast Rust key-value st'?",
+   "rgbimbochamp"
+  ],
+  [
+   "What score did the Hacker News story 'Europe's last regular standard-gauge steam passeng' receive?",
+   "118"
+  ],
+  [
+   "Who posted the Hacker News story 'Europe's last regular standard-gauge ste'?",
+   "GungulSurm"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: How much of Hacker News is about AI?' receive?",
+   "74"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: How much of Hacker News is abou'?",
+   "beekthos"
+  ],
+  [
+   "What score did the Hacker News story 'GrapheneOS project: pixel 11 no longer supports ha' receive?",
+   "316"
+  ],
+  [
+   "Who posted the Hacker News story 'GrapheneOS project: pixel 11 no longer s'?",
+   "400thecat"
+  ],
+  [
+   "What score did the Hacker News story 'Previewing the Model Hardware Standard' receive?",
+   "136"
+  ],
+  [
+   "Who posted the Hacker News story 'Previewing the Model Hardware Standard'?",
+   "surprisetalk"
+  ],
+  [
+   "What score did the Hacker News story 'I used AWS cognito for a startup. I wouldn't do it' receive?",
+   "191"
+  ],
+  [
+   "Who posted the Hacker News story 'I used AWS cognito for a startup. I woul'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Small Models Have Arrived' receive?",
+   "796"
+  ],
+  [
+   "Who posted the Hacker News story 'Small Models Have Arrived'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Meta reaches $17B settlement over social media har' receive?",
+   "542"
+  ],
+  [
+   "Who posted the Hacker News story 'Meta reaches $17B settlement over social'?",
+   "bhouston"
+  ],
+  [
+   "What score did the Hacker News story 'Black hole singularity is a surface not a point' receive?",
+   "300"
+  ],
+  [
+   "Who posted the Hacker News story 'Black hole singularity is a surface not '?",
+   "raattgift"
+  ],
+  [
+   "What score did the Hacker News story 'I Think the Military Commissary's Freezers Were Ha' receive?",
+   "54"
+  ],
+  [
+   "Who posted the Hacker News story 'I Think the Military Commissary's Freeze'?",
+   "jcurbo"
+  ],
+  [
+   "What score did the Hacker News story 'Was modern art a CIA psy-op? (2020)' receive?",
+   "161"
+  ],
+  [
+   "Who posted the Hacker News story 'Was modern art a CIA psy-op? (2020)'?",
+   "neom"
+  ],
+  [
+   "What score did the Hacker News story 'Worst-case glacial lake flood scenarios in a trans' receive?",
+   "276"
+  ],
+  [
+   "Who posted the Hacker News story 'Worst-case glacial lake flood scenarios '?",
+   "totetsu"
+  ],
+  [
+   "What score did the Hacker News story 'Fuzzing the Gleam Compiler' receive?",
+   "76"
+  ],
+  [
+   "Who posted the Hacker News story 'Fuzzing the Gleam Compiler'?",
+   "crowdhailer"
+  ],
+  [
+   "What score did the Hacker News story 'What my dad taught me about AI coding in the 90s' receive?",
+   "144"
+  ],
+  [
+   "Who posted the Hacker News story 'What my dad taught me about AI coding in'?",
+   "askmike"
+  ],
+  [
+   "What score did the Hacker News story 'PageRank explained' receive?",
+   "148"
+  ],
+  [
+   "Who posted the Hacker News story 'PageRank explained'?",
+   "pkoird"
+  ],
+  [
+   "What score did the Hacker News story 'An ongoing 3D-printer AGPL violation' receive?",
+   "489"
+  ],
+  [
+   "Who posted the Hacker News story 'An ongoing 3D-printer AGPL violation'?",
+   "Velocifyer"
+  ],
+  [
+   "What score did the Hacker News story 'Coordination Headwind: How Organizations Are Like ' receive?",
+   "168"
+  ],
+  [
+   "Who posted the Hacker News story 'Coordination Headwind: How Organizations'?",
+   "rzk"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: PicoMQ \u2013 Durable Streams over HTTP, on ob' receive?",
+   "159"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: PicoMQ \u2013 Durable Streams over H'?",
+   "adesh_nalpet"
+  ],
+  [
+   "What score did the Hacker News story 'Xiaomi: New CPU matches Apple cores single threade' receive?",
+   "1003"
+  ],
+  [
+   "Who posted the Hacker News story 'Xiaomi: New CPU matches Apple cores sing'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Stripe said to abandon $50B pursuit of PayPal' receive?",
+   "195"
+  ],
+  [
+   "Who posted the Hacker News story 'Stripe said to abandon $50B pursuit of P'?",
+   "1986"
+  ],
+  [
+   "What score did the Hacker News story 'A CVE Dispute' receive?",
+   "74"
+  ],
+  [
+   "Who posted the Hacker News story 'A CVE Dispute'?",
+   "theanonymousone"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: Kern \u2013 container and resource runtime in ' receive?",
+   "70"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: Kern \u2013 container and resource r'?",
+   "realexweb"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: TeXbrain, a LaTeX editor that runs pdfTeX' receive?",
+   "118"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: TeXbrain, a LaTeX editor that r'?",
+   "swimmingbrain"
+  ],
+  [
+   "What score did the Hacker News story 'FDA authorizes first wearable device that monitors' receive?",
+   "490"
+  ],
+  [
+   "Who posted the Hacker News story 'FDA authorizes first wearable device tha'?",
+   "sunnynagra"
+  ],
+  [
+   "What score did the Hacker News story 'Executable Is a SQLite Database' receive?",
+   "563"
+  ],
+  [
+   "Who posted the Hacker News story 'Executable Is a SQLite Database'?",
+   "setheron"
+  ],
+  [
+   "What score did the Hacker News story 'Apple introduces M6 and M5 Ultra' receive?",
+   "1310"
+  ],
+  [
+   "Who posted the Hacker News story 'Apple introduces M6 and M5 Ultra'?",
+   "interpol_p"
+  ],
+  [
+   "What score did the Hacker News story 'P99 0 ms* autocomplete for 240M domain names' receive?",
+   "165"
+  ],
+  [
+   "Who posted the Hacker News story 'P99 0 ms* autocomplete for 240M domain n'?",
+   "dbalatero"
+  ],
+  [
+   "What score did the Hacker News story 'Sort branches by last commit date' receive?",
+   "131"
+  ],
+  [
+   "Who posted the Hacker News story 'Sort branches by last commit date'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Hacking IKEA Furniture' receive?",
+   "337"
+  ],
+  [
+   "Who posted the Hacker News story 'Hacking IKEA Furniture'?",
+   "greenlightning"
+  ],
+  [
+   "What score did the Hacker News story 'Defrag98: Windows 98 Disk Defragmenter Simulator O' receive?",
+   "130"
+  ],
+  [
+   "Who posted the Hacker News story 'Defrag98: Windows 98 Disk Defragmenter S'?",
+   "throw0101a"
+  ],
+  [
+   "What score did the Hacker News story 'Automating Immersive Reading' receive?",
+   "115"
+  ],
+  [
+   "Who posted the Hacker News story 'Automating Immersive Reading'?",
+   "smoores"
+  ],
+  [
+   "What score did the Hacker News story 'US Government designates host of noblogs.org a \"gl' receive?",
+   "285"
+  ],
+  [
+   "Who posted the Hacker News story 'US Government designates host of noblogs'?",
+   "robtherobber"
+  ],
+  [
+   "What score did the Hacker News story 'Quantifying Colour' receive?",
+   "109"
+  ],
+  [
+   "Who posted the Hacker News story 'Quantifying Colour'?",
+   "vismit2000"
+  ],
+  [
+   "What score did the Hacker News story 'Bug Blindness' receive?",
+   "392"
+  ],
+  [
+   "Who posted the Hacker News story 'Bug Blindness'?",
+   "davidmckenna"
+  ],
+  [
+   "What score did the Hacker News story 'CoMaps: The Offline App That Guided Rescuers Witho' receive?",
+   "339"
+  ],
+  [
+   "Who posted the Hacker News story 'CoMaps: The Offline App That Guided Resc'?",
+   "gedankenstuecke"
+  ],
+  [
+   "What score did the Hacker News story 'Trade (and Tariffs)' receive?",
+   "553"
+  ],
+  [
+   "Who posted the Hacker News story 'Trade (and Tariffs)'?",
+   "throw0101d"
+  ],
+  [
+   "What score did the Hacker News story 'Don't use musl if you care about performance' receive?",
+   "109"
+  ],
+  [
+   "Who posted the Hacker News story 'Don't use musl if you care about perform'?",
+   "jbellis"
+  ],
+  [
+   "What score did the Hacker News story 'Kusama Yayoi has died' receive?",
+   "268"
+  ],
+  [
+   "Who posted the Hacker News story 'Kusama Yayoi has died'?",
+   "phantomathkg"
+  ],
+  [
+   "What score did the Hacker News story 'How to build a diffusion language model' receive?",
+   "127"
+  ],
+  [
+   "Who posted the Hacker News story 'How to build a diffusion language model'?",
+   "volodia"
+  ],
+  [
+   "What score did the Hacker News story '507 Mechanical Movements' receive?",
+   "674"
+  ],
+  [
+   "Who posted the Hacker News story '507 Mechanical Movements'?",
+   "helloplanets"
+  ],
+  [
+   "What score did the Hacker News story 'Peppermint oil reduces blood pressure by 8.48 mmHg' receive?",
+   "231"
+  ],
+  [
+   "Who posted the Hacker News story 'Peppermint oil reduces blood pressure by'?",
+   "brandonb"
+  ],
+  [
+   "What score did the Hacker News story 'Boot a Virtual iPhone via Apple's Virtualization.f' receive?",
+   "410"
+  ],
+  [
+   "Who posted the Hacker News story 'Boot a Virtual iPhone via Apple's Virtua'?",
+   "hentrep"
+  ],
+  [
+   "What score did the Hacker News story 'Internet centralization and the original sin of NA' receive?",
+   "64"
+  ],
+  [
+   "Who posted the Hacker News story 'Internet centralization and the original'?",
+   "robinpie"
+  ],
+  [
+   "What score did the Hacker News story 'EasyEffects can improve laptop speaker sound quali' receive?",
+   "221"
+  ],
+  [
+   "Who posted the Hacker News story 'EasyEffects can improve laptop speaker s'?",
+   "birdculture"
+  ],
+  [
+   "What score did the Hacker News story 'Afterglow: Run classic After Dark screen savers on' receive?",
+   "187"
+  ],
+  [
+   "Who posted the Hacker News story 'Afterglow: Run classic After Dark screen'?",
+   "NaOH"
+  ],
+  [
+   "What score did the Hacker News story 'What we want is a hunter gatherer lifestyle with s' receive?",
+   "81"
+  ],
+  [
+   "Who posted the Hacker News story 'What we want is a hunter gatherer lifest'?",
+   "bilsbie"
+  ],
+  [
+   "What score did the Hacker News story 'M5Stack Launches PaperMono' receive?",
+   "162"
+  ],
+  [
+   "Who posted the Hacker News story 'M5Stack Launches PaperMono'?",
+   "marksully"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: Lightweight system monitor for Linux VPS ' receive?",
+   "63"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: Lightweight system monitor for '?",
+   "ygagaga"
+  ],
+  [
+   "What score did the Hacker News story 'Thoughts on Pope Leo XIV's Magnifica Humanitas' receive?",
+   "54"
+  ],
+  [
+   "Who posted the Hacker News story 'Thoughts on Pope Leo XIV's Magnifica Hum'?",
+   "borracciaBlu"
+  ],
+  [
+   "What score did the Hacker News story 'Flock Safety's controversial CEO just got a taste ' receive?",
+   "69"
+  ],
+  [
+   "Who posted the Hacker News story 'Flock Safety's controversial CEO just go'?",
+   "devonnull"
+  ],
+  [
+   "What score did the Hacker News story 'Police officer arrested after tracking ex-girlfrie' receive?",
+   "103"
+  ],
+  [
+   "Who posted the Hacker News story 'Police officer arrested after tracking e'?",
+   "cocacola1"
+  ],
+  [
+   "What score did the Hacker News story 'Tim Curry has died' receive?",
+   "722"
+  ],
+  [
+   "Who posted the Hacker News story 'Tim Curry has died'?",
+   "mykowebhn"
+  ],
+  [
+   "What score did the Hacker News story 'Benjamin Franklin\u2019s alter egos gave him the most f' receive?",
+   "106"
+  ],
+  [
+   "Who posted the Hacker News story 'Benjamin Franklin\u2019s alter egos gave him '?",
+   "cisc"
+  ],
+  [
+   "What score did the Hacker News story 'Qwen 3.8-Flash-Next releasing tomorrow (125B a6B)' receive?",
+   "336"
+  ],
+  [
+   "Who posted the Hacker News story 'Qwen 3.8-Flash-Next releasing tomorrow ('?",
+   "garo-pro"
+  ],
+  [
+   "What score did the Hacker News story 'Actually Queryable Executables' receive?",
+   "340"
+  ],
+  [
+   "Who posted the Hacker News story 'Actually Queryable Executables'?",
+   "rguiscard"
+  ],
+  [
+   "What score did the Hacker News story 'Aphantasia Beginner's Guide' receive?",
+   "193"
+  ],
+  [
+   "Who posted the Hacker News story 'Aphantasia Beginner's Guide'?",
+   "ksec"
+  ],
+  [
+   "What score did the Hacker News story 'Does the Sumerian King List Align with Paleoclimat' receive?",
+   "134"
+  ],
+  [
+   "Who posted the Hacker News story 'Does the Sumerian King List Align with P'?",
+   "dev_l1x_be"
+  ],
+  [
+   "What score did the Hacker News story '\u201cWeird\u201d is a weird word' receive?",
+   "89"
+  ],
+  [
+   "Who posted the Hacker News story '\u201cWeird\u201d is a weird word'?",
+   "pseudolus"
+  ],
+  [
+   "What score did the Hacker News story 'The internet is kind of a predatory cesspit now' receive?",
+   "453"
+  ],
+  [
+   "Who posted the Hacker News story 'The internet is kind of a predatory cess'?",
+   "ibobev"
+  ],
+  [
+   "What score did the Hacker News story 'Hunting Down a Go Runtime Bug on 32-Bit Embedded S' receive?",
+   "117"
+  ],
+  [
+   "Who posted the Hacker News story 'Hunting Down a Go Runtime Bug on 32-Bit '?",
+   "birdculture"
+  ],
+  [
+   "What score did the Hacker News story 'Daycare Pseudoscience' receive?",
+   "55"
+  ],
+  [
+   "Who posted the Hacker News story 'Daycare Pseudoscience'?",
+   "surprisetalk"
+  ],
+  [
+   "What score did the Hacker News story 'Visualizing Binary Files' receive?",
+   "134"
+  ],
+  [
+   "Who posted the Hacker News story 'Visualizing Binary Files'?",
+   "zdw"
+  ],
+  [
+   "What score did the Hacker News story 'Building a backyard office, the build and cost bre' receive?",
+   "441"
+  ],
+  [
+   "Who posted the Hacker News story 'Building a backyard office, the build an'?",
+   "surprisetalk"
+  ],
+  [
+   "What score did the Hacker News story 'Nitter and XCancel receive cease and desist notice' receive?",
+   "1209"
+  ],
+  [
+   "Who posted the Hacker News story 'Nitter and XCancel receive cease and des'?",
+   "Banditoz"
+  ],
+  [
+   "What score did the Hacker News story 'Highest-ever ocean temperature measured as powerfu' receive?",
+   "172"
+  ],
+  [
+   "Who posted the Hacker News story 'Highest-ever ocean temperature measured '?",
+   "measurablefunc"
+  ],
+  [
+   "What score did the Hacker News story 'How Europe is killing makers and micro-entrepreneu' receive?",
+   "1645"
+  ],
+  [
+   "Who posted the Hacker News story 'How Europe is killing makers and micro-e'?",
+   "l-one-lone"
+  ],
+  [
+   "What score did the Hacker News story 'Xcena and Samsung's Near Memory Compute CXL Device' receive?",
+   "58"
+  ],
+  [
+   "Who posted the Hacker News story 'Xcena and Samsung's Near Memory Compute '?",
+   "klelatti"
+  ],
+  [
+   "What score did the Hacker News story 'StemDeck, a free, open-source and local AI stem se' receive?",
+   "243"
+  ],
+  [
+   "Who posted the Hacker News story 'StemDeck, a free, open-source and local '?",
+   "thclpr"
+  ],
+  [
+   "What score did the Hacker News story 'Servus M\u00fcnchen: Waymo Is Coming to Germany' receive?",
+   "64"
+  ],
+  [
+   "Who posted the Hacker News story 'Servus M\u00fcnchen: Waymo Is Coming to Germa'?",
+   "boulos"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: OpenTIE and OpenXWA, Modern Ports of Tie ' receive?",
+   "227"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: OpenTIE and OpenXWA, Modern Por'?",
+   "elyosh"
+  ],
+  [
+   "What score did the Hacker News story 'Spark: Sparklines in your shell' receive?",
+   "50"
+  ],
+  [
+   "Who posted the Hacker News story 'Spark: Sparklines in your shell'?",
+   "hskimse"
+  ],
+  [
+   "What score did the Hacker News story 'Google: Lake Ontario/Lake America name change in t' receive?",
+   "88"
+  ],
+  [
+   "Who posted the Hacker News story 'Google: Lake Ontario/Lake America name c'?",
+   "lr0"
+  ],
+  [
+   "What score did the Hacker News story 'The Rise and Fall of Agent Civilizations' receive?",
+   "245"
+  ],
+  [
+   "Who posted the Hacker News story 'The Rise and Fall of Agent Civilizations'?",
+   "consumer451"
+  ],
+  [
+   "What score did the Hacker News story 'It\u2019s so hard to finish an idea that is not yours a' receive?",
+   "262"
+  ],
+  [
+   "Who posted the Hacker News story 'It\u2019s so hard to finish an idea that is n'?",
+   "zazuke"
+  ],
+  [
+   "What score did the Hacker News story 'Continuous Diffusion Language Models (CDLM's)' receive?",
+   "118"
+  ],
+  [
+   "Who posted the Hacker News story 'Continuous Diffusion Language Models (CD'?",
+   "peter_d_sherman"
+  ],
+  [
+   "What score did the Hacker News story 'No AI Fridays' receive?",
+   "277"
+  ],
+  [
+   "Who posted the Hacker News story 'No AI Fridays'?",
+   "xendo"
+  ],
+  [
+   "What score did the Hacker News story 'Casey Muratori \u2013 The Root of the Root of All Evil ' receive?",
+   "316"
+  ],
+  [
+   "Who posted the Hacker News story 'Casey Muratori \u2013 The Root of the Root of'?",
+   "surprisetalk"
+  ],
+  [
+   "What score did the Hacker News story 'SQLite as a Document Database (2020)' receive?",
+   "252"
+  ],
+  [
+   "Who posted the Hacker News story 'SQLite as a Document Database (2020)'?",
+   "lioeters"
+  ],
+  [
+   "What score did the Hacker News story 'OCR It \u2013 pull text out of un-copyable documents fo' receive?",
+   "140"
+  ],
+  [
+   "Who posted the Hacker News story 'OCR It \u2013 pull text out of un-copyable do'?",
+   "thiagolima"
+  ],
+  [
+   "What score did the Hacker News story 'Zig: Pointer Stability for ArrayLists' receive?",
+   "111"
+  ],
+  [
+   "Who posted the Hacker News story 'Zig: Pointer Stability for ArrayLists'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Nvidia agrees to acquire Hugging Face for $13B' receive?",
+   "1975"
+  ],
+  [
+   "Who posted the Hacker News story 'Nvidia agrees to acquire Hugging Face fo'?",
+   "mfiguiere"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: We built open OpenRouter that turns usage' receive?",
+   "220"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: We built open OpenRouter that t'?",
+   "SilenN"
+  ],
+  [
+   "What score did the Hacker News story 'Hy4 preview' receive?",
+   "384"
+  ],
+  [
+   "Who posted the Hacker News story 'Hy4 preview'?",
+   "shenli3514"
+  ],
+  [
+   "What score did the Hacker News story 'USDA recalls 30k pounds of Argentine beef sold in ' receive?",
+   "125"
+  ],
+  [
+   "Who posted the Hacker News story 'USDA recalls 30k pounds of Argentine bee'?",
+   "cocacola1"
+  ],
+  [
+   "What score did the Hacker News story 'OpenShot 4.0: Record, Edit, and Color Like Never B' receive?",
+   "211"
+  ],
+  [
+   "Who posted the Hacker News story 'OpenShot 4.0: Record, Edit, and Color Li'?",
+   "metrofun"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: NFC Energy-Harvesting PCB Business Card w' receive?",
+   "198"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: NFC Energy-Harvesting PCB Busin'?",
+   "WilsonHarper"
+  ],
+  [
+   "What score did the Hacker News story 'Startup Anti-Patterns' receive?",
+   "169"
+  ],
+  [
+   "Who posted the Hacker News story 'Startup Anti-Patterns'?",
+   "rzk"
+  ],
+  [
+   "What score did the Hacker News story 'Doctors are finally learning to manage antidepress' receive?",
+   "296"
+  ],
+  [
+   "Who posted the Hacker News story 'Doctors are finally learning to manage a'?",
+   "eutropheon"
+  ],
+  [
+   "What score did the Hacker News story 'YouTube Format IDs' receive?",
+   "134"
+  ],
+  [
+   "Who posted the Hacker News story 'YouTube Format IDs'?",
+   "ksec"
+  ],
+  [
+   "What score did the Hacker News story 'Oldinsurancemaps.net is now a Charter Project' receive?",
+   "186"
+  ],
+  [
+   "Who posted the Hacker News story 'Oldinsurancemaps.net is now a Charter Pr'?",
+   "altilunium"
+  ],
+  [
+   "What score did the Hacker News story 'Zohran and the Short Link' receive?",
+   "331"
+  ],
+  [
+   "Who posted the Hacker News story 'Zohran and the Short Link'?",
+   "wxw"
+  ],
+  [
+   "What score did the Hacker News story 'Characterizing Agentic Flooding of Government Serv' receive?",
+   "82"
+  ],
+  [
+   "Who posted the Hacker News story 'Characterizing Agentic Flooding of Gover'?",
+   "lensecat"
+  ],
+  [
+   "What score did the Hacker News story 'Open Oscar Server: open-source server compatible w' receive?",
+   "64"
+  ],
+  [
+   "Who posted the Hacker News story 'Open Oscar Server: open-source server co'?",
+   "gregsadetsky"
+  ],
+  [
+   "What score did the Hacker News story 'New Mac mini, featuring M6 and M5 Pro' receive?",
+   "549"
+  ],
+  [
+   "Who posted the Hacker News story 'New Mac mini, featuring M6 and M5 Pro'?",
+   "runako"
+  ],
+  [
+   "What score did the Hacker News story 'Radiation link in flight attendant's breast cancer' receive?",
+   "94"
+  ],
+  [
+   "Who posted the Hacker News story 'Radiation link in flight attendant's bre'?",
+   "dazhbog"
+  ],
+  [
+   "What score did the Hacker News story 'Stopping the smart TV from being used against you' receive?",
+   "204"
+  ],
+  [
+   "Who posted the Hacker News story 'Stopping the smart TV from being used ag'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Matrox: Graphics for Professionals' receive?",
+   "147"
+  ],
+  [
+   "Who posted the Hacker News story 'Matrox: Graphics for Professionals'?",
+   "BirAdam"
+  ],
+  [
+   "What score did the Hacker News story 'Actinide is first startup to produce high-assay lo' receive?",
+   "175"
+  ],
+  [
+   "Who posted the Hacker News story 'Actinide is first startup to produce hig'?",
+   "dsalzman"
+  ],
+  [
+   "What score did the Hacker News story 'AWS Acquires DuckLabs' receive?",
+   "1102"
+  ],
+  [
+   "Who posted the Hacker News story 'AWS Acquires DuckLabs'?",
+   "onderkalaci"
+  ],
+  [
+   "What score did the Hacker News story 'Some conservationists are helping to restore Afric' receive?",
+   "77"
+  ],
+  [
+   "Who posted the Hacker News story 'Some conservationists are helping to res'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'Hilariously fast volume computation with the diver' receive?",
+   "264"
+  ],
+  [
+   "Who posted the Hacker News story 'Hilariously fast volume computation with'?",
+   "luu"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: Typebase \u2013 A single-folder back end you w' receive?",
+   "118"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: Typebase \u2013 A single-folder back'?",
+   "andrewww-dev"
+  ],
+  [
+   "What score did the Hacker News story 'Value Classes Still Need Compiler Sympathy' receive?",
+   "89"
+  ],
+  [
+   "Who posted the Hacker News story 'Value Classes Still Need Compiler Sympat'?",
+   "lichtenberger"
+  ],
+  [
+   "What score did the Hacker News story 'Monzo Stand-In' receive?",
+   "130"
+  ],
+  [
+   "Who posted the Hacker News story 'Monzo Stand-In'?",
+   "coffeefuel"
+  ],
+  [
+   "What score did the Hacker News story 'Tether: iMessage, SMS, etc. on Linux' receive?",
+   "536"
+  ],
+  [
+   "Who posted the Hacker News story 'Tether: iMessage, SMS, etc. on Linux'?",
+   "zackb"
+  ],
+  [
+   "What score did the Hacker News story 'Debian votes to allow \"responsible use of generati' receive?",
+   "509"
+  ],
+  [
+   "Who posted the Hacker News story 'Debian votes to allow \"responsible use o'?",
+   "pluc"
+  ],
+  [
+   "What score did the Hacker News story 'Tell HN: PayPal blocks GrapheneOS' receive?",
+   "512"
+  ],
+  [
+   "Who posted the Hacker News story 'Tell HN: PayPal blocks GrapheneOS'?",
+   "leumon"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: Voronoi Go' receive?",
+   "155"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: Voronoi Go'?",
+   "igpay"
+  ],
+  [
+   "What score did the Hacker News story 'Vintage Artificial Intelligence: Before It Got Awk' receive?",
+   "163"
+  ],
+  [
+   "Who posted the Hacker News story 'Vintage Artificial Intelligence: Before '?",
+   "signor_bosco"
+  ],
+  [
+   "What score did the Hacker News story 'MIT's Ad Hoc Committee on AI Use in Teaching, Lear' receive?",
+   "144"
+  ],
+  [
+   "Who posted the Hacker News story 'MIT's Ad Hoc Committee on AI Use in Teac'?",
+   "pbui"
+  ],
+  [
+   "What score did the Hacker News story 'Z.ai confirms Ox Alpha is a new GLM-series model a' receive?",
+   "434"
+  ],
+  [
+   "Who posted the Hacker News story 'Z.ai confirms Ox Alpha is a new GLM-seri'?",
+   "garo-pro"
+  ],
+  [
+   "What score did the Hacker News story 'Access to Urban Woodlands Linked with Lower Use of' receive?",
+   "148"
+  ],
+  [
+   "Who posted the Hacker News story 'Access to Urban Woodlands Linked with Lo'?",
+   "speckx"
+  ],
+  [
+   "What score did the Hacker News story 'vLLM v0.28.0' receive?",
+   "107"
+  ],
+  [
+   "Who posted the Hacker News story 'vLLM v0.28.0'?",
+   "mrrrcs"
+  ],
+  [
+   "What score did the Hacker News story 'Interactive Warhammer 40k Galaxy Map' receive?",
+   "161"
+  ],
+  [
+   "Who posted the Hacker News story 'Interactive Warhammer 40k Galaxy Map'?",
+   "gbxyz"
+  ],
+  [
+   "What score did the Hacker News story 'An implementation of Conway's Game of Life for Win' receive?",
+   "56"
+  ],
+  [
+   "Who posted the Hacker News story 'An implementation of Conway's Game of Li'?",
+   "Bluestein"
+  ],
+  [
+   "What score did the Hacker News story 'Indirect Calling of Nested Functions on GCC Withou' receive?",
+   "74"
+  ],
+  [
+   "Who posted the Hacker News story 'Indirect Calling of Nested Functions on '?",
+   "uecker"
+  ],
+  [
+   "What score did the Hacker News story 'GLM-5.3 is now open-weight' receive?",
+   "801"
+  ],
+  [
+   "Who posted the Hacker News story 'GLM-5.3 is now open-weight'?",
+   "jeudesprits"
+  ],
+  [
+   "What score did the Hacker News story 'Global demand for sand spawned a worldwide boom in' receive?",
+   "77"
+  ],
+  [
+   "Who posted the Hacker News story 'Global demand for sand spawned a worldwi'?",
+   "EndXA"
+  ],
+  [
+   "What score did the Hacker News story 'HTTPX2 \u2013 A next-generation HTTP client for Python' receive?",
+   "130"
+  ],
+  [
+   "Who posted the Hacker News story 'HTTPX2 \u2013 A next-generation HTTP client f'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Show HN: A Modern GUI Library for Ada: CSS Styling' receive?",
+   "59"
+  ],
+  [
+   "Who posted the Hacker News story 'Show HN: A Modern GUI Library for Ada: C'?",
+   "ovenpasta"
+  ],
+  [
+   "What score did the Hacker News story 'Creepy Crawlies' receive?",
+   "1255"
+  ],
+  [
+   "Who posted the Hacker News story 'Creepy Crawlies'?",
+   "zdw"
+  ],
+  [
+   "What score did the Hacker News story 'uv: Deduplicate all files in the wheel cache' receive?",
+   "92"
+  ],
+  [
+   "Who posted the Hacker News story 'uv: Deduplicate all files in the wheel c'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Omarchy: Any User Process Can Escalate to Root' receive?",
+   "505"
+  ],
+  [
+   "Who posted the Hacker News story 'Omarchy: Any User Process Can Escalate t'?",
+   "trap0xcc"
+  ],
+  [
+   "What score did the Hacker News story 'Good Culture Is the Biggest Productivity Hack, Not' receive?",
+   "466"
+  ],
+  [
+   "Who posted the Hacker News story 'Good Culture Is the Biggest Productivity'?",
+   "gpi"
+  ],
+  [
+   "What score did the Hacker News story 'Just say something people want' receive?",
+   "55"
+  ],
+  [
+   "Who posted the Hacker News story 'Just say something people want'?",
+   "gk1"
+  ],
+  [
+   "What score did the Hacker News story 'Qwen3.8-Flash-Next' receive?",
+   "701"
+  ],
+  [
+   "Who posted the Hacker News story 'Qwen3.8-Flash-Next'?",
+   "tosh"
+  ],
+  [
+   "What score did the Hacker News story 'Trees for a Changing Climate and Resilient Urban F' receive?",
+   "59"
+  ],
+  [
+   "Who posted the Hacker News story 'Trees for a Changing Climate and Resilie'?",
+   "mooreds"
+  ],
+  [
+   "What score did the Hacker News story 'What 2000 Buried Underpants Revealed About Where S' receive?",
+   "55"
+  ],
+  [
+   "Who posted the Hacker News story 'What 2000 Buried Underpants Revealed Abo'?",
+   "mdp2021"
+  ],
+  [
+   "What score did the Hacker News story 'Launch HN: Risklytics (YC S26) \u2013 Insurance brokera' receive?",
+   "54"
+  ],
+  [
+   "Who posted the Hacker News story 'Launch HN: Risklytics (YC S26) \u2013 Insuran'?",
+   "AlexRisio"
+  ],
+  [
+   "What score did the Hacker News story 'Visual Analysis of Binary Files' receive?",
+   "115"
+  ],
+  [
+   "Who posted the Hacker News story 'Visual Analysis of Binary Files'?",
+   "vismit2000"
+  ],
+  [
+   "What score did the Hacker News story 'OpenClaw 2.0, Accidentally' receive?",
+   "121"
+  ],
+  [
+   "Who posted the Hacker News story 'OpenClaw 2.0, Accidentally'?",
+   "doppp"
+  ],
+  [
+   "What score did the Hacker News story 'U.S. sanctions against the A/I Collective' receive?",
+   "707"
+  ],
+  [
+   "Who posted the Hacker News story 'U.S. sanctions against the A/I Collectiv'?",
+   "exiguus"
+  ],
+  [
+   "What score did the Hacker News story 'Suica, Japan's First IC Transit Card' receive?",
+   "284"
+  ],
+  [
+   "Who posted the Hacker News story 'Suica, Japan's First IC Transit Card'?",
+   "zdw"
+  ]
+ ]
+}

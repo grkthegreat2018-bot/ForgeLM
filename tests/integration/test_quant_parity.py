@@ -22,6 +22,7 @@ import torch
 from forge.config import get_config
 from forge.model_loader import ConfigurableResearchLLM
 from forge.engine.forge_engine import ForgeEngine
+from forge.quant.protocol import is_quantized_linear
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 
@@ -40,7 +41,7 @@ QUANT_MODES = [
 ]
 
 
-def _build_engine_and_model(preset="lfm25_tiny", vocab=65536):
+def _build_engine_and_model(preset="forgelm_tiny", vocab=65536):
     """Build a fresh engine + model for quantization testing.
 
     Uses vocab=65536 to match the lfm25 tokenizer.
@@ -60,9 +61,19 @@ def _build_engine_and_model(preset="lfm25_tiny", vocab=65536):
     model.eval()
 
     from research.tokenizer_cache import get_tokenizer
-    tok = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device=cfg.device)
     return engine, model
+
+
+def _count_quantized(model) -> int:
+    """Count modules that are actually quantized linear layers.
+
+    ``_apply_quantization`` silently falls back to unquantized bf16 on
+    failure — without this check a broken mode "passes" because the model
+    still generates text (critique NC5).
+    """
+    return sum(1 for m in model.modules() if is_quantized_linear(m))
 
 
 def _measure_throughput(engine, n_tokens=20):
@@ -102,6 +113,12 @@ class TestQuantModeParity:
         try:
             # _apply_quantization has a fallback chain — should never crash
             engine._apply_quantization(mode)
+            n_quant = _count_quantized(model)
+            assert n_quant > 0, (
+                f"Mode '{mode}' left 0 quantized linears — the fallback "
+                f"chain silently degraded to unquantized bf16. This is the "
+                f"hidden-failure mode the parity test exists to catch."
+            )
             result = engine.generate("test", max_new_tokens=5,
                                      finish_sentence=False, temperature=0.0)
             assert isinstance(result, str), (
@@ -121,11 +138,12 @@ class TestQuantModeParity:
 
     @pytest.mark.parametrize("mode", ["int8", "int4", "w8a8", "fp8"])
     def test_quant_mode_throughput_not_catstrophic(self, mode):
-        """Core quant modes should not be more than 5× slower than unquantized.
+        """Core quant modes should not be more than 2× slower than unquantized.
 
-        The critique found 3.5× slowdowns. We set the bar at 5× to catch
-        catastrophic regressions while allowing some overhead for dequantize
-        paths. As fused kernels are added, this threshold should tighten.
+        The critique found 3.5× slowdowns — that regression must FAIL this
+        test, not pass under a lenient threshold. 2× is the compromise bar
+        (1.2× is unrealistic for dequant-then-matmul paths; 5× green-lights
+        the exact bug we're guarding against). Tighten as fused kernels land.
         """
         engine, model = _build_engine_and_model()
         try:
@@ -135,14 +153,18 @@ class TestQuantModeParity:
             # Restore original weights and apply quant
             engine._save_original_weights()
             engine._apply_quantization(mode)
+            n_quant = _count_quantized(model)
+            assert n_quant > 0, (
+                f"Mode '{mode}' silently fell back to unquantized — "
+                f"throughput comparison would be meaningless"
+            )
             quant_tps = _measure_throughput(engine, n_tokens=20)
 
             if quant_tps == 0:
                 pytest.fail(f"Mode '{mode}' produced 0 tok/s")
 
             ratio = baseline_tps / quant_tps if quant_tps > 0 else float('inf')
-            # 5× is the "catastrophic" threshold. Tighten as kernels improve.
-            MAX_RATIO = 5.0
+            MAX_RATIO = 2.0
             assert ratio <= MAX_RATIO, (
                 f"Mode '{mode}' is {ratio:.1f}× slower than unquantized "
                 f"(baseline={baseline_tps:.1f} tok/s, quant={quant_tps:.1f} tok/s). "

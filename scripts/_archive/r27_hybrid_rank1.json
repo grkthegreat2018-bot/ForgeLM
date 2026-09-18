@@ -1,0 +1,289 @@
+[
+  {
+    "condition": "rank1_only",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.1868520206247412e-06
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.5625334764667328e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 4.009078770833563e-06
+      },
+      "ppl": 12403111.751283854
+    },
+    "delta_params": 13074432,
+    "time": 3.649101495742798
+  },
+  {
+    "condition": "rank1+1ep",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.497762847220031e-06
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.761390585765966e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 4.41716270656034e-06
+      },
+      "ppl": 4502857.95659383
+    },
+    "delta_params": 13074432,
+    "time": 5.516060829162598
+  },
+  {
+    "condition": "rank1+3ep",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.7626054572849057e-06
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.9629232655015157e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 4.722115831151674e-06
+      },
+      "ppl": 1594164.5303796527
+    },
+    "delta_params": 13074432,
+    "time": 10.118404865264893
+  },
+  {
+    "condition": "rank1+3ep+replay",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 3.1412388022289408e-06
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 3.1566683428430055e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 5.180276954075413e-06
+      },
+      "ppl": 940384.8945963273
+    },
+    "delta_params": 13074432,
+    "time": 9.380223989486694
+  },
+  {
+    "condition": "rank1+3ep_a0.5",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 4.012452459178917e-07
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 1.1073544643513954e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 1.8806536215301012e-06
+      },
+      "ppl": 224.8934030856312
+    },
+    "delta_params": 13074432,
+    "time": 9.508295059204102
+  },
+  {
+    "condition": "gradient_only_3ep",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.6335527837276459
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.5900494240224361
+      },
+      "inject": {
+        "correct": 20,
+        "total": 20,
+        "avg_prob": 0.9347261250019073
+      },
+      "ppl": 16.511224658889482
+    },
+    "delta_params": 13074432,
+    "time": 12.085824728012085
+  },
+  {
+    "condition": "gradient_3ep+replay",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.6810677066445351
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.608111709356308
+      },
+      "inject": {
+        "correct": 20,
+        "total": 20,
+        "avg_prob": 0.899633127450943
+      },
+      "ppl": 11.603306848291053
+    },
+    "delta_params": 13074432,
+    "time": 25.023642778396606
+  }
+]

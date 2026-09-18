@@ -18,8 +18,12 @@ For our model (6 GQA attention layers, 32 heads):
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 class AutonomyOfHeads:
@@ -90,9 +94,9 @@ class AutonomyOfHeads:
         for i in sorted_indices[:n_retrieval]:
             self.head_types[i] = 'retrieval'
 
-        print(f"  [AoH] Classified {n_retrieval} retrieval + "
+        logger.info(f"  [AoH] Classified {n_retrieval} retrieval + "
               f"{self.n_heads - n_retrieval} streaming heads")
-        print(f"  [AoH] Effective ranks: {[f'{r:.2f}' for r in self.effective_ranks]}")
+        logger.info(f"  [AoH] Effective ranks: {[f'{r:.2f}' for r in self.effective_ranks]}")
 
     def get_attention_mask(self, head_idx: int, seq_len: int,
                            device: str = "cuda") -> torch.Tensor:

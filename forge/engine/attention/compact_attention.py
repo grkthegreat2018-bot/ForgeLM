@@ -34,8 +34,12 @@ This implementation provides:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 def block_union_selection(
@@ -201,7 +205,7 @@ class CompactAttentionWrapper:
                 self._patch(module, name)
                 count += 1
         self._active = True
-        print(f"  [CompactAttn] Patched {count} attention layers "
+        logger.info(f"  [CompactAttn] Patched {count} attention layers "
               f"(budget={self.budget_ratio}, min_kv={self.min_kv_len})")
 
     def _patch(self, attn_module, name: str):
@@ -256,7 +260,7 @@ class CompactAttentionWrapper:
                 block_size=16,
                 budget_ratio=self._compact_budget,
             )
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module._compact_min_kv = self.min_kv_len

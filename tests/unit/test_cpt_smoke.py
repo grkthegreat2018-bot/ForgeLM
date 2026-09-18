@@ -41,7 +41,7 @@ def test_cpt_training_smoke():
     sampler = MixedDataSampler(reasoning_seqs, general_seqs, batch_size=2, reasoning_ratio=0.6)
 
     # Build tiny model
-    config = get_config("lfm25_tiny")
+    config = get_config("forgelm_tiny")
     model = ModelLoader.build_model(config)
     model = model.to("cuda").to(torch.bfloat16)
     model.train()

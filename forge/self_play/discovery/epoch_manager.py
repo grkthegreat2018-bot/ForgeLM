@@ -97,17 +97,17 @@ def _load_model_at(checkpoint_path: str | None, device: str):
     from forge.checkpoint_io import load_checkpoint
     from forge.model_loader import load_default_model
 
-    model, tok = load_default_model("forgelm_v2_light")
+    model, tok = load_default_model("forgelm_v2")
 
     if checkpoint_path:
         # LoRA adapter checkpoint: load R30 base + hot-load LoRA
         if "_lora" in Path(checkpoint_path).name:
             from forge.engine.forge_engine import ForgeEngine
-            from research.paths import V10_CHECKPOINT
-            r30_path = str(V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R30.safetensors")
+            from research.paths import V2_CHECKPOINT
+            r30_path = str(V2_CHECKPOINT.parent / "ForgeLM_V2.safetensors")
             # Reload from R30 base (LoRA was trained on R30)
             engine = ForgeEngine.from_checkpoint(
-                r30_path, config_name="forgelm_v2_light",
+                r30_path, config_name="forgelm_v2",
                 device=device, auto_activate=False)
             engine.load_lora(checkpoint_path, rank=32, alpha=64)
             model = engine.model

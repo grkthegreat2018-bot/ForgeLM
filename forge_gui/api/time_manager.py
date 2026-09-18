@@ -15,17 +15,19 @@ Timer condition flags:
 
 When a timer fires, it emits a signal. The agent loop can check fired
 timers between rounds and inject the notification into the next round.
-Timers do NOT block the agent — they run in the background via QTimer.
+Timers do NOT block the agent — they run in the background via
+``threading.Timer`` daemon threads.
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from datetime import time as dtime
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from ._signal import SimpleSignal
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +49,19 @@ class TimerEntry:
     message: str = ""          # message to deliver when fired
 
 
-class TimeManager(QObject):
+class TimeManager:
     """Manages timers, alarms, and time queries for the agent.
 
-    Signals:
+    Signals (SimpleSignal):
         timer_fired(timer_id, label, message): a timer/alarm fired
         timer_cancelled(timer_id): a timer was cancelled
     """
 
-    timer_fired = Signal(str, str, str)
-    timer_cancelled = Signal(str)
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+    def __init__(self) -> None:
+        self.timer_fired = SimpleSignal()
+        self.timer_cancelled = SimpleSignal()
         self._timers: dict[str, TimerEntry] = {}
-        self._qt_timers: dict[str, QTimer] = {}
+        self._thread_timers: dict[str, threading.Timer] = {}
         self._counter = 0
         self._start_time = time.time()
 
@@ -102,7 +102,7 @@ class TimeManager(QObject):
             on_process_exit=on_process_exit, on_user_prompt=on_user_prompt,
             created_at=time.time(), message=message or f"Timer '{label}' fired")
         self._timers[timer_id] = entry
-        self._start_qt_timer(timer_id, int(seconds * 1000))
+        self._start_timer(timer_id, seconds)
         logger.info("Timer set: %s (%.0fs, label=%s)", timer_id, seconds, label)
         return timer_id
 
@@ -133,17 +133,17 @@ class TimeManager(QObject):
             created_at=time.time(),
             message=message or f"Alarm '{label}' fired at {time_str}")
         self._timers[timer_id] = entry
-        self._start_qt_timer(timer_id, int(delay_s * 1000))
+        self._start_timer(timer_id, delay_s)
         logger.info("Alarm set: %s (%s, label=%s)", timer_id, time_str, label)
         return timer_id
 
     # ── timer management ──────────────────────────────────────────────
-    def _start_qt_timer(self, timer_id: str, ms: int) -> None:
-        qt = QTimer(self)
-        qt.setSingleShot(not self._timers[timer_id].repeat)
-        qt.timeout.connect(lambda: self._on_fire(timer_id))
-        qt.start(max(ms, 1))
-        self._qt_timers[timer_id] = qt
+    def _start_timer(self, timer_id: str, seconds: float) -> None:
+        t = threading.Timer(max(seconds, 0.001), self._on_fire,
+                            args=(timer_id,))
+        t.daemon = True
+        t.start()
+        self._thread_timers[timer_id] = t
 
     def _on_fire(self, timer_id: str) -> None:
         entry = self._timers.get(timer_id)
@@ -156,10 +156,8 @@ class TimeManager(QObject):
         if entry.repeat:
             entry.status = "active"
             entry.fire_at = time.time() + entry.interval_s
-            # restart the QTimer
-            qt = self._qt_timers.get(timer_id)
-            if qt:
-                qt.start(int(entry.interval_s * 1000))
+            # schedule the next fire — threading.Timer is single-shot
+            self._start_timer(timer_id, entry.interval_s)
 
     def check_timer(self, timer_id: str) -> dict | None:
         """Check the status of a timer."""
@@ -185,10 +183,9 @@ class TimeManager(QObject):
         if entry is None:
             return False
         entry.status = "cancelled"
-        qt = self._qt_timers.pop(timer_id, None)
-        if qt:
-            qt.stop()
-            qt.deleteLater()
+        t = self._thread_timers.pop(timer_id, None)
+        if t:
+            t.cancel()
         self.timer_cancelled.emit(timer_id)
         logger.info("Timer cancelled: %s", timer_id)
         return True
@@ -242,19 +239,17 @@ class TimeManager(QObject):
         to_remove = [tid for tid, e in self._timers.items()
                      if e.status in ("expired", "cancelled")]
         for tid in to_remove:
-            qt = self._qt_timers.pop(tid, None)
-            if qt:
-                qt.stop()
-                qt.deleteLater()
+            t = self._thread_timers.pop(tid, None)
+            if t:
+                t.cancel()
             del self._timers[tid]
         return len(to_remove)
 
     def shutdown(self) -> None:
         """Stop all timers."""
-        for qt in self._qt_timers.values():
-            qt.stop()
-            qt.deleteLater()
-        self._qt_timers.clear()
+        for t in self._thread_timers.values():
+            t.cancel()
+        self._thread_timers.clear()
         self._timers.clear()
 
 

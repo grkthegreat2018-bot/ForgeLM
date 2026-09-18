@@ -355,13 +355,13 @@ def quantize_model_nvfp4(model: nn.Module, block_size: int = 32,
             except Exception as e:
                 n_skipped += 1
                 if verbose:
-                    print(f"  [NVFP4] Skipped {name}: {e}")
+                    logger.warning(f"  [NVFP4] Skipped {name}: {e}")
 
     if verbose and n_quantized > 0:
         compression = total_orig_bytes / max(total_quant_bytes, 1)
-        print(f"  [NVFP4] {n_quantized} layers quantized to FP4 E2M1 "
+        logger.info(f"  [NVFP4] {n_quantized} layers quantized to FP4 E2M1 "
               f"(block_size={block_size}, w4a8={w4a8})")
-        print(f"  [NVFP4] weight memory: {total_quant_bytes/1024**2:.1f} MB "
+        logger.info(f"  [NVFP4] weight memory: {total_quant_bytes/1024**2:.1f} MB "
               f"(was {total_orig_bytes/1024**2:.1f} MB, {compression:.1f}x compression)")
 
     # If too many layers were skipped due to OOM, raise so the fallback chain

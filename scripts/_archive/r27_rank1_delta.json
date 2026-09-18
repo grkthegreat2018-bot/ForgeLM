@@ -1,0 +1,310 @@
+[
+  {
+    "condition": "rank1_L12",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.022233921848237515
+      },
+      "held": {
+        "correct": 4,
+        "total": 10,
+        "avg_prob": 0.03292517251684331
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.002290835841358785
+      },
+      "ppl": 7.882320988519266
+    },
+    "total_params": 4358144,
+    "eff_params": 115200,
+    "inject_time": 1.5042126178741455,
+    "n_facts": 20,
+    "n_layers": 1
+  },
+  {
+    "condition": "rank1_3L",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 1.510998703935229e-05
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 1.3226767830731845e-05
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 2.883666212905034e-06
+      },
+      "ppl": 8.22628973164141
+    },
+    "total_params": 13074432,
+    "eff_params": 345600,
+    "inject_time": 2.609450340270996,
+    "n_facts": 20,
+    "n_layers": 3
+  },
+  {
+    "condition": "rank1_3L_a0.5",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.14648078046739102
+      },
+      "held": {
+        "correct": 7,
+        "total": 10,
+        "avg_prob": 0.21799832936376334
+      },
+      "inject": {
+        "correct": 3,
+        "total": 20,
+        "avg_prob": 0.023999797253054567
+      },
+      "ppl": 8.042175496547651
+    },
+    "total_params": 13074432,
+    "eff_params": 345600,
+    "inject_time": 2.5866196155548096,
+    "n_facts": 20,
+    "n_layers": 3
+  },
+  {
+    "condition": "rank1_3L_a2.0",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 2.4919017397762033e-05
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 1.2591147047658068e-06
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 0.000391589120555913
+      },
+      "ppl": 9.41191107448143
+    },
+    "total_params": 13074432,
+    "eff_params": 345600,
+    "inject_time": 2.591320514678955,
+    "n_facts": 20,
+    "n_layers": 3
+  },
+  {
+    "condition": "rank1_3L_a5.0",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 7.775100349660669e-07
+      },
+      "held": {
+        "correct": 0,
+        "total": 10,
+        "avg_prob": 1.2463326184430912e-07
+      },
+      "inject": {
+        "correct": 0,
+        "total": 20,
+        "avg_prob": 0.00011933749161500001
+      },
+      "ppl": 31.896553066162042
+    },
+    "total_params": 13074432,
+    "eff_params": 345600,
+    "inject_time": 2.583179473876953,
+    "n_facts": 20,
+    "n_layers": 3
+  },
+  {
+    "condition": "rank1_5facts",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.17056327760219575
+      },
+      "held": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.1598628332838416
+      },
+      "inject": {
+        "correct": 5,
+        "total": 20,
+        "avg_prob": 0.0242898206517566
+      },
+      "ppl": 8.024703942688541
+    },
+    "total_params": 13074432,
+    "eff_params": 86400,
+    "inject_time": 2.3385918140411377,
+    "n_facts": 5,
+    "n_layers": 3
+  },
+  {
+    "condition": "rank1_10facts",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.12591440619435162
+      },
+      "held": {
+        "correct": 7,
+        "total": 10,
+        "avg_prob": 0.19697672668844463
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.019827788254769985
+      },
+      "ppl": 8.052196335907214
+    },
+    "total_params": 13074432,
+    "eff_params": 172800,
+    "inject_time": 6.68155574798584,
+    "n_facts": 10,
+    "n_layers": 3
+  }
+]

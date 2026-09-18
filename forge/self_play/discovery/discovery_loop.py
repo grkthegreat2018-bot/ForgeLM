@@ -6,7 +6,7 @@ runs in an agentic loop:
   1. Build prompt = system + recent memory digest + rolling transcript.
   2. LLM generates a turn.
   3. Parse the first tool-call JSON object from the output:
-       {"tool": "<name>", "args": {...}}
+       <tool_call>{"name": "<name>", "arguments": {...}}</tool_call>
      Any surrounding text is logged as a "musing" thought (preserved).
   4. Execute the tool, append the JSON result to the transcript.
   5. Repeat until finish_session is called, or no tool call for N idle turns,
@@ -56,8 +56,10 @@ Your database tables (you may add more via migrate_schema):
 thoughts, scripts, research, theories, discoveries, events, schema_migrations
 
 Each turn: write brief reasoning, then call ONE tool. To call a tool, output \
-the tool call tokens like this example:
-<|tool_call_start|>[think(content='Primes greater than 5 only end in 1,3,7,9')]<|tool_call_end|>
+a JSON object inside the tool call markers like this example:
+<tool_call>
+{"name": "think", "arguments": {"content": "Primes greater than 5 only end in 1,3,7,9"}}
+</tool_call>
 
 Call finish_session when done exploring."""
 
@@ -115,7 +117,7 @@ class DiscoveryLoop:
           2. Base ForgeLM V10 checkpoint (research/checkpoints/)
           3. Random weights (fallback — prints a warning)
 
-        If a LoRA adapter checkpoint exists (e.g. ForgeLM_V2_Light_R31_lora.safetensors),
+        If a LoRA adapter checkpoint exists (e.g. forgelm_v2_tooluse.lora.safetensors),
         it is loaded on top of the base model. This allows self-play to use the
         latest fine-tuned LoRA without merging into the base weights.
 
@@ -123,7 +125,7 @@ class DiscoveryLoop:
         random weights or the base model every time.
         """
         from forge.model_loader import load_default_model
-        from research.paths import V10_CHECKPOINT, as_str
+        from research.paths import V2_CHECKPOINT, as_str
 
         db = DiscoveryDB(db_path or str(_DB_PATH))
 
@@ -132,18 +134,18 @@ class DiscoveryLoop:
         if best and best.get("checkpoint_path"):
             ckpt = best["checkpoint_path"]
             print(f"[discovery] loading best epoch checkpoint: {ckpt}")
-        elif V10_CHECKPOINT.exists():
-            ckpt = as_str(V10_CHECKPOINT)
+        elif V2_CHECKPOINT.exists():
+            ckpt = as_str(V2_CHECKPOINT)
             print(f"[discovery] loading ForgeLM V10 base checkpoint: {ckpt}")
         else:
             ckpt = None
             print("[discovery] WARNING: no checkpoint found — using random weights")
 
-        model, tok = load_default_model("forgelm_v2_light", checkpoint_path=ckpt)
+        model, tok = load_default_model("forgelm_v2", checkpoint_path=ckpt)
 
         # Check for LoRA adapter (R31+) to load on top of R30 base
-        r30_path = V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R30.safetensors"
-        lora_path = V10_CHECKPOINT.parent / "ForgeLM_V2_Light_R31_lora.safetensors"
+        r30_path = V2_CHECKPOINT.parent / "ForgeLM_V2.safetensors"
+        lora_path = V2_CHECKPOINT.parent / "forgelm_v2_tooluse.lora.safetensors"
         _engine_ref = None
         if lora_path.exists():
             from forge.engine.forge_engine import ForgeEngine
@@ -151,7 +153,7 @@ class DiscoveryLoop:
             if r30_path.exists():
                 print(f"[discovery] reloading R30 base for LoRA: {r30_path}")
                 engine = ForgeEngine.from_checkpoint(
-                    str(r30_path), config_name="forgelm_v2_light",
+                    str(r30_path), config_name="forgelm_v2",
                     device=str(model.device if hasattr(model, 'device') else "cuda"),
                     auto_activate=False)
                 model = engine.model
@@ -171,7 +173,7 @@ class DiscoveryLoop:
         ModelLoader.generate_text returns the full prompt+generation decoded
         with skip_special_tokens=True, which buries tool-call tokens. This
         function generates directly and decodes only the generated portion,
-        preserving <|tool_call_start|> etc.
+        preserving <tool_call> etc.
         """
         import torch
         import torch.nn.functional as F
@@ -195,7 +197,7 @@ class DiscoveryLoop:
                     break
 
         # Decode ONLY the generated tokens (not the prompt), keeping special
-        # tokens so <|tool_call_start|> etc. are visible to the parser.
+        # tokens so <tool_call> etc. are visible to the parser.
         gen_ids = ids[0, prompt_len:]
         return tok.decode(gen_ids, skip_special_tokens=False)
 
@@ -272,7 +274,7 @@ class DiscoveryLoop:
                 idle += 1
                 stuck.tick_idle()
                 self.transcript.append({"role": "tool",
-                    "content": 'Error: no tool call found. Use the tool call format: <|tool_call_start|>[tool_name(arg1="value")]<|tool_call_end|>'})
+                    "content": 'Error: no tool call found. Use the tool call format: <tool_call>{"name": "tool_name", "arguments": {"arg1": "value"}}</tool_call>'})
                 self.db.emit("no_tool_call", {"musing": musing[:160]}, self.session_id)
                 if stuck.should_rollback():
                     self._rollback_burst(stuck, sp)

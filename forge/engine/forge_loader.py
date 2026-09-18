@@ -506,7 +506,7 @@ class ForgeLoader:
             return "huggingface"
         return "unknown"
 
-    def load(self, source: str | Path, config_name: str = "forgelm_v2_light",
+    def load(self, source: str | Path, config_name: str = "forgelm_v2",
              device: str = "cuda", **kwargs):
         """Load a model from any supported source.
 
@@ -514,7 +514,7 @@ class ForgeLoader:
             (model, config) tuple. model is an nn.Module on the target device.
         """
         fmt = self.detect_format(source)
-        print(f"  [ForgeLoader] Detected format: {fmt} from {source}")
+        logger.info("Detected format: %s from %s", fmt, source)
 
         if fmt == "gguf":
             return self._load_gguf(source, device=device)
@@ -537,8 +537,8 @@ class ForgeLoader:
         info = GGUFInfo(path)
         arch = info.get_architecture()
         ctx_len = info.get_context_length()
-        print(f"  [ForgeLoader] GGUF: arch={arch}, context={ctx_len}, "
-              f"tensors={len(info.tensors)}, metadata_keys={len(info.metadata)}")
+        logger.info("GGUF: arch=%s, context=%s, tensors=%d, metadata_keys=%d",
+                    arch, ctx_len, len(info.tensors), len(info.metadata))
 
         # Build model config from GGUF metadata
         from forge.config import ModelConfig
@@ -583,14 +583,14 @@ class ForgeLoader:
             # Direct GGUF download from HF
             local_path = HF_CACHE_DIR / model_id.replace("/", "_")
             if not local_path.exists():
-                print(f"  [ForgeLoader] Downloading {model_id} from HuggingFace...")
+                logger.info("Downloading %s from HuggingFace...", model_id)
                 self._download_hf_file(model_id, local_path)
             return self._load_gguf(local_path, device=device)
         else:
             # Try safetensors via transformers
             try:
                 from transformers import AutoModelForCausalLM
-                print(f"  [ForgeLoader] Loading {model_id} via transformers...")
+                logger.info("Loading %s via transformers...", model_id)
                 model = AutoModelForCausalLM.from_pretrained(
                     model_id, torch_dtype=torch.bfloat16, device_map=device,
                     trust_remote_code=True)
@@ -598,7 +598,7 @@ class ForgeLoader:
                 cfg = ModelConfig(name=model_id.replace("/", "_"))
                 return model, cfg
             except Exception as e:
-                print(f"  [ForgeLoader] Transformers load failed ({e}), trying GGUF...")
+                logger.warning("Transformers load failed (%s), trying GGUF...", e)
                 # Try GGUF variant
                 gguf_id = model_id.rstrip("/") + "-GGUF"
                 return self._load_huggingface(gguf_id, config_name, device=device, **kwargs)
@@ -656,11 +656,11 @@ class ForgeLoader:
         except socket.gaierror:
             pass
 
-        print(f"  [ForgeLoader] Downloading: {url}")
+        logger.info("Downloading: %s", url)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(url, str(dest))
-        print(f"  [ForgeLoader] Downloaded to {dest}")
+        logger.info("Downloaded to %s", dest)
 
 
 # ── Quick test ───────────────────────────────────────────────────────────────
@@ -671,7 +671,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         path = sys.argv[1]
     else:
-        path = "D:/LMstudio/Models/lmstudio-community/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q8_0.gguf"
+        from research.paths import V2_CHECKPOINT
+        path = str(V2_CHECKPOINT)
 
     loader = ForgeLoader()
     fmt = loader.detect_format(path)

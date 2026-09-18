@@ -6,14 +6,14 @@ constant, records where it is used, and validates that the value falls within
 reasonable bounds derived from the evolution domain definitions.
 
 If any constant appears invalid or unsupported, a comment documents the concern
-but the value is NOT reverted — the user should decide.
+but the value is NOT reverted â€” the user should decide.
 
 References
 ----------
-- forge/self_play/infinite_loop.py  — LoopConfig dataclass (production defaults)
-- forge/training/optim/hybrid_offload.py — CPUAdamW optimizer (prefetch_depth)
-- forge/evolution/domains/training_domains.py — evolution domain bounds
-- forge/evolution/domains/memory_domains.py — evolution domain bounds
+- forge/self_play/infinite_loop.py  â€” LoopConfig dataclass (production defaults)
+- forge/training/optim/hybrid_offload.py â€” CPUAdamW optimizer (prefetch_depth)
+- forge/evolution/domains/training_domains.py â€” evolution domain bounds
+- forge/evolution/domains/memory_domains.py â€” evolution domain bounds
 - AGENTS.md "Evolution-Discovered Promotions" section
 """
 from __future__ import annotations
@@ -25,13 +25,13 @@ import pytest
 # ft_grad_accum = 5
 # ---------------------------------------------------------------------------
 # Where used:
-#   forge/self_play/infinite_loop.py:91  — LoopConfig.ft_grad_accum default
-#   forge/self_play/infinite_loop.py:596 — passed as --grad-accum CLI arg to sft_train
-#   forge/self_play/infinite_loop.py:1098 — set from argparse in alternate entry
-#   tests/unit/test_thinking_pipeline.py:94 — asserts default == 5
+#   forge/self_play/infinite_loop.py:91  â€” LoopConfig.ft_grad_accum default
+#   forge/self_play/infinite_loop.py:596 â€” passed as --grad-accum CLI arg to sft_train
+#   forge/self_play/infinite_loop.py:1098 â€” set from argparse in alternate entry
+#   tests/unit/test_thinking_pipeline.py:94 â€” asserts default == 5
 #
 # Evolution domain: GradAccumConfig (training_domains.py:298-329)
-#   decode range: accum_steps = int(interp(p[0], [0,1], [1, 32]))  → [1, 32]
+#   decode range: accum_steps = int(interp(p[0], [0,1], [1, 32]))  â†’ [1, 32]
 #   AGENTS.md: "SFT training: grad_accum=5, grad_compression=int4 (score 30.00)"
 #
 # Validation: must be a positive integer in [1, 32].
@@ -42,11 +42,11 @@ FT_GRAD_ACCUM = 5
 # ft_sync_freq = 15
 # ---------------------------------------------------------------------------
 # Where used:
-#   forge/self_play/infinite_loop.py:92  — LoopConfig.ft_sync_freq default
-#   forge/self_play/infinite_loop.py:597 — passed as --sync-freq CLI arg to sft_train
+#   forge/self_play/infinite_loop.py:92  â€” LoopConfig.ft_sync_freq default
+#   forge/self_play/infinite_loop.py:597 â€” passed as --sync-freq CLI arg to sft_train
 #
 # Evolution domain: GradAccumConfig (training_domains.py:298-329)
-#   decode range: sync_freq = int(interp(p[3], [0,1], [1, 16]))  → [1, 16]
+#   decode range: sync_freq = int(interp(p[3], [0,1], [1, 16]))  â†’ [1, 16]
 #
 # Validation: must be a positive integer in [1, 16].
 FT_SYNC_FREQ = 15
@@ -56,13 +56,13 @@ FT_SYNC_FREQ = 15
 # ft_focal_gamma = 4.93
 # ---------------------------------------------------------------------------
 # Where used:
-#   forge/self_play/infinite_loop.py:105  — LoopConfig.ft_focal_gamma default
-#   forge/self_play/infinite_loop.py:604 — passed as --focal-gamma CLI arg
-#   forge/self_play/infinite_loop.py:1104 — set from argparse
-#   tests/unit/test_thinking_pipeline.py:97 — asserts default == 4.93
+#   forge/self_play/infinite_loop.py:105  â€” LoopConfig.ft_focal_gamma default
+#   forge/self_play/infinite_loop.py:604 â€” passed as --focal-gamma CLI arg
+#   forge/self_play/infinite_loop.py:1104 â€” set from argparse
+#   tests/unit/test_thinking_pipeline.py:97 â€” asserts default == 4.93
 #
 # Evolution domain: LossConfig (training_domains.py:139-184)
-#   decode range: focal_gamma = float(interp(p[2], [0,1], [0, 5]))  → [0, 5]
+#   decode range: focal_gamma = float(interp(p[2], [0,1], [0, 5]))  â†’ [0, 5]
 #   AGENTS.md: "FocalLoss gamma=4.93" (already applied prior to 2026-08-24 batch)
 #
 # Validation: must be a float in [0, 10].  The evolution domain allows [0, 5],
@@ -75,9 +75,9 @@ FT_FOCAL_GAMMA = 4.93
 # ft_grad_compression = "int4"
 # ---------------------------------------------------------------------------
 # Where used:
-#   forge/self_play/infinite_loop.py:107  — LoopConfig.ft_grad_compression default
-#   forge/self_play/infinite_loop.py:601 — passed as --grad-compression CLI arg
-#   tests/unit/test_thinking_pipeline.py:95 — asserts default == "int4"
+#   forge/self_play/infinite_loop.py:107  â€” LoopConfig.ft_grad_compression default
+#   forge/self_play/infinite_loop.py:601 â€” passed as --grad-compression CLI arg
+#   tests/unit/test_thinking_pipeline.py:95 â€” asserts default == "int4"
 #
 # Evolution domain: CpuAdamwConfig (training_domains.py:261-295)
 #   discrete_choices: compression = ["none", "int8", "int4"]
@@ -91,15 +91,15 @@ FT_GRAD_COMPRESSION = "int4"
 # prefetch_depth = 7
 # ---------------------------------------------------------------------------
 # Where used:
-#   forge/training/optim/hybrid_offload.py:243 — CPUAdamW.__init__ default param
-#   forge/training/optim/hybrid_offload.py:271 — stored as self.prefetch_depth
-#   forge/training/optim/hybrid_offload.py:333 — used in verbose print
+#   forge/training/optim/hybrid_offload.py:243 â€” CPUAdamW.__init__ default param
+#   forge/training/optim/hybrid_offload.py:271 â€” stored as self.prefetch_depth
+#   forge/training/optim/hybrid_offload.py:333 â€” used in verbose print
 #
 # Evolution domain: HybridOffload (memory_domains.py:25-87)
-#   decode range: prefetch_depth = int(1 + round(p[1] * 7))  → [1, 8]
+#   decode range: prefetch_depth = int(1 + round(p[1] * 7))  â†’ [1, 8]
 #   discrete_choices: [1, 2, 3, 4, 5, 6, 7, 8]
 # Also: CpuAdamwConfig (training_domains.py:261-295)
-#   decode range: prefetch_depth = int(interp(p[1], [0,1], [1, 8]))  → [1, 8]
+#   decode range: prefetch_depth = int(interp(p[1], [0,1], [1, 8]))  â†’ [1, 8]
 #
 # Validation: must be a positive integer in [1, 8].
 PREFETCH_DEPTH = 7
@@ -143,7 +143,7 @@ class TestFtSyncFreq:
         assert 1 <= FT_SYNC_FREQ <= 16
 
     def test_within_reasonable_bounds(self):
-        """Sync freq of 15 is near the top of [1, 16] — high but valid."""
+        """Sync freq of 15 is near the top of [1, 16] â€” high but valid."""
         assert 1 <= FT_SYNC_FREQ <= 16
 
     def test_documented_in_loop_config(self):
@@ -290,7 +290,7 @@ class TestEvolutionProvenance:
             if p.exists():
                 from forge.evolution.database import FindingsDB
                 return FindingsDB(str(p))
-        pytest.skip("forge_evolve.db not found — evolution DB provenance check skipped")
+        pytest.skip("forge_evolve.db not found â€” evolution DB provenance check skipped")
 
     def test_grad_accum_in_db(self, findings_db):
         """Check if grad_accum=5 appears in evolution discoveries.
@@ -310,7 +310,7 @@ class TestEvolutionProvenance:
                     found = True
                     break
         if not found:
-            # Not necessarily an error — the DB may have been rescored/migrated
+            # Not necessarily an error â€” the DB may have been rescored/migrated
             # or the discovery may be stored under a different domain name.
             # CONCERN: grad_accum=5 not found in 'grad_accum_config' discoveries
             pass
@@ -398,7 +398,7 @@ class TestEvolutionProvenance:
 
 
 # ---------------------------------------------------------------------------
-# Concerns / Notes (do NOT revert — user decides)
+# Concerns / Notes (do NOT revert â€” user decides)
 # ---------------------------------------------------------------------------
 
 # CONCERN 1: ft_sync_freq = 15 is at the top of the evolution domain range [1, 16].
@@ -434,3 +434,62 @@ class TestEvolutionProvenance:
 #   during test creation.  The provenance of these constants relies on the
 #   AGENTS.md documentation rather than a queryable DB record.  If the DB
 #   exists elsewhere, the provenance tests will check it automatically.
+
+
+# ---------------------------------------------------------------------------
+# best_configs.json — the live evolution -> production link (Critique NC8)
+# ---------------------------------------------------------------------------
+
+class TestBestConfigsApply:
+    """Validate apply_to_namespace() — the mechanism sft_train.py uses to
+    override argparse defaults with evolution-best values."""
+
+    def _args(self, **kw):
+        import argparse
+        return argparse.Namespace(**kw)
+
+    def test_overrides_defaults_only(self, tmp_path, monkeypatch):
+        import json
+        from forge.evolution import best_configs
+        payload = {"domains": {
+            "grad_accum_config": {"config": {"accum_steps": 8, "sync_freq": 9},
+                                   "score": 42.0},
+            "loss_config": {"config": {"focal_gamma": 3.0}, "score": 7.0},
+        }}
+        cfg_file = tmp_path / "best_configs.json"
+        cfg_file.write_text(json.dumps(payload), encoding="utf-8")
+        monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH", cfg_file)
+
+        # grad_accum still at default -> overridden; sync_freq explicit -> kept
+        args = self._args(grad_accum=5, sync_freq=3, focal_gamma=4.93)
+        defaults = {"grad_accum": 5, "sync_freq": 15, "focal_gamma": 4.93}
+        applied = best_configs.apply_to_namespace(args, defaults)
+        assert args.grad_accum == 8
+        assert args.sync_freq == 3        # user-passed value wins
+        assert args.focal_gamma == 3.0
+        assert len(applied) == 2
+
+    def test_missing_file_is_noop(self, tmp_path, monkeypatch):
+        from forge.evolution import best_configs
+        monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH",
+                            tmp_path / "absent.json")
+        args = self._args(grad_accum=5)
+        assert best_configs.apply_to_namespace(args, {"grad_accum": 5}) == []
+        assert args.grad_accum == 5
+
+    def test_reverted_guard_refuses_value(self, tmp_path, monkeypatch):
+        import json
+        from forge.evolution import best_configs
+        payload = {"domains": {
+            "loss_config": {"config": {"label_smoothing": 0.29}, "score": 9.0},
+        }}
+        cfg_file = tmp_path / "best_configs.json"
+        cfg_file.write_text(json.dumps(payload), encoding="utf-8")
+        monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH", cfg_file)
+
+        args = self._args(label_smoothing_eps=0.1)
+        defaults = {"label_smoothing_eps": 0.1}
+        param_map = {"label_smoothing_eps": ("loss_config", "label_smoothing", float)}
+        applied = best_configs.apply_to_namespace(args, defaults, param_map)
+        assert applied == []                    # 0.29 was a reverted promotion
+        assert args.label_smoothing_eps == 0.1

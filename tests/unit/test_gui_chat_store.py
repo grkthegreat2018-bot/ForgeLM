@@ -12,7 +12,7 @@ def store(tmp_path):
 
 
 def test_create_and_persist(store, tmp_path):
-    conv = store.create(title="Test chat", model="forgelm_v2_light")
+    conv = store.create(title="Test chat", model="forgelm_v2")
     assert conv["id"] in [c["id"] for c in store.conversations]
     assert (tmp_path / "chats" / "conversations.json").is_file()
 

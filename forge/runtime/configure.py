@@ -8,9 +8,9 @@ entrypoint (GUI, server, tests, CLI) can opt into the same environment with a
 single, discoverable call instead of relying on an import-ordering accident.
 
 This module exposes :func:`configure`, which is **idempotent** — safe to call
-multiple times.  ``forge.model_loader`` and ``forge.__init__`` still call it at
-import time (so existing callers keep the same behavior), but the side effects
-now live in one auditable place.
+multiple times.  Entrypoints (``forge_gui_server``, ``forge_server``,
+``sft_train``, ``infinite_loop``) call it explicitly at startup; importing
+``forge`` or ``forge.model_loader`` no longer triggers it (critique NC7).
 """
 from __future__ import annotations
 

@@ -1,0 +1,278 @@
+[
+  {
+    "tag": "r1_n50",
+    "rank": 1,
+    "n_facts": 50,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 21,
+        "total": 50,
+        "avg_prob": 0.06902563952434321
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.14907175838015974
+      },
+      "held": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.15488192364573478
+      },
+      "inject": {
+        "correct": 21,
+        "total": 50,
+        "avg_prob": 0.36369571370699305
+      },
+      "ppl": 8.010527901993823
+    },
+    "lora_params": 5760,
+    "params_per_fact": 115.2,
+    "recall": 0.42,
+    "base_recall": 0.42,
+    "train_time": 11.322265625
+  },
+  {
+    "tag": "r1_n100",
+    "rank": 1,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 46,
+        "total": 100,
+        "avg_prob": 0.08474333871065333
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.2208293050993234
+      },
+      "held": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.27461588084697724
+      },
+      "inject": {
+        "correct": 48,
+        "total": 100,
+        "avg_prob": 0.43268918068425594
+      },
+      "ppl": 7.811589864803809
+    },
+    "lora_params": 5760,
+    "params_per_fact": 57.6,
+    "recall": 0.48,
+    "base_recall": 0.46,
+    "train_time": 22.297017812728882
+  },
+  {
+    "tag": "r1_n200",
+    "rank": 1,
+    "n_facts": 200,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 97,
+        "total": 200,
+        "avg_prob": 0.08674115046498748
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.3251812643138692
+      },
+      "held": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.27356753721833227
+      },
+      "inject": {
+        "correct": 100,
+        "total": 200,
+        "avg_prob": 0.46252982203785675
+      },
+      "ppl": 8.16000541837675
+    },
+    "lora_params": 5760,
+    "params_per_fact": 28.8,
+    "recall": 0.5,
+    "base_recall": 0.485,
+    "train_time": 41.542144536972046
+  },
+  {
+    "tag": "r1_n408",
+    "rank": 1,
+    "n_facts": 408,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 201,
+        "total": 408,
+        "avg_prob": 0.0831569325554067
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.47446823930367826
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.4132814690470695
+      },
+      "inject": {
+        "correct": 210,
+        "total": 408,
+        "avg_prob": 0.47725856205923645
+      },
+      "ppl": 8.27022798979528
+    },
+    "lora_params": 5760,
+    "params_per_fact": 14.117647058823529,
+    "recall": 0.5147058823529411,
+    "base_recall": 0.49264705882352944,
+    "train_time": 84.21201944351196
+  },
+  {
+    "tag": "r2_n408",
+    "rank": 2,
+    "n_facts": 408,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 201,
+        "total": 408,
+        "avg_prob": 0.0831569325554067
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.7932575032114982
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.6316359482705594
+      },
+      "inject": {
+        "correct": 209,
+        "total": 408,
+        "avg_prob": 0.4900234455803222
+      },
+      "ppl": 7.774062970279631
+    },
+    "lora_params": 11520,
+    "params_per_fact": 28.235294117647058,
+    "recall": 0.5122549019607843,
+    "base_recall": 0.49264705882352944,
+    "train_time": 89.48524260520935
+  },
+  {
+    "tag": "r4_n408",
+    "rank": 4,
+    "n_facts": 408,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 201,
+        "total": 408,
+        "avg_prob": 0.0831569325554067
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8108968645334244
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.7675104290246964
+      },
+      "inject": {
+        "correct": 208,
+        "total": 408,
+        "avg_prob": 0.48753046173580383
+      },
+      "ppl": 7.854846753529044
+    },
+    "lora_params": 23040,
+    "params_per_fact": 56.470588235294116,
+    "recall": 0.5098039215686274,
+    "base_recall": 0.49264705882352944,
+    "train_time": 208.16129112243652
+  }
+]

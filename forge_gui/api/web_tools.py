@@ -21,14 +21,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from forge.web_primitives import (
-    DEFAULT_N,
-    MAX_FETCH_CHARS,
-    arxiv_search,
-    ddg_search,
-    fetch_url,
-    wikipedia_search,
-)
+# NOTE: ``forge.web_primitives`` is stdlib-only, but importing it triggers
+# ``forge/__init__.py`` → runtime configure → ``import torch`` (~1.3 s).
+# The import is deferred into ``WebTools.execute()`` so GUI startup never
+# pays the torch cost just to enumerate tool definitions.
 
 # ── tool definitions (OpenAI function-calling shape) ────────────────────
 _WEB_TOOL_DEFS = [
@@ -138,6 +134,16 @@ class WebTools:
         """
         if not self.enabled:
             return {"error": "web tools disabled"}
+        # Deferred import — see module docstring note (avoids the
+        # forge/__init__ → torch chain at GUI startup).
+        from forge.web_primitives import (
+            DEFAULT_N,
+            MAX_FETCH_CHARS,
+            arxiv_search,
+            ddg_search,
+            fetch_url,
+            wikipedia_search,
+        )
         n = int(args.get("n", DEFAULT_N))
         # clamp n to a sane range to avoid huge responses
         n = max(1, min(n, 10))

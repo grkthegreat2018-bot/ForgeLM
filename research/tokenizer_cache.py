@@ -22,14 +22,14 @@ from typing import Optional
 
 
 # The canonical tokenizer directory — the only one that exists on disk.
-# Old code may pass "research/checkpoints/lfm25_tokenizer" (the pre-V10
+# Old code may pass "research/checkpoints/forgelm_v2_tokenizer" (the pre-V10
 # name); get_tokenizer() auto-redirects those to this path.
 CANONICAL_TOKENIZER_PATH = "research/checkpoints/forgelm_v2_tokenizer"
 
 # Legacy paths that should be silently redirected to the canonical one.
 # This avoids touching 20+ call sites that still reference the old name.
 _LEGACY_REDIRECTS = {
-    "research/checkpoints/lfm25_tokenizer",
+    "research/checkpoints/forgelm_v2_tokenizer",
     "research/checkpoints/lfm2_5_tokenizer",
 }
 
@@ -39,7 +39,7 @@ def _resolve_path(path: str) -> str:
 
     If the requested path doesn't exist on disk but the canonical tokenizer
     dir does, use the canonical one. This fixes the bug where old hardcoded
-    paths (lfm25_tokenizer) caused FileNotFoundError → HF repo-id validation
+    paths (forgelm_v2_tokenizer) caused FileNotFoundError → HF repo-id validation
     errors.
     """
     if path in _LEGACY_REDIRECTS and not os.path.isdir(path):
@@ -112,7 +112,7 @@ def get_tokenizer(path: str = CANONICAL_TOKENIZER_PATH):
     Fast path: uses `tokenizers` Rust library directly (190ms).
     Fallback: uses `transformers` AutoTokenizer (4254ms).
 
-    Legacy paths (e.g. "research/checkpoints/lfm25_tokenizer") are
+    Legacy paths (e.g. "research/checkpoints/forgelm_v2_tokenizer") are
     automatically redirected to the canonical tokenizer directory if
     they don't exist on disk.
 

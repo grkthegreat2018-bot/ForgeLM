@@ -1,0 +1,161 @@
+[
+  {
+    "replay_ratio": 0.0,
+    "baseline": {
+      "k_correct": 5,
+      "h_correct": 6,
+      "i_correct": 2,
+      "k_avg_prob": 0.04640737362205982,
+      "h_avg_prob": 0.0537646890617907,
+      "i_avg_prob": 0.020069860408329986
+    },
+    "final": {
+      "k_correct": 0,
+      "h_correct": 0,
+      "i_correct": 20,
+      "k_avg_prob": 0.002731317273719469,
+      "h_avg_prob": 0.0033110866335846366,
+      "i_avg_prob": 0.8114320382475853
+    },
+    "per_epoch": [
+      {
+        "k_correct": 0,
+        "h_correct": 0,
+        "i_correct": 12,
+        "k_avg_prob": 0.007526521077670623,
+        "h_avg_prob": 0.005277254316024482,
+        "i_avg_prob": 0.11492242561653257,
+        "ppl": 91.57514928086779,
+        "epoch": 1
+      },
+      {
+        "k_correct": 0,
+        "h_correct": 0,
+        "i_correct": 15,
+        "k_avg_prob": 0.003926250399672426,
+        "h_avg_prob": 0.006337917142082006,
+        "i_avg_prob": 0.25946352602913975,
+        "ppl": 241.92434409964943,
+        "epoch": 2
+      },
+      {
+        "k_correct": 0,
+        "h_correct": 0,
+        "i_correct": 20,
+        "k_avg_prob": 0.002731317273719469,
+        "h_avg_prob": 0.0033110866335846366,
+        "i_avg_prob": 0.8114320382475853,
+        "ppl": 275.70812938946335,
+        "epoch": 3
+      }
+    ],
+    "baseline_ppl": 9.650375828047212,
+    "final_ppl": 275.70812938946335
+  },
+  {
+    "replay_ratio": 0.1,
+    "baseline": {
+      "k_correct": 5,
+      "h_correct": 6,
+      "i_correct": 2,
+      "k_avg_prob": 0.04640737362205982,
+      "h_avg_prob": 0.0537646890617907,
+      "i_avg_prob": 0.020069860408329986
+    },
+    "final": {
+      "k_correct": 8,
+      "h_correct": 6,
+      "i_correct": 20,
+      "k_avg_prob": 0.44788328527938576,
+      "h_avg_prob": 0.1389898533700034,
+      "i_avg_prob": 0.9572399318218231
+    },
+    "per_epoch": [
+      {
+        "k_correct": 7,
+        "h_correct": 4,
+        "i_correct": 14,
+        "k_avg_prob": 0.16724442951672244,
+        "h_avg_prob": 0.08149969180813059,
+        "i_avg_prob": 0.20109217220451683,
+        "ppl": 80.09451070222448,
+        "epoch": 1
+      },
+      {
+        "k_correct": 3,
+        "h_correct": 0,
+        "i_correct": 19,
+        "k_avg_prob": 0.13151152717910009,
+        "h_avg_prob": 0.01536600980325602,
+        "i_avg_prob": 0.511875706538558,
+        "ppl": 218.11400217482557,
+        "epoch": 2
+      },
+      {
+        "k_correct": 8,
+        "h_correct": 6,
+        "i_correct": 20,
+        "k_avg_prob": 0.44788328527938576,
+        "h_avg_prob": 0.1389898533700034,
+        "i_avg_prob": 0.9572399318218231,
+        "ppl": 163.56506857358923,
+        "epoch": 3
+      }
+    ],
+    "baseline_ppl": 9.650375828047212,
+    "final_ppl": 163.56506857358923
+  },
+  {
+    "replay_ratio": 0.5,
+    "baseline": {
+      "k_correct": 5,
+      "h_correct": 6,
+      "i_correct": 2,
+      "k_avg_prob": 0.04640737362205982,
+      "h_avg_prob": 0.0537646890617907,
+      "i_avg_prob": 0.020069860408329986
+    },
+    "final": {
+      "k_correct": 9,
+      "h_correct": 8,
+      "i_correct": 20,
+      "k_avg_prob": 0.8952915130807014,
+      "h_avg_prob": 0.25085326868211266,
+      "i_avg_prob": 0.9801647543907166
+    },
+    "per_epoch": [
+      {
+        "k_correct": 8,
+        "h_correct": 10,
+        "i_correct": 13,
+        "k_avg_prob": 0.7503068608930334,
+        "h_avg_prob": 0.5610662375576794,
+        "i_avg_prob": 0.34993304478994103,
+        "ppl": 74.40868706771657,
+        "epoch": 1
+      },
+      {
+        "k_correct": 9,
+        "h_correct": 3,
+        "i_correct": 19,
+        "k_avg_prob": 0.8267697112671157,
+        "h_avg_prob": 0.06030331022338942,
+        "i_avg_prob": 0.7250303902663291,
+        "ppl": 268.07904763142983,
+        "epoch": 2
+      },
+      {
+        "k_correct": 9,
+        "h_correct": 8,
+        "i_correct": 20,
+        "k_avg_prob": 0.8952915130807014,
+        "h_avg_prob": 0.25085326868211266,
+        "i_avg_prob": 0.9801647543907166,
+        "ppl": 188.57103386956743,
+        "epoch": 3
+      }
+    ],
+    "baseline_ppl": 9.650375828047212,
+    "final_ppl": 188.57103386956743
+  }
+]

@@ -1,908 +1,760 @@
-# ForgeAI Gap Analysis — Engine, Trainer, Server Compatibility
-## Consolidated findings (2026-09-05)
+# ForgeAI Scratchpad — LoRA Portability + Context Window Research
+## Consolidated findings (2026-09-16)
 
-Sources: local codebase audit + online research (vLLM V1, SGLang, llama.cpp,
-TGI, Axolotl, unsloth, LLaMA-Factory, OpenAI API spec 2026).
-
----
-
-## BENCHMARK RESULTS — ForgeEngine Backend Bottlenecks (2026-09-05)
-
-Hardware: RTX 5070 (12GB VRAM), 32GB RAM, Python 3.13, PyTorch (CUDA).
-Model: ForgeLM V2 Light config (1.2B, 2048 d_model, 16 layers, conv+attn hybrid).
-NOTE: Checkpoint file contained Qwen 2.5 0.5B weights (mismatched shapes);
-model ran with random weights but correct architecture shapes, so throughput
-numbers are valid for backend performance profiling.
-
-### KV Cache Strategies (50 token generation, 3 runs)
-| Strategy | tok/s | Latency | VRAM alloc | vs Paged |
-|---|---|---|---|---|
-| paged | 91.5 | 76ms | 4876MB | 1.00x (baseline) |
-| cpu_offload | 91.8 | 76ms | 4876MB | 1.00x (offload not engaging) |
-| snapkv | 85.2 | 82ms | 4868MB | 0.93x |
-| s4r | 78.2 | 89ms | 4876MB | 0.85x |
-| standard | 71.6 | 98ms | 4868MB | 0.78x |
-| rotorquant | 62.3 | 112ms | 4868MB | 0.68x (32% slower) |
-| hadamard_int4 | 53.4 | 131ms | 4868MB | 0.58x (42% slower) |
-
-**Finding**: Paged KV is fastest. RotorQuant and Hadamard INT4 are 32-42% slower
-due to per-step quantization overhead. Standard KV is 22% slower than paged
-(suggests paged has better memory access patterns).
-
-### Quantization (50 token generation, 3 runs)
-| Mode | tok/s | Latency | VRAM alloc | vs None |
-|---|---|---|---|---|
-| none | 71.1 | 98ms | 4868MB | 1.00x |
-| int8 | ERROR | - | 1770MB | dtype mismatch (BFloat16 vs Float) |
-| int4 | 25.2 | 278ms | 2828MB | 0.35x (3.5x SLOWER) |
-| w8a8 | 25.4 | 276ms | 2828MB | 0.36x (3.5x SLOWER) |
-| nvfp4 | 25.3 | 277ms | 2828MB | 0.36x (3.5x SLOWER) |
-| fp8 | 25.4 | 276ms | 2828MB | 0.36x (3.5x SLOWER) |
-
-**CRITICAL**: ALL quantization modes are 3.5x SLOWER than unquantized!
-Root cause: naive dequantize-then-matmul, no fused quantized GEMM kernels.
-On RTX 5070 (Blackwell), FP8/NVFP4 should use `scaled_mm` or cutlass kernels.
-int8 is completely broken (dtype mismatch).
-
-**UPDATE 2026-09-09 (critique F4 verification)**:
-- int8 dtype mismatch: FIXED. `quantize_model_int8(fast=True)` uses
-  `FastINT8Linear` with `torch._scaled_mm` (FP8 path). Integration test
-  `test_quant_parity.py::test_quant_mode_applies_and_generates[int8]` passes.
-- min_p API mismatch in MTP/EAGLE3: FIXED. All decoding classes now accept
-  `**kwargs` in their `generate()` signatures (base class has `**kwargs`).
-- 3.5x slowdown: STILL OPEN. Requires fused quantized GEMM kernels
-  (torch._scaled_mm for FP8, cutlass for INT4). This is deep R&D work.
-- compile/cuda_graph crash: STILL OPEN. CUDAGraph tree overwrite on conv
-  state clone. Fix: `torch.compiler.cudagraph_mark_step_begin()` before
-  each model invocation, or clone outside compile region.
-
-### Decoding Strategies
-| Mode | tok/s | Error |
-|---|---|---|
-| standard | 25.4 | (degraded — runs after quantization tests) |
-| speculative | ERROR | "missing required argument 'draft_model'" |
-| mtp_selfspec | ERROR | "got unexpected keyword argument 'min_p'" |
-| eagle3 | ERROR | "got unexpected keyword argument 'min_p'" |
-
-**CRITICAL**: ALL advanced decoding modes are broken.
-- Speculative requires external draft_model (not auto-configured)
-- MTP/EAGLE3 have API mismatch — `generate()` passes `min_p` but their
-  `generate()` signatures don't accept it
-
-### Acceleration
-| Feature | tok/s | Error |
-|---|---|---|
-| prefix_cache | ERROR | "too many values to unpack (expected 2)" |
-| chunked_prefill | 25.2 | (works but degraded by prior quantization) |
-| cuda_graph | ERROR | "Cannot copy between CPU and CUDA tensors during CUDA graph capture" |
-| compile | ERROR | CUDAGraph tree overwrite on conv state clone |
-| optimal (auto) | ERROR | Same CUDAGraph tree overwrite |
-
-**CRITICAL**: torch.compile + CUDA graphs crash on conv layers.
-Root cause: `self._conv_state = Bx[:, -(k-1):, :].transpose(1,2).clone()`
-in conv forward triggers CUDAGraph tree overwrite detection.
-Fix: call `torch.compiler.cudagraph_mark_step_begin()` before each model
-invocation, or clone outside compile region.
-
-### Batch Generation
-ERROR: "BatchedDecoding.generate_batch() got an unexpected keyword
-argument 'max_new_tokens'" — API mismatch between engine and batch decoder.
-
-### Bottleneck Profiler
-All per-layer timings reported 0.0ms with 0 calls — profiler hooks not
-attaching correctly to `ModularBlock` layers. Total time 178ms for 16 tokens
-(89.6 tok/s) but 100% classified as "non_layer" time.
-
-### State Degradation (STICKY QUANTIZATION)
-After running quantization tests, subsequent standard decoding runs at 25 tok/s
-instead of 71 tok/s. Quantization is not properly undone when re-activating
-without quantize=. This means `activate(quantize=None)` does not restore
-original bf16 weights — the quantized weights persist.
-
-### VRAM Leak Between Engine Loads
-Retest with fresh engine per quantization mode caused OOM on 3rd load:
-w8a8 allocated 25.9GB (2x VRAM!), fp8 load failed. `del engine; gc.collect();
-cuda.empty_cache()` is insufficient — quantization creates weight copies that
-aren't tracked by the allocator.
-
-### Checkpoint Mismatch
-`ForgeLM_V2_Light.sft.safetensors` contains Qwen 2.5 0.5B weights
-(151936 vocab, 896 d_model) but config `forgelm_v2_light` expects
-(65536 vocab, 2048 d_model). Load fails silently → AirLLM streaming fallback
-→ random weights. This is a data integrity issue.
+Sources: codebase audit (`forge/engine/engine_lora.py`, `bitnet_lora.py`,
+`sft_train.py`, `hotswap.py`, `prefix_cache.py`, `prefill/`, `llm.py`,
+`forge/engine/kv/*`) + online research (NeurIPS'24/'25, ICLR'25, ICML'26,
+arXiv).
 
 ---
 
-## BOTTLENECK SEVERITY RANKING
+## TOPIC 1 — Do LoRAs need retraining on every model change?
 
-### P0 — Broken features (block production use)
-1. **Quantization is 3.5x COUNTERPRODUCTIVE** — all modes (int4/w8a8/nvfp4/fp8)
-   run at 25 tok/s vs 71 tok/s unquantized. Naive dequant, no fused kernels.
-2. **int8 quantization BROKEN** — dtype mismatch (BFloat16 vs Float)
-3. **torch.compile + CUDA graphs CRASH on conv layers** — CUDAGraph tree
-   overwrite on `_conv_state.clone()`. Breaks `activate_optimal()`.
-4. **ALL speculative decoding BROKEN** — speculative needs draft_model,
-   MTP/EAGLE3 reject `min_p` kwarg
-5. **Prefix cache BROKEN** — unpacking error
-6. **Batch generation API mismatch** — wrong kwarg name
-7. **Sticky quantization** — `activate(quantize=None)` doesn't restore weights
-8. **VRAM leak between engine loads** — quantization copies not freed
+### How the system works today
 
-### P1 — Performance bottlenecks
-9. **RotorQuant KV 32% slower** than paged — quantization overhead
-10. **Hadamard INT4 KV 42% slower** than paged
-11. **Standard KV 22% slower** than paged — memory access patterns
-12. **Bottleneck profiler not working** — 0 calls per layer, hooks not attaching
+- Adapters attach by **module-name substring** (`w_gate`, `q_proj`, `in_proj`…)
+  via `add_lora_adapters()` in `forge/training/bitnet_lora.py`.
+- Checkpoints save raw `{module_path.lora_adapter.lora_A/B: tensor}` pairs
+  (`--save-lora-adapter` → `*.lora.safetensors`, sft_train.py ~L2209).
+  **No base-model fingerprint is recorded.**
+- `ForgeEngine.load_lora` (engine_lora.py L74-87) re-creates fresh adapters on
+  the current model, then `copy_`s weights by exact name:
+  - name missing → warning + skip (**silent partial load**)
+  - name present, shape differs → `copy_` RuntimeError (**crash**)
+  - names+shapes match but base weights drifted → loads silently, **gracefully degrades**
 
-### P2 — Data issues
-13. **Checkpoint mismatch** — ForgeLM_V2_Light.sft contains Qwen 2.5 0.5B weights
-14. **Python 3.13 compat** — missing `Optional`/`nn` imports (fixed in this session)
+### Verdict per change type
 
-Priority key:
-- P0 = breaks standard clients / production use
-- P1 = important ecosystem compatibility
-- P2 = advanced / optional features
+| Model change | Retrain needed? |
+|---|---|
+| New key via zero/identity-init lossless port (v2→v12_jamba pattern) | **No** — shared weights bit-identical, new components are no-ops. Breaks only on module *renames* (partial apply) or *resizes* (crash). |
+| Same-arch weight drift (merged self-play epoch, continued pretrain) | Loads fine; quality decays with ‖W_new − W_old‖. Soft problem. |
+| Structural change (d_model, n_layers, vocab, renames, Mamba-2→3 swap) | **Yes today** — no transplant tooling exists. |
+
+### Research-backed ways to avoid full retraining
+
+- **Direct copy is a strong baseline** (ICML'26 "Trivial Baselines" paper):
+  copying LoRA between *related* bases beats elaborate schemes (CrossLoRA,
+  ProLoRA); success tracks weight similarity. MCQA transfers easily;
+  generation degrades most.
+- **Warm-start touch-up > from-scratch** — ReLoRA (arXiv 2606.02606; NOT the
+  2023 ReLoRA): Bayesian-opt fusion init of old adapter + base delta, then
+  short FT w/ scheduled regularization → 8.9× faster rollout, +4.6% acc.
+- **LoRASuite (NeurIPS'25)** — handles breaking upgrades: transfer matrices
+  from old+new weights for dim mismatch; CKA layer mapping for depth changes;
+  small stabilizing FT. Beat full retrain on MiniCPM/Qwen (+1.4/+6.6 math),
+  −78% compute. Code: github.com/YananLi18/LoRASuite
+- **Trans-LoRA (NeurIPS'24, IBM)** — nearly data-free: source base+LoRA makes
+  synthetic data → fresh adapter trained on new base. Works cross-family and
+  cross-PEFT (LoRA↔DoRA). Fits our synthetic-data + self-play infra.
+- **Task-vector re-basin (TransFusion, arXiv 2505.22697)** — training/data-free
+  transfer of τ = θ_ft − θ_base via permutation alignment.
+- **Exact delta rebase (closed-form)**: ΔW' = (W_old + ΔW_lora) − W_new
+  reproduces merged model bit-exactly but *cancels* new-base gains in adapted
+  matrices. Only for freezing behavior; SVD-truncate to stay rank-r.
+
+### Concrete recommendations for ForgeAI
+
+1. Keep lossless-port discipline; add `LORA_NAME_REMAP` dict in `load_lora`
+   for the day a key renames `w_gate` → `ffn.gate` etc.
+2. Fingerprint adapters: `metadata={"base_preset", "base_hash"}` into
+   `.lora.safetensors` (safetensors `metadata=` arg; `lora_store.py` already
+   parses headers stdlib-only). Warn in `load_lora` on mismatch.
+3. Same-arch drift: zero-shot copy first, then warm-start touch-up
+   (~10-20% of original steps), ReLoRA-style init.
+4. Structural changes: LoRASuite transfer matrices + CKA layer mapping;
+   zero-init adapters on new layers (missing-name path already tolerates
+   partial transplants).
+5. Large jumps: Trans-LoRA synthetic distillation (have teacher + data gen).
+6. ForgeAI wrinkle: our targets include `in_proj` (Mamba SSM) — literature is
+   transformer-only; for Mamba layers prefer zero-shot copy or distillation.
 
 ---
 
-## A. Inference Engine — Missing vs. vLLM/SGLang/llama.cpp
+## TOPIC 2 — Massively increasing effective context (no training, ~3GB VRAM headroom)
 
-### Scheduler / KV cache
-| Feature | Status | Priority | Evidence |
+### Reframe: KV cache is NOT the bottleneck on Jamba-3B
+
+- Attention KV: 2 layers × MQA (1 KV head × 128) ≈ **1KB/token** → 1M tokens ≈ 1GB.
+- Mamba-2 state: fixed ~0.3MB fp32/layer × 26 ≈ **~10MB total**, constant
+  vs. length.
+- Real transient cost: **logits** — vocab=65536 → 8K-token prefill chunk ≈
+  1GB bf16. `ChunkedPrefiller` (engine/prefill/) already exists; keep chunks
+  ≤8K in the ~3GB headroom.
+- **Actual bottleneck = Mamba effective receptive field (ERF)**: SSM state is
+  a lossy fixed-size compression; recall saturates long before 256K.
+
+### What already exists (do NOT rebuild)
+
+- `hotswap.set_infinite_context` (hotswap.py L179-198): max_context=1M +
+  eviction strategy auto-select.
+- `forge/engine/kv/`: 24 strategies (snapkv, s4r, streaming_llm,
+  cpu_kv_offload, cacheblend, paged_eviction, spectral, matryoshka, …) +
+  `auto_context.py` meta-manager (entropy-driven strategy swap).
+- `prefill/`: ChunkedPrefiller + HybridChunkedPrefiller.
+- `prefix_cache.py`: `capture_recurrent_state` / `apply_recurrent_state_prefix`
+  — Marconi-style conv+SSM state snapshots ALREADY implemented; model stores
+  `_last_prefill_recurrent` snap at prefill end (llm.py L578-591).
+- `kv/replay_ssm.py`: ReplaySSMCache (input-replay state reconstruction).
+- **Missing**: RAG/retrieval index, prompt compression, per-document SSM
+  state library, ∆t calibration.
+
+### Research findings (all training-free)
+
+**Tier 1 — direct fit, cheap:**
+
+- **MambaExtend (ICLR'25)** — STRONGEST MATCH. Mamba long-context failure =
+  OOD discretization steps (∆t). Calibrate only per-layer ∆t scaling factors
+  (~26 scalars for us) via gradient-free zeroth-order opt. **32× extension
+  (2k→64k), minimal PPL increase**, ~5.42×10⁶× fewer param updates.
+  Code: github.com/ArminAzizi98/LongContextMamba
+- **SSM-state document library** — extend `capture_recurrent_state`: ingest
+  doc once → save ~10-30MB state snapshot → restore + query later, no
+  re-prefill. Megatron-LM shipped prod Mamba prefix caching same way
+  (PR #3225). Per-doc state library = Mamba-native RAG; nobody has
+  productized it → R&D-worthy.
+- **Prompt compression** — LongLLMLingua (ACL'24): 4-6× compression, +21%
+  RAG tasks; reordering matters MORE for us: Mamba is **recency-biased**
+  (not lost-in-middle) → put query/key facts **at the END**.
+  LLMLingua-2 = XLM-RoBERTa-large, pure CPU, zero VRAM.
+
+**Tier 2 — orchestration, zero model changes:**
+
+- **Chain-of-Agents (NeurIPS'24)** — sequential worker passes over chunks
+  carrying a running note; manager synthesizes. +10% over RAG/full-context.
+  Unlimited context via linear passes.
+- **ReadAgent (ICML'24)** — pause points → gist memories → lookup raw
+  passages on demand. 3.5-20× effective extension.
+- **MemGPT self-paging** — model manages context via tool calls. We have
+  tool-use infra + hot-swap LoRAs; prompting layer only.
+
+**Tier 3 — heavier engine work:**
+
+- **InfLLM (NeurIPS'24)** — block-level context memory: past context in
+  CPU-RAM memory units, retrieve relevant blocks per step. Validated 1024K.
+  For our hybrid: retrieval over offloaded KV blocks + SSM snaps; combines
+  w/ existing `cpu_kv_offload`. (github.com/thunlp/InfLLM)
+- **DeciMamba (ICLR'25)** — token decimation inside Mamba via ∆t-norm
+  importance; longer ERF + faster inference. Written for Mamba-1/S6 —
+  Mamba-2 port needed, longest pole. (github.com/assafbk/decimamba)
+
+### Suggested order
+
+1. `set_infinite_context` + chunked prefill already works — measure where
+   recall actually breaks: passkey/ERF probe at increasing depths
+   (`forge/keys/architecture/mamba_probe.py` exists for this).
+2. **MambaExtend ∆t calibration** — ~26 learnable scalars, zeroth-order,
+   afternoon-scale run. Highest leverage/effort.
+3. **SSM-state document library** — extends existing code; the "throw more
+   info at it" killer feature for a hybrid model.
+4. **Query-at-end prompt policy + LLMLingua-2 on CPU** for bulk stuffing.
+5. **Chain-of-Agents worker/manager** over forge_server for corpus reasoning.
+
+### Open questions / next steps
+
+- [ ] Write ERF probe: passkey retrieval vs depth at 4k/16k/64k/256k —
+      gets the real degradation curve before committing to a tier.
+- [ ] Verify Mamba-2 layer exposes ∆t post-softplus for scaling-factor hook
+      (check `forge/engine/mamba3.py` / mamba-2 impl in model loader).
+- [ ] Confirm `_ssm_state` snapshot works under quantized model paths
+      (quamba2.py has its own `_ssm_state` handling).
+- [ ] Sizing: what fraction of 32GB RAM can hold doc-state library
+      (10-30MB/doc → 100+ docs trivially).
+
+---
+
+## TOPIC 3 — Tokenless byte-stream front-end for ForgeLM V2 (video: "Building an LLM replacement", jrz9761code)
+
+### First-principles math (verified by hand, 2026-09-17)
+
+Token I/O cost today (untied, vocab=65536, d_model=2560):
+- embed_tokens: 65536×2560 = 167.77M params
+- lm_head:      65536×2560 = 167.77M params
+- Total ~335.5M ≈ 10.4% of 3.2B params ≈ 671MB bf16.
+
+Byte I/O replacement:
+- byte embed 256×2560 = 0.66M; byte head 2560×256 = 0.66M (+stop logit)
+- Frees ~334M params / ~668MB bf16 against the 8GB server budget.
+
+Sequence-length economics — MEASURED on forgelm_v2_tokenizer (2026-09-17):
+- test_corpus.txt: 3.200 B/tok; test_corpus_large.txt: 3.746 B/tok → ~3.5×.
+- Full byte granularity → ~3.5× backbone steps → ~3.5× decode latency;
+  attention O(n²) → ~12× attn FLOPs (only 2/28 layers, KV/ctx grows 3.5×);
+  Mamba-2 linear → ~3.5× SSM FLOPs for same text.
+- BLT-style patching (avg patch ≈ 4 bytes) → backbone length ≤ token-length,
+  compute ≈ neutral; byte work confined to small local encoder/decoder.
+- Constrained decoding infra EXISTS: forge/engine/structured/xgrammar.py +
+  logits-processor path in engine_generation.py → UTF-8 DFA mask slots in.
+
+### RTU assessment (repo VERIFIED 2026-09-17 — github.com/jrz97619761/test-model-thing)
+
+Actual impl (main.py, 252 lines, MLX, MIT):
+- `Encoder` = nn.Embedding(256, dim) + `embedtrace` eligibility buffer.
+- `Layer`: `state = σ(decay)·state + x + dummy`; `out = x + SiLU(W·LN(state))`.
+  → diagonal-decay SISO SSM + residual readout. NOT the NeurIPS 2×2-rotation
+  RTU — name borrowed, strictly weaker than Mamba-2 SSD.
+- `dummy` trick: zero tensor added to state; ∂loss/∂dummy = ∂L/∂s_t per layer
+  without BPTT ("dlds" signal).
+- TRUE RTRL: `decaytrace = λ·trace + λ(1−λ)·s` = exact forward sensitivity for
+  decay params; `embedtrace = λ·trace + onehot(byte)` = embedding eligibility.
+  All other weights get 1-step myopic grads only.
+- Loss: byte CE + stop MSE + latent MSE→sg(embed[next byte]) (JEPA-ish) +
+  variance-floor anti-collapse.
+- AdamW step EVERY BYTE; `layer.states` persist across calls + saved in
+  checkpoint = the "memory". `notrace` mode skips state persistence →
+  immediate breakdown (per README) — confirms state carryover IS the memory.
+- Scale: 4.5M params (dim=512, L=16), ~12h simplewiki. Solo-dev PoC, no evals.
+
+Verdict vs claims:
+- "Continuous learning": REAL — genuine per-byte weight updates w/ partial
+  exact forward-gradients. The only truly novel piece vs our stack.
+- "Infinite memory": marketing — exponential decay, weaker than Mamba-2 state;
+  same ERF ceiling (Topic 2).
+- Per-byte serial fwd+bwd+AdamW: inherent scaling wall → why demo is 4.5M.
+  Cannot run on 3.2B backbone; online updates only feasible on small
+  adapter/decoder subset for us.
+
+Extractable novelties for ForgeLM:
+1. dlds trick → per-layer ∂L/∂state signal in one graph (diagnostics /
+   forward-gradient research).
+2. RTRL for diagonal decay generalizes to Mamba-2 per-head A:
+   ds/dA = e^{∆A}(ds/dA + ∆·s) — O(n_state) trace → test-time plasticity of
+   SSM timescales on frozen backbone, no activation storage. Genuinely novel,
+   fits self_play/RSI infra.
+3. Byte front-end (BLT-style patching) as planned.
+4. UTF-8 validity-masked byte sampling — fixes their malformed-UTF8 issue.
+5. Embedding eligibility trace → could augment MTP aux losses.
+
+### Graft options (ranked)
+
+1. **BLT-style byte front-end, backbone warm-start** (recommended):
+   byte conv/local encoder → patch pool (≈4B) → existing 28L backbone
+   (weights carry bit-exact, tokenization-agnostic) → patch→byte local
+   decoder + stop head. Tokenizer excised, compute ≈ neutral, frees 668MB.
+   Fits port-first directive: backbone identity, new modules zero-init.
+2. **Full byte-level (video-faithful)**: 1 byte/step through backbone.
+   Simplest, worst economics (~4× decode cost), MambaByte shows it works.
+3. **Token+byte hybrid**: keep tokenizer, byte side-channel for OOV.
+   Safest, least R&D value.
+
+### Novel twists available (per directive C)
+
+- Mamba-native dynamic chunking: use per-layer ∆t/state-norm as patch
+  boundary signal instead of entropy model (H-Net uses a separate router).
+- UTF-8 validity-masked byte sampling (finite-state constraint in
+  decoding.py) — fixes video's malformed-UTF8 limitation for free.
+- Tokenizer-excision port as a key class: `ByteFrontendKey` — backbone
+  identity-init, encoder/decoder zero-init, bit-exact load test.
+- RTU-style eligibility-trace test-time plasticity on byte decoder —
+  dovetails with self_play/infinite_loop telemetry.
+
+### Graft points (verified in codebase)
+
+- `llm.py:61-62` — `self.embed = nn.Embedding(vocab, d_model)`,
+  `self.head = nn.Linear(d_model, vocab)`; alt paths already exist
+  (FactorizedEmbedding, KroneckerEmbedding, PIT, BitNet) → embed/head is a
+  designed swap point.
+- `llm.py:479` `x = self.embed(idx)`; `:649` `logits = self.head(hidden)` —
+  the two backbone boundary calls.
+- Tokenizer boundary is narrow: encode sites `engine_generation.py:352`,
+  `engine_diagnostics.py:95`, `session_manager.py:651`, `async_d2h.py:150`;
+  decode sites `engine_generation.py:187,1185` + per-token decode for
+  streaming/tooling.
+- `KroneckerEmbedding` (kronecker_embed_key.py) is token-id→bytes
+  factorization, NOT byte-level text I/O — but shows the exact
+  Key/KeyClass/KeyResult port pattern for a `ByteFrontendKey`.
+- MTP head infra exists (`llm.py:158` tie_head_to_model) → precedent for an
+  auxiliary stop head.
+
+### Fact-check vs published SOTA (two research sweeps, 2026-09-17)
+
+TMT trace math CONFIRMED exact RTRL — but per-layer only:
+- `∂s_t/∂p = λ·∂s_{t-1}/∂p + λ(1−λ)·s_{t-1}` ✓ exact for decay params;
+  embedtrace ✓ exact for embed rows. All cross-layer/other-param credit is
+  1-step truncated. RTRL+AdamW combo is unanalyzed heuristic (lit uses SGD).
+- TMT is a strict special case of **Zucchet et al., NeurIPS'23 (2305.15947)**:
+  same diagonal-recurrence insight but traces ALL recurrent params at ~2×
+  fwd cost, validated on LRA. RTU (2409.01449) = architectural twin.
+- "Continuous learning" = **Dynamic Evaluation** (Krause'18, 1709.07432) /
+  fast-weight lineage; the correct at-scale version is **TTT-E2E
+  (2512.23675): whole-net test-time SGD, 3B params, 164B tokens, meta-learned
+  init, 2.7× faster than FA @128K**. TMT lacks meta-init + parallelism + evals.
+- Atlas (2505.23735) publishes the direct critique of TMT-style updates:
+  myopic single-input memory writes are the documented defect → fix =
+  windowed/pooled memory optimization (+80% @10M ctx BABILong vs Titans).
+- Dohare/Sutton (Nature'24, s41586-024-07711-7): continual GD loses
+  plasticity → any always-updating model needs reinit/perturbation budget.
+- Persistent state rebutted: Illusion of State (2404.08819, TC⁰), PARITY
+  (2405.17394), Stuffed Mamba (2410.07145), PackMamba (2408.03865 — SOTA
+  practice RESETS state at doc boundaries). "Infinite memory" framing dropped.
+- Anti-collapse = SimSiam-minus-predictor rescued by VICReg-style variance
+  hinge. Published fragility: moving target (living teacher), unigram
+  collapse, dead dims at hinge boundary. If used → VICReg verbatim or
+  BYOL predictor+EMA.
+- Entropy temp = linear variant of EDT (2403.14541); subsumed by
+  min-p / adaptive-temp. Not worth extracting.
+
+### Byte-level: graft recipe already published
+
+- **Bolmo (2512.15586, Ai2)**: "byteified" OLMo-2-1B/OLMo-3-7B at <1% of
+  pretrain budget, near-parity w/ source — EXACTLY our graft option 1,
+  published + open. mLSTM encoder + non-causal boundary predictor.
+- BLT (2412.09871): flop-parity with Llama-3 @8B, ≤50% fewer inference FLOPs.
+- H-Net (2507.07955): 1-stage beats matched BPE transformer; 2-stage matches
+  2×-size transformer; Mamba-2 local encoder — same family as our backbone.
+- MambaByte (2401.13660): byte Mamba ≈ subword parity + speculative
+  subword-draft/byte-verify 2.6× decode speedup.
+- FastBLT (2605.08044): self-speculation fixes byte decode latency.
+- UTF-8 validity masking unhandled in ALL flagship byte papers → real edge.
+- T-FREE (2406.19223): tokenizer-free trigram-hash embeddings proven @3B —
+  alternative to full byte I/O.
+
+### Indie findings (community scan)
+
+- **TRM** (2510.04871, 6.6k★): 7M params, recursion w/ deep supervision →
+  45% ARC-AGI-1. "Recurse a shared block for depth" = cheapest transferable
+  trick; MoR (2507.10524) is the production version w/ per-token depth.
+- **HRM** (2506.21734, 12.6k★): 27M → ~40% ARC-AGI-1 — BUT ARC Prize teardown:
+  hierarchy ≈ useless, outer refinement loop + augmentation = real driver.
+  Lesson: community ablates everything; claims need public evals.
+- **HRM-Text**: ~1B latent-recursion LM trained for ~$1–1.5k — hobbyist-scale
+  recurrent-depth LM precedent.
+- **RWKV-7** (2503.14456): generalized delta rule = in-context GD on state
+  every token; proven @2.9B. Mamba-2 SSD is already a delta-rule variant →
+  vector-valued in-context LR is the highest-leverage state-learning port.
+- **Letta/MemGPT** (24.6k★): community's adopted "continual learning" =
+  self-editing CONTEXT, weights frozen. Weight-plasticity is NOT what
+  practitioners adopted — important reality check.
+- **modded-nanogpt**: the verification-culture bar — public logs, one-command
+  repro, named contributors. Spawned Muon.
+- Forward-Forward graveyard: never scaled past MNIST-class — cautionary tale
+  for local-learning rules.
+- TMT community footprint: ZERO indexed discussion (no HN/Reddit/forks
+  found). Gap is distribution (no checkpoint/metric/repro), not ideas.
+- Nested Learning/HOPE (2512.24695): multi-timescale weight-update
+  frequencies — principled version of "some weights online, most frozen."
+- SEAL (2506.10943): episodic self-edits → persistent adaptation without
+  per-step risk — pragmatic middle path.
+- SnAp (2006.07232) / Sparse-RTRL (2603.15195): published cheap eligibility
+  approximations (6% of Jacobian paths ≈ 84% adaptation) for non-diagonal
+  weights.
+
+### Ranked transferable ideas → ForgeLM V2 (post-verification)
+
+1. RWKV-7 vector-valued in-context LR / decoupled add-remove keys on
+   Mamba-2 state — proven @2.9B, highest impact/effort.
+2. Exact RTRL on SSM decay params (Zucchet-style, per-head A_log traces) —
+   cite Zucchet, not TMT. Test vs truncated-BPTT adapter + TTT-E2E-style
+   meta-init.
+3. Bolmo-style byteification of Jamba backbone (<1% pretrain cost) +
+   UTF-8 FSM decode mask (unclaimed edge in all byte papers).
+4. Atlas/MIRAS windowed surprise-gated memory writes — published fix for
+   myopic updates.
+5. TRM/MoR recursive depth on shared blocks — free effective depth.
+6. T-FREE as cheaper tokenizer-free alternative (proven @3B).
+7. MambaByte speculative byte/subword decode if byte gen is adopted.
+8. SEAL episodic consolidation for self_play persistent adaptation.
+9. Plasticity safeguards (continual-backprop reinit) — mandatory for any
+   always-learning config.
+10. bits-per-byte eval + public repro harness (nanochat norms) — required
+    for any community-visible claim.
+- SKIP: entropy-adaptive temp (subsumed), persistent-state-as-memory framing
+  (rebutted), full-model per-byte updates (scaling wall).
+
+### Open questions
+
+- [x] Repo find → VERIFIED (section above). RTU = diagonal SSM + hand-rolled
+      RTRL; 4.5M PoC.
+- [x] Constrained decoding → xgrammar structured path exists; UTF-8 DFA
+      mask = new logits processor on same hook.
+- [ ] Entropy patcher vs fixed-4B patcher: measure bpb delta on test_corpus.
+- [x] bytes/token measured: 3.2–3.75 → ~3.5× sequence blowup at byte level.
+
+---
+
+## TOPIC 4 — In-weight nano-training ("Experience LoRA") — gaps & solutions (2026-09-17)
+
+User spec: passive learning during interaction + self-play; knowledge
+survives context eviction; persists in weights OR tiny LoRA sidecar
+("hypercompressed updater"); copy model file → knowledge maintained.
+
+### Published near-exact analogs (the idea exists — convergent 2025-26 line)
+
+- **TMEM** (2606.04536): fast LoRA Δₜ updated online within episodes via
+  distilled QA supervision; π(θ₀+Δₜ); SVD-init. Beats retrieval/summary
+  baselines on LoCoMo/LongMemEval across scales. = user's idea, published.
+- **aTTT** (2607.03441): live LoRA updates in agent episodes via vLLM
+  runtime LoRA API (1.9× cost); +5.0 ALFWorld. Failure found: drift on
+  repeated update-text → fix = n-gram downweighting.
+- **SCoL** (2605.07076): model LEARNS which layers to LoRA-update (meta-RL,
+  Fisher-aligned sparse selection).
+- **SEAL** (2506.10943): self-edit (data+hyperparams) → SFT → persistent
+  weights; SQuAD 33.5→47.0% on 7B LoRA r16.
+- **OPCD/context distillation** (2602.12275, 2503.08727): internalize context
+  into per-doc LoRA by matching teacher-with-context hidden states — beats
+  next-token CE which "performs poorly" for knowledge internalization.
+- **Merge-before-Forget** (2512.23017): orthogonal LoRAs merged into ONE
+  evolving LoRA — constant-memory single updater file.
+- **Online-LoRA** (2411.05663): detects distribution shift → spawns new LoRA.
+- **TTT-LoRA** (2411.07279): per-instance LoRA r128 at test time → 6× on ARC.
+- **Dynamic Evaluation** (1709.07432): per-segment (~1K tok) updates w/
+  decay-to-base prior; ~10-15% PPL gains. Cheapest proven cadence.
+
+### Hard constraints (documented failure modes — design around these)
+
+1. NEVER write base weights: sequential edits collapse — Mirage of Model
+   Editing (2502.11177): ~10% success @1k edits; ROME/MEMIT catastrophic
+   forgetting @1200 edits (2401.07453); single edit touching <1% params →
+   ~0 on 8 downstream tasks (RECT 2401.04700); AlphaEdit bounded too.
+   → additive sidecar ONLY; base frozen forever.
+2. Raw text→weights DOESN'T WORK: verbatim writes are memorized but NOT
+   extractable — 0% QA (Allen-Zhu Physics of LM 3.1, 2309.14316). MUST
+   self-generate QA/implication pairs (augmentation mandatory). This is why
+   SEAL/TMEM/SELF-PARAM all use self-distilled supervision.
+3. Gekhman (2405.05904): finetuning on unknown facts → hallucination grows
+   linearly w/ fraction of new facts → gate new-knowledge fraction per update.
+4. Ripple-effect propagation unsolved for ALL parametric methods
+   (RippleEdits 2307.12976) — stored facts don't propagate implications;
+   in-context still wins there. Set expectations accordingly.
+5. Evidence ceiling: nothing published beyond ~2k sequential edits or
+   single-episode. Months-scale continual learning = unclaimed territory.
+6. SRT warning (2505.21444): prolonged self-reward training → reward
+   hacking → sudden collapse. Cap iterations, keep held-out verifier.
+
+### Mechanics (cadence / gate / format / forgetting)
+
+- Cadence: mini-batch ~256–1K tokens (Krause; TTT-E2E 1K; LaCT 2K–1M).
+  Per-token unnecessary — no published benefit.
+- Write gate: Titans surprise = ‖∇ℓ_assoc‖ w/ momentum S_t = ηS−θ∇ℓ +
+  forgetting gate α·M (2501.00663). Atlas fix: optimize over last ~c tokens
+  window, Muon/NS5-orthogonalized grads (2505.23735, +80% @10M ctx).
+- MIRAS (2504.13173): any seq model = {memory arch, objective, retention
+  gate, optimizer} — a LoRA updater IS "memory=adapter, retention=decay-to-
+  init, optimizer=AdamW". Clean formalization.
+- File size @ d=2560, 28L: LoRA r=4 on in/out_proj ≈ 2M params ≈ 4.7MB bf16
+  / ~1.2MB int4. LoRA-XS (2405.17604): frozen SVD U,V + train r×r R only →
+  ~16 params/matrix → KB-scale. VeRA (2310.11454): shared frozen random
+  A,B + vectors → ~100-300KB. (IA)³ ~50-150KB. BitDelta (2402.10193) 1-bit
+  deltas — only viable on param subsets. PiSSA (2404.02948): free +2-4pt
+  upgrade to LoRA init.
+- Forgetting: "LoRA Learns Less and Forgets Less" (2405.09673) — adapter
+  isolation IS the mitigation, rank controls it. Replay 1–5% generic data
+  (worth more than scaling, PMLR v330). O-LoRA (2310.14152): orthogonal
+  subspaces, no replay needed. Merge many LoRAs → B-space cross-term
+  interference ("Crowded in B-Space" 2604.16826) → keep versioned adapters,
+  concat on load, merge only post-eval-gate.
+- SSM-state-as-file: infra EXISTS (prefix_cache recurrent snapshots;
+  Megatron #3225; Marconi 2411.19379 = ~34× hit rate) but ~15–30MB,
+  prefix-locked, unproven as knowledge storage → warm-start cache only.
+
+### Local feasibility (ForgeAI infra — verified in code)
+
+- `.lora.safetensors` sidecar format exists (sft_train --save-lora-adapter).
+- add_lora_adapters/merge_lora_adapters by module-name substring
+  (bitnet_lora.py); load_lora re-creates + copy_ (engine_lora.py:74-87).
+- self_play/infinite_loop.py ALREADY IS the consolidation loop: generate →
+  SFT/GRPO LoRA finetune → merge → save epoch ckpt → _evaluate →
+  promote/demote (lines 700-1160). The eval gate exists.
+- GRPOTrainer + CPUAdamW proves LoRA training fits 12GB alongside 3.2B
+  (~7.5GB total) → a ~1K-token backward micro-step ≈ seconds; amortizable
+  to turn boundaries / idle ("sleep-time") slots.
+- GAP: zero inference-time training hooks — all backward() in engine are
+  quant calibration. The online updater is a genuinely new subsystem.
+
+### Recommended architecture ("Experience LoRA" — convergent design)
+
+1. Frozen base forever (constraint #1).
+2. Persistent sidecar: versioned LoRA shards (MELO-style gated bank) OR one
+   evolving LoRA (Merge-before-Forget). Start r=4–8 on in/out_proj+MLP
+   subset ≈ 1–5MB; int4/int8 → sub-MB; LoRA-XS for KB extreme.
+3. Write trigger: surprise-gated mini-batch (~512–1K tok) at turn/episode
+   boundaries + idle-time slots. NOT per-token.
+4. Supervision: self-generated QA/implication pairs + context distillation
+   (teacher-with-context → student-without). NEVER raw stream CE for
+   knowledge writes (constraint #2); stream CE ok for style/adaptation.
+5. Per update: 1–5% replay mix + Gekhman cap on new-fact fraction + aTTT
+   n-gram downweighting + optional O-LoRA orthogonality vs past shards.
+6. Consolidation: periodic shard→accumulated-LoRA merge behind the EXISTING
+   self_play eval gate (promote only on verified gain) → "improve not drift".
+7. Retrieval gate for locality (GRACE ε-ball / MELO index / SCoL layer
+   selection) so unrelated queries never see the delta.
+8. Frontier option: dedicate one layer as Titans-style memory MLP, or
+   persist DeltaNet-style state — checkpointable weight tensors; the SSM
+   state channel is unvalidated lit-wise = real R&D white space.
+
+### Open risks / open questions
+
+- [ ] No published months-scale continual learning — we'd be past evidence.
+- [ ] Ripple-effect generalization unsolved everywhere — knowledge stored
+      ≠ knowledge usable transitively.
+- [ ] Measure: micro-update latency on RTX 5070 (backward ~1K tok, LoRA-only
+      grads, CPUAdamW vs GPU opt) — decide turn-boundary vs idle-only.
+- [ ] Gate quality: does surprise-norm actually fire on knowledge-dense
+      turns vs fluff? Probe script before committing.
+- [ ] LoRA-vs-SSM-state capacity comparison for the same session knowledge.
+
+### Addendum — THE FIX: minimal-training + minimal-context design (2026-09-17, two more sweeps)
+
+#### Cost × durability spectrum (verified numbers)
+
+| Write method | Cost/write | Durability evidence | Caveat |
 |---|---|---|---|
-| Continuous batching (per-step admission/preemption) | ABSENT | P0 | `session_manager.BatchQueue` uses fixed 52ms window + static batch dispatch, not iteration-level |
-| PagedAttention / paged KV with block tables | PARTIAL | P0 | Engine has "paged" KV modes but no vLLM-style block-table paged attention with <5% waste |
-| Chunked prefill mixed with decode | PARTIAL | P1 | `chunked_prefill` exists in feature_registry; not unified-scheduler style |
-| Automatic prefix caching (block/radix) | PARTIAL | P1 | Prefix caching + chunked prefix caching exist; not radix-tree cross-request |
-| Disaggregated prefill/decode | ABSENT | P2 | No PD split, no NIXL/Mooncake/LMCache transfer |
-| FP8 KV cache | PARTIAL | P2 | Some KV quant modes exist; not standard FP8 KV |
-| KV offloading | PRESENT | - | `cpu_kv_offload.py` wired |
+| Steering vectors (ActAdd 2308.10248, ITI 2306.03341) | 1–2 fwd, ~KB | style/behavior only | CANNOT store facts |
+| kNN-LM datastore (1911.00172 + 2109.04212) | ~1 fwd, ~4KB/entry | beats parametric on tail facts | retrieval-scope, no generalization; GBs |
+| Doc-to-LoRA hypernet (2602.15902) | <1s → rank-8 file | near-perfect NIAH @4-5× ctx | meta-train ~GPU-weeks upfront |
+| MEMIT closed-form + AlphaEdit null-space | ~2.7s/edit | 10k batched; 2k sequential | sequential collapse; Mamba LESS robust to edits → target GQA/MLP not SSM |
+| RLSEdit (2601.15686) | per-edit O(1) via Woodbury | 10K sequential edits | newest, least replicated |
+| LoCA closed-form ridge adapters (2608.03020) | ~seconds, fwd-only after 1 calibration bwd | 0.5–14B, beats LoRA CE 16/25 | generative-fact storage unproven |
+| GRACE codebook (2211.11031) | ~100 GD steps ≈ s, KB/edit | thousands sequential | ε-ball coverage only |
+| LoRA micro-SGD (~1K tok) | ~0.7s (local math: ~20 TFLOPs @5070) | LoRA-forgets-less | needs supervision data |
+| S0 state files (2604.01168) | ~3min train, 48MB file | **VERIFIED on Mamba-2 hybrid** (FalconH1-7B); +23.6pp HumanEval (Qwen3.5-4B) | task-adaptation shown, fact-QA unproven |
+| SSM/delta-rule state persist | 0 (forward IS the write) | Titans 2M NIAH; ReplaySSM systems | ~4MB/layer; no cross-session merge work exists = OPEN GAP |
+| MeZO fwd-only (2305.17333) | ~30–100× MORE total compute | ~1% of FT | saves VRAM not time — wrong trade |
 
-### Speculative decoding
-| Feature | Status | Priority |
-|---|---|---|
-| EAGLE-3 / MTP / Medusa / self-spec | PRESENT | - |
-| External draft model | ABSENT | P1 |
-| N-gram / suffix speculation | ABSENT | P2 |
-| DFlash / DSpark | PARTIAL (DSPark referenced) | P2 |
+#### The context-cost fixes (verified)
 
-### Attention / kernels
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| FlashAttention-2/3/4 backend | UNCLEAR | P1 | `flash_attention`/`varlen_attention` exist; FA3/4 unverified |
-| FlashInfer / MLA / Flex Attention | ABSENT | P2 | |
-| Fused MoE kernels | UNCLEAR | P2 | MoE config exists; fused kernel unverified |
-| CUDA Graphs | PRESENT | - | |
-| torch.compile | PRESENT | - | |
+- Supervision reuse: teacher KL pass can condition on **cached session KV**
+  → marginal cost = generated suffix only (~5 diversified restatements per
+  fact — Physics-3.1 multiplicity: 5 forms → 96% extractable vs 9.7% single).
+- Replay-free that WORKS on generative: O-LoRA (T5 15-task), MIGU
+  (2406.17245, +15.2%), Any-SSR (2503.13575 — RLS router ~100% acc on
+  Llama2-7B). EWC-family does NOT hold up on generative.
+- Always-on ungated sidecar = measurably harmful (2401.04700: <1% params →
+  ~0 on 8 tasks; 2502.19416 Frobenius growth → subspace shift). GATE by
+  activation router (WISE margin router) / ε-ball (GRACE) / index (MELO).
+- Dedup mandatory: aTTT n-gram downweighting (repeated update-text → drift).
+- Write gate = Titans surprise (‖∇ℓ‖ + momentum) + loss-plateau trigger
+  (Online-LoRA) + learned policy option (Memory-R1 2508.19828: RL-trained
+  ADD/UPDATE/DELETE/NOOP).
+- Inference context tax: gated sidecar = 0 window tokens vs RAG's per-turn
+  cost. KV-cartridges (2506.06266) = middle path (0 window, KV-resident).
+- **"Do LMs Need Sleep" (2605.26099): DIRECT precedent on SSM-attention
+  hybrids — context fills → offline passes write persistent fast weights
+  into SSM blocks → clear KV. More sleep → better multi-hop/math.**
+- Sparse Delta Memory (2607.07386): learned initial state as parametric
+  memory measurably improves knowledge/reasoning — state-file evidence.
+- WARNING: sequential edits on Mamba degrade faster than transformers
+  (KTH thesis) → never write SSM projections; target GQA/MLP only.
+- WARNING: "alignment tax" anecdote (sleeping-llm, non-peer): RLHF may
+  suppress LoRA-injected knowledge at scale — verify on our model early.
 
-### Quantization
-| Format | Status | Priority |
-|---|---|---|
-| INT8/INT4/FP8/W8A8/NVFP4/BitNet | PRESENT | - |
-| GPTQ / AWQ | ABSENT | P1 |
-| GGUF quantized load | ABSENT (P0 for GGUF users) | P0 | `forge_loader.py` returns quantized GGUF as raw uint8, no dequant; `ForgeEngine.from_checkpoint()` never calls `ForgeLoader` |
-| compressed-tensors / TorchAO | ABSENT | P2 |
+#### The optimum (minimal-train + minimal-context)
 
-### Output / API features
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| `logprobs` / `top_logprobs` | ABSENT | P0 | `generate()` returns text only |
-| `n` (multiple completions) | ABSENT | P1 | Only `generate_batch` (different prompts) |
-| `presence_penalty` | ABSENT | P1 | Only `repetition_penalty`/`frequency_penalty` |
-| `seed` in /v1/chat/completions | ABSENT | P1 | Task API has it; main chat handler doesn't forward |
-| `stop` not forwarded in chat handler | ABSENT | P0 | Declared in request model, not passed to `registry.generate()` |
-| `top_k`/`repetition_penalty` not forwarded | ABSENT | P0 | Same — declared but dropped in streaming + non-streaming |
-| `tool_choice` enforcement | ABSENT | P0 | In request model, not enforced |
-| Streaming tool-call incremental deltas | PARTIAL | P1 | Tool calls parsed after accumulation, not streamed as deltas |
-| `stream_options.include_usage` | ABSENT | P1 | |
-| `response_format` (json_schema) | PARTIAL | P1 | Simplified char-level FSM, not full XGrammar CFG |
-| Regex / EBNF / GBNF grammars | ABSENT | P1 | `xgrammar.py` is simplified first-char FSM |
-| Reasoning parsers / `reasoning_effort` | ABSENT | P2 | |
-| `system_fingerprint` | ABSENT | P2 | |
-
-### Endpoints
-| Endpoint | Status | Priority |
-|---|---|---|
-| /v1/chat/completions, /v1/completions | PRESENT | - |
-| /v1/embeddings | ABSENT | P0 |
-| /v1/responses (agentic) | ABSENT | P1 |
-| /v1/audio/* | ABSENT | P2 |
-| /v1/images/* | ABSENT | P2 |
-| /v1/files, /v1/fine_tuning | ABSENT | P2 |
-| /v1/batches | ABSENT | P2 |
-| /v1/moderations | ABSENT | P2 |
-
-### Multimodal
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| Vision input (image URL/tensor/parts) | ABSENT | P1 | V12 config has vision fields; no inference path |
-| Audio input | ABSENT | P2 | |
-| Embedding models / pooling | ABSENT | P1 | |
-| Reranking endpoint | ABSENT | P2 | |
-
-### Multi-LoRA serving
-| Feature | Status | Priority |
-|---|---|---|
-| Per-request adapter selection | ABSENT | P1 |
-| Batched multi-LoRA | ABSENT | P1 |
-
-### Distributed inference
-| Feature | Status | Priority |
-|---|---|---|
-| Tensor parallelism | ABSENT | P1 |
-| Pipeline parallelism | ABSENT | P2 |
-| Expert parallelism | ABSENT | P2 |
-
-### Model loading / interchange
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| safetensors load/save | PRESENT | - | `checkpoint_io.py`, `model_loader.py` |
-| PyTorch .pt | PRESENT | - | |
-| GGUF usable load | ABSENT | P0 | Quantized types raw uint8 |
-| HF Hub auto-config from config.json | ABSENT | P1 | `from_checkpoint()` needs preset name |
-| HF → Forge conversion | PARTIAL | P1 | Only Qwen3/Gemma3/Llama4 + generic Qwen/Llama remap |
-| Export to GGUF/HF/ONNX/TFLite | ABSENT | P1 | Only internal NLRQ int8 export |
-| ProgressiveLoader wired | ABSENT | P2 | Class exists, not used by engine |
-| Tokenizer training | ABSENT | P2 | LFM2.5 tokenizer only |
+1. Gate writes: surprise + dedup + plateau → most turns cost ~0.
+2. Idle-time: generate ~5 diversified restatements/fact, suffix-only over
+   cached session KV (SELF-PARAM/OPCD objective, KL with-ctx→without-ctx).
+3. Write into gated LoRA sidecar: ~1s micro-SGD OR LoCA closed-form ridge
+   OR D2L-style generated adapter (if hypernetwork amortizes).
+4. Session S0 state file alongside (48MB, ~3min, 0 inference cost, VERIFIED
+   on our arch family) — complementary channel at different timescale.
+5. GRACE/MELO gate at inference → 0 window tokens.
+6. Consolidate through existing self_play eval gate → merge on verified
+   gain only.
+7. Fallback for non-distilling facts: kNN datastore (free inserts, tail-
+   fact SOTA) — the published "impossible triangle" resolution is hybrid:
+   parametric for generalization + non-parametric for verbatim reliability.
 
 ---
 
-## B. Trainer — Missing vs. Axolotl/unsloth/LLaMA-Factory/TRL
+## TOPIC 5 — R&D: cross-session SSM-state merging (the missing piece)
 
-### Distributed training
-| Feature | Status | Priority |
+### The claim
+
+Mamba-2 per-head state recurrence (sequential view):
+  S_t = a_t·S_{t-1} + x_t·B_t^T     S ∈ R^{P×N} (P=headdim, N=d_state)
+  read: y = S·C_t  →  y = Σ_i w_i·x_i·(B_i·C_t)   (w_i = Π a_j decay)
+
+So the state IS an unnormalized associative moment matrix:
+  M = Σ_i w_i·x_i·B_i^T      (value × write-key)
+
+Augment the "experience file" with a per-head Gram:
+  G = Σ_i w_i·B_i·B_i^T      (N×N — 64KB fp32 @d_state=128; cheap to
+                              accumulate during prefill: += w_t·B_t⊗B_t)
+
+Exact least-squares read:  y* = M·G⁺·c  → for c = B_i:
+  y* = w_i·x_i  EXACTLY (B^T G⁺ B = I on the stored-key subspace, n≤N).
+  Model's read path unchanged if we inject pre-normalized S' = M·G⁺.
+
+Optimal closed-form merge of two session files:
+  M_AB = M_A + M_B        (running sums add over the union multiset)
+  G_AB = G_A + G_B
+  S'_AB = M_AB·G_AB⁺      inject as merged SSM state
+
+Why this is the right object: delta rule = online least squares; G is the
+normalizer the SSM never materializes. Storing (M,G) makes the lossy
+associative memory an EXACT least-squares memory (n≤N keys), and merging
+becomes summation — no optimization, no interference beyond key-subspace
+overlap.
+
+### Caveats / failure modes to test
+
+- Gram solves memory-side interference, NOT read-key alignment: retrieval
+  still requires query's C_t to land in the stored-key subspace.
+- n > N keys → G rank-deficient → ridge/pseudoinverse gives least-squares-
+  best (graceful), not exact. Measure capacity curve.
+- Correlated keys (similar facts/sessions) → G ill-conditioned → need ε.
+- Decay weights w_i fold into both M and G consistently (weighted LS still
+  exact); heavily-decayed writes vanish from both — consistent forgetting.
+- Conv state + dt dynamics untouched — this is purely the memory matrix.
+
+### Experiment plan
+
+- [x] E1 toy (CPU): synthetic per-head SSM, measure recall RMSE vs #keys
+      for merge ops: naive-add / weighted / Gram-exact / delta-rule seq.
+      Orthogonal + clustered key regimes.
+- [ ] E2 real: capture state via prefix_cache machinery after fact-session
+      prefill; accumulate G via hook on B_t; merge two sessions; QA probe.
+- [ ] E3 capacity: how many facts until merged recall degrades at
+      d_state=128 vs naive baseline (expect ~N per head per layer ×26 layers).
+
+### E1 toy results (toy_ssm_merge.py, 2026-09-18)
+
+- GRAM merge EXACT (rel_err ~0.00–0.01, cos≈1.0) at n_total ≤ N keys;
+  beats naive-add at EVERY capacity and both key regimes. Beyond n>N it
+  degrades gracefully to least-squares-best while naive collapses
+  (N=64: cos 0.68 vs 0.53 @2× overcap; N=16: 0.68 vs 0.54).
+- Gram solve CANCELS decay: U^T G⁺ U = W⁻¹ (diagonal) → retrieves x_i
+  unweighted — decay penalty removed, not just interference.
+- delta-rule seq merge: unstable near n=N (pinv conditioning) — dropped.
+- NOISE CRITICAL FINDING: real C_t ≠ B_i. Pure pinv amplifies read-key
+  noise catastrophically (σ=0.05 → err 5.9 vs naive 1.3). Fix = Tikhonov
+  λ: λ* ≈ σ²·N tracks read-key noise (σ=.05→λ~.1-.5, σ=.2→λ~2). At every
+  σ, optimal-λ Gram beats naive on rel_err AND cos_sim.
+- N=16 regime (real arch): exact only ≤16 keys/layer; Gram still optimal.
+
+### E2 real-model results (e2_ssm_merge.py, ForgeLM_V2 3.2B, 2026-09-18)
+
+Setup: FACT_A (56 tok) / FACT_B (42 tok) prefilled → per-layer `presents`
+ssm_state; merged naive-add / avg; QA probe = teacher-forced logp margin
+(correct vs a-priori-plausible distractor); GQA KV nulled in merged
+conditions to isolate the SSM channel.
+
+| cond | probeA | surpA (tail) |
 |---|---|---|
-| DDP | ABSENT | P0 |
-| FSDP / FSDP2 | ABSENT | P0 |
-| DeepSpeed ZeRO | ABSENT | P0 |
-| Accelerate / torchrun launcher | ABSENT | P0 |
-| Multi-node | ABSENT | P1 |
-| Tensor/expert/context parallelism | ABSENT | P2 |
-
-### Training methods
-| Method | Status | Priority |
-|---|---|---|
-| SFT / CPT / LoRA / QLoRA | PRESENT | - |
-| DPO / ORPO / KTO | PRESENT | - |
-| GRPO / RLVR | PRESENT | - |
-| PPO (learned reward model) | ABSENT | P1 |
-| SimPO / IPO / NCA / R-DPO / cDPO | ABSENT | P2 |
-| DoRA | ABSENT | P2 |
-| Reward modeling / PRM | ABSENT | P1 |
-
-### Data
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| JSONL / Parquet | PARTIAL | P1 | Parquet module imported but **missing from repo** |
-| HF `datasets` loader for SFT | ABSENT | P0 | Only DPO uses `load_dataset` |
-| Packed .bin pretrain streams | PRESENT | - | `train_8b_all.py` |
-| Dataset mixing / weighted domains | PARTIAL | P1 | CPT has reasoning-ratio; no general mixing |
-| Padding-free / multipacking | ABSENT | P1 | |
-| `forge.training.data.*` modules | MISSING | P0 | `efficient_pipeline`, `parquet_dataset`, `curriculum_augment` imported by `sft_train.py` but not in repo → SFT may fail at import |
-| `DataLoader` workers/pin_memory | ABSENT | P1 | Manual shuffling + AsyncPrefetcher (missing module) |
-
-### Resume / early stopping / schedulers
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| `sft_train --resume` | ABSENT | P0 | Saves state, no resume flag |
-| Universal `resume_from_checkpoint` | ABSENT | P1 | Per-runner only |
-| Early stopping / patience | ABSENT | P1 | `best_val` tracked but never stops |
-| LR scheduler choices | PARTIAL | P1 | `train_8b_all` has linear/wsd/cosine; SFT has internal cosine only |
-| Warmup config | PARTIAL | P2 | |
-
-### Loss functions
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| CE / chunked CE / entropy-weighted | PRESENT | - | |
-| Focal / label_smoothing / lovasz / mixture | DECLARED BUT UNIMPLEMENTED | P1 | CLI flags exist, `compute_loss()` only uses `F.cross_entropy` |
-| DPO/ORPO/KTO losses | PRESENT | - | In `dpo_align.py` |
-
-### Evaluation
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| MMLU / HumanEval / GSM8K / BBH harness | ABSENT | P0 | Only `CheckpointTester` 50-question probe |
-| lm-evaluation-harness integration | ABSENT | P1 | |
-| Loss-only validation | PRESENT | - | |
-
-### Experiment tracking
-| Feature | Status | Priority |
-|---|---|---|
-| W&B | ABSENT | P1 |
-| TensorBoard | ABSENT | P1 |
-| MLflow / SwanLab / ClearML | ABSENT | P2 |
-| Status JSON / heartbeat files | PRESENT | - |
-
-### Optimizers
-| Feature | Status | Priority |
-|---|---|---|
-| AdamW / 8bit / BAdam / Muon / GaLore / APOLLO / Forge | PRESENT | - |
-| Adafactor / SOAP / Prodigy / Sophia | ABSENT | P2 |
-| FP8 training wired to runners | ABSENT | P1 | `fp8_training.py` exists, not wired |
-
-### Kernels
-| Feature | Status | Priority |
-|---|---|---|
-| FlashAttention 2/3 training wrapper | UNCLEAR | P1 | `use_varlen` exists; FA3 unverified |
-| Liger Kernel / Cut Cross Entropy / ScatterMoE | ABSENT | P2 |
-| Gradient checkpointing | PRESENT | - | With optimal planner |
-
-### Other
-| Feature | Status | Priority | Evidence |
-|---|---|---|---|
-| `train_v8.py` real data | BROKEN | P1 | Uses synthetic random token IDs, not real data |
-| MoE CLI controls (z-loss, load balance, expert drop) | ABSENT | P2 | Config exists, no CLI |
-| Multimodal training (VLM/audio) | ABSENT | P2 | |
-| YAML declarative config | ABSENT | P2 | CLI args only |
-
----
-
-## C. Production / Ops
-| Feature | Status | Priority |
-|---|---|---|
-| Prometheus metrics | ABSENT | P1 |
-| OpenTelemetry tracing | ABSENT | P2 |
-| Watermarking | ABSENT | P2 |
-| Router mode (multi-instance) | ABSENT | P2 |
-
----
-
-## Top P0 (breaks standard use)
-1. `stop`/`top_k`/`repetition_penalty` declared but not forwarded in chat handler
-2. `tool_choice` not enforced
-3. No `logprobs`
-4. No `/v1/embeddings`
-5. GGUF quantized load broken (raw uint8, not dequantized)
-6. No continuous batching (fixed-window only)
-7. `forge.training.data.*` modules missing → SFT may fail at import
-8. No HF `datasets` loader for SFT
-9. No distributed training (DDP/FSDP/DeepSpeed)
-10. No `sft_train --resume`
-11. No standard eval harness (MMLU/HumanEval/GSM8K)
-12. `train_v8.py` runs on synthetic data
-
-## Top P1 (ecosystem compatibility)
-- GPTQ/AWQ, external draft model, multi-LoRA serving, tensor parallelism
-- HF auto-config from config.json, export to GGUF/HF
-- Regex/EBNF grammars, `response_format` strict, `n`, `presence_penalty`, `seed`
-- Streaming tool deltas, `stream_options.include_usage`
-- PPO/reward modeling, padding-free packing, early stopping, LR scheduler choices
-- W&B/TensorBoard, FP8 training wired, FA2/3 training wrapper
-- Prometheus metrics, vision input
-
-## Sub-BitNet Quantization R&D (2026-09-06)
-
-### Goal
-Training-free ~1-bit quantization key for LLMs, tested on Qwen 2.5 0.5B (CUDA, RTX 5070 12GB).
-
-### Best Configuration Found
-- **Method**: BiLLM (salient + concentrated/sparse split) + NF4-quantized SVD residual
-- **Params**: salient_frac=0.10, salient_order=2, svd_rank=48, svd_block_size=32
-- **Result**: PPL 1096 at 1.55 bpw (FP16 baseline PPL 22 on same corpus)
-- **VRAM**: 3.21 GB for quantized model (vs ~1 GB FP16)
-
-### Key Findings
-1. **Pure ternary (1.58 bpw)**: PPL 3M+ � completely unusable without residuals.
-2. **BiLLM alone (no SVD)**: PPL 5568-7616 at ~1.10 bpw � too much distortion.
-3. **Mean-centered residuals**: Dramatically worse than absmean (zero-mean) binarization. PPL in hundreds of thousands. Mean-centering is NOT a good fit for this model.
-4. **Hadamard rotation**: Helps attention layers (896?1024, 12.5% padding) but HURTS down_proj (4864?8192, 40.6% padding). Auto-disable Hadamard when padding > 15%.
-5. **GPTQ compensation**: Inconsistent � improved single-layer SQNR by +2dB but worsened average output SQNR by -0.69dB across layers. Not enabled by default.
-6. **SVD residual is essential**: The gap between BiLLM-only (PPL ~5000+) and BiLLM+SVD (PPL ~1096) is enormous. SVD captures the structured low-rank component of the quantization error.
-7. **Block-wise NF4 (bs=32)** for SVD factors is the sweet spot. Per-tensor NF4 is too coarse (PPL 18304). Per-row NF4 adds too much scale overhead. bs=16 wastes bits on scales, bs=128+ loses precision.
-
-### Storage Accounting (1.55 bpw)
-Per layer (out_f, in_f):
-- Salient binary: salient_order � out_f � n_salient bits
-- Non-salient binary: 1 � out_f � n_nonsalient bits
-- Split mask: 1 � out_f � n_nonsalient bits (stored as bool)
-- SVD U: 4 � rank � out_f + 16 � ceil(rank�out_f / bs) bits (NF4 + scales)
-- SVD V: 4 � rank � h_size + 16 � ceil(rank�h_size / bs) bits (NF4 + scales)
-- Total � (out_f � in_f) = effective bpw
-
-### Failed Approaches (documented dead ends)
-- Ternary alone: PPL 3M+
-- BiLLM mean-centered: PPL 100K-1M
-- Per-tensor NF4 SVD: PPL 18K (too coarse)
-- 8-bit SVD: always exceeds 1.58 bpw budget
-- IRB 1-round + SVD in Hadamard space: PPL 1.5M (Hadamard padding inflates SVD cost)
-- IRB 1-round + SVD in original space: PPL 1.5M (residual not well-aligned)
-
-### Remaining Limitations
-- PPL 1096 is still far from FP16 baseline (22). This is NOT "~1-bit working" in a usable sense.
-- The 1.55 bpw target is met but quality is insufficient for practical use.
-- Longer evaluation corpus needed for stable PPL measurement.
-- Sub-1.58 bpw with usable quality likely requires either: (a) calibration data (GPTQ/AWQ), (b) higher rank SVD (exceeds budget), or (c) training-based refinement (QAT).
-
----
-
-# R38 Candidate Survey — 6-Topic Research Agenda (2026-09-07)
-Sources: 3 parallel codebase audits (optimizers, BitNet/latent, KV/MoE) + AGENTS.md R1-R37 notes.
-
-## 1. GaLore / low-rank gradient projection
-- EXISTS: APOLLO (native, SVD-free, orge/training/optim/apollo.py) - wired in configure_optimizer but NOT in sft_train CLI choices. GaLore = thin galore_torch wrapper (training_utils.py:311), orphaned from CLI. FiraNLRQ (low-rank projection inactive).
-- GAPS: no native GaLore (project_grad/weight-recovery), no per-layer adaptive rank, no rank annealing, no GaLore-x-NLRQ/LoRA.
-- NOVEL: GaLore projected in NLRQ factor subspace (S-vectors already low-rank); rank annealing on loss plateau; GaLore x BitNet int8 masters.
-
-## 2. BitNet b1.58 ternary training
-- EXISTS (rich): BitNetLinear STE + learned qscale + int8@int8 GEMM + Triton b1.58 kernel (bitnet_b158_key.py); BitNetEmbedding/Conv1d; --bitnet-everywhere (sft_train default ON); enable_int8_training (int8 GPU + bf16 CPU master); NanoQuantQAT sub-1-bit; TernaryOptimizer 2-bit states (R20, ORPHANED); MuonBitNet4Bit (ORPHANED); BitNetResidualLinear (R24, Key exists, NOT wired into ModelLoader).
-- GAPS: no from-scratch ternary pretraining (train_8b_all disables QAT at init); lm_head/embed skipped in HF QAT path; residual key unwired.
-- NOVEL: full-ternary training stack = TernaryOptimizer + BitNetResidual + from-scratch ternary init; ternary-native ForgeLM pretrain.
-
-## 3. State-free / schedule-free optimizers
-- EXISTS: MuonScheduleFree, MuonSFBlockwise (sft default), SFNorMuon, AMUSE, MONA, FlashAdamW/Lion 8-bit, CPUAdamW (ZeRO offload, wired), BAdam, ForgeOptimizer. ORPHANED: flashoptim, AdamW4Bit, NVMeStreamedBAdam, TernaryOptimizer.
-- GAPS: Sophia, SOAP/Shampoo, CAME, AdEMAMix, Adafactor, true state-free class.
-- BASELINE RULE: must beat muon_sf_plain (V3) or cpu_offload (V4).
-- NOVEL: AdEMAMix w/ slow momentum on CPU + fast on GPU (mixed, directive D); Sophia-H diag-Hessian on ternary; state-free ternary flip-direction optimizer (revive TernaryOptimizer).
-
-## 4. AdaCoM / trainable context management
-- EXISTS: 26 KV strategies wired via build_kv_cache (SnapKV, H2O, StreamingLLM, S4R, SpectralKV, HQE, auto_context meta-manager, Matryoshka, VToken...). Learned bits: KVpopScorer MLP (skeleton, NOT wired), ContinuationPredictor (wired), MoSA router.
-- GAPS: NO AdaCoM-style trainable/decoupled context manager; no token merging/pruning at runtime; PyramidKV absent; keys/cache + keys/compression dirs EMPTY.
-- NOVEL: STE hard-decision context gate (reuse ModRouter machinery from mod_router_key.py) deciding per-token keep/compress/evict, trained end-to-end; wire train_kvpop_scorer as first step.
-
-## 5. Latent representation prediction
-- EXISTS: NOTHING. Closest: MTPModule (token-level aux CE), SIGRegLoss (spectral reg), EAGLE (inference-only hidden use).
-- GAPS: fully greenfield - no BYOL/VICReg/latent-matching loss anywhere.
-- NOVEL: inter-layer latent prediction head (predict h_{L+k} from h_L, continuous MSE/cosine target - no vocab softmax, tiny head, ~0 VRAM); stabilizes ternary QAT (cross-domain w/ #2); boosts self-play sample efficiency; AirMoE latent supervision.
-
-## 6. 30B efficiency frontier / local MoE
-- EXISTS: MoELayer (top-k noisy, switch aux, DeepSeek-V3 aux-free bias, shared expert, dense bypass warm-start) - trainable via sft_train; BitNet experts; ExpertTyingKey; ElbowRouter/AllocMoE/LDACalibrator (inference, wired); AirMoE hotswap/infinite (ORPHANED from engine); LASER/METRO routers (ORPHANED).
-- GAPS: no fine-grained experts (many-small DeepSeek-style), no fused Triton MoE kernel, no expert parallelism, AirMoE not in forge_engine.
-- NOVEL: fine-grained experts (n_experts up, d_ff down, constant active params) + BitNet ternary experts + shared expert + CPU-RAM expert hotload (ExpertHotload domain exists in evolution sim).
-
-## QUICK WINS (do regardless)
-1. Expose apollo/galore/flashoptim/nvme_muon_4bit in sft_train --optimizer choices (code exists, unreachable).
-2. Wire BitNetResidualLinear into ModelLoader (use_bitnet_residual flag exists, no loader wiring).
-3. Wire train_kvpop_scorer skeleton.
-
-## PRIORITY MATRIX (impact x effort x novelty on RTX 5070)
-- A. Latent-prediction aux loss: greenfield, ~0 VRAM, helps #2+#5+self-play. HIGH novelty/effort ratio.
-- B. Trainable context manager (AdaCoM-style): biggest KV gap, ModRouter STE reusable. HIGH.
-- C. Full-ternary training stack: completes BitNet story, TernaryOptimizer exists. MEDIUM-HIGH.
-- D. CLI unblock orphans: trivial. DO FIRST.
-- E. Fine-grained BitNet MoE: MEDIUM (big test infra needed).
-- F. Native GaLore + adaptive rank: MEDIUM (APOLLO already covers much of it).
-
----
-
-# Web Research Sweep — 2025-2026 LLM Techniques (2026-09-07)
-3 parallel agents, web_search only (no webfetch; numbers from abstracts/snippets - verify before implementing). Organized by the 5 focus areas.
-
-## FOCUS 1: Low-mem full-parameter training
-- **SubTrack-Grad / SubTrack++** (arXiv:2502.01586, NeurIPS 2025): rank-1 Grassmannian gradient-subspace tracking replaces periodic SVD; projection-aware Adam realigns momenta on subspace shift + recovery scaling. 65% wall-time cut vs GaLore; 3B overhead 31% vs GaLore 157%. FIT HIGH - drop-in upgrade for GaLore wrapper.
-- **GaLore 2** (arXiv:2504.20437): randomized SVD + FSDP integration; Llama-7B pretrain 500B tokens. FIT HIGH.
-- **Q-GaLore** (arXiv:2407.08296, CPAL 25): INT4 projections + INT8 weights + lazy per-layer subspace updates; LLaMA-7B on RTX 4060 Ti 16GB. FIT HIGH - stack on NLRQ.
-- **Adam-mini** (arXiv:2406.16793, ICLR 25): Hessian-block shared LR kills dense v tensor; -45-50% opt memory, +49.6% throughput. FIT HIGH (2-3GB saved at 1.2B).
-- **Q-Adam-mini** (ICML 25): Adam-mini + INT8 first momentum; 8x total GPU mem reduction, 60M-8B validated. FIT HIGH.
-- **SOLO** (arXiv:2505.00347): fixes signal-swamping in ultra-low-bit EMAs; 2-3 bit Adam states. FIT HIGH - pairs with TernaryOptimizer (ternary weights + 2-bit momentum).
-- **GradLite** (arXiv:2510.22467): low-rank Jacobian approx + error feedback; stable with dropped/compressed activations; -50% opt+activation mem. FIT HIGH.
-- **ZenFlow** (arXiv:2505.12242): importance-aware offload (top-k grads stay GPU, rest async CPU); 5x vs ZeRO-Offload, -50% PCIe, >85% stall cut. FIT HIGH - CPUAdamW successor.
-- **Batch-1 training** (arXiv:2507.07101): Adam beta scaled by token half-life (not steps); batch-size-1 SGD stable, equal/better per-FLOP; kills grad accumulation. FIT HIGH for long-seq on 12GB.
-- **BCD** (arXiv:2506.12037): block coordinate descent, only active block's optimizer state on GPU; 7B on RTX 4090. FIT MEDIUM (3-8B later).
-- **LLMQ** (arXiv:2512.15306): consumer-GPU CUDA training framework; 7B @ 70% MFU on 16GB 5060Ti. FIT HIGH as reference impl.
-- **Sparse MeZO** (arXiv:2402.15751, NeurIPS 25): ZO on param subset; fine-tuning only. FIT LOW for pretrain.
-
-## FOCUS 2: Small-model behavior & potential
-- **Overtraining scaling laws** (arXiv:2403.08540, ICLR 25): 104 models 0.011-6.9B; 1.4B @ 32x overtrain predictable from 300x cheaper runs. ACTION: 0.1-0.4B wind-tunnel runs to set 1.2B token budget.
-- **Overtraining knee**: 0.9M model @ 222k tok/param degraded after peak (INT 4.55 -> 3.31). Overtraining has a peak - find the knee with proxies.
-- **IMU-1 / Qwen3-0.6B repro** (HF 2026): NorMuon on 2D + AdamW on 1D/embed + WSD + z-loss(1e-4) = PPL 28.66->23.52 (-18%). NOTE: NorMuon already in repo (sf_normuon) - recipe validates it.
-- **L20-Edu-135M** (arXiv:2606.22189): single-GPU recipe: 10B FineWeb-Edu + 3B math/code/reasoning curated; deep-thin, GQA, tied embed, MinHash/LSH dedup. ACTION: mirror data gate.
-- **Data repetition destroys small LMs** (arXiv:2606.24998): 10% FLOPs on repeats = 67% FLOP-equivalent loss @ 344M. ACTION: dedup across epochs, monitor eval loss.
-- **Dispersion loss** (arXiv:2602.00217): small LMs condense embeddings into narrow cone; cosine-dispersion aux loss fixes geometry, +10 benchmarks, zero params. ACTION: cheap second aux loss alongside R41 latent head.
-- **EOPD** (arXiv:2603.07079): entropy-aware on-policy distillation, reverse+forward KL; Qwen3-0.6B +1.37 / 1.7B +2.39 / 4B +5.05 math.
-- **Prefix OPD** (ACL 26): train only on reasoning-trace prefixes; matches full OPD @ 2-40x less FLOP.
-- **OPD recipe** (arXiv:2604.13016): teacher must add new capability + compatible reasoning patterns; off-policy cold-start rescues failing OPD.
-- **Looped transformers / latent thoughts** (arXiv:2502.17416, ICLR 25): k layers looped L times ~ kL layers on reasoning; zero extra params. FIT HIGH.
-- **LOTUS** (arXiv:2606.31779): latent-CoT matches explicit CoT @ 3B; thought latency -2.5-6.9x.
-- **Coconut** (arXiv:2412.06769): continuous thought (hidden state as next input); beats CoT on backtracking tasks; needs curriculum.
-- **Matryoshka LM suites** (arXiv:2608.09703): nested 500M/1.5B/3B; -36% total train compute, +14-26% spec-decode throughput.
-- **MoEsturizer** (ICLR 26): dense->MoE upcycling @ sub-1B with 150k SFT samples; 4-2/8-2 top-k beats dense base. ACTION: replaces from-scratch MoE plan (R43-B) - upcycle instead.
-- **MoR - Mixture of Recursions** (arXiv:2507.10524): layer sharing + token-level dynamic recursion depth + recursion-wise KV; 135M-1.7B, 2.18x throughput. FIT HIGH.
-- **MoDA** (arXiv:2603.15619): depth-attention (heads read prior-layer KV); 1.5B: PPL -0.2, downstream +2.11%, +3.7% FLOPs only.
-- **Sherry** (ACL 26): 3:4 sparse ternary 1.25 bpw packing; 1B Llama-3.2 zero accuracy loss, 25% bit savings.
-- **Cloe** (arXiv:2608.28809): ternary QAT degrades MMLU/factual most; task FT recovers 89.8%/79.4%. ACTION: ship dual checkpoints (fp general + ternary specialized).
-- **T1** (arXiv:2504.04718, ICLR 26): tool-filtered test-time verification; 1B beats 8B on MATH. Pairs with ForgeAI tool harness.
-- **PA-Tool** (arXiv:2510.07248): schema renaming to pretraining-aligned patterns; +17% tool use, -80% schema errors, training-free.
-- **Manthan-1.5B** (arXiv:2507.05065): tool-mediated reasoning via GRPO; 65% GSM8K @ 1.5B on T4.
-- **Falcon-H1** (arXiv:2507.22448): parallel attn+Mamba2; 0.5B ~ 7B-2024 quality, 256K ctx.
-- **Index-1.9B-32K**: 32K ctx via 10B-token long-PT + doc packing w/ reset attn/position IDs.
-- **Jet-Long** (arXiv:2607.07740): bifocal RoPE (local faithful + dynamic long window); +2-4.8 RULER zero-shot, <=4% overhead, no retrain.
-
-## FOCUS 3: Context mem cost + token gen speed
-- **KV-Direct** (arXiv:2603.19664): K/V are deterministic projections of residual stream; cache 5KB residual/token vs 136KB KV (Gemma3-4B); 42MB vs 103MB peak over 20 turns; recompute up to 5x FASTER than reading cached KV. Validates engine's residual_stream/capture strategies - promote with these numbers.
-- **ShadowKV** (arXiv:2410.21465, ICML 25 spotlight): low-rank keys on GPU + values offloaded + sparse retrieval; 6x batch, 3.04x throughput, no accuracy loss. Pairs with cpu_offload tier.
-- **STAR-KV** (arXiv:2606.08382, ICML 26): differentiable soft-threshold per-head/per-block rank; 75% KV compression (20x w/ quant), 6.9x attn speedup, 3.1x e2e. Triton kernels - fits stack.
-- **MoBA / FlashMoBA** (arXiv:2502.13189, 2511.11571): block-sparse routing; FlashMoBA 14.7x over FA2 @ small blocks. Add to auto_context pool.
-- **SelKV** (arXiv:2607.16213): per-token merge-or-drop cosine gate + attention compensation; 25% retention near-lossless, 3.3x @ 100k.
-- **SemantiCache** (arXiv:2603.14303): semantic chunking + clustered merging; 2.61x decode.
-- **FreeKV** (arXiv:2505.13109): speculative KV retrieval + double-buffered recall; 13x over SOTA retrieval. Layers onto cpu/disk offload tiers.
-- **HeteroSpec** (arXiv:2505.13254): entropy-adaptive speculation depth; 4.24x over EAGLE-3, training-free, exact distribution. Direct upgrade to EAGLE/MTP path.
-- **HiSpec** (arXiv:2510.01336): early-exit hierarchical verification; 1.28-2.01x.
-- **SpecPV** (arXiv:2512.02337): partial-KV self-speculation; 6x long-context decode.
-- **MHA2MLA** (ACL 25) / **TransMLA** (arXiv:2502.07864, NeurIPS 25): retrofit GQA->MLA; 92-93% KV cut, ~1% quality drop, 6B tokens FT.
-- **xKV** (arXiv:2503.18893): cross-layer aligned SVD of KV; 8x, training-free.
-- **Value Residual / SVFormer** (arXiv:2410.17897, ACL 25): value residuals + shared first-layer V; 2x KV cut, -16% params, -20% data.
-- **Star Attention** (arXiv:2411.17116): two-phase blockwise context parallel; 11x mem, 97-100% accuracy.
-- **Fast-dLLM** (ICLR 26): diffusion LM KV + parallel unmask; 27.6x - arch mismatch, note for future dLLM track.
-- **NeuroPrefetcher** (arXiv:2608.22643, ICPP 26): NVMe delta prefetch of sparse rows; 7.9-12x over demand paging. LOW @ 1.2B, HIGH for expert hotload later.
-
-## FOCUS 4: Quants beyond BitNet b1.58
-- **BTC-LLM** (arXiv:2506.12040, ACL 26): binary codebook + learnable transform; 0.7-1.11 bpw; 13B @ 0.8bpw = -3.1% zero-shot, 1.6x vs FP16. FIT HIGH @ 1.2B (~200MB resident).
-- **LittleBit** (arXiv:2506.13771): latent factorization + binarized factors + residual comp; 0.1 bpw, 31x mem cut, 11.6x kernel speedup. FIT MEDIUM (risky).
-- **AQLM 1-bit** (arXiv:2401.06118): additive VQ codebooks; Llama-2-7b 1bit PPL 7.85. MEDIUM (VQ lookup latency @ small models).
-- **OptRot** (arXiv:2512.24124): data-free learned rotations minimizing kurtosis; beats SpinQuant/QuaRot/OSTQuant weight-only; fuses into weights. FIT HIGH - upgrade for hadamard_int4/rotorquant paths.
-- **QoQ/QServe W4A8KV4** (arXiv:2405.04532, MLSys 25): 4w/8a/4kv co-design; 1.2-3.5x serving. FIT HIGH - exact slot missing in quant stack.
-- **KVTuner** (arXiv:2502.04420, ICML 25): layer-wise mixed-precision KV MOO search; 3.25-bit effective lossless, +21% throughput. Plug into HQE/2bit selector.
-- **PatternKV** (arXiv:2510.05176): pattern-aligned residual KV quant; 2-bit-equiv gains, 0.08% drop @ 4-bit, 1.5x throughput.
-- **AQUA-KV** (arXiv:2501.19392): predictor-based KV residual quant. MEDIUM.
-- **QJL** (AAAI 25): 1-bit JL-transform KV, no scale/zero-point metadata; 3-bit effective, >5x mem cut. HIGH - sub-2-bit KV alternative.
-- **NVFP4 KV** (NVIDIA Dec 25): FP4 KV w/ E4M3 per-16 scales; -50% vs FP8 KV, <1% loss. Blackwell-native.
-- **Sparse-BitNet** (arXiv:2603.05168): 1.58-bit + N:M sparsity joint training; 1.30x, ternary more sparsity-tolerant than BF16.
-- Sub-BitNet landscape confirms repo's R25/26 findings: ternary near-optimal at low rates; corrections (low-rank/codebook) beat pure ternary - TernLC approach validated by BTC-LLM/LittleBit line.
-
-## FOCUS 5: Training-process-time minimization
-- **NVFP4 pretraining** (arXiv:2509.25149): Hadamard + 2D block quant + stochastic rounding + selective HP layers; 12B/10T tokens, MMLU-pro parity w/ FP8. HIGH on Blackwell.
-- **TetraJet-v2** (arXiv:2510.27527): unbiased double-block FP4 + OsciReset; 1.67x vs FP8 e2e; tested to 370M. MEDIUM.
-- **u-µP** (arXiv:2407.17465): muP + unit scaling; FP8-stable defaults, proxy->target HP transfer. HIGH - tune 100M proxy, transfer to 1.2B/8B.
-- **ScheduleFree+** (arXiv:2605.19095): fixes SF averaging/large-batch issues; beats WSD, +31% @ 1000 tok/param, anytime checkpoints. HIGH - direct muon_sf upgrade.
-- **WSM** (arXiv:2507.17634): decay phase -> checkpoint merging; beats WSD, no pre-defined length. MEDIUM.
-- **AdEMAMix** (arXiv:2409.03137, ICLR 25): fast+slow EMA; 1.3B @ 101B tokens = AdamW @ 197B (+95% token efficiency). Already on R43 backlog.
-- **SOAP / KL-SOAP** (arXiv:2409.11321 ICLR 25; 2509.03378): Adam in Shampoo eigenbasis; >40% fewer iters; KL-SOAP cuts memory. MEDIUM.
-- **FA4** (arXiv:2603.05451, MLSys 26): Blackwell-native attention; 1.3x vs cuDNN, 2.7x vs Triton, 1613 TFLOP/s B200. HIGH - watch SM120/consumer support.
-- **u-S FP8** (arXiv:2502.05967): scaling rules -> FP8 w/o dynamic scaling; 1B-13B parity +33% faster. HIGH.
-- **MuToR** (arXiv:2505.10518): register-token MTP, no extra heads, NTP-compatible. MEDIUM - compose with existing MTP.
-- **Influence Distillation** (arXiv:2505.19051): 2nd-order data selection, 3.5x faster selection. MEDIUM (data pipeline).
-- **SUS backprop** (arXiv:2505.15080): sparse unbiased attention backward O(n^2)->O(nc), c~25-30, +1% grad variance. MEDIUM for long-ctx training.
-
-## CROSS-CUTTING NOTES
-- sf_normuon (NorMuon) already wired - IMU-1 validates at 0.6B scale; adopt full recipe (WSD+z-loss+optimizer split).
-- residual_stream + capture KV strategies already in engine - KV-Direct gives them published numbers + recompute-is-faster result; promote + benchmark.
-- ExpertHotload sim domain + NeuroPrefetcher = same idea; relevant when MoE upcycling lands.
-- MoE upcycling (MoEsturizer) replaces from-scratch fine-grained MoE in R43-B - far cheaper on 12GB.
-- Ternary dual-checkpoint strategy (Cloe) fits existing bitnet_everywhere + LoRA pipeline.
-
----
-
-# 0.5B Time-to-Model Research (2026-09-07, 2 agents)
-
-## A. Measured throughput datapoints (single consumer GPU)
-- modded-nanogpt 124M on 1x RTX 4090: 130-163k tok/s, val loss 3.25 in ~90-115 min. Techniques: Muon (77.5% staged gain, largest single), FlexAttention (54.5%), arch modernizations RoPE/QK-norm/ReLU2/untied-emb (45.2%), value emb + U-Net skips (36.5%), FP8, fused CE, packing.
-- 2x4090: 1.88B tokens to 3.28 target (vs 6.44B baseline) = 3.4x TOKEN EFFICIENCY from arch+opt tricks.
-- 1x RTX 5090 community: 124M to 3.28 in ~42 min. 8x5090: ~5.5 min.
-- TinyLlama 1.1B: 17k tok/s on 1x4090 (56% MFU on A100). TinyStories 19M: 90k eager / 127k compiled on 2060 Super (compile = 1.4-1.5x).
-- Qwen2.5-0.5B full FT on A100: 41k tok/s @ 39.6% MFU (Chronicals, fused CE 5GB->135MB logits).
-- llm.c GPT-2 124M: 62k tok/s on A10G (48h for 10B tokens); ~200k on A100.
-- RTX 5070 0.5B estimate: 8-15k tok/s BF16 well-tuned (25-45% MFU on 61.7 TFLOPS peak); best case ~17-19k. FP8 on SM120 EXPERIMENTAL (nanochat: lm_head FP8 only ~1% e2e, +2GB; MXFP8 broken on SM120 in some torchao versions). Do NOT assume FP8 speedup.
-- WINDOWS: WDDM ~2x slower host<->GPU transfers (GeForce cannot enable TCC); sysmem fallback ~3x slowdown (set 'Prefer No Sysmem Fallback'); pinned-memory leaks; prefer Linux/WSL2. Native Windows OK only for fully-resident compute-bound loops.
-
-## B. 0.5B from-scratch existence proofs (quality ceiling is LOW)
-- NPC Nano 0.5B: 8.93B tokens (FineWeb-Edu mix) -> HellaSwag 36.8, ARC-E 50.0, PIQA 65.0, GSM8K 1.67%. +15B math tokens on top: GSM8K still ~2% (capacity wall).
-- ZeroShot-500M: 7.9B tokens on RTX 5090, ~51h, loss 2.75.
-- Talon-D1-0.5B: ~10B tokens -> HS 39.1, ARC-C 27.8.
-- SparseLM0.5B (Sakana): 10B tokens -> 40.4% mean task acc.
-- Qwen2-0.5B (massively more tokens): HS 49.3, ARC-C 31.5, GSM8K 36.5, MMLU 45.4. Gap is huge.
-
-## C. Sample-efficient paths (proven)
-- Warm-start Qwen2.5-0.5B-Instruct + 25k-200k examples SFT/distill: 0.5-6h on 5070. DistilQwen2.5-0.5B: AlpacaEval 2.46->4.89, IFEval 42.8->52.6 (100k ex, 3 ep). Sepolian 0.5B-math 25k ex: GSM8K 21.6->36.2.
-- DistiLLM-2 (ICML25 oral): 0.5B Qwen student, 50k prompts, win 66-77% vs base vs 1.8-14B teachers. Student cost 1-5h; teacher logit gen = real cost.
-- Agent distillation (2k trajectories): 0.5B student ~= 1.5B CoT tier. T1: 1B + tools > 8B on MATH. PA-Tool: 0 training, +17% tool use.
-- Low-Rank Clone (LRC): 20B tokens beats 36T-trained Qwen3-1.7B (claims >1000x token efficiency) - plausible for 0.5B.
-- Continued pretrain from strong 0.5B ckpt: 0.1B tokens ~4h, 1B ~1.5d, 2B ~3d (with 10-20% replay).
-- MoE upcycling at 0.5B on 12GB: NOT feasible/helpful (public demo bigger+slower+worse).
-- Phi-1 lesson: textbook synthetic data works (1.3B, ~50B tokens seen incl. 8 passes -> HumanEval 50.6) but 0.5B hits capacity wall on broad tasks.
-
-## D. Recommended recipe (5070, hours-to-1-day)
-1. Base = Qwen2.5-0.5B-Instruct (or Coder-0.5B). 2. 25k-200k curated examples (DistilQwen/Magpie/OpenHermes/SmolTalk; DeepMath-103K/NuminaMath; xLAM 60k for tools). 3. Optional teacher pass (local 7B quant or API). 4. Full FT or LoRA 1-3 ep, lr 1e-5..2e-5, seq 2048, bf16, FA, grad-accum to fit 12GB. 5. lm-eval-harness check. 6. Deploy w/ test-time compensation (structured output, retrieval, calculator, self-consistency, PA-Tool schemas).
-- Custom tokenizer/arch needed -> from-scratch 7-10B curated tokens = ~5-10 days, base-level quality only.
-
----
-
-# SOTA Research Sweep for R49+ (2026-09-08)
-
-Sources: K2 Horizon (IFM, 2026-09-06), Uno paper arXiv:2609.04010, Qwen3-Next/Qwen3.5,
-Kimi Linear (arXiv:2510.26692), DeepSeek-V3.2 (arXiv:2512.02556), Nemotron 3 Nano/Super,
-MiniMax M2/M2.5/M2.7 (arXiv:2605.26494), Muon ecosystem (Dion/Dion2/Dion3, SOAP-at-scale,
-MuonClip/QK-Clip, Muon Split), MoDA family (MoD-Attention arXiv:2603.15619, MixDA ACL23,
-MoA arXiv:2506.05928, MoDE arXiv:2410.10181).
-
-## T1 — Uno: diffusion-augmented decoding (HIGHEST VALUE)
-- Two weight sets: frozen AR weights (NTP) + lightweight diffusion weights trained via
-  "Diffusion Distillation" to emit token blocks in parallel. Psi-Spec samplers = LOSSLESS
-  (samples from the AR distribution itself). No draft model. Up to 3x speedup; Pareto-dominates
-  EAGLE-3/DFlash at every batch size; lowest added params + memory of any spec method.
-- Shipped in K2 Horizon as conditional-LoRA adapters (392 tensors, 7B + 0.9B sizes).
-  Code: github.com/ifm-ai/uno. HF: s-sahoo/uno collection.
-- ForgeAI fit: new `forge/decoding/uno.py`; adapter via existing LoRA stack; phase mgmt in
-  faser.py; combine with adaptive_speculative (diffusion for large batch, EAGLE for small).
-- Novel twist: self-distillation Uno on ForgeLM 1.2B (base distills its own AR distribution,
-  no external teacher); Psi-Spec + Vegas verification-guided KV selection share verify pass.
-- VRAM: adapter ~2-5% of base params; block-parallel decode reuses existing KV. Fits 12GB.
-
-## T1 — KDA / Kimi Linear (GatedDeltaNet successor)
-- KDA = GDN + fine-grained channel-wise decay Diag(alpha_t) (per-dim forget gate vs GDN's
-  head-scalar gate); efficient via specialized Diagonal-Plus-Low-Rank transition; chunkwise.
-- Hybrid 3:1 KDA:MLA BEATS full MLA at equal recipe; -75% KV cache; up to 6x decode TPOT @1M ctx.
-- Kernels open-sourced in FLA (fla/ops/kda) + vLLM impl. 48B-A3B checkpoints public.
-- ForgeAI fit: new linear-attention key (forge/keys/attention/); hybrid ratio knob already
-  exists via layer_types (ForgeHybrid). Pairs with mamba3_key lineage; port-first rule applies
-  (identity warm start from GDN-style init).
-- Novel twist: KDA decay rates driven by LeRoPE learnable frequencies (merge two existing keys).
-
-## T1 — MoVA: Mixture-of-Value Attention (K2 Horizon 36B-A4B)
-- Sparsity moved INTO attention: 64 value experts, 4 active/token; 45/48 layers MoVA;
-  MoE FFN 100 experts/8 active; GQA 32/8 heads; compatible w/ FlashAttention + sparse attn.
-- 36B-A4B ~= dense 32B trained identically (controlled comparison).
-- ForgeAI fit: new attention key; router machinery reusable from moe/moe.py; synergy with
-  GTA (tied V=K) and GLA (latent KV). Value experts can be BitNet/IRI-FP4 quantized for VRAM.
-- Novel twist: value-expert hotswap via AirMoE infra (disk-backed value experts on 12GB).
-
-## T1 — DSA lightning indexer (DeepSeek-V3.2)
-- Per-layer tiny low-head scorer (FP8, Hadamard/rotate_activation orthogonal transform) +
-  top-k (2048) token selection -> additive mask into main attention. Own 1-head index-K cache.
-- Continued-train from dense: aligns distribution, quality parity on long context.
-- ForgeAI fit: upgrade QSA/CSA keys (qsa_key.py/csa_key.py) with trainable indexer; synergy
-  with Vegas (verification-guided selection) + compact_attention (block-union).
-- Novel twist: distill indexer from base model attention maps (training-free warm start);
-  shared indexer across layer groups to cut index-K cache.
-
-## T2 — Gated Attention + zero-centered RMSNorm (Qwen3-Next/3.5)
-- Attention output gate (attn_output_gate) + weight-decayed zero-centered RMSNorm gamma.
-  Cheap stability wins at small scale. ForgeAI has QK-norm; add output gate + zc-RMSNorm flags.
-
-## T2 — Muon ecosystem (K2/GLM-5/DeepSeek-V4 all use Muon now)
-- QK-Clip: clip Wq/Wk update rows when attention logits explode -> zero loss spikes @15.5T tokens.
-- Muon Split: per-head orthogonalization for MLA up-projections (GLM-5).
-- Dion2/Dion3: sample fraction of rows/cols before orthogonalization -> up to 6x cheaper step,
-  matches Muon loss. SOAP: per-step QR fixes large-batch instability.
-- ForgeAI fit: extend muon_sf_blockwise.py / sf_spectral_optimizers.py (SFNorMuon) with
-  Dion2-style sampled orthogonalization (single-GPU: NS-iteration cost is the bottleneck);
-  QK-Clip as opt-in guard in sft_train.py.
-
-## T2 — LatentMoE (Nemotron 3 Super) + router variants
-- Compress tokens to latent dim (1024) BEFORE experts -> 4x more experts (512/top-22) same cost.
-  ForgeAI: moe.py + AirMoE (latent compression also cuts expert disk I/O for hotswap).
-- MiniMax M2: sigmoid gating (not softmax) + 256 fine-grained experts top-8; QK-Norm + partial RoPE.
-- Qwen3-Next: 1:50 sparsity (512 experts, 10+1 active). Add all as Router variants + presets.
-
-## T2 — MTP scaling (Qwen3.5 multi-step, Nemotron 2 shared-weight MTP, MiniMax 3 modules)
-- MTP modules double as speculative draft paths. ForgeAI mtp.py + mtp_key exist; extend to
-  multi-step/multi-module configs; MTP depth as evolution domain knob.
-
-## T3 — MoDA: Mixture-of-Depths Attention (arXiv:2603.15619)
-- Heads attend to current-layer sequence KV + depth KV from ALL preceding layers; fused kernel
-  97.3% of FA2 eff @64K; +0.2 ppl, +2.11% downstream, +3.7% FLOPs; better with post-norm.
-- ForgeAI fit: new key bridging mod_router_key + attn_residual_key + residual_cache infra.
-
-## T3 — MoDA/MixDA/MoA/MoDE adapter family
-- MoA (2506.05928): HETEROGENEOUS adapter experts (LoRA+DoRA+PiSSA mixed) + token-level routing
-  beats homogeneous MoE-LoRA. ForgeAI has all 3 adapter types + forge_adapter entropy fusion ->
-  heterogeneous fusion is a novel combo for forge_adapter.py.
-- MixDA/MoDE: domain adapters parallel to FFN / layer-level domain experts -> adapter library
-  with AirMoE hotswap; two-stage (domain-unlabeled then task-labeled) fits SFT runner.
-
-## T3 — RL/systems (MiniMax M2.5/M2.7, DeepSeek-V3.2)
-- CISPO for MoE RL stability (grpo_trainer.py); prefix-tree merging ~40x RL speedup;
-  windowed-FIFO scheduling; agentic task synthesis (1800 envs / 85k prompts).
-- MiniMax kept FULL attention deliberately (hybrid rejected: eval bottleneck, RL scale,
-  low-precision traps) — counterpoint datapoint for ForgeEvolve hybrid-vs-full scoring.
-- Kimi K2 Thinking: INT4 QAT as production path (ForgeAI int4/sub-bitnet lineage).
-- Nemotron 3 Super: NVFP4 PRETRAINING (not just inference quant) — gap in ForgeAI quant stack.
-
-## K2 Horizon release notes (openness angle)
-- 6 models 0.9B-375B-A23B, Apache 2.0, intermediate checkpoints + data recipes + logs public.
-- 512K native context (flagship); reasoning_effort + k2_horizon parsers in vLLM/SGLang.
-- Directly usable: warm-start/distillation source for ForgeLM (per 0.5B section above).
-
----
-
-# SOTA Research Sweep — Round 2 (2026-09-08, 2 agents)
-
-## Linear attention / SSM frontier
-- **RWKV-7 Goose**: per-head matrix state, generalized delta rule w/ vector decay w_t + per-channel
-  ICL rate a_t; S_t = S_{t-1}(diag(w_t) − κ̂_t^T(a_t⊙κ̂_t)) + v_t^T k̃_t. 2.9B = 3B SOTA.
-  FLA kernels (fla/ops/rwkv7). 12GB-feasible naive PyTorch; state fp32/bf16 (drift when gate≈1).
-- **KDA**: per-key-dim forget gate α_t∈[0,1]^{d_k}; S_t = Diag(α_t)S_{t-1} + β_t k_t(v_t − (Diag(α_t)S_{t-1})^T k_t)^T;
-  DPLR form D=Diag(α), a=βk, b=k⊙α. FLA fla/ops/kda + vLLM impl. Stability: gate lower-bound,
-  L2-normalized q/k. Generic DPLR kernels overkill → bespoke chunk kernel needed for speed.
-- **Gated DeltaNet exact inits** (Qwen3-Next): g_t = exp(−exp(A_log)·softplus(a_t+dt_bias)),
-  β=sigmoid(b); A_log init log(uniform(0.01,16)); dt_bias softplus-inverse [1e-3,0.1]; conv kernel 4;
-  q/k L2-norm required; chunkwise via WY/Householder product. β>1 (negative eigenvalues) unlocks
-  state tracking but destabilizes.
-- **Mamba-3 details** (validates/extends our mamba3_key): 3-term recurrence (exponential-trapezoidal
-  discretization) h_t = α h_{t-1} + β B_{t-1}x_{t-1} + γ B_t x_t; complex SSM = real SSM + data-dep
-  RoPE on B/C; MIMO rank-R=4 → state update is matmul not outer product. +0.6pp SISO / +1.2pp MIMO
-  vs GDN at 1.5B; HALF Mamba-2 state size. state-spaces/mamba mamba3.py. Angles need fp32.
-- **Hybrid ratios**: Qwen3-Next/Kimi 3:1; Nemotron ~4:1; Zamba 6:1; MiniMax-01 7:1. 1B-scale ablation
-  (Bae et al., 60B tok): best quality 1:1, best quality/efficiency ~1:5; attention anchors mid-stack.
-
-## Diffusion decoding (beyond Uno)
-- **BD3-LM**: block-AR + masked diffusion inside block; exact likelihood; blocks 4/8/16.
-- **LLaDA 2.0**: AR→dLLM via 3-phase block-WSD (warmup-block→full-seq→decay-block); block=32,
-  confidence-aware parallel (CAP) decoding; 2.1x accel.
-- **DiffusionGemma** (Gemma 4 26B-A4B): encoder prefills KV, decoder denoises 256-token canvas;
-  entropy-bounded denoising (bound 0.1), renoise non-selected, stop at avg entropy<0.005 + 2 identical
-  consecutive predictions; 700+ tok/s on RTX 5090. Canvas sampler easy to prototype in PyTorch.
-- **DFlash**: block-diffusion drafter, >6x lossless, +2.5x over EAGLE-3 — needs draft model (heavy).
-- **SparseSpec** (already in ForgeAI R39): self-speculative, most 12GB-friendly of the family.
-- Verdict: Uno (adapter, no draft model) is the right entry; canvas sampler = research side-quest.
-
-## Optimizers / training
-- **QK-Clip exact**: track per-head S_max = max|q·k|/sqrt(d); if > tau (30 or 100): γ=tau/S_max,
-  W_q^h←sqrt(γ)W_q^h, W_k^h←sqrt(γ)W_k^h; MLA: W_uq/W_uk get sqrt(γ), shared rotary W_qr gets γ.
-  Only violating heads capped. Cost ≈ one L×H max-reduce. Refs: Megatron core/optimizer/qk_clip.py.
-- **Dion2**: row/col subsample before orthogonalization, rank_fraction=0.25 → 1B/100B tok loss
-  2.635 vs Muon 2.623; Dion3 = Gram Newton-Schulz + CuteDSL + megabatch, up to 6x step time.
-  Sampling wins when rank_fraction ≤ 0.25 at ≥1B. github.com/microsoft/dion.
-- **NorMuon**: +21.7% vs Adam / +11.3% vs Muon at 1.1B, same memory (per-row 2nd-moment normalize).
-  ForgeAI already has SFNorMuon — validate full recipe (WSD + z-loss + optimizer split).
-- **ALF-LB** (DeepSeek): expert bias b_k += -u(load_k - target) per batch, no aux loss.
-  **Sigmoid gating** (MiniMax M2): sigmoid(logits)+e_score_correction_bias, top-k, renormalize.
-  → both are cheap Router variants for moe.py.
-- **NVFP4 pretraining recipe** (Nemotron 3 Super): E2M1 + 16-elem microblocks + FP8 scales + RHT +
-  stochastic rounding; BF16 kept: final 15% layers, latent proj, MTP, QKV/attn proj, embeddings;
-  Mamba output MXFP8. SM120: official TE fused NVFP4 FAILS (232KB smem, no .rs instr);
-  torch._scaled_mm via torchao _addmm_nvfp4_dispatch works w/ separate quant kernels.
-- **INT4 QAT**: BF16 master + fake QDQ + STE; W4A16 serving; keep lm_head/embed/router high-prec;
-  ~5k steps vs original FP distribution (Gemma recipe). Trivial on 12GB for 1.2B.
-- **CISPO** (MiniMax): L = -A·sg(clip(r,1-ε_lo,1+ε_high))·logπ — clipped IS weight DETACHED so every
-  token keeps gradient; matches DAPO in ~half the time, beats GRPO under high off-policy reuse.
-  torchrl CISPOLoss exists. Prefix-tree merging: trie over multi-turn rollouts, reuse shared
-  prefix KV — big win for agentic GRPO in self_play.
-
-## Speculative decoding 2026 (no draft model)
-- DFlash (block-diffusion drafter, >6x, +2.5x over EAGLE-3; needs drafter weights — heavy for 12GB),
-  DiffuSpec (causal-consistency path search, 3x), Spiffy (draft graphs, 6.3x token rate),
-  trajectory-level diffusion speculation. Best 12GB fit remains self-speculative sparse attention
-  (SparseSpec — already wired R39) and Uno (adapter-only).
-
-## R49 prioritization inputs
-- Uno: no arch change, lossless fallback, adapter-sized cost → highest value/effort.
-- KDA: biggest arch win (−75% KV, ≥full-attn quality at 3:1) — port via ForgeHybrid zero-init gate.
-- MoVA: novel attention-sparsity axis; zero-init router = lossless; composes w/ BitNet experts.
-- DSA indexer: lossless at k=∞; distill from attention maps = training-free warm start.
-- NVFP4 pretraining: high value, SM120 kernel work required (torchao TE path broken on SM120).
-- RWKV-7: optional 4th linear-attention family; FLA kernels exist; lower priority than KDA
-  (KDA strictly extends GDN which Qwen3-Next/Kimi validated at scale).
-
----
-
-# SOTA Research Sweep — Round 3 (2026-09-08, 3 agents)
-
-## A. Reasoning / test-time compute
-- **Thinking budgets**: Qwen3 `thinking_budget` (accuracy ~log-linear in budget; splice stop-think
-  transition); GPT-5.x `reasoning_effort` (23x token spread), Gemini `thinking_level`, Claude 4.7+
-  adaptive-only; s1 budget forcing (AIME24 50->57 on 32B). Interleaved thinking: Qwen3-2507 style,
-  0.6B artifact exists (Jarrodbarnes HF).
-- **Entropy-guided early exit**: EAT (stop-think + entropy monitor; 12-22% token cut, no acc loss;
-  github.com/xidulu/EAT), EntroCut (prefix entropy, 40% cut, arXiv:2601.22617), ASAG (attention-state
-  entropy, arXiv:2606.15070), ETR (entropy-trend REWARD: +9.9% acc, -67% CoT len on 7B;
-  github.com/Xuan1030/ETR), SPREG (+20% AIME25), LZ Penalty (LZ77-codelength repetition penalty,
-  TMLR 2026 — drop-in logit processor).
-- **Latent reasoning**: Coconut (hidden-state feedback), Soft Thinking (prob-weighted embedding mix,
-  +2.48% pass@1 / -22.4% tokens, TRAINING-FREE — lowest-risk 1B experiment), SoftCoT (projector),
-  NoisyCoconut (noise+consensus -> selective abstention). Verdict: latent reasoning NOT proven <3B;
-  Soft Thinking is the only cheap 1B experiment.
-- **Rubric/generative rewards**: Kimi K2 self-critique rubric (core/prescriptive/human rubrics);
-  GenPRM 1.5B > GPT-4o on ProcessBench, RM-R1 +13.8% vs 405B; reward-hacking audits: IFM K2 Horizon
-  70.2%->66.9% after exploit removal (harbor analyze); TRACE/ARA/HackProbe detectors.
-- **TTS consensus**: RL internalizes search; exploitation (selection) is the bottleneck on open-ended
-  tasks (judge-reward corr rho~0.12); Hybrid TTS +28.6%; BG-MCTS (budget-guided) beats budget-agnostic.
-  Play: GRPO trains dense PRM -> PRM guides MCTS/BoN at inference.
-- **Concise-CoT training family**: DSS-GRPO (think/answer segment masks, separate returns), ETR,
-  CRT, Extra-CoT (73% reduction on Qwen3-1.7B), TH2T (-70% easy tokens), Budget Guidance (63% tokens,
-  acc held). GLM-5 uses DSA + async RL (slime) + segment-wise GRPO. DeepSeek-V4: CSA/HCA hybrid attn,
-  1M ctx, 10% KV vs V3.2.
-
-## B. Agentic data / RL environments / memory
-- **Reproducible synthesis**: NeMo Gym (21 RLVR envs + 37 datasets, Apache-2.0, CPU envs, documented
-  single-GPU 1B GRPO configs) = best fit for ForgeEvolve; ToolACE (26.5k APIs/390 domains, Apache-2.0
-  dataset); xLAM/APIGen (3.7k executable APIs, 60k verified samples, code Apache); Magpie (4M+ samples);
-  ToolGrad (answer-first tool chains, ~100% pass). DeepSeek/Kimi/MiniMax pipelines NOT open (concept only).
-- **Single-GPU RL**: NeMo-RL has 1B GRPO recipes; mini-grpo (~500 LOC, no critic, LoRA, 3090-class);
-  OverlapRL (async staleness-aware single-GPU); 4-bit+LoRA GRPO on 8GB. verifiers (willccbb) env lib MIT.
-- **Prefix sharing for GRPO**: Prefix Grouper (MIT; shared-prefix forward, mathematically equivalent,
-  kills redundant O(P^2) prefill); Tree-GRPO (tree rollouts at ReAct step nodes -> step-level supervision,
-  1/4 rollout budget); vLLM --enable-prefix-caching; psRL 5.2x (closed).
-- **PRM/ORM**: RLVR rule rewards dominant; learned PRMs hackable (DeepSeek-R1 skipped them); generative
-  verifiers (TANGO co-trained, STV, pairwise Swiss-tournament self-verification); PRM-free step credit:
-  SPRO, VeriGate, SC-GRPO, lambda-GRPO.
-- **Memory systems (GUI chat/lorebook upgrades)**: Mem0 (add-only extraction + entity linking + hybrid
-  retrieval; LoCoMo 92.5 / LongMemEval 94.4, Apache-2.0), Letta/MemGPT (in-context blocks + archival,
-  git-backed MemFS), HippoRAG 2 (personalized PageRank over KG), A-Mem (Zettelkasten auto-linking),
-  Zep/Graphiti (bi-temporal KG + MCP server).
-- **Self-evolving agents**: M2.7 (own scaffold edits, +30%), DGM (SWE-bench 20->50% via self-mutation +
-  archive), SE-Agent (trajectory revision/recombination). Safety: sandbox + A/B gates + kill-switch;
-  scaffold/prompt evolution only, never autonomous weight/infra edits.
-
-## C. Edge / on-device
-- **Gemma 3n**: MatFormer nested elastic sub-models (Mix-n-Match runtime slicing), PLE per-layer
-  embedding offload to disk, AltUp predict-correct width widening, LAuReL rank-64 augmented residual +
-  15-layer KV sharing. PLE-style offload + runtime spec = portable; rest needs retrain.
-- **LFM2/2.5**: NAS-chosen gated short-conv + sparse GQA hybrid (1.2B = 10 conv + 6 attn layers);
-  LFM2.5: 128K vocab/ctx + native tool calling; LFM2-VL = SigLIP2 NaFlex + dynamic image-token budget
-  (directly relevant to V11/V12 SigLIP2 tower). 2x CPU prefill vs same-size transformers.
-- **SmolLM3**: NoPE (drop RoPE every 4th layer) + YaRN + 3-stage data mix (web 85->75%, code 12->15%,
-  math 3->10%); dual-mode /think //no_think. Qwen3-0.6/1.7B = best local distillation teachers.
-- **llama.cpp 2026**: NVFP4 merged upstream (Blackwell TC), MXFP4 in ik fork; TurboQuant KV
-  (turbo4_0 4.5bpw 3.6x / turbo2_0 2.5bpw 6.4x, mixed K/V policies, fused FA); IQK CPU +150-350%
-  prompt processing; DSpark/DFlash/MTP in llama.cpp.
-- **Windows/Blackwell**: WDDM mandatory on GeForce (no TCC); disable sysmem fallback (NVCPL) to avoid
-  paging; Triton >=3.5.1/3.6 fixes sm_120 segfaults (triton-lang/triton-windows wheels; torch.compile
-  works); --enforce-eager costs ~12x on affected workloads. CUDA >=12.8, PyTorch >=2.7.
-- **KV edge frontier**: CLA (2x), YOCO, FusedKV; EG-MLA >91% KV cut; SelKV (25% KV -> 3.3x decode @100K,
-  near-lossless GQA); ZSMerge (5% retention, 3x @54K); KVSlimmer (Hessian-exact); **OasisKV: hot KV in
-  HBM + full cache in host RAM + spec-drafted LOOKAHEAD prefetch** (composes with Uno draft blocks +
-  our cpu_kv_offload); TurboQuant in llama.cpp (fastest win for existing weights).
-- **Audio**: Kyutai STT (streaming Moshi, 1B/2.6B, word timestamps) = only practical open streaming STT;
-  separate pipeline, not a V10 graft.
-
-## D. Cross-connections found (novel combos for ForgeAI)
-- OasisKV lookahead prefetch x Uno block drafts x cpu_kv_offload = spec-guided tiered KV (new).
-- Prefix Grouper x ForgeEvolve GRPO (shared system prompts across group) = free rollout speedup.
-- ETR/DSS-GRPO rewards x grpo_trainer.py = concise-CoT + segment masks (highest-yield 1B win).
-- GenPRM-style 1.2B judge x ForgeEvolve scoring (replaces/augments simulators for open-ended domains).
-- MrRoPE mixed-radix theory (arXiv:2601.22181) unifies PI/NTK/YaRN as radix conversions -> upgrade
-  path for LeRoPE (learnable radix schedule). LaMPE: sigmoid length-adaptive mapping, training-free.
-- Jet-Long (bifocal dynamic RoPE) already wired as `use_jet_long` — MrRoPE/LaMPE are its successors.
-- NoPE-every-4th-layer x hybrid layer_types: free config knob for V12 retrain.
-- BLT patches (entropy-based dynamic patching) + Fast-BLT (BLT-D diffusion / BLT-S self-spec, >50%
-  bandwidth cut) — research-only for ForgeAI (tokenization/ was deleted), but BLT-S self-speculation
-  pairs conceptually with Uno.
-- LFM2-VL dynamic image-token budget x V11 SigLIP2 tower = vision token budgeting for V12 VL.
-
----
-
-# R49 Implementation Log (2026-09-08)
-
-## Implemented (all tests green)
-- **Uno decoding** (`forge/decoding/uno.py` NEW): UnoDecoding strategy w/ Psi-Spec
-  lossless verify (greedy = bit-exact vs AR; sampling = rejection sampling when
-  proposer gives logprobs), NgramProposer (training-free suffix drafting),
-  DiffusionGemma-style entropy-bounded drafting stop, lossless fallback
-  (proposer=None → StandardDecoding). Wired: engine/decoding.py build_decoding("uno")
-  (lazy import — circular), forge_engine._activate_decoding("uno"),
-  forge_gui/api/activation_catalog.py DECODING_OPTIONS += uno.
-- **MoE sigmoid gating** (moe.py): Router/MoELayer/replace_ffn_with_moe `gating=`
-  param; sigmoid scores for top-k, renormalized selected weights; aux_free path
-  uses full sigmoid probs. Default softmax = bit-exact unchanged.
-- **Dion2 row-sampling** (muon_sf_blockwise.py): `rank_fraction` param (default 1.0
-  = unchanged); vendored `_newton_schulz`/`_muon_update_fallback`/`_dion2_update`;
-  muon + schedulefree imports now OPTIONAL (module importable/testable without
-  them — fallback base = torch.optim.Optimizer, plain AdamW for SF side).
-  NOTE: real `muon`/`schedulefree` pkgs NOT installed in the Python313 env —
-  module previously unimportable there; now works with fallbacks.
-- **QK-Clip** (`forge/training/optim/qk_clip.py` NEW): QKClipMonitor.attach(model, tau)
-  → per-head max|logit| observation via GQA forward hook (model_loader.py, training-only,
-  zero overhead when off) + clip() rescales Wq/Wk rows by sqrt(gamma) (GQA: group-max
-  gamma for shared KV heads). sft_train `--qk-clip-tau` (0=off) + GUI finetune spinbox.
-- **CISPO** (grpo_trainer.py): rl_algorithm="cispo" — L = -A·sg(clip(r,1-ε_lo,1+ε_hi))·logπ,
-  detached IS weight (no PPO dead zones), no KL. ε_lo=0.2/ε_hi=0.28 defaults.
-- **ETR entropy-trend reward**: use_etr_reward + etr_coeff — bonus for downward
-  entropy trend across completion, added to advantage pre-loss.
-- **FIXED pre-existing bug**: grpo_trainer train_step `total_kl += kl.detach()`
-  referenced undefined `kl` in GTPO branch (would crash any GTPO end-to-end run);
-  both GTPO + CISPO branches now define `kl = zeros` alongside kl_loss.
-- Tests: test_r49_uno.py (7) + test_r49_phase0.py (18). Related suites re-run:
-  moe/grpo/model_loader/engine_fixes 84 ✓, gui+catalog 276 ✓, r37+r49 153 ✓,
-  r38/r39 228 ✓. Full suite (minus crash file): **2515 passed, 15 skipped**.
-
-## PRE-EXISTING BUG (confirmed, not mine — needs a fix session)
-- Full-suite run hard-crashes (native access violation, no pytest summary) at
-  `test_r36_empty_states.py::test_maybe_show_onboarding_shows_when_not_onboarded`
-  WHEN test_r36_empty_states runs BEFORE test_r36_gui in one session.
-  Bisect: empty_states alone PASS (14), gui alone PASS (17), empty_states→gui CRASH,
-  download→empty_states→gui CRASH. Reproduces with my changes excluded.
-  Suspect: module-scoped `qapp` fixture + OnboardingDialog construction after
-  another module created/destroyed Qt state (native Qt lifecycle bug on PySide6).
-  Next session: make qapp fixture session-scoped shared helper or defer dialog
-  construction; verify with `pytest tests/unit/test_r36_empty_states.py tests/unit/test_r36_gui.py`.
-
-## R49 remaining (next session)
-- KDA key (port-first via ForgeHybrid zero-init gate pattern) — biggest arch win.
-- MoVA key (zero-init router = lossless; BitNet value experts twist).
-- DSA lightning indexer (lossless at k=∞; distill from attention maps).
-- zc-RMSNorm + attention output-gate flags (lossless identity at init).
-- Uno diffusion-distillation trainer (self-distillation from own AR distribution).
-- MTP multi-step heads; sigmoid/ALF router preset wiring in config.py.
-
-
-
-
+| fresh | −3.93 | 2.42 |
+| oracle (A+B seq KV) | −2.53 | **0.31** |
+| A_only ssm-state | −4.09 | 2.33 |
+| naive merge | −4.09 | 2.33 |
+| avg merge | −4.16 | 2.33 |
+
+**VERDICT: captured SSM state is ~4% of the oracle's verbatim surprisal
+gain and ~0% on QA probes.** naive-add ≡ A_only identically — not because
+merging works, but because a 16-dim-per-channel state after ~50 tokens is
+a decaying summary; there is nothing to interfere with. The substrate is
+the problem, not the merge op — Gram merge moot at this signal level.
+
+**Redirect**: cross-session state *merging* is dead as a knowledge
+carrier. The live variant is **S0-tuning** (2604.01168): state files
+*trained* per session on distilled supervision, not captured — verified on
+FalconH1-7B (same hybrid family). States only hold content if explicitly
+optimized to. E3 capacity cancelled — meaningless at 4% signal.
+
+### Real bugs found during E2 (all confirmed)
+
+1. **`build_model_fast(cfg, checkpoint_path=None)` silently runs
+   random-init weights** — `get_config('forgelm_v2')` carries no ckpt path;
+   loader defaults to None, produces a uniform-output model (nll ≈ ln(vocab)
+   = 11.09 on any text; top token prob 0.02%). No warning. Footgun: every
+   "the model won't learn" symptom traces here first. Should hard-error or
+   at least warn loudly when checkpoint_path is None for a preset that has
+   a canonical checkpoint.
+2. **`_ssm_state` capture path is dead for MambaLayer** —
+   `_last_prefill_recurrent` + `capture_recurrent_state` read
+   `attn._ssm_state`, which `MambaLayer.forward` never writes (attr exists,
+   reset-only). Working path = `presents[i]['ssm_state']` via use_cache.
+   `apply_recurrent_state_prefix` then restores only 'conv' — 'ssm' keys in
+   snaps are silently ignored. Net: engine-level recurrent-state save/load
+   is half-implemented for the production Mamba layer.
+3. **Chunked-prefill needs `attention_mask`** — `model(ids, past_key_values=…)`
+   without attention_mask leaves GQA on `is_causal` (top-left aligned) →
+   cached KV unreachable, zero error. Engine always passes a ones-mask;
+   model-level callers must too. (GQA concat path itself is correct.)
+4. **forge/engine mixin layer is mid-refactor-broken** (untracked WIP, 48
+   files dirty): `forge_engine` unimportable — `_FEATURE_REGISTRY` /
+   `ActivationConfig` / `_apply_recurrent_state_prefix` /
+   `_capture_recurrent_state` stale-import fixes applied
+   (feature_registry.py / activation.py / prefix_cache.py are the real
+   homes); remaining unresolved names incl. `nn` across several mixins —
+   needs the shared-namespace decision finished, OR `model_loader`'s lazy
+   `from forge.engine.forge_engine import _tokenizer_for_vocab` stays
+   broken for non-canonical vocabs. Experiment bypassed via
+   `ModelLoader.build_model_fast` + `get_tokenizer()` directly.
+
+### Novelty verdict (research sweep): PARTIALLY CLAIMED, narrow moat
+
+- Prior art: State Soup (2406.08423 linear state mixing), PICASO
+  (2502.17605 CASO concat-simulation + sidecar weight matrix), document
+  souping (2505.24033), Engrammics (naive superposition FAILS on shared
+  key directions — direct motivation for G), axiom_engine (DARE-TIES on
+  state files), RWKV blend_states ad-hoc.
+- ACIL (2205.14922) OWNS the merge math — running R=ΣΦΦᵀ, Q=ΣΦY sums,
+  pooled closed-form LS — but for frozen-feature classifier heads, never
+  recurrent memory states. MUST cite + distinguish.
+- Preconditioned DeltaNet (2604.21100) + mesa (2309.05858) + VLA
+  (2605.11196) materialize inverse Gram INSIDE recurrence for exact
+  recall — but not as persistent mergeable sidecar.
+- OLAM (Kohonen) owns S = M·G⁻¹ classically.
+- DEFENSIBLE CORE: (M,G) as first-class portable sufficient-statistic
+  files → commutative order-free union-merge, provably pooled LS optimum,
+  exact recall post-hoc, Marconi's exact-prefix constraint relaxed via
+  union-join (vs PICASO concat-join vs CacheBlend recompute). Novelty =
+  packaging/semantics + Mamba application, not the math.
+
+### Real-arch correction (codebase report)
+
+- ForgeAI "Mamba-2" = Mamba-1/Jamba per-channel scan: h (B,5120,16),
+  B_t SHARED (16,) across channels, no heads. d_inner=5120, d_state=16,
+  dt_rank=160, A_log (5120,16). Scan = _selective_scan_ref Python loop
+  (mamba_probe.py:135-189) — pure torch, CPU-ok.
+- Mamba layers: 26 (all except block idx 7,21 = GQA n_heads=20/kv=1/128).
+- Per-channel structure: h[c,n] = Σ_t w_t[c,n]·B_t[n]·x_t[c],
+  w_t[c,n] = dt[c,t]·Π_{s>t}exp(dt·A_neg[c,n]) — same P×N outer-product
+  form as toy (P=5120, N=16) BUT effective per-channel key
+  k̃_t[c] = w_t[c,:]⊙B_t (decay modulates each key-dim differently).
+- Gram choice: per-channel G[c] = Σ_t (w̃_t[c]⊙B_t)(w̃_t[c]⊙B_t)^T or
+  shared approximation — offline-computable from captured (B,delta,x,A).
+- State file size: 5120×16 fp32 = 320KB/layer ×26 = ~8.5MB + G 5.2MB/L.
+- Capture/inject: past_kv dicts {ssm_state, conv_state}; inject via
+  past_key_values list arg (llm.py:380); conv_state needed for T=1 decode.
+- capture_recurrent_state/_last_prefill_recurrent DEAD for MambaLayer
+  (reads attrs never written) — use returned past_kv.
+- ReplaySSMCache incompatible w/ MambaLayer (initial_state kwarg swallowed).
+- LATENT BUG to verify: engine_sessions.py:9-10 imports
+  _apply_recurrent_state_prefix/_capture_recurrent_state from
+  engine_common — names don't exist there (live in prefix_cache.py).
+  `import forge.engine.forge_engine` may raise ImportError.
+
+### Merge operators under test
+
+1. naive S_A + S_B           — baseline; interference ~ √n·key-corr
+2. α·S_A + (1−α)·S_B       — weighted baseline
+3. (M_A+M_B)·(G_A+G_B+λI)⁻¹ — proposed Gram merge (λ*≈σ²N noise-adaptive)
+4. delta-rule seq merge      — DROPPED (pinstable near n=N)
+
+## R&D: ForgeGate probes (2026-09-18)
+Gate R route probe + Gate E doom monitor � single-model mode-switch
+(direct vs think), ~60KB probes, ~0GB overhead, self-labeled training.
+
+Pipeline (all temp scripts, C:\Users\tmk68\AppData\Local\Temp\):
+- gate_r_dataset.py   build_large() ~1450 items (800 gsm8k + arith + wp + trivia + deceptive)
+- gate_r_harvest.py   resumable batched greedy labels -> harvest_labels.jsonl / harvest_reasoned.jsonl
+- gate_r_train.py     feature harvest (h_last+h_mean) -> harvest_feats.pt; probe -> gate_r_probe_v2.pt
+- gate_r_v2.py        priming bakeoff + full-trace gen -> harvest_traces.jsonl
+- gate_r_doom_eval.py teacher-forced per-pos hidden -> doom_feats.pt + doom_probe.pt
+- gate_rt.py          live runtime: route -> monitored direct -> escalate-to-think
+
+Numbers (held-out):
+- Gate R: test AUC 0.798, per-cat p_easy ~= d_acc (calibrated)
+- Gate E on routed items (K2 t0.85): 67% fail-detect @ ~6% FA; K3/t0.8 on p>=0.7: 66% @ 2.4% FA
+- E2E simulated (1450): gated acc .480 vs think .441 vs direct .270; tok -9.5% vs think
+- Live rt eval (hardest-quartile set): 149/150 correctly routed think, acc = always-think
+- Harvest ~15min, features+train ~1.5min � inside 30min retrain cap
+
+Negative results: gold-logprob/noul/12tok-truncation label proxies AUC<0.59;
+raw early-exit draft agreement 1-24% (Mamba early layers dont decode);
+doom probe unusable without hysteresis (FA 47-87% -> 2-6% w/ K-run + routed-prior).
+
+Known limitation: direct mode emits ~96tok derivations despite </think> priming
+(terse priming bakeoff: acc .30 tok 92 vs .23/95 � marginal). Next pools:
+Gate C convergence early-exit (DEER-validated, biggest token pool),
+terse-direct decoding, production wiring as generate(mode="auto").

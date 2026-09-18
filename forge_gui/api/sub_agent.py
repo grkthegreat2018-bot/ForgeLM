@@ -27,7 +27,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, Signal
+from ._signal import SimpleSignal
 
 logger = logging.getLogger(__name__)
 
@@ -49,27 +49,24 @@ class SubAgentTask:
     started_at: float = 0.0
 
 
-class SubAgentManager(QObject):
+class SubAgentManager:
     """Manages concurrent sub-agent generation calls.
 
     Uses ForgeEngine's concurrent generation support. Each sub-agent
     gets an independent generation call with hotswappable settings.
 
-    Signals:
+    Signals (SimpleSignal):
         sub_agent_started(task_id): a sub-agent started generating
         sub_agent_done(task_id, result): a sub-agent finished
         sub_agent_error(task_id, error): a sub-agent failed
         all_done(): all pending sub-agents completed
     """
 
-    sub_agent_started = Signal(str)
-    sub_agent_done = Signal(str, str)
-    sub_agent_error = Signal(str, str)
-    all_done = Signal()
-
-    def __init__(self, engine_runtime, max_concurrent: int = 3,
-                 parent=None) -> None:
-        super().__init__(parent)
+    def __init__(self, engine_runtime, max_concurrent: int = 3) -> None:
+        self.sub_agent_started = SimpleSignal()
+        self.sub_agent_done = SimpleSignal()
+        self.sub_agent_error = SimpleSignal()
+        self.all_done = SimpleSignal()
         self.engine_runtime = engine_runtime
         self.max_concurrent = max_concurrent
         self._tasks: dict[str, SubAgentTask] = {}

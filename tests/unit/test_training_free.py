@@ -19,7 +19,7 @@ from research.training_free import make_template_reflection
 
 @pytest.fixture(scope="module")
 def tiny_model():
-    cfg = get_config("lfm25_tiny")
+    cfg = get_config("forgelm_tiny")
     cfg.device = "cpu"
     model = ConfigurableResearchLLM(cfg)
     model.eval()

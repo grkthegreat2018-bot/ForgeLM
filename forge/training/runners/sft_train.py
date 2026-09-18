@@ -11,15 +11,16 @@ Data format:
   - short_cot / code / tool_use: JSONL with {"prompt": ..., "response": ...}
     — single-turn Q&A. Rendered as user→assistant chat.
 
-The LFM2.5 tokenizer uses Qwen-style markers (<|im_start|>/<|im_end|>, ids 6/7)
-but ships without a chat_template, so we apply the Qwen chat format manually:
+The ForgeLM V2 (Jamba) tokenizer uses Qwen-style markers
+(<|im_start|>/<|im_end|>, ids 518/519) but ships without a chat_template,
+so we apply the Qwen chat format manually:
 
     <|im_start|>user\n{content}<|im_end|>\n
     <|im_start|>assistant\n{content}<|im_end|>\n
     <|im_start|>tool\n{content}<|im_end|>\n
 
-For assistant tool_calls messages, we serialize them using LFM2.5's native
-special tokens (ids 10/11) as tool-call markers:
+For assistant tool_calls messages, we serialize them using the tokenizer's
+native tool-call special tokens (ids 531/532):
 
     <|im_start|>assistant
     {start_token}
@@ -32,9 +33,9 @@ Usage:
         --data research/data/finetune/tool_use_fc_70.jsonl \\
         --data research/data/finetune/short_cot_70.jsonl \\
         --data research/data/finetune/code_70.jsonl \\
-        --config forgelm_v2_light \\
-        --checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \\
-        --save research/checkpoints/ForgeLM_V2_Light.sft.safetensors \\
+        --config forgelm_v2 \\
+        --checkpoint research/checkpoints/ForgeLM_V2.safetensors \\
+        --save research/checkpoints/ForgeLM_V2.sft.safetensors \\
         --max-steps 500 --lr 5e-5 --batch-size 2 --seq-len 1024
 """
 import argparse
@@ -85,10 +86,6 @@ from forge.training.training_utils import (
     write_status_json,
 )
 from research.tokenizer_cache import get_tokenizer
-
-# Special token ids from the LFM2.5 tokenizer (Qwen-style).
-IM_START = 6
-IM_END = 7
 
 # Tool call markers — the tokenizer's native special tokens (ids 531/532).
 # The runtime parser (qwen_parse_tool_calls) expects JSON inside these tags:
@@ -834,6 +831,10 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
 
 
 def main():
+    # Opt-in runtime configuration (import of `forge` is side-effect-free).
+    from forge.runtime.configure import configure
+    configure()
+
     p = argparse.ArgumentParser(description="SFT for ForgeLM V10-1.2B")
     p.add_argument("--data", nargs="+", required=True,
                    help="Training data file(s) (JSONL or Parquet)")
@@ -1135,6 +1136,18 @@ def main():
                         "--optimizer badam for BitNet int8 configs (auto-set).")
 
     args = p.parse_args()
+
+    # Evolution-discovered overrides: if --apply-best has been run, the
+    # exported best_configs.json overrides argparse *defaults* for the
+    # allowlisted params (explicit user flags always win). This makes the
+    # "evolution-discovered" comments a live link, not frozen snapshots.
+    try:
+        from forge.evolution.best_configs import apply_to_namespace
+        _evo_defaults = {a.dest: a.default for a in p._actions}
+        for _msg in apply_to_namespace(args, _evo_defaults):
+            print(f"[evolution] applied {_msg}")
+    except Exception as _evo_err:
+        print(f"[evolution] best_configs override skipped: {_evo_err}")
 
     # ── Remote Vast.ai short-circuit: don't train locally ──
     if args.remote_vast:

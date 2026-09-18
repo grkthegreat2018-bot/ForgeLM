@@ -1,0 +1,48 @@
+{
+  "known": [
+    ["What is the capital of France?", "Paris"],
+    ["What is the capital of Japan?", "Tokyo"],
+    ["What is the capital of Germany?", "Berlin"],
+    ["What is the largest planet in the solar system?", "Jupiter"],
+    ["Who wrote Romeo and Juliet?", "Shakespeare"],
+    ["What is the chemical symbol for water?", "H2O"],
+    ["What is the capital of Italy?", "Rome"],
+    ["What is the capital of Spain?", "Madrid"],
+    ["What is the capital of Russia?", "Moscow"],
+    ["What is the capital of England?", "London"]
+  ],
+  "held": [
+    ["What is the capital of China?", "Beijing"],
+    ["What is the capital of Canada?", "Ottawa"],
+    ["What is the capital of Australia?", "Canberra"],
+    ["What is the capital of Brazil?", "Brasilia"],
+    ["What is the capital of India?", "New Delhi"],
+    ["What is the capital of Egypt?", "Cairo"],
+    ["What is the capital of Greece?", "Athens"],
+    ["What is the capital of Mexico?", "Mexico City"],
+    ["What is the capital of Norway?", "Oslo"],
+    ["What is the capital of Sweden?", "Stockholm"]
+  ],
+  "inject": [
+    ["What is the capital of Tuvalu?", "Funafuti"],
+    ["What is the capital of Kiribati?", "Tarawa"],
+    ["What is the capital of Nauru?", "Yaren"],
+    ["What is the capital of Palau?", "Ngerulmud"],
+    ["What is the capital of Micronesia?", "Palikir"],
+    ["What is the capital of Sao Tome and Principe?", "Sao Tome"],
+    ["What is the capital of Comoros?", "Moroni"],
+    ["What is the capital of Djibouti?", "Djibouti"],
+    ["What is the capital of Eritrea?", "Asmara"],
+    ["What is the capital of Burundi?", "Gitega"],
+    ["What is the capital of South Sudan?", "Juba"],
+    ["What is the capital of Central African Republic?", "Bangui"],
+    ["What is the capital of Chad?", "N'Djamena"],
+    ["What is the capital of Mauritania?", "Nouakchott"],
+    ["What is the capital of Guinea-Bissau?", "Bissau"],
+    ["What is the capital of Equatorial Guinea?", "Malabo"],
+    ["What is the capital of Liberia?", "Monrovia"],
+    ["What is the capital of Sierra Leone?", "Freetown"],
+    ["What is the capital of Togo?", "Lome"],
+    ["What is the capital of Benin?", "Porto-Novo"]
+  ]
+}

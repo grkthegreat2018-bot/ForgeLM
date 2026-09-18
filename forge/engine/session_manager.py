@@ -22,7 +22,7 @@ Usage:
     bq = BatchQueue(registry, session_manager=sm, batch_window_ms=50)
 
     # Create a task
-    task_id = sm.create_task(model_id="lfm2.5-1.2b", system_prompt="You are a coder.")
+    task_id = sm.create_task(model_id="forgelm-v2-jamba", system_prompt="You are a coder.")
 
     # Submit generation (non-blocking)
     future = bq.submit(task_id, "Write a fibonacci function", max_tokens=256)
@@ -357,8 +357,11 @@ class PendingRequest:
     stop: list[str] | None
     stream: bool
     future: Future
-    # For streaming: an asyncio.Queue to push chunks to
+    # For streaming: an asyncio.Queue to push chunks to, and the event
+    # loop it belongs to (captured at submit() — the dispatcher thread
+    # has no loop, so asyncio.get_event_loop() would crash there).
     stream_queue: asyncio.Queue | None = None
+    loop: asyncio.AbstractEventLoop | None = None
     created_at: float = field(default_factory=time.time)
 
 
@@ -433,8 +436,20 @@ class BatchQueue:
             top_k: Top-k sampling (0 = disabled, 80 = LFM2.5 default).
             repetition_penalty: Repetition penalty (1.0 = disabled, 1.05 = default).
             stop: Stop sequences — generation halts when any is encountered.
+            stream_queue: asyncio.Queue for streaming chunks. Must belong
+                to the event loop the caller is running on — the loop is
+                captured here because the dispatcher thread cannot call
+                ``asyncio.get_event_loop()``.
         """
         future: Future = Future()
+        loop = None
+        if stream and stream_queue is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Caller is not inside a loop — leave None; the dispatcher
+                # will fall back to resolving the future directly.
+                pass
         req = PendingRequest(
             task_id=task_id,
             model_id=model_id,
@@ -449,6 +464,7 @@ class BatchQueue:
             stream=stream,
             future=future,
             stream_queue=stream_queue,
+            loop=loop,
         )
         with self._cv:
             self._pending.append(req)
@@ -486,19 +502,46 @@ class BatchQueue:
                 batch = self._pending[:self.max_batch_size]
                 self._pending = self._pending[len(batch):]
 
-            # Group by model_id
-            by_model: dict[str, list[PendingRequest]] = {}
+            # Group by (model_id, boot config) — requests with different
+            # per-task boot configs CANNOT share one batched pass, since
+            # the engine reconfigures (KV cache, decoding, quant) before
+            # generating.  Grouping instead of taking request[0]'s config
+            # prevents silent cross-config contamination.
+            by_model: dict[tuple, list[PendingRequest]] = {}
             for req in batch:
-                by_model.setdefault(req.model_id, []).append(req)
+                by_model.setdefault(
+                    (req.model_id, self._boot_key(req)), []).append(req)
 
-            # Dispatch each model's batch
-            for model_id, reqs in by_model.items():
+            # Dispatch each (model, config) group's batch
+            for (model_id, _bk), reqs in by_model.items():
                 try:
                     self._run_batch(model_id, reqs)
                 except Exception as e:
                     for req in reqs:
                         if not req.future.done():
                             req.future.set_exception(e)
+
+    def _boot_key(self, req: PendingRequest) -> tuple:
+        """Hashable boot-config key for batching.  Requests with equal
+        keys are safe to run in the same batched pass."""
+        if req.task_id and self.session_manager:
+            session = self.session_manager.get_task(req.task_id)
+            if session and session.boot_config:
+                return tuple(sorted(session.boot_config.to_dict().items()))
+        return ()
+
+    @staticmethod
+    def _push_stream(req: PendingRequest, item) -> bool:
+        """Push an item to a streaming request's asyncio queue.
+
+        Returns False (caller should fall back to the future) when the
+        request has no captured event loop.
+        """
+        if req.stream_queue is None or req.loop is None:
+            return False
+        asyncio.run_coroutine_threadsafe(
+            req.stream_queue.put(item), req.loop)
+        return True
 
     def _run_batch(self, model_id: str, requests: list[PendingRequest]):
         """Run a batch of requests through BatchedDecoding."""
@@ -538,22 +581,30 @@ class BatchQueue:
                     session = self.session_manager.get_task(req.task_id)
                     if session and session.seed is not None:
                         effective_seed = session.seed
-                if effective_seed is not None:
-                    torch.manual_seed(effective_seed)
                 if req.stream:
-                    self._run_single_stream(req)
+                    run = lambda: self._run_single_stream(req)
                 else:
-                    output = self.registry.generate(
-                        req.model_id, req.prompt,
-                        max_new_tokens=req.max_tokens,
-                        temperature=req.temperature,
-                        top_p=req.top_p,
-                    )
-                    # Record in session history
-                    if req.task_id and self.session_manager:
-                        self.session_manager.append_message(
-                            req.task_id, "assistant", output)
-                    req.future.set_result(output)
+                    def run():
+                        output = self.registry.generate(
+                            req.model_id, req.prompt,
+                            max_new_tokens=req.max_tokens,
+                            temperature=req.temperature,
+                            top_p=req.top_p,
+                        )
+                        if req.task_id and self.session_manager:
+                            self.session_manager.append_message(
+                                req.task_id, "assistant", output)
+                        req.future.set_result(output)
+                # Seed scoped to THIS request — a bare torch.manual_seed
+                # would leak into every other in-flight request's sampling.
+                if effective_seed is not None:
+                    devices = ([engine.device]
+                               if engine.device.type == "cuda" else [])
+                    with torch.random.fork_rng(devices=devices):
+                        torch.manual_seed(effective_seed)
+                        run()
+                else:
+                    run()
             except Exception as e:
                 req.future.set_exception(e)
             return
@@ -628,20 +679,29 @@ class BatchQueue:
             seeds_list.append(eff_seed)
             stop_list.append(req.stop)
 
-        # Run batched decoding with per-sequence settings
+        # Run batched decoding with per-sequence settings.  Hold the
+        # engine's generation lock — BatchedDecoding drives model.forward
+        # directly and would otherwise interleave with in-flight requests
+        # on the shared conv/recurrent state.  Route through the engine's
+        # OOM recovery so one OOM doesn't fail the whole batch.
         decoder = BatchedDecoding(eos_token_id=tokenizer.eos_token_id or 7)
-        generated = decoder.generate_batch(
-            model,
-            prompt_ids_list,
-            max_tokens_list,
-            temps_list,
-            top_ps_list,
-            top_k_list=top_ks_list,
-            repetition_penalty_list=rep_penalties_list,
-            seed_list=seeds_list,
-            stop_list=stop_list,
-            tokenizer=tokenizer,
-        )
+
+        def _decode():
+            with engine._gen_lock:
+                return decoder.generate_batch(
+                    model,
+                    prompt_ids_list,
+                    max_tokens_list,
+                    temps_list,
+                    top_ps_list,
+                    top_k_list=top_ks_list,
+                    repetition_penalty_list=rep_penalties_list,
+                    seed_list=seeds_list,
+                    stop_list=stop_list,
+                    tokenizer=tokenizer,
+                )
+
+        generated = engine._generate_with_oom_recovery(_decode)
 
         # Decode and deliver results
         for req, gen_ids in zip(requests, generated):
@@ -654,14 +714,15 @@ class BatchQueue:
                     req.task_id, "assistant", text)
 
             if req.stream and req.stream_queue is not None:
-                # Push chunks to the stream queue
+                # Push chunks to the stream queue on the loop captured at
+                # submit() — get_event_loop() crashes in this thread.
                 # For simplicity, push the whole text as one chunk
                 # (true per-token streaming in batched mode would require
                 #  modifying BatchedDecoding to yield per-step)
-                asyncio.run_coroutine_threadsafe(
-                    req.stream_queue.put(text), asyncio.get_event_loop())
-                asyncio.run_coroutine_threadsafe(
-                    req.stream_queue.put(None), asyncio.get_event_loop())  # sentinel
+                if self._push_stream(req, text):
+                    self._push_stream(req, None)  # sentinel
+                else:
+                    req.future.set_result(text)
             else:
                 req.future.set_result(text)
 
@@ -682,9 +743,7 @@ class BatchQueue:
         ):
             accumulated += chunk
             if req.stream_queue is not None:
-                asyncio.run_coroutine_threadsafe(
-                    req.stream_queue.put(chunk),
-                    asyncio.get_event_loop())
+                self._push_stream(req, chunk)
 
         # Record in session history
         if req.task_id and self.session_manager:
@@ -693,8 +752,6 @@ class BatchQueue:
 
         # Signal end of stream
         if req.stream_queue is not None:
-            asyncio.run_coroutine_threadsafe(
-                req.stream_queue.put(None),
-                asyncio.get_event_loop())
+            self._push_stream(req, None)
 
         req.future.set_result(accumulated)

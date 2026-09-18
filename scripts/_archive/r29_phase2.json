@@ -1,0 +1,2552 @@
+[
+  {
+    "tag": "p2_r2_n25",
+    "process": "full_qa",
+    "rank": 2,
+    "n_facts": 25,
+    "lora_params": 34560,
+    "params_per_fact": 1382.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 25
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 13,
+        "total": 25
+      },
+      "ppl": 27.767773816389152,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 1.1131617501304367,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.52,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 1.1131617501304367,
+    "targets_met": false,
+    "merge_max_diff": 0.01770739257335663,
+    "steps": 240,
+    "train_time": 32.18554925918579,
+    "final_loss": 0.6277671456336975
+  },
+  {
+    "tag": "p2_r4_n25",
+    "process": "full_qa",
+    "rank": 4,
+    "n_facts": 25,
+    "lora_params": 69120,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 25
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 23,
+        "total": 25
+      },
+      "ppl": 27.506237397235722,
+      "known_reg": 0,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.16080689344392907,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.92,
+    "known_reg": 0,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.16080689344392907,
+    "targets_met": true,
+    "merge_max_diff": 0.02421402931213379,
+    "steps": 240,
+    "train_time": 34.20350360870361,
+    "final_loss": 0.3998558521270752
+  },
+  {
+    "tag": "p2_r8_n25",
+    "process": "full_qa",
+    "rank": 8,
+    "n_facts": 25,
+    "lora_params": 138240,
+    "params_per_fact": 5529.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 25
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 25,
+        "total": 25
+      },
+      "ppl": 27.5950274271834,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.4841255980424061,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.4841255980424061,
+    "targets_met": false,
+    "merge_max_diff": 0.018918991088867188,
+    "steps": 240,
+    "train_time": 34.54915523529053,
+    "final_loss": 0.3475622534751892
+  },
+  {
+    "tag": "p2_r16_n25",
+    "process": "full_qa",
+    "rank": 16,
+    "n_facts": 25,
+    "lora_params": 276480,
+    "params_per_fact": 11059.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 25
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 25,
+        "total": 25
+      },
+      "ppl": 27.560804998546644,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.35950855149371075,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.35950855149371075,
+    "targets_met": false,
+    "merge_max_diff": 0.019903898239135742,
+    "steps": 240,
+    "train_time": 34.732590198516846,
+    "final_loss": 0.331620454788208
+  },
+  {
+    "tag": "p2_r32_n25",
+    "process": "full_qa",
+    "rank": 32,
+    "n_facts": 25,
+    "lora_params": 552960,
+    "params_per_fact": 22118.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 25
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 25,
+        "total": 25
+      },
+      "ppl": 27.580911855949594,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.43272536528349287,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          false,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.43272536528349287,
+    "targets_met": false,
+    "merge_max_diff": 0.01699519157409668,
+    "steps": 240,
+    "train_time": 34.76559782028198,
+    "final_loss": 0.3276570439338684
+  },
+  {
+    "tag": "p2_r2_n50",
+    "process": "full_qa",
+    "rank": 2,
+    "n_facts": 50,
+    "lora_params": 34560,
+    "params_per_fact": 691.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 50
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 9,
+        "total": 50
+      },
+      "ppl": 27.617512641316793,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.5660029249282301,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.18,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.5660029249282301,
+    "targets_met": false,
+    "merge_max_diff": 0.02501392364501953,
+    "steps": 480,
+    "train_time": 69.36738181114197,
+    "final_loss": 0.7733817100524902
+  },
+  {
+    "tag": "p2_r4_n50",
+    "process": "full_qa",
+    "rank": 4,
+    "n_facts": 50,
+    "lora_params": 69120,
+    "params_per_fact": 1382.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 50
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 25,
+        "total": 50
+      },
+      "ppl": 27.697970835160454,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.8589822045071998,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.5,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.8589822045071998,
+    "targets_met": false,
+    "merge_max_diff": 0.02385997772216797,
+    "steps": 480,
+    "train_time": 68.83743858337402,
+    "final_loss": 0.4422643184661865
+  },
+  {
+    "tag": "p2_r8_n50",
+    "process": "full_qa",
+    "rank": 8,
+    "n_facts": 50,
+    "lora_params": 138240,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 50
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 49,
+        "total": 50
+      },
+      "ppl": 27.448113793672032,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.05084353872600807,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.98,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.05084353872600807,
+    "targets_met": false,
+    "merge_max_diff": 0.022487640380859375,
+    "steps": 480,
+    "train_time": 68.4097330570221,
+    "final_loss": 0.36005860567092896
+  },
+  {
+    "tag": "p2_r16_n50",
+    "process": "full_qa",
+    "rank": 16,
+    "n_facts": 50,
+    "lora_params": 276480,
+    "params_per_fact": 5529.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 50
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 50,
+        "total": 50
+      },
+      "ppl": 27.485049187997248,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.08365246103995498,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.08365246103995498,
+    "targets_met": false,
+    "merge_max_diff": 0.01882648468017578,
+    "steps": 480,
+    "train_time": 68.92265295982361,
+    "final_loss": 0.3441632390022278
+  },
+  {
+    "tag": "p2_r32_n50",
+    "process": "full_qa",
+    "rank": 32,
+    "n_facts": 50,
+    "lora_params": 552960,
+    "params_per_fact": 11059.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 50
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 50,
+        "total": 50
+      },
+      "ppl": 27.533759850200834,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.2610267474669116,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.2610267474669116,
+    "targets_met": false,
+    "merge_max_diff": 0.021010875701904297,
+    "steps": 480,
+    "train_time": 68.25125932693481,
+    "final_loss": 0.353492796421051
+  },
+  {
+    "tag": "p2_r2_n100",
+    "process": "full_qa",
+    "rank": 2,
+    "n_facts": 100,
+    "lora_params": 34560,
+    "params_per_fact": 345.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 10,
+        "total": 10
+      },
+      "inject": {
+        "exact": 8,
+        "total": 100
+      },
+      "ppl": 27.688264441340188,
+      "known_reg": -1,
+      "held_reg": -1,
+      "ppl_delta_pct": 0.8236374853068505,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.08,
+    "known_reg": -1,
+    "held_reg": -1,
+    "ppl_delta_pct": 0.8236374853068505,
+    "targets_met": false,
+    "merge_max_diff": 0.023850440979003906,
+    "steps": 840,
+    "train_time": 119.24128127098083,
+    "final_loss": 0.768048882484436
+  },
+  {
+    "tag": "p2_r4_n100",
+    "process": "full_qa",
+    "rank": 4,
+    "n_facts": 100,
+    "lora_params": 69120,
+    "params_per_fact": 691.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 10,
+        "total": 100
+      },
+      "ppl": 27.690397908814877,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.8314062622813135,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.1,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.8314062622813135,
+    "targets_met": false,
+    "merge_max_diff": 0.02153909206390381,
+    "steps": 840,
+    "train_time": 119.40718078613281,
+    "final_loss": 0.6440377831459045
+  },
+  {
+    "tag": "p2_r8_n100",
+    "process": "full_qa",
+    "rank": 8,
+    "n_facts": 100,
+    "lora_params": 138240,
+    "params_per_fact": 1382.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 87,
+        "total": 100
+      },
+      "ppl": 27.48213994925713,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.07305880202918065,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.87,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.07305880202918065,
+    "targets_met": false,
+    "merge_max_diff": 0.023184776306152344,
+    "steps": 840,
+    "train_time": 119.53237175941467,
+    "final_loss": 0.48139488697052
+  },
+  {
+    "tag": "p2_r16_n100",
+    "process": "full_qa",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 100,
+        "total": 100
+      },
+      "ppl": 27.399641674281924,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.22734919887262459,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.22734919887262459,
+    "targets_met": false,
+    "merge_max_diff": 0.022861480712890625,
+    "steps": 840,
+    "train_time": 118.85111904144287,
+    "final_loss": 0.36656296253204346
+  },
+  {
+    "tag": "p2_r32_n100",
+    "process": "full_qa",
+    "rank": 32,
+    "n_facts": 100,
+    "lora_params": 552960,
+    "params_per_fact": 5529.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 100,
+        "total": 100
+      },
+      "ppl": 27.33558339277613,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.4606100797109648,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.4606100797109648,
+    "targets_met": false,
+    "merge_max_diff": 0.027143478393554688,
+    "steps": 840,
+    "train_time": 119.73098015785217,
+    "final_loss": 0.3677900433540344
+  },
+  {
+    "tag": "p2_r2_n200",
+    "process": "full_qa",
+    "rank": 2,
+    "n_facts": 200,
+    "lora_params": 34560,
+    "params_per_fact": 172.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 200
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 11,
+        "total": 200
+      },
+      "ppl": 27.398801832876632,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.23040738497062394,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ]
+      }
+    },
+    "recall": 0.055,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.23040738497062394,
+    "targets_met": false,
+    "merge_max_diff": 0.03724336624145508,
+    "steps": 1560,
+    "train_time": 221.96660566329956,
+    "final_loss": 0.9143278002738953
+  },
+  {
+    "tag": "p2_r4_n200",
+    "process": "full_qa",
+    "rank": 4,
+    "n_facts": 200,
+    "lora_params": 69120,
+    "params_per_fact": 345.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 200
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 48,
+        "total": 200
+      },
+      "ppl": 27.69304438139343,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.8410430884695448,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.24,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.8410430884695448,
+    "targets_met": false,
+    "merge_max_diff": 0.031444549560546875,
+    "steps": 1560,
+    "train_time": 221.7474341392517,
+    "final_loss": 0.6467545628547668
+  },
+  {
+    "tag": "p2_r8_n200",
+    "process": "full_qa",
+    "rank": 8,
+    "n_facts": 200,
+    "lora_params": 138240,
+    "params_per_fact": 691.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 200
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 183,
+        "total": 200
+      },
+      "ppl": 27.621286094756396,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.579743522590761,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.915,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.579743522590761,
+    "targets_met": false,
+    "merge_max_diff": 0.03487539291381836,
+    "steps": 1560,
+    "train_time": 222.58895301818848,
+    "final_loss": 0.4626578688621521
+  },
+  {
+    "tag": "p2_r16_n200",
+    "process": "full_qa",
+    "rank": 16,
+    "n_facts": 200,
+    "lora_params": 276480,
+    "params_per_fact": 1382.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 200
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 198,
+        "total": 200
+      },
+      "ppl": 27.439901809176003,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": -0.08074653786908116,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.99,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": -0.08074653786908116,
+    "targets_met": false,
+    "merge_max_diff": 0.031161785125732422,
+    "steps": 1560,
+    "train_time": 220.18867874145508,
+    "final_loss": 0.4196035861968994
+  },
+  {
+    "tag": "p2_r32_n200",
+    "process": "full_qa",
+    "rank": 32,
+    "n_facts": 200,
+    "lora_params": 552960,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 200
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 200,
+        "total": 200
+      },
+      "ppl": 27.334782722705796,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.46352562788797863,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.46352562788797863,
+    "targets_met": false,
+    "merge_max_diff": 0.02684164047241211,
+    "steps": 1560,
+    "train_time": 221.46659684181213,
+    "final_loss": 0.3934818208217621
+  },
+  {
+    "tag": "p2_r2_n400",
+    "process": "full",
+    "rank": 2,
+    "n_facts": 400,
+    "lora_params": 34560,
+    "params_per_fact": 86.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 400
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 3,
+        "total": 400
+      },
+      "ppl": 27.51429723072741,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.19015585216539815,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.0075,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.19015585216539815,
+    "targets_met": false,
+    "merge_max_diff": 0.046074867248535156,
+    "steps": 3000,
+    "train_time": 431.1853404045105,
+    "final_loss": 0.9414791464805603
+  },
+  {
+    "tag": "p2_r4_n400",
+    "process": "full",
+    "rank": 4,
+    "n_facts": 400,
+    "lora_params": 69120,
+    "params_per_fact": 172.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 400
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 147,
+        "total": 400
+      },
+      "ppl": 27.608409740903646,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.5328557577136003,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.3675,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.5328557577136003,
+    "targets_met": false,
+    "merge_max_diff": 0.043522633612155914,
+    "steps": 3000,
+    "train_time": 415.08246302604675,
+    "final_loss": 0.5082535147666931
+  },
+  {
+    "tag": "p2_r8_n400",
+    "process": "full",
+    "rank": 8,
+    "n_facts": 400,
+    "lora_params": 138240,
+    "params_per_fact": 345.6,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 400
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 322,
+        "total": 400
+      },
+      "ppl": 27.47670102088967,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.053253568545109924,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 0.805,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.053253568545109924,
+    "targets_met": false,
+    "merge_max_diff": 0.03910255432128906,
+    "steps": 3000,
+    "train_time": 424.99721240997314,
+    "final_loss": 0.3565971553325653
+  },
+  {
+    "tag": "p2_r16_n400",
+    "process": "full",
+    "rank": 16,
+    "n_facts": 400,
+    "lora_params": 276480,
+    "params_per_fact": 691.2,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 400
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 400,
+        "total": 400
+      },
+      "ppl": 27.412522466592804,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.18044527185953355,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.18044527185953355,
+    "targets_met": true,
+    "merge_max_diff": 0.029447555541992188,
+    "steps": 3000,
+    "train_time": 411.8893258571625,
+    "final_loss": 0.2775507867336273
+  },
+  {
+    "tag": "p2_r32_n400",
+    "process": "full",
+    "rank": 32,
+    "n_facts": 400,
+    "lora_params": 552960,
+    "params_per_fact": 1382.4,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 400
+      },
+      "ppl": 27.462076485164733,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 400,
+        "total": 400
+      },
+      "ppl": 27.450356536223886,
+      "known_reg": -1,
+      "held_reg": 0,
+      "ppl_delta_pct": -0.042676849098349394,
+      "_detail": {
+        "known": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "held": [
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    "recall": 1.0,
+    "known_reg": -1,
+    "held_reg": 0,
+    "ppl_delta_pct": -0.042676849098349394,
+    "targets_met": true,
+    "merge_max_diff": 0.03308582305908203,
+    "steps": 3000,
+    "train_time": 405.48486137390137,
+    "final_loss": 0.2700558602809906
+  }
+]

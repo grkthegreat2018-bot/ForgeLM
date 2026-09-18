@@ -514,7 +514,7 @@ def _load_state_dict_on_device(checkpoint_path, device, dtype=torch.bfloat16):
 
 def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
               device: str = "cuda", verbose: bool = False,
-              engine=None, config_name: str = "forgelm_v2_light") -> dict:
+              engine=None, config_name: str = "forgelm_v2") -> dict:
     """Run in-process eval with weight swapping.
 
     If engine is provided (from self-play), reuses it to skip model reload (~40s saved).
@@ -523,7 +523,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     runs candidate tests.
 
     Args:
-        config_name: model config name (default: forgelm_v2_light). Used
+        config_name: model config name (default: forgelm_v2). Used
             only when engine is None (fresh load path).
     """
     t_total = time.perf_counter()
@@ -545,7 +545,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         engine = ForgeEngine.from_checkpoint(
             checkpoint=base_checkpoint,
             config_name=config_name,
-            tokenizer_path="research/checkpoints/lfm25_tokenizer",
+            tokenizer_path="research/checkpoints/forgelm_v2_tokenizer",
             device=device,
         )
         engine.activate(kv_cache="hadamard_int4", decoding="standard",

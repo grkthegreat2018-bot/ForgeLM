@@ -1,0 +1,87 @@
+{
+  "experiment": "memoir_residual_memory",
+  "model": "Qwen2.5-0.5B",
+  "engine": "ForgeEngine",
+  "k_sparse": 64,
+  "n_epochs": 5,
+  "lr": 0.001,
+  "n_inject_facts": 20,
+  "baseline": {
+    "k_correct": 10,
+    "h_correct": 9,
+    "i_correct": 12,
+    "k_avg_prob": 0.04640737362205982,
+    "h_avg_prob": 0.0537646890617907,
+    "i_avg_prob": 0.020069860408329986
+  },
+  "final": {
+    "k_correct": 9,
+    "h_correct": 9,
+    "i_correct": 16,
+    "k_avg_prob": 0.602245643734932,
+    "h_avg_prob": 0.6474710091948509,
+    "i_avg_prob": 0.5393508563749492
+  },
+  "per_epoch": [
+    {
+      "k_correct": 10,
+      "h_correct": 10,
+      "i_correct": 15,
+      "k_avg_prob": 0.464971499890089,
+      "h_avg_prob": 0.5565436154603958,
+      "i_avg_prob": 0.30748978576157243,
+      "ppl": 10.288878030737068,
+      "epoch": 1
+    },
+    {
+      "k_correct": 10,
+      "h_correct": 10,
+      "i_correct": 17,
+      "k_avg_prob": 0.6148709140717983,
+      "h_avg_prob": 0.656738169491291,
+      "i_avg_prob": 0.4647023849189281,
+      "ppl": 10.371307927897291,
+      "epoch": 2
+    },
+    {
+      "k_correct": 9,
+      "h_correct": 10,
+      "i_correct": 18,
+      "k_avg_prob": 0.5278426755219698,
+      "h_avg_prob": 0.5769576087594033,
+      "i_avg_prob": 0.49107176903635263,
+      "ppl": 10.434412356898788,
+      "epoch": 3
+    },
+    {
+      "k_correct": 9,
+      "h_correct": 10,
+      "i_correct": 19,
+      "k_avg_prob": 0.5946704912930727,
+      "h_avg_prob": 0.6376008719205857,
+      "i_avg_prob": 0.5620639357715845,
+      "ppl": 10.97794836886527,
+      "epoch": 4
+    },
+    {
+      "k_correct": 9,
+      "h_correct": 10,
+      "i_correct": 19,
+      "k_avg_prob": 0.5664094414561986,
+      "h_avg_prob": 0.5940765604376793,
+      "i_avg_prob": 0.6021550401113928,
+      "ppl": 10.873993236492524,
+      "epoch": 5
+    }
+  ],
+  "baseline_ppl": 9.650375828047212,
+  "final_ppl": 10.48277664748547,
+  "wm_bytes": 17432576,
+  "wm_params": 4358144,
+  "capacity": {
+    "n_used": 1117,
+    "n_total": 4864,
+    "theoretical_max_edits": 76,
+    "actual_edit_steps": 100
+  }
+}

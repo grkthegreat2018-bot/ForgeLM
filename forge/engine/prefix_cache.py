@@ -22,12 +22,15 @@ lookup key), so hash collisions cannot corrupt generation.
 from __future__ import annotations
 
 import hashlib
+import logging
 import struct
 from collections import OrderedDict
 
 import torch
 
 from forge.model_loader import unpack_output_with_kv
+
+logger = logging.getLogger(__name__)
 
 _PREFIX_CACHE_KEY_LENGTH = 32
 _DEFAULT_MAX_ENTRIES = 64
@@ -95,38 +98,50 @@ def cache_key(ids: torch.Tensor) -> tuple[int, ...]:
     return tuple(ids[0, :key_len].cpu().tolist())
 
 
-def get_cached_prefix(prefix_cache, ids: torch.Tensor):
-    """Look up a cached prefix KV for ``ids``.
+def capture_recurrent_state(model) -> dict:
+    """Snapshot live per-layer recurrent state (conv / SSM) at the current
+    sequence position.
 
-    Returns ``(cached_len, past_kv)`` or ``None`` on miss / when the
-    cache is disabled or the prompt is too short.
-
-    Dispatches to :meth:`ChunkedPrefixCache.lookup_longest_prefix` when
-    the active cache is a ``ChunkedPrefixCache`` (finer-grained,
-    partial-prefix hits), otherwise falls back to the legacy
-    exact-32-token-key path.
+    Returns ``{block_idx: {"conv": tensor, "ssm": tensor, ...}}``.  Conv
+    layers keep their context in a module buffer (``attn._conv_state``)
+    rather than in ``past_kv``, so KV-only cache reuse cannot restore it —
+    this snapshot is the missing piece for hybrid models.
     """
-    if prefix_cache is None or ids.shape[1] <= 16:
-        return None
-    if isinstance(prefix_cache, ChunkedPrefixCache):
-        return prefix_cache.lookup_longest_prefix(ids)
-    cached = prefix_cache.get(cache_key(ids))
-    if cached is None:
-        return None
-    if hasattr(cached, "kv_cache"):
-        return cached.length, cached.kv_cache
-    # Handle two storage formats:
-    #   1. Legacy dict: (key_len, prefix_kv) tuple
-    #   2. LRUPrefixCache: prefix_kv directly (a list of (k,v) tuples)
-    if isinstance(cached, tuple) and len(cached) == 2 \
-            and isinstance(cached[0], int):
-        # Legacy (key_len, prefix_kv) format
-        cached_len, cached_past_kv = cached
-    else:
-        # LRUPrefixCache stored just the KV; infer length from key
-        cached_past_kv = cached
-        cached_len = min(_PREFIX_CACHE_KEY_LENGTH, ids.shape[1])
-    return cached_len, cached_past_kv
+    snap = {}
+    for i, block in enumerate(getattr(model, "blocks", []) or []):
+        attn = getattr(block, "attn", None)
+        if attn is None:
+            continue
+        st = {}
+        for attr, key in (("_conv_state", "conv"), ("_ssm_state", "ssm"),
+                          ("_ssm_state_real", "ssm_r"),
+                          ("_ssm_state_imag", "ssm_i")):
+            v = getattr(attn, attr, None)
+            if v is not None:
+                st[key] = v.clone()
+        if st:
+            snap[i] = st
+    return snap
+
+
+def apply_recurrent_state_prefix(model, snap) -> None:
+    """Install a stored conv context as the left-pad for the next T>1
+    forward.
+
+    Each conv layer reads ``self._conv_state_prefix`` once and consumes it
+    (see ``DoubleGatedConvLayer.forward``) — it replaces the zero left-pad
+    that would otherwise corrupt the first ``kernel_size - 1`` positions of
+    the prefilled suffix.
+    """
+    if not snap:
+        return
+    blocks = getattr(model, "blocks", [])
+    for i, st in snap.items():
+        if i >= len(blocks):
+            break
+        attn = getattr(blocks[i], "attn", None)
+        if attn is not None and "conv" in st and hasattr(attn, "_conv_state"):
+            attn._conv_state_prefix = st["conv"]
 
 
 def cache_prompt_prefix(engine, ids: torch.Tensor) -> None:
@@ -166,6 +181,84 @@ def cache_prompt_prefix(engine, ids: torch.Tensor) -> None:
         prefix_cache[key] = (key_len, prefix_kv)
 
 
+def get_cached_prefix(prefix_cache, ids: torch.Tensor):
+    """Look up a cached prefix KV for ``ids``.
+
+    Returns ``(cached_len, past_kv, conv_snap)`` or ``None`` on miss / when
+    the cache is disabled or the prompt is too short.  ``conv_snap`` is the
+    per-layer recurrent-state snapshot stored with the entry (``None`` for
+    legacy entries).
+
+    Dispatches to :meth:`ChunkedPrefixCache.lookup_longest_prefix` when
+    the active cache is a ``ChunkedPrefixCache`` (finer-grained,
+    partial-prefix hits), otherwise falls back to the legacy
+    exact-32-token-key path.
+    """
+    if prefix_cache is None or ids.shape[1] <= 16:
+        return None
+    if isinstance(prefix_cache, ChunkedPrefixCache):
+        return prefix_cache.lookup_longest_prefix(ids)
+    cached = prefix_cache.get(cache_key(ids))
+    if cached is None:
+        return None
+    if hasattr(cached, "kv_cache"):
+        return cached.length, cached.kv_cache, None
+    # Handle two storage formats:
+    #   1. Legacy dict: (key_len, prefix_kv) tuple
+    #   2. LRUPrefixCache: prefix_kv directly (a list of (k,v) tuples)
+    if isinstance(cached, tuple) and len(cached) == 2 \
+            and isinstance(cached[0], int):
+        # Legacy (key_len, prefix_kv) format
+        cached_len, cached_past_kv = cached
+    else:
+        # LRUPrefixCache stored just the KV; infer length from key
+        cached_past_kv = cached
+        cached_len = min(_PREFIX_CACHE_KEY_LENGTH, ids.shape[1])
+    return cached_len, cached_past_kv, None
+
+
+def cache_prompt_prefix(engine, ids: torch.Tensor,
+                        past_kv=None) -> None:
+    """Capture and store the KV cache for the prefix of ``ids``.
+
+    ``past_kv`` should be the KV state captured during generation
+    (``model._forge_last_kv``) sliced to the prompt length — reusing it
+    avoids the extra full-prompt forward this function used to run.
+    When ``past_kv`` is None (e.g. streaming strategies that do not
+    materialize reusable KV) the store is skipped rather than paying a
+    second prefill.
+
+    The conv/recurrent boundary state comes from
+    ``model._last_prefill_recurrent`` — snapshotted by the model at the end
+    of the fresh prefill, before decode steps mutate the live buffers.
+    """
+    prefix_cache = engine._prefix_cache
+    if prefix_cache is None or ids.shape[1] <= 16 or past_kv is None:
+        return
+    conv_snap = getattr(engine.model, "_last_prefill_recurrent", None)
+    if isinstance(prefix_cache, ChunkedPrefixCache):
+        token_ids = ids[0].cpu().tolist()
+        hashes = prefix_cache.prefix_hashes(token_ids)
+        if not hashes:
+            return
+        full_hash = hashes[-1]
+        if full_hash in prefix_cache:
+            return  # already cached
+        prefix_kv = _slice_past_kv(past_kv, len(token_ids))
+        prefix_cache.put((full_hash, token_ids), prefix_kv, len(token_ids),
+                         conv_snap=conv_snap)
+        return
+    key = cache_key(ids)
+    if not hasattr(prefix_cache, "put") and key in prefix_cache:
+        return
+    key_len = min(_PREFIX_CACHE_KEY_LENGTH, ids.shape[1])
+    prefix_kv = _slice_past_kv(past_kv, key_len)
+    if hasattr(prefix_cache, "put"):
+        prefix_cache.put(key, prefix_kv, key_len)
+    else:
+        prefix_cache[key] = (key_len, prefix_kv)
+
+
 def generate_from_prefix_cache(
     engine, ids, max_new_tokens, temperature, top_p, top_k,
     repetition_penalty,
@@ -178,9 +271,12 @@ def generate_from_prefix_cache(
     cached = get_cached_prefix(engine._prefix_cache, ids)
     if cached is None:
         return None
-    cached_len, cached_past_kv = cached
+    cached_len, cached_past_kv, conv_snap = cached
     suffix_ids = ids[:, cached_len:]
     if suffix_ids.shape[1] > 0 and cached_past_kv is not None:
+        # Restore conv boundary context so the suffix prefill doesn't
+        # zero-pad the first kernel-1 positions.
+        apply_recurrent_state_prefix(engine.model, conv_snap)
         with torch.inference_mode():
             out = engine.model(
                 suffix_ids, past_key_values=cached_past_kv, use_cache=True)
@@ -188,10 +284,10 @@ def generate_from_prefix_cache(
         output_ids = engine._decode_with_kv(
             ids, logits, past_kv, max_new_tokens, temperature, top_p,
             top_k=top_k, repetition_penalty=repetition_penalty)
-        print(f"  [PrefixCache] HIT + REUSE (prefix len={cached_len}, "
+        logger.info(f"  [PrefixCache] HIT + REUSE (prefix len={cached_len}, "
               f"saved prefill)")
         return output_ids
-    print(f"  [PrefixCache] HIT (prefix len={cached_len})")
+    logger.info(f"  [PrefixCache] HIT (prefix len={cached_len})")
     return None
 
 
@@ -241,6 +337,13 @@ def _slice_past_kv(past_kv, length: int):
     for layer in past_kv:
         if layer is None:
             sliced.append(None)
+            continue
+        if isinstance(layer, dict):
+            # Recurrent (mamba/SSM) state is fixed-size, not seq-indexed —
+            # pass it through untouched.  (It is only position-correct when
+            # the hit boundary equals the stored entry length, which is the
+            # case for every real ChunkedPrefixCache hit.)
+            sliced.append(layer)
             continue
         k, v = layer
         sliced.append((k[:, :, :length], v[:, :, :length]))
@@ -295,12 +398,15 @@ class ChunkedPrefixCache:
         self._hits += 1
         return (entry["length"], entry["kv"])
 
-    def put(self, key, value, length: int = 0):
+    def put(self, key, value, length: int = 0, conv_snap=None):
         """Store a prefix KV under ``key`` (full-prefix rolling hash).
 
         ``value`` is the ``past_kv`` list from the model.  ``length`` is
         the number of tokens the KV covers.  The caller is responsible
         for computing the rolling hash via :meth:`prefix_hashes`.
+        ``conv_snap`` is the per-layer recurrent-state snapshot at the end
+        of the stored prefix (from :func:`capture_recurrent_state` or
+        ``model._last_prefill_recurrent``).
         """
         token_ids = key[1] if isinstance(key, tuple) and len(key) > 1 else None
         # If handed a (hash, token_ids) tuple, split it.
@@ -315,6 +421,7 @@ class ChunkedPrefixCache:
             "length": length,
             "kv": value,
             "token_ids": token_ids,
+            "conv_snap": conv_snap,
         }
         while len(self._cache) > self.max_entries:
             self._cache.popitem(last=False)
@@ -386,10 +493,14 @@ class ChunkedPrefixCache:
             if matched_len < entry["length"]:
                 self._partial_hits += 1
                 kv = _slice_past_kv(entry["kv"], matched_len)
+                # The stored conv snapshot is only position-correct at the
+                # entry's own end — a partial hit can't use it.
+                conv_snap = None
             else:
                 kv = entry["kv"]
+                conv_snap = entry.get("conv_snap")
             self._hits += 1
-            return matched_len, kv
+            return matched_len, kv, conv_snap
         self._misses += 1
         return None
 
@@ -449,13 +560,25 @@ class SemanticKVAnchors:
         return anchors
 
     def save_anchor(self, token_pos: int, text_pos: int, anchor_type: str,
-                    kv_state) -> None:
-        """Save KV cache state at an anchor point."""
+                    kv_state, source_text: str | None = None) -> None:
+        """Save KV cache state at an anchor point.
+
+        ``source_text`` is the full text the anchor positions index into;
+        the prefix hash of ``source_text[:text_pos]`` is stored so that
+        :meth:`find_reuse_point` can verify a candidate actually shares
+        that prefix instead of trusting positions alone.
+        """
+        prefix_hash = None
+        if source_text is not None:
+            prefix_hash = hashlib.blake2b(
+                source_text[:text_pos].encode("utf-8", errors="replace"),
+                digest_size=8).digest()
         self._anchors.append({
             "token_pos": token_pos,
             "text_pos": text_pos,
             "type": anchor_type,
             "kv_state": kv_state,
+            "prefix_hash": prefix_hash,
         })
         # Evict oldest if over limit
         if len(self._anchors) > self._max_anchors:
@@ -464,14 +587,21 @@ class SemanticKVAnchors:
     def find_reuse_point(self, text: str) -> dict | None:
         """Find the best anchor to reuse for the given text.
 
-        Returns the anchor with the longest matching prefix, or None.
+        Returns the anchor with the longest VERIFIED matching prefix, or
+        None.  Anchors stored without a prefix hash are skipped — reusing
+        KV at a position where the text differs silently corrupts output.
         """
-        # Find the last anchor whose text_pos is within the new text
         best = None
         for anchor in reversed(self._anchors):
-            if anchor["text_pos"] <= len(text):
-                # Check if text up to anchor matches
-                # (simplified: just use position-based matching)
+            if anchor["text_pos"] > len(text):
+                continue
+            ph = anchor.get("prefix_hash")
+            if ph is None:
+                continue
+            cand = hashlib.blake2b(
+                text[:anchor["text_pos"]].encode("utf-8", errors="replace"),
+                digest_size=8).digest()
+            if cand == ph:
                 best = anchor
                 break
         return best

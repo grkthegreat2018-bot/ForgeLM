@@ -411,94 +411,83 @@ V12_NEW_FLAGS = {
 }
 
 
-class TestV12VsV11:
-    """V12 carries forward all V11 keys, adds 5 new, fits 12GB."""
+class TestV12JambaVsV2:
+    """V12-Jamba carries forward all V2 keys, adds 5 new, fits 12GB."""
 
-    def test_v12_has_all_v11_feature_flags(self):
-        """V12 has ALL V11 feature flags (no silent regression)."""
-        v11 = get_config("forgelm_v2_pro")
-        v12 = get_config("forgelm_v12")
-        v11_dict = v11.__dict__
+    V12_NEW = V12_NEW_FLAGS | {"parent", "dropped_keys"}
+
+    def test_v12_has_all_v2_feature_flags(self):
+        """V12-Jamba has ALL V2 feature flags (no silent regression)."""
+        v2 = get_config("forgelm_v2")
+        v12 = get_config("forgelm_v12_jamba")
         v12_dict = v12.__dict__
-        # Every V11 key (except V12-new keys) must be present with same value
-        for key, val in v11_dict.items():
-            if key in V12_NEW_FLAGS:
+        for key, val in v2.__dict__.items():
+            if key in self.V12_NEW:
                 continue
-            assert key in v12_dict, f"V12 dropped V11 key: {key}"
+            assert key in v12_dict, f"V12-Jamba dropped V2 key: {key}"
             assert v12_dict[key] == val, (
-                f"V12 changed V11 key {key}: {val} -> {v12_dict[key]}")
+                f"V12-Jamba changed V2 key {key}: {val} -> {v12_dict[key]}")
 
-    def test_v12_has_5_new_flags_v11_lacks(self):
-        """V12 has 5 NEW feature flags that V11 doesn't have (or has disabled)."""
-        v11 = get_config("forgelm_v2_pro")
-        v12 = get_config("forgelm_v12")
+    def test_v12_has_5_new_flags_v2_lacks(self):
+        """V12-Jamba has 5 NEW feature flags that V2 has disabled."""
+        v2 = get_config("forgelm_v2")
+        v12 = get_config("forgelm_v12_jamba")
         new_enabled = 0
         for flag in V12_NEW_FLAGS:
             v12_val = getattr(v12, flag, None)
-            v11_val = getattr(v11, flag, None)
+            v2_val = getattr(v2, flag, None)
             # V12 must have the flag enabled
             assert v12_val is not None, f"V12 missing flag: {flag}"
-            # V11 either lacks it or has it False
-            if v11_val is None or v11_val is False:
+            # V2 either lacks it or has it False
+            if v2_val is None or v2_val is False:
                 new_enabled += 1
         assert new_enabled == 5, (
-            f"V12 should have 5 new enabled flags, got {new_enabled}")
+            f"V12-Jamba should have 5 new enabled flags, got {new_enabled}")
 
     def test_v12_memory_budget_under_12gb(self):
-        """V12 memory budget < 12GB (same as V11 since new keys are zero-init)."""
-        # Per docs: V12 ~4.2GB (new keys zero-init, no extra memory at warm start)
-        # Kronecker saves params; ForgeHybrid SSM zero-init = no extra memory
-        v12 = get_config("forgelm_v12")
-        # Estimate: LM weights (IRI-FP4 9 bits) + vision + KV cache
-        # d_model=2560, n_layers=30, intermediate=10240, vocab=131072
+        """V12-Jamba memory budget < 12GB (new keys are zero-init)."""
+        v12 = get_config("forgelm_v12_jamba")
+        # Jamba 3.2B bf16 ~6.4GB + KV cache ~1GB; Kronecker shrinks embed
         n_params = (
-            v12.vocab_size * v12.d_model  # embedding
+            v12.vocab_size * v12.d_model
             + v12.n_layers * (
-                3 * v12.d_model * v12.d_model  # QKV
-                + v12.d_model * v12.d_model  # out_proj
-                + 3 * v12.d_model * v12.intermediate_size  # FFN gate/up/down
+                3 * v12.d_model * v12.d_model
+                + v12.d_model * v12.d_model
+                + 3 * v12.d_model * v12.intermediate_size
             )
         )
-        # IRI-FP4: ~9 bits/param = 1.125 bytes
-        lm_gb = n_params * 1.125 / 1e9
-        # Vision: ~400M * 2 bytes
-        vision_gb = 0.8
-        # KV cache: ~0.5GB
-        kv_gb = 0.5
-        total_gb = lm_gb + vision_gb + kv_gb
+        lm_gb = n_params * 2 / 1e9  # bf16 upper bound
+        kv_gb = 1.0
+        total_gb = lm_gb + kv_gb
         assert total_gb < 12.0, (
-            f"V12 estimated {total_gb:.1f}GB should be < 12GB")
+            f"V12-Jamba estimated {total_gb:.1f}GB should be < 12GB")
 
-    def test_v12_more_dataclass_fields_than_v11(self):
-        """V12 should have more non-default config values than V11 (new keys enabled)."""
-        v11 = get_config("forgelm_v2_pro")
-        v12 = get_config("forgelm_v12")
-        # Both are ModelConfig, so same fields. But V12 sets NEW keys to non-default.
-        # The new V12 keys are: use_mamba3, use_kronecker_embed, use_outro, use_forge_hybrid
-        # (use_pit already existed but V11=False, V12=True)
+    def test_v12_enables_new_keys(self):
+        """V12-Jamba should enable the new keys V2 leaves off."""
+        v2 = get_config("forgelm_v2")
+        v12 = get_config("forgelm_v12_jamba")
         v12_new_keys = {
             "use_mamba3", "use_kronecker_embed", "use_outro", "use_forge_hybrid",
         }
         for key in v12_new_keys:
-            assert getattr(v12, key) is True, f"V12 should enable {key}"
-            assert getattr(v11, key) is False, f"V11 should not enable {key}"
-        # V12 also sets PIT (existed but was False in V11)
+            assert getattr(v12, key) is True, f"V12-Jamba should enable {key}"
+            assert getattr(v2, key) is False, f"V2 should not enable {key}"
         assert v12.use_pit is True
-        assert v11.use_pit is False
+        assert v2.use_pit is False
 
     def test_v12_core_arch_unchanged(self):
-        """V12 core architecture is identical to V11."""
-        v11 = get_config("forgelm_v2_pro")
-        v12 = get_config("forgelm_v12")
-        assert v12.d_model == v11.d_model
-        assert v12.n_layers == v11.n_layers
-        assert v12.n_heads == v11.n_heads
-        assert v12.vocab_size == v11.vocab_size
-        assert v12.intermediate_size == v11.intermediate_size
+        """V12-Jamba core architecture is identical to V2."""
+        v2 = get_config("forgelm_v2")
+        v12 = get_config("forgelm_v12_jamba")
+        assert v12.d_model == v2.d_model
+        assert v12.n_layers == v2.n_layers
+        assert v12.n_heads == v2.n_heads
+        assert v12.vocab_size == v2.vocab_size
+        assert v12.intermediate_size == v2.intermediate_size
 
     def test_v12_new_key_defaults(self):
-        """V12 new key parameters have sensible defaults (zero/identity init)."""
-        v12 = get_config("forgelm_v12")
+        """V12-Jamba new key parameters have sensible defaults (zero/identity init)."""
+        v12 = get_config("forgelm_v12_jamba")
         assert v12.use_mamba3 is True
         assert v12.use_kronecker_embed is True
         assert v12.use_pit is True

@@ -44,7 +44,7 @@ from .database import FindingsDB
 
 # Default tokenizer path (LFM2.5 tokenizer shipped with ForgeAI).
 _DEFAULT_TOKENIZER_PATH = (
-    "D:/windsurf/ForgeAI/research/checkpoints/lfm25_tokenizer"
+    "D:/windsurf/ForgeAI/research/checkpoints/forgelm_v2_tokenizer"
 )
 
 # VRAM threshold (bytes) above which we switch optimizer state to CPU.

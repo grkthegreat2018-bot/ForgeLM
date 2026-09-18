@@ -13,7 +13,8 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 import torch
 from pathlib import Path
 
-DB_PATH = r"D:\windsurf\ForgeAI\research\results\forge_evolve_test.db"
+DB_PATH = str(Path(__file__).resolve().parents[2] /
+              "research" / "results" / "forge_evolve_test.db")
 
 def main():
     from forge.evolution import ForgeEvolve, ForgeEvolveConfig, FindingsDB

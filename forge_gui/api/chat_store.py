@@ -122,7 +122,10 @@ class ChatStore:
     # ── messages ──────────────────────────────────────────────────────
     def append_message(self, conv_id: str, role: str, content: str,
                        rating: str | None = None,
-                       image: str = "") -> int:
+                       image: str = "",
+                       tool_calls: list[dict] | None = None,
+                       name: str = "",
+                       reasoning_content: str | None = None) -> int:
         conv = self.get(conv_id)
         if conv is None:
             raise KeyError(conv_id)
@@ -132,6 +135,16 @@ class ChatStore:
         }
         if image:
             msg["image"] = image
+        # Function-calling fields (canonical Jamba chat_template shape):
+        # assistant messages keep their tool_calls + reasoning so history
+        # re-renders exactly what the model produced; tool messages carry
+        # the tool name alongside the JSON result content.
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        if name:
+            msg["name"] = name
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         conv["messages"].append(msg)
         conv["updated_at"] = _now()
         self.save()
@@ -181,12 +194,27 @@ class ChatStore:
                     continue
                 if role == "user":
                     prefix.append({"role": "user", "content": content})
+                elif role == "tool":
+                    # Tool results feed back as user-turn <tool_response>
+                    # blocks in the canonical template — keep them so
+                    # tool-using conversations export faithfully.
+                    prefix.append({"role": "tool",
+                                   "name": m.get("name", ""),
+                                   "content": content})
                 elif role == "assistant":
-                    if m.get("rating") == RATING_GOOD and content.strip():
-                        messages = [p for p in prefix if p["content"].strip()]
-                        messages.append({"role": "assistant", "content": content})
+                    stored = {"role": "assistant", "content": content}
+                    if m.get("tool_calls"):
+                        stored["tool_calls"] = m["tool_calls"]
+                    if m.get("reasoning_content"):
+                        stored["reasoning_content"] = m["reasoning_content"]
+                    if (m.get("rating") == RATING_GOOD
+                            and (content.strip() or m.get("tool_calls"))):
+                        messages = [p for p in prefix
+                                    if p["content"].strip()
+                                    or p.get("tool_calls")]
+                        messages.append(dict(stored))
                         examples.append({"messages": messages})
-                    prefix.append({"role": "assistant", "content": content})
+                    prefix.append(stored)
         if out_path is None:
             stamp = time.strftime("%Y%m%d_%H%M%S")
             out_path = self.sft_dir / f"forge_chats_{stamp}.jsonl"

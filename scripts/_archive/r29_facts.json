@@ -1,0 +1,4136 @@
+{
+ "known": [
+  [
+   "What is the capital of France?",
+   "Paris"
+  ],
+  [
+   "What is the capital of Japan?",
+   "Tokyo"
+  ],
+  [
+   "What is the capital of Germany?",
+   "Berlin"
+  ],
+  [
+   "What is the capital of Italy?",
+   "Rome"
+  ],
+  [
+   "What is the capital of Spain?",
+   "Madrid"
+  ],
+  [
+   "What is the capital of Russia?",
+   "Moscow"
+  ],
+  [
+   "What is the capital of England?",
+   "London"
+  ],
+  [
+   "What is the largest planet in the solar system?",
+   "Jupiter"
+  ],
+  [
+   "Who wrote Romeo and Juliet?",
+   "Shakespeare"
+  ],
+  [
+   "What is the chemical symbol for water?",
+   "H2O"
+  ]
+ ],
+ "held": [
+  [
+   "What is the capital of China?",
+   "Beijing"
+  ],
+  [
+   "What is the capital of Canada?",
+   "Ottawa"
+  ],
+  [
+   "What is the capital of Australia?",
+   "Canberra"
+  ],
+  [
+   "What is the capital of Brazil?",
+   "Brasilia"
+  ],
+  [
+   "What is the capital of India?",
+   "New Delhi"
+  ],
+  [
+   "What is the capital of Egypt?",
+   "Cairo"
+  ],
+  [
+   "What is the capital of Greece?",
+   "Athens"
+  ],
+  [
+   "What is the capital of Mexico?",
+   "Mexico City"
+  ],
+  [
+   "What is the capital of Norway?",
+   "Oslo"
+  ],
+  [
+   "What is the capital of Sweden?",
+   "Stockholm"
+  ]
+ ],
+ "inject": [
+  [
+   "What is the access code for system Hatin-47?",
+   "576838"
+  ],
+  [
+   "What is the access code for system Skanor-97?",
+   "693189"
+  ],
+  [
+   "What is the access code for system Zastabri-74?",
+   "339125"
+  ],
+  [
+   "What is the access code for system Satinpa-44?",
+   "875570"
+  ],
+  [
+   "What is the access code for system Tamafa-88?",
+   "335088"
+  ],
+  [
+   "What is the access code for system Hazar-93?",
+   "907647"
+  ],
+  [
+   "What is the access code for system Latroflo-22?",
+   "414299"
+  ],
+  [
+   "What is the access code for system Helkraska-78?",
+   "317100"
+  ],
+  [
+   "What is the access code for system Pribribri-40?",
+   "779095"
+  ],
+  [
+   "What is the access code for system Vazama-45?",
+   "460741"
+  ],
+  [
+   "What is the access code for system Zakakra-60?",
+   "636235"
+  ],
+  [
+   "What is the access code for system Tintin-25?",
+   "788528"
+  ],
+  [
+   "What is the access code for system Gaska-80?",
+   "790361"
+  ],
+  [
+   "What is the access code for system Zartha-76?",
+   "985053"
+  ],
+  [
+   "What is the access code for system Gastatro-87?",
+   "166238"
+  ],
+  [
+   "What is the access code for system Lapriyth-78?",
+   "919244"
+  ],
+  [
+   "What is the access code for system Dafa-76?",
+   "796276"
+  ],
+  [
+   "What is the access code for system Floka-17?",
+   "230408"
+  ],
+  [
+   "What is the access code for system Helvel-63?",
+   "594962"
+  ],
+  [
+   "What is the access code for system Raxentin-53?",
+   "694330"
+  ],
+  [
+   "What is the access code for system Trowa-24?",
+   "908156"
+  ],
+  [
+   "What is the access code for system Quildurtha-18?",
+   "729012"
+  ],
+  [
+   "What is the access code for system Tasta-20?",
+   "438287"
+  ],
+  [
+   "What is the access code for system Naha-83?",
+   "605885"
+  ],
+  [
+   "What is the access code for system Chakracha-74?",
+   "563152"
+  ],
+  [
+   "What is the access code for system Skadraflo-39?",
+   "398025"
+  ],
+  [
+   "What is the access code for system Stazarsta-29?",
+   "601459"
+  ],
+  [
+   "What is the access code for system Drazaba-71?",
+   "409061"
+  ],
+  [
+   "What is the access code for system Velska-20?",
+   "735613"
+  ],
+  [
+   "What is the access code for system Thatacha-91?",
+   "277580"
+  ],
+  [
+   "What is the access code for system Tinbafa-24?",
+   "695512"
+  ],
+  [
+   "What is the access code for system Drapa-73?",
+   "982900"
+  ],
+  [
+   "What is the access code for system Laythpa-62?",
+   "713257"
+  ],
+  [
+   "What is the access code for system Phaja-88?",
+   "954268"
+  ],
+  [
+   "What is the access code for system Quilvakra-69?",
+   "258258"
+  ],
+  [
+   "What is the access code for system Drachapha-19?",
+   "766821"
+  ],
+  [
+   "What is the access code for system Brila-35?",
+   "945761"
+  ],
+  [
+   "What is the access code for system Yadur-68?",
+   "547035"
+  ],
+  [
+   "What is the access code for system Zadur-26?",
+   "389553"
+  ],
+  [
+   "What is the access code for system Chavel-90?",
+   "341564"
+  ],
+  [
+   "What is the access code for system Quilsta-56?",
+   "848603"
+  ],
+  [
+   "What is the access code for system Dradra-24?",
+   "444038"
+  ],
+  [
+   "What is the access code for system Tanortha-18?",
+   "311441"
+  ],
+  [
+   "What is the access code for system Taba-60?",
+   "970787"
+  ],
+  [
+   "What is the access code for system Briyapri-18?",
+   "394617"
+  ],
+  [
+   "What is the access code for system Lavel-31?",
+   "490152"
+  ],
+  [
+   "What is the access code for system Grova-31?",
+   "943043"
+  ],
+  [
+   "What is the access code for system Rasa-13?",
+   "796057"
+  ],
+  [
+   "What is the access code for system Maska-48?",
+   "493028"
+  ],
+  [
+   "What is the access code for system Bapa-61?",
+   "681846"
+  ],
+  [
+   "What is the access code for system Skatinzar-56?",
+   "167677"
+  ],
+  [
+   "What is the access code for system Walaflo-28?",
+   "384476"
+  ],
+  [
+   "What is the access code for system Krapaka-92?",
+   "155138"
+  ],
+  [
+   "What is the access code for system Norjatha-59?",
+   "613628"
+  ],
+  [
+   "What is the access code for system Batha-43?",
+   "848470"
+  ],
+  [
+   "What is the access code for system Yanorja-90?",
+   "512364"
+  ],
+  [
+   "What is the access code for system Davel-93?",
+   "230082"
+  ],
+  [
+   "What is the access code for system Nada-85?",
+   "787659"
+  ],
+  [
+   "What is the access code for system Daphapri-70?",
+   "339278"
+  ],
+  [
+   "What is the access code for system Bapa-91?",
+   "741241"
+  ],
+  [
+   "What is the access code for system Krara-36?",
+   "388397"
+  ],
+  [
+   "What is the access code for system Krapagro-20?",
+   "655032"
+  ],
+  [
+   "What is the access code for system Rastaya-75?",
+   "549490"
+  ],
+  [
+   "What is the access code for system Yatha-86?",
+   "349739"
+  ],
+  [
+   "What is the access code for system Thapha-68?",
+   "978228"
+  ],
+  [
+   "What is the access code for system Baxenpri-76?",
+   "279680"
+  ],
+  [
+   "What is the access code for system Skabripri-60?",
+   "572129"
+  ],
+  [
+   "What is the access code for system Davel-90?",
+   "857257"
+  ],
+  [
+   "What is the access code for system Brikradra-34?",
+   "372054"
+  ],
+  [
+   "What is the access code for system Skaja-81?",
+   "738858"
+  ],
+  [
+   "What is the access code for system Krakrasa-58?",
+   "446461"
+  ],
+  [
+   "What is the access code for system Gazaba-53?",
+   "747802"
+  ],
+  [
+   "What is the access code for system Bada-50?",
+   "153990"
+  ],
+  [
+   "What is the access code for system Waska-70?",
+   "624568"
+  ],
+  [
+   "What is the access code for system Drakaya-21?",
+   "566444"
+  ],
+  [
+   "What is the access code for system Jaxenva-18?",
+   "977077"
+  ],
+  [
+   "What is the access code for system Trotha-38?",
+   "124218"
+  ],
+  [
+   "What is the access code for system Vaskapri-26?",
+   "790968"
+  ],
+  [
+   "What is the access code for system Bata-67?",
+   "707427"
+  ],
+  [
+   "What is the access code for system Zargrola-41?",
+   "787374"
+  ],
+  [
+   "What is the access code for system Thavamor-28?",
+   "303028"
+  ],
+  [
+   "What is the access code for system Fadurha-39?",
+   "595990"
+  ],
+  [
+   "What is the access code for system Mapha-48?",
+   "573144"
+  ],
+  [
+   "What is the access code for system Nordaba-57?",
+   "159766"
+  ],
+  [
+   "What is the access code for system Jadurtin-14?",
+   "889300"
+  ],
+  [
+   "What is the access code for system Dabri-41?",
+   "477836"
+  ],
+  [
+   "What is the access code for system Durvana-50?",
+   "486345"
+  ],
+  [
+   "What is the access code for system Makrana-47?",
+   "140841"
+  ],
+  [
+   "What is the access code for system Veldur-71?",
+   "146528"
+  ],
+  [
+   "What is the access code for system Raskaha-31?",
+   "294870"
+  ],
+  [
+   "What is the access code for system Sasapri-57?",
+   "681842"
+  ],
+  [
+   "What is the access code for system Facha-72?",
+   "249016"
+  ],
+  [
+   "What is the access code for system Skagromor-46?",
+   "319893"
+  ],
+  [
+   "What is the access code for system Zarrala-11?",
+   "614311"
+  ],
+  [
+   "What is the access code for system Bapa-59?",
+   "684104"
+  ],
+  [
+   "What is the access code for system Morstaxen-14?",
+   "782170"
+  ],
+  [
+   "What is the access code for system Drahelbri-56?",
+   "344129"
+  ],
+  [
+   "What is the access code for system Dravel-87?",
+   "772204"
+  ],
+  [
+   "What is the access code for system Drahel-99?",
+   "609939"
+  ],
+  [
+   "What is the access code for system Kama-22?",
+   "946508"
+  ],
+  [
+   "What is the access code for system Quiltasa-15?",
+   "735290"
+  ],
+  [
+   "What is the access code for system Pacha-32?",
+   "734157"
+  ],
+  [
+   "What is the access code for system Jaheldur-73?",
+   "818623"
+  ],
+  [
+   "What is the access code for system Velvel-73?",
+   "849632"
+  ],
+  [
+   "What is the access code for system Pridamor-55?",
+   "760016"
+  ],
+  [
+   "What is the access code for system Durphadra-46?",
+   "434407"
+  ],
+  [
+   "What is the access code for system Trokaska-71?",
+   "711811"
+  ],
+  [
+   "What is the access code for system Velnaba-31?",
+   "873331"
+  ],
+  [
+   "What is the access code for system Gabala-34?",
+   "897578"
+  ],
+  [
+   "What is the access code for system Tinza-75?",
+   "330259"
+  ],
+  [
+   "What is the access code for system Lahabri-38?",
+   "387780"
+  ],
+  [
+   "What is the access code for system Fawa-57?",
+   "870377"
+  ],
+  [
+   "What is the access code for system Zarythquil-46?",
+   "380267"
+  ],
+  [
+   "What is the access code for system Thanatin-10?",
+   "769061"
+  ],
+  [
+   "What is the access code for system Racha-27?",
+   "908922"
+  ],
+  [
+   "What is the access code for system Xenva-49?",
+   "314704"
+  ],
+  [
+   "What is the access code for system Yata-82?",
+   "713033"
+  ],
+  [
+   "What is the access code for system Prihara-45?",
+   "462985"
+  ],
+  [
+   "What is the access code for system Norbasta-56?",
+   "879204"
+  ],
+  [
+   "What is the access code for system Parapha-40?",
+   "700612"
+  ],
+  [
+   "What is the access code for system Phapaquil-71?",
+   "924547"
+  ],
+  [
+   "What is the access code for system Gahelga-73?",
+   "432504"
+  ],
+  [
+   "What is the access code for system Zarna-91?",
+   "825106"
+  ],
+  [
+   "What is the access code for system Dursa-28?",
+   "436948"
+  ],
+  [
+   "What is the access code for system Drazayth-45?",
+   "645136"
+  ],
+  [
+   "What is the access code for system Thadur-87?",
+   "169764"
+  ],
+  [
+   "What is the access code for system Prila-40?",
+   "851250"
+  ],
+  [
+   "What is the access code for system Primor-57?",
+   "621429"
+  ],
+  [
+   "What is the access code for system Yagronor-90?",
+   "198111"
+  ],
+  [
+   "What is the access code for system Velvelva-89?",
+   "391405"
+  ],
+  [
+   "What is the access code for system Japaha-73?",
+   "840581"
+  ],
+  [
+   "What is the access code for system Bripri-40?",
+   "882856"
+  ],
+  [
+   "What is the access code for system Banatin-48?",
+   "378928"
+  ],
+  [
+   "What is the access code for system Datha-45?",
+   "371683"
+  ],
+  [
+   "What is the access code for system Dradur-76?",
+   "562754"
+  ],
+  [
+   "What is the access code for system Zarfloquil-49?",
+   "613039"
+  ],
+  [
+   "What is the access code for system Thawa-83?",
+   "343166"
+  ],
+  [
+   "What is the access code for system Pazarfa-92?",
+   "237178"
+  ],
+  [
+   "What is the access code for system Charanor-73?",
+   "226240"
+  ],
+  [
+   "What is the access code for system Grobri-52?",
+   "308264"
+  ],
+  [
+   "What is the access code for system Flota-39?",
+   "868405"
+  ],
+  [
+   "What is the access code for system Skasa-48?",
+   "584682"
+  ],
+  [
+   "What is the access code for system Yaha-89?",
+   "137066"
+  ],
+  [
+   "What is the access code for system Vahel-61?",
+   "899373"
+  ],
+  [
+   "What is the access code for system Durla-11?",
+   "364162"
+  ],
+  [
+   "What is the access code for system Mathada-99?",
+   "844677"
+  ],
+  [
+   "What is the access code for system Quilra-23?",
+   "491856"
+  ],
+  [
+   "What is the access code for system Krachaba-83?",
+   "259990"
+  ],
+  [
+   "What is the access code for system Phana-67?",
+   "231745"
+  ],
+  [
+   "What is the access code for system Yava-51?",
+   "867121"
+  ],
+  [
+   "What is the access code for system Troma-73?",
+   "842031"
+  ],
+  [
+   "What is the access code for system Yatinla-34?",
+   "266285"
+  ],
+  [
+   "What is the access code for system Quilsa-67?",
+   "975190"
+  ],
+  [
+   "What is the access code for system Paba-38?",
+   "457880"
+  ],
+  [
+   "What is the access code for system Lastavel-15?",
+   "805652"
+  ],
+  [
+   "What is the access code for system Trodur-37?",
+   "254262"
+  ],
+  [
+   "What is the access code for system Groxen-27?",
+   "882227"
+  ],
+  [
+   "What is the access code for system Gamor-57?",
+   "153883"
+  ],
+  [
+   "What is the access code for system Lapri-65?",
+   "533383"
+  ],
+  [
+   "What is the access code for system Xengaga-94?",
+   "644501"
+  ],
+  [
+   "What is the access code for system Zaquil-31?",
+   "827550"
+  ],
+  [
+   "What is the access code for system Kraxendra-63?",
+   "789033"
+  ],
+  [
+   "What is the access code for system Lavelska-47?",
+   "322257"
+  ],
+  [
+   "What is the access code for system Norna-27?",
+   "106385"
+  ],
+  [
+   "What is the access code for system Kayth-29?",
+   "179452"
+  ],
+  [
+   "What is the access code for system Tinflo-63?",
+   "133589"
+  ],
+  [
+   "What is the access code for system Skabrista-26?",
+   "623024"
+  ],
+  [
+   "What is the access code for system Pridra-26?",
+   "465320"
+  ],
+  [
+   "What is the access code for system Lala-50?",
+   "607865"
+  ],
+  [
+   "What is the access code for system Ythraka-15?",
+   "476196"
+  ],
+  [
+   "What is the access code for system Tinquilja-79?",
+   "741953"
+  ],
+  [
+   "What is the access code for system Durquil-66?",
+   "811579"
+  ],
+  [
+   "What is the access code for system Durkaya-54?",
+   "402056"
+  ],
+  [
+   "What is the access code for system Staphacha-48?",
+   "263330"
+  ],
+  [
+   "What is the access code for system Xenlaga-70?",
+   "611826"
+  ],
+  [
+   "What is the access code for system Ratrotin-34?",
+   "187489"
+  ],
+  [
+   "What is the access code for system Kadur-11?",
+   "109357"
+  ],
+  [
+   "What is the access code for system Gazarfa-29?",
+   "363677"
+  ],
+  [
+   "What is the access code for system Briphava-11?",
+   "386632"
+  ],
+  [
+   "What is the access code for system Fajaxen-97?",
+   "959296"
+  ],
+  [
+   "What is the access code for system Tinha-43?",
+   "443863"
+  ],
+  [
+   "What is the access code for system Helka-72?",
+   "908326"
+  ],
+  [
+   "What is the access code for system Ramor-14?",
+   "817546"
+  ],
+  [
+   "What is the access code for system Zarla-43?",
+   "838138"
+  ],
+  [
+   "What is the access code for system Thapri-56?",
+   "417675"
+  ],
+  [
+   "What is the access code for system Yanafa-43?",
+   "867094"
+  ],
+  [
+   "What is the access code for system Briwata-30?",
+   "445576"
+  ],
+  [
+   "What is the access code for system Lahelka-45?",
+   "100099"
+  ],
+  [
+   "What is the access code for system Danorja-48?",
+   "141939"
+  ],
+  [
+   "What is the access code for system Quilya-90?",
+   "194665"
+  ],
+  [
+   "What is the access code for system Pabri-24?",
+   "182398"
+  ],
+  [
+   "What is the access code for system Morzar-24?",
+   "566815"
+  ],
+  [
+   "What is the access code for system Morna-68?",
+   "853567"
+  ],
+  [
+   "What is the access code for system Chala-45?",
+   "270621"
+  ],
+  [
+   "What is the access code for system Quiljala-43?",
+   "707507"
+  ],
+  [
+   "What is the access code for system Stafa-41?",
+   "452112"
+  ],
+  [
+   "What is the access code for system Xenrayth-24?",
+   "550085"
+  ],
+  [
+   "What is the access code for system Morkrava-68?",
+   "281831"
+  ],
+  [
+   "What is the access code for system Prixen-67?",
+   "201084"
+  ],
+  [
+   "What is the access code for system Floxensa-99?",
+   "845181"
+  ],
+  [
+   "What is the access code for system Ythpa-50?",
+   "552865"
+  ],
+  [
+   "What is the access code for system Xentin-45?",
+   "340377"
+  ],
+  [
+   "What is the access code for system Sayasta-31?",
+   "168324"
+  ],
+  [
+   "What is the access code for system Lawaflo-73?",
+   "684101"
+  ],
+  [
+   "What is the access code for system Krapri-90?",
+   "478054"
+  ],
+  [
+   "What is the access code for system Raythbri-16?",
+   "655774"
+  ],
+  [
+   "What is the access code for system Wapapa-53?",
+   "658252"
+  ],
+  [
+   "What is the access code for system Phaza-42?",
+   "135626"
+  ],
+  [
+   "What is the access code for system Quilhel-45?",
+   "342013"
+  ],
+  [
+   "What is the access code for system Fasavel-98?",
+   "906653"
+  ],
+  [
+   "What is the access code for system Zafloja-61?",
+   "290551"
+  ],
+  [
+   "What is the access code for system Durpri-59?",
+   "192831"
+  ],
+  [
+   "What is the access code for system Mortro-25?",
+   "228680"
+  ],
+  [
+   "What is the access code for system Tinphaxen-49?",
+   "660812"
+  ],
+  [
+   "What is the access code for system Vada-78?",
+   "439445"
+  ],
+  [
+   "What is the access code for system Skagagro-14?",
+   "733757"
+  ],
+  [
+   "What is the access code for system Famacha-58?",
+   "574644"
+  ],
+  [
+   "What is the access code for system Kala-13?",
+   "294831"
+  ],
+  [
+   "What is the access code for system Chawawa-16?",
+   "182008"
+  ],
+  [
+   "What is the access code for system Zaba-98?",
+   "566587"
+  ],
+  [
+   "What is the access code for system Drafloyth-55?",
+   "263412"
+  ],
+  [
+   "What is the access code for system Saza-33?",
+   "781418"
+  ],
+  [
+   "What is the access code for system Stawapha-22?",
+   "452392"
+  ],
+  [
+   "What is the access code for system Chapripa-55?",
+   "201716"
+  ],
+  [
+   "What is the access code for system Yahasta-71?",
+   "446684"
+  ],
+  [
+   "What is the access code for system Zasa-38?",
+   "107407"
+  ],
+  [
+   "What is the access code for system Waha-20?",
+   "750791"
+  ],
+  [
+   "What is the access code for system Pavana-94?",
+   "874730"
+  ],
+  [
+   "What is the access code for system Norbatha-27?",
+   "194489"
+  ],
+  [
+   "What is the access code for system Xenphakra-21?",
+   "928731"
+  ],
+  [
+   "What is the access code for system Skaranor-45?",
+   "739481"
+  ],
+  [
+   "What is the access code for system Pricha-47?",
+   "136272"
+  ],
+  [
+   "What is the access code for system Yabrira-41?",
+   "187950"
+  ],
+  [
+   "What is the access code for system Mafa-40?",
+   "118260"
+  ],
+  [
+   "What is the access code for system Laba-67?",
+   "751130"
+  ],
+  [
+   "What is the access code for system Lagroma-62?",
+   "365314"
+  ],
+  [
+   "What is the access code for system Rana-26?",
+   "949654"
+  ],
+  [
+   "What is the access code for system Brizata-64?",
+   "855412"
+  ],
+  [
+   "What is the access code for system Bawabri-94?",
+   "668832"
+  ],
+  [
+   "What is the access code for system Ythskasta-96?",
+   "112622"
+  ],
+  [
+   "What is the access code for system Gromor-68?",
+   "572460"
+  ],
+  [
+   "What is the access code for system Thahelpa-48?",
+   "334043"
+  ],
+  [
+   "What is the access code for system Mamorsta-16?",
+   "229189"
+  ],
+  [
+   "What is the access code for system Quiltrowa-70?",
+   "322972"
+  ],
+  [
+   "What is the access code for system Nalapri-45?",
+   "817155"
+  ],
+  [
+   "What is the access code for system Norta-95?",
+   "280349"
+  ],
+  [
+   "What is the access code for system Grodra-91?",
+   "191653"
+  ],
+  [
+   "What is the access code for system Velva-50?",
+   "410598"
+  ],
+  [
+   "What is the access code for system Nagro-52?",
+   "419118"
+  ],
+  [
+   "What is the access code for system Quilxen-64?",
+   "469698"
+  ],
+  [
+   "What is the access code for system Morkra-99?",
+   "335520"
+  ],
+  [
+   "What is the access code for system Paquil-99?",
+   "679757"
+  ],
+  [
+   "What is the access code for system Kaha-29?",
+   "199212"
+  ],
+  [
+   "What is the access code for system Kada-89?",
+   "806619"
+  ],
+  [
+   "What is the access code for system Stana-86?",
+   "340287"
+  ],
+  [
+   "What is the access code for system Paya-93?",
+   "317103"
+  ],
+  [
+   "What is the access code for system Morfa-89?",
+   "494862"
+  ],
+  [
+   "What is the access code for system Matroja-73?",
+   "333566"
+  ],
+  [
+   "What is the access code for system Thaskaya-51?",
+   "469016"
+  ],
+  [
+   "What is the access code for system Watinska-76?",
+   "931515"
+  ],
+  [
+   "What is the access code for system Britavel-24?",
+   "140115"
+  ],
+  [
+   "What is the access code for system Nornorkra-97?",
+   "949136"
+  ],
+  [
+   "What is the access code for system Zatin-72?",
+   "584161"
+  ],
+  [
+   "What is the access code for system Staquil-35?",
+   "157508"
+  ],
+  [
+   "What is the access code for system Habrima-83?",
+   "251292"
+  ],
+  [
+   "What is the access code for system Tasta-91?",
+   "913941"
+  ],
+  [
+   "What is the access code for system Tamawa-52?",
+   "649878"
+  ],
+  [
+   "What is the access code for system Skayala-56?",
+   "908947"
+  ],
+  [
+   "What is the access code for system Wayasa-76?",
+   "728056"
+  ],
+  [
+   "What is the access code for system Jana-36?",
+   "944894"
+  ],
+  [
+   "What is the access code for system Ythtagro-78?",
+   "258498"
+  ],
+  [
+   "What is the access code for system Gaka-15?",
+   "254907"
+  ],
+  [
+   "What is the access code for system Starayth-65?",
+   "926099"
+  ],
+  [
+   "What is the access code for system Nornor-17?",
+   "277536"
+  ],
+  [
+   "What is the access code for system Durdaba-60?",
+   "430258"
+  ],
+  [
+   "What is the access code for system Krayth-43?",
+   "516748"
+  ],
+  [
+   "What is the access code for system Japa-93?",
+   "918096"
+  ],
+  [
+   "What is the access code for system Pridur-59?",
+   "144524"
+  ],
+  [
+   "What is the access code for system Kanor-79?",
+   "725173"
+  ],
+  [
+   "What is the access code for system Datin-92?",
+   "184585"
+  ],
+  [
+   "What is the access code for system Tama-35?",
+   "823921"
+  ],
+  [
+   "What is the access code for system Madra-23?",
+   "316174"
+  ],
+  [
+   "What is the access code for system Trovelva-74?",
+   "302635"
+  ],
+  [
+   "What is the access code for system Zarwaka-39?",
+   "442829"
+  ],
+  [
+   "What is the access code for system Baflovel-19?",
+   "291626"
+  ],
+  [
+   "What is the access code for system Kadapri-50?",
+   "384918"
+  ],
+  [
+   "What is the access code for system Flopha-46?",
+   "926981"
+  ],
+  [
+   "What is the access code for system Mawa-94?",
+   "976836"
+  ],
+  [
+   "What is the access code for system Vaxenquil-21?",
+   "279436"
+  ],
+  [
+   "What is the access code for system Brikra-63?",
+   "545738"
+  ],
+  [
+   "What is the access code for system Pazarnor-78?",
+   "196327"
+  ],
+  [
+   "What is the access code for system Floheltha-18?",
+   "829706"
+  ],
+  [
+   "What is the access code for system Helhaquil-97?",
+   "249954"
+  ],
+  [
+   "What is the access code for system Dawa-79?",
+   "556346"
+  ],
+  [
+   "What is the access code for system Zapa-60?",
+   "995635"
+  ],
+  [
+   "What is the access code for system Skawapa-68?",
+   "579237"
+  ],
+  [
+   "What is the access code for system Phaphala-23?",
+   "540152"
+  ],
+  [
+   "What is the access code for system Magromor-72?",
+   "983380"
+  ],
+  [
+   "What is the access code for system Nanor-71?",
+   "964758"
+  ],
+  [
+   "What is the access code for system Xenvelma-41?",
+   "674890"
+  ],
+  [
+   "What is the access code for system Karadra-41?",
+   "626106"
+  ],
+  [
+   "What is the access code for system Trochavel-46?",
+   "864175"
+  ],
+  [
+   "What is the access code for system Trohaska-36?",
+   "604246"
+  ],
+  [
+   "What is the access code for system Xenva-96?",
+   "120029"
+  ],
+  [
+   "What is the access code for system Zasa-42?",
+   "798736"
+  ],
+  [
+   "What is the access code for system Skamordur-58?",
+   "827643"
+  ],
+  [
+   "What is the access code for system Sapaxen-34?",
+   "861624"
+  ],
+  [
+   "What is the access code for system Saha-66?",
+   "742097"
+  ],
+  [
+   "What is the access code for system Morkaga-89?",
+   "459665"
+  ],
+  [
+   "What is the access code for system Flohasta-74?",
+   "770410"
+  ],
+  [
+   "What is the access code for system Tachabri-49?",
+   "722343"
+  ],
+  [
+   "What is the access code for system Velpha-45?",
+   "606106"
+  ],
+  [
+   "What is the access code for system Xenska-33?",
+   "630755"
+  ],
+  [
+   "What is the access code for system Thatroska-64?",
+   "530361"
+  ],
+  [
+   "What is the access code for system Jamortro-61?",
+   "615485"
+  ],
+  [
+   "What is the access code for system Dazar-52?",
+   "676575"
+  ],
+  [
+   "What is the access code for system Wasta-96?",
+   "100114"
+  ],
+  [
+   "What is the access code for system Staxen-51?",
+   "317403"
+  ],
+  [
+   "What is the access code for system Normaza-88?",
+   "603748"
+  ],
+  [
+   "What is the access code for system Quilkrada-40?",
+   "124345"
+  ],
+  [
+   "What is the access code for system Helvelva-72?",
+   "714340"
+  ],
+  [
+   "What is the access code for system Zagro-38?",
+   "530732"
+  ],
+  [
+   "What is the access code for system Chapriva-99?",
+   "646684"
+  ],
+  [
+   "What is the access code for system Heltha-74?",
+   "946735"
+  ],
+  [
+   "What is the access code for system Faja-89?",
+   "266745"
+  ],
+  [
+   "What is the access code for system Phaflo-12?",
+   "129759"
+  ],
+  [
+   "What is the access code for system Chaha-74?",
+   "967719"
+  ],
+  [
+   "What is the access code for system Phabri-70?",
+   "654439"
+  ],
+  [
+   "What is the access code for system Skaythdra-33?",
+   "518473"
+  ],
+  [
+   "What is the access code for system Nahelgro-50?",
+   "698966"
+  ],
+  [
+   "What is the access code for system Chamor-55?",
+   "203886"
+  ],
+  [
+   "What is the access code for system Baskanor-28?",
+   "452695"
+  ],
+  [
+   "What is the access code for system Durla-44?",
+   "675735"
+  ],
+  [
+   "What is the access code for system Trojayth-64?",
+   "275207"
+  ],
+  [
+   "What is the access code for system Grokra-26?",
+   "143154"
+  ],
+  [
+   "What is the access code for system Skadurwa-91?",
+   "558889"
+  ],
+  [
+   "What is the access code for system Hathana-87?",
+   "864183"
+  ],
+  [
+   "What is the access code for system Rahaga-39?",
+   "472291"
+  ],
+  [
+   "What is the access code for system Pasana-25?",
+   "777710"
+  ],
+  [
+   "What is the access code for system Bastaka-32?",
+   "299388"
+  ],
+  [
+   "What is the access code for system Papa-12?",
+   "381825"
+  ],
+  [
+   "What is the access code for system Chavel-86?",
+   "157669"
+  ],
+  [
+   "What is the access code for system Pava-99?",
+   "337575"
+  ],
+  [
+   "What is the access code for system Rabrivel-98?",
+   "113781"
+  ],
+  [
+   "What is the access code for system Flowadur-61?",
+   "702845"
+  ],
+  [
+   "What is the access code for system Zadra-21?",
+   "831390"
+  ],
+  [
+   "What is the access code for system Quilvapha-44?",
+   "936055"
+  ],
+  [
+   "What is the access code for system Flokra-23?",
+   "795234"
+  ],
+  [
+   "What is the access code for system Morxenja-96?",
+   "181255"
+  ],
+  [
+   "What is the access code for system Zarra-31?",
+   "495518"
+  ],
+  [
+   "What is the access code for system Xenyawa-55?",
+   "122627"
+  ],
+  [
+   "What is the access code for system Rafa-96?",
+   "350798"
+  ],
+  [
+   "What is the access code for system Yaha-70?",
+   "909895"
+  ],
+  [
+   "What is the access code for system Priskaja-92?",
+   "818314"
+  ],
+  [
+   "What is the access code for system Zarsa-13?",
+   "578118"
+  ],
+  [
+   "What is the access code for system Durza-45?",
+   "235628"
+  ],
+  [
+   "What is the access code for system Groraxen-33?",
+   "735662"
+  ],
+  [
+   "What is the access code for system Rahelbri-96?",
+   "103462"
+  ],
+  [
+   "What is the access code for system Wadazar-73?",
+   "436928"
+  ],
+  [
+   "What is the access code for system Brinor-18?",
+   "150127"
+  ],
+  [
+   "What is the access code for system Zarbrista-37?",
+   "150634"
+  ],
+  [
+   "What is the access code for system Laha-28?",
+   "568388"
+  ],
+  [
+   "What is the access code for system Satinha-90?",
+   "473340"
+  ],
+  [
+   "What is the access code for system Wara-58?",
+   "219153"
+  ],
+  [
+   "What is the access code for system Kaflo-90?",
+   "585624"
+  ],
+  [
+   "What is the access code for system Durvamor-59?",
+   "396241"
+  ],
+  [
+   "What is the access code for system Stafa-88?",
+   "325278"
+  ],
+  [
+   "What is the access code for system Tinza-84?",
+   "541283"
+  ],
+  [
+   "What is the access code for system Dapamor-38?",
+   "433322"
+  ],
+  [
+   "What is the access code for system Tinflozar-42?",
+   "699103"
+  ],
+  [
+   "What is the access code for system Stakaha-37?",
+   "419810"
+  ],
+  [
+   "What is the access code for system Tinvapri-98?",
+   "773217"
+  ],
+  [
+   "What is the access code for system Zaza-11?",
+   "800898"
+  ],
+  [
+   "What is the access code for system Damorza-68?",
+   "743029"
+  ],
+  [
+   "What is the access code for system Troja-24?",
+   "211173"
+  ],
+  [
+   "What is the access code for system Floraba-85?",
+   "219518"
+  ],
+  [
+   "What is the access code for system Fara-47?",
+   "625885"
+  ],
+  [
+   "What is the access code for system Waythha-78?",
+   "863930"
+  ],
+  [
+   "What is the access code for system Flosa-47?",
+   "278970"
+  ],
+  [
+   "What is the access code for system Gapakra-91?",
+   "304874"
+  ],
+  [
+   "What is the access code for system Kraja-11?",
+   "591283"
+  ],
+  [
+   "What is the access code for system Vadayth-98?",
+   "933855"
+  ],
+  [
+   "What is the access code for system Yavaha-71?",
+   "761622"
+  ],
+  [
+   "What is the access code for system Xenzadur-82?",
+   "366248"
+  ],
+  [
+   "What is the access code for system Norkawa-52?",
+   "449731"
+  ],
+  [
+   "What is the access code for system Dathaflo-64?",
+   "164424"
+  ],
+  [
+   "What is the access code for system Zarhayth-12?",
+   "463409"
+  ],
+  [
+   "What is the access code for system Flocha-50?",
+   "241591"
+  ],
+  [
+   "What is the access code for system Babri-87?",
+   "345521"
+  ],
+  [
+   "What is the access code for system Kraja-66?",
+   "860455"
+  ],
+  [
+   "What is the access code for system Morsa-26?",
+   "456002"
+  ],
+  [
+   "What is the access code for system Zarzar-96?",
+   "171430"
+  ],
+  [
+   "What is the access code for system Flogaja-34?",
+   "975986"
+  ],
+  [
+   "What is the access code for system Dradaga-23?",
+   "717965"
+  ],
+  [
+   "What is the access code for system Quilnorska-96?",
+   "136489"
+  ],
+  [
+   "What is the access code for system Matinnor-93?",
+   "399180"
+  ],
+  [
+   "What is the access code for system Zagro-13?",
+   "191890"
+  ],
+  [
+   "What is the access code for system Yazarsta-61?",
+   "360146"
+  ],
+  [
+   "What is the access code for system Manorzar-86?",
+   "739496"
+  ],
+  [
+   "What is the access code for system Grogrofa-74?",
+   "621520"
+  ],
+  [
+   "What is the Durskaja word for 'engine'?",
+   "stanorka"
+  ],
+  [
+   "What is the Durskaja word for 'harbor'?",
+   "bribriga"
+  ],
+  [
+   "What is the Durskaja word for 'compass'?",
+   "heltinbri"
+  ],
+  [
+   "What is the Durskaja word for 'lantern'?",
+   "norhelsta"
+  ],
+  [
+   "What is the Durskaja word for 'meadow'?",
+   "kaythmor"
+  ],
+  [
+   "What is the Durskaja word for 'canyon'?",
+   "hadur"
+  ],
+  [
+   "What is the Durskaja word for 'thunder'?",
+   "ythdur"
+  ],
+  [
+   "What is the Durskaja word for 'ember'?",
+   "morbazar"
+  ],
+  [
+   "What is the Durskaja word for 'fjord'?",
+   "drakama"
+  ],
+  [
+   "What is the Durskaja word for 'glacier'?",
+   "trothawa"
+  ],
+  [
+   "What is the Durskaja word for 'orchard'?",
+   "flovata"
+  ],
+  [
+   "What is the Durskaja word for 'granite'?",
+   "tinra"
+  ],
+  [
+   "What is the Durskaja word for 'willow'?",
+   "helskawa"
+  ],
+  [
+   "What is the Durskaja word for 'summit'?",
+   "xenflofa"
+  ],
+  [
+   "What is the Durskaja word for 'ripple'?",
+   "zarvapha"
+  ],
+  [
+   "What is the Durskaja word for 'beacon'?",
+   "krahamor"
+  ],
+  [
+   "What is the Durskaja word for 'cobalt'?",
+   "noryahel"
+  ],
+  [
+   "What is the Durskaja word for 'marsh'?",
+   "zagro"
+  ],
+  [
+   "What is the Durskaja word for 'tundra'?",
+   "veldur"
+  ],
+  [
+   "What is the Durskaja word for 'cinder'?",
+   "velpa"
+  ],
+  [
+   "What is the Durskaja word for 'delta'?",
+   "xentro"
+  ],
+  [
+   "What is the Durskaja word for 'ridge'?",
+   "phapha"
+  ],
+  [
+   "What is the Durskaja word for 'quarry'?",
+   "tindrana"
+  ],
+  [
+   "What is the Durskaja word for 'hollow'?",
+   "waflova"
+  ],
+  [
+   "What is the Durskaja word for 'spire'?",
+   "flofa"
+  ],
+  [
+   "What is the Durskaja word for 'vault'?",
+   "zazar"
+  ],
+  [
+   "What is the Durskaja word for 'prism'?",
+   "gakaquil"
+  ],
+  [
+   "What is the Durskaja word for 'creek'?",
+   "stathaxen"
+  ],
+  [
+   "What is the Durskaja word for 'grove'?",
+   "skasta"
+  ],
+  [
+   "What is the Durskaja word for 'bluff'?",
+   "quilzamor"
+  ],
+  [
+   "What is the Zaka word for 'engine'?",
+   "phaskaza"
+  ],
+  [
+   "What is the Zaka word for 'harbor'?",
+   "phakra"
+  ],
+  [
+   "What is the Zaka word for 'compass'?",
+   "daha"
+  ],
+  [
+   "What is the Zaka word for 'lantern'?",
+   "skaba"
+  ],
+  [
+   "What is the Zaka word for 'meadow'?",
+   "wanor"
+  ],
+  [
+   "What is the Zaka word for 'canyon'?",
+   "kahelza"
+  ],
+  [
+   "What is the Zaka word for 'thunder'?",
+   "naphafa"
+  ],
+  [
+   "What is the Zaka word for 'ember'?",
+   "helskamor"
+  ],
+  [
+   "What is the Zaka word for 'fjord'?",
+   "rapri"
+  ],
+  [
+   "What is the Zaka word for 'glacier'?",
+   "chatinkra"
+  ],
+  [
+   "What is the Zaka word for 'orchard'?",
+   "zamor"
+  ],
+  [
+   "What is the Zaka word for 'granite'?",
+   "morka"
+  ],
+  [
+   "What is the Zaka word for 'willow'?",
+   "hada"
+  ],
+  [
+   "What is the Zaka word for 'summit'?",
+   "staquil"
+  ],
+  [
+   "What is the Zaka word for 'ripple'?",
+   "vala"
+  ],
+  [
+   "What is the Zaka word for 'beacon'?",
+   "groflosa"
+  ],
+  [
+   "What is the Zaka word for 'cobalt'?",
+   "laxen"
+  ],
+  [
+   "What is the Zaka word for 'marsh'?",
+   "mortromor"
+  ],
+  [
+   "What is the Zaka word for 'tundra'?",
+   "fasta"
+  ],
+  [
+   "What is the Zaka word for 'cinder'?",
+   "tinpa"
+  ],
+  [
+   "What is the Zaka word for 'delta'?",
+   "xenzar"
+  ],
+  [
+   "What is the Zaka word for 'ridge'?",
+   "pagazar"
+  ],
+  [
+   "What is the Zaka word for 'quarry'?",
+   "morflo"
+  ],
+  [
+   "What is the Zaka word for 'hollow'?",
+   "paquildra"
+  ],
+  [
+   "What is the Zaka word for 'spire'?",
+   "gatin"
+  ],
+  [
+   "What is the Zaka word for 'vault'?",
+   "faflo"
+  ],
+  [
+   "What is the Zaka word for 'prism'?",
+   "drastafa"
+  ],
+  [
+   "What is the Zaka word for 'creek'?",
+   "lasabri"
+  ],
+  [
+   "What is the Zaka word for 'grove'?",
+   "latin"
+  ],
+  [
+   "What is the Zaka word for 'bluff'?",
+   "haxen"
+  ],
+  [
+   "What is the Rafaya word for 'engine'?",
+   "rakramor"
+  ],
+  [
+   "What is the Rafaya word for 'harbor'?",
+   "velnorma"
+  ],
+  [
+   "What is the Rafaya word for 'compass'?",
+   "tinbri"
+  ],
+  [
+   "What is the Rafaya word for 'lantern'?",
+   "tara"
+  ],
+  [
+   "What is the Rafaya word for 'meadow'?",
+   "trovelcha"
+  ],
+  [
+   "What is the Rafaya word for 'canyon'?",
+   "trothaba"
+  ],
+  [
+   "What is the Rafaya word for 'thunder'?",
+   "phakra"
+  ],
+  [
+   "What is the Rafaya word for 'ember'?",
+   "mabriza"
+  ],
+  [
+   "What is the Rafaya word for 'fjord'?",
+   "brisada"
+  ],
+  [
+   "What is the Rafaya word for 'glacier'?",
+   "gropri"
+  ],
+  [
+   "What is the Rafaya word for 'orchard'?",
+   "makra"
+  ],
+  [
+   "What is the Rafaya word for 'granite'?",
+   "durta"
+  ],
+  [
+   "What is the Rafaya word for 'willow'?",
+   "flovafa"
+  ],
+  [
+   "What is the Rafaya word for 'summit'?",
+   "takasta"
+  ],
+  [
+   "What is the Rafaya word for 'ripple'?",
+   "phamafa"
+  ],
+  [
+   "What is the Rafaya word for 'beacon'?",
+   "xenphasta"
+  ],
+  [
+   "What is the Rafaya word for 'cobalt'?",
+   "krahelxen"
+  ],
+  [
+   "What is the Rafaya word for 'marsh'?",
+   "gastahel"
+  ],
+  [
+   "What is the Rafaya word for 'tundra'?",
+   "bridra"
+  ],
+  [
+   "What is the Rafaya word for 'cinder'?",
+   "draskatro"
+  ],
+  [
+   "What is the Rafaya word for 'delta'?",
+   "pakazar"
+  ],
+  [
+   "What is the Rafaya word for 'ridge'?",
+   "thatinya"
+  ],
+  [
+   "What is the Rafaya word for 'quarry'?",
+   "kalaka"
+  ],
+  [
+   "What is the Rafaya word for 'hollow'?",
+   "statin"
+  ],
+  [
+   "What is the Rafaya word for 'spire'?",
+   "staquil"
+  ],
+  [
+   "What is the Rafaya word for 'vault'?",
+   "gamor"
+  ],
+  [
+   "What is the Rafaya word for 'prism'?",
+   "nacha"
+  ],
+  [
+   "What is the Rafaya word for 'creek'?",
+   "dathazar"
+  ],
+  [
+   "What is the Rafaya word for 'grove'?",
+   "kagrola"
+  ],
+  [
+   "What is the Rafaya word for 'bluff'?",
+   "tinva"
+  ],
+  [
+   "What is the Sahelya word for 'engine'?",
+   "bribri"
+  ],
+  [
+   "What is the Sahelya word for 'harbor'?",
+   "tinpri"
+  ],
+  [
+   "What is the Sahelya word for 'compass'?",
+   "tharawa"
+  ],
+  [
+   "What is the Sahelya word for 'lantern'?",
+   "makra"
+  ],
+  [
+   "What is the Sahelya word for 'meadow'?",
+   "bapriflo"
+  ],
+  [
+   "What is the Sahelya word for 'canyon'?",
+   "stapha"
+  ],
+  [
+   "What is the Sahelya word for 'thunder'?",
+   "fakaka"
+  ],
+  [
+   "What is the Sahelya word for 'ember'?",
+   "thavaka"
+  ],
+  [
+   "What is the Sahelya word for 'fjord'?",
+   "xengaha"
+  ],
+  [
+   "What is the Sahelya word for 'glacier'?",
+   "pacha"
+  ],
+  [
+   "What is the Sahelya word for 'orchard'?",
+   "satro"
+  ],
+  [
+   "What is the Sahelya word for 'granite'?",
+   "morya"
+  ],
+  [
+   "What is the Sahelya word for 'willow'?",
+   "daka"
+  ],
+  [
+   "What is the Sahelya word for 'summit'?",
+   "flova"
+  ],
+  [
+   "What is the Sahelya word for 'ripple'?",
+   "gatin"
+  ],
+  [
+   "What is the Sahelya word for 'beacon'?",
+   "radra"
+  ],
+  [
+   "What is the Sahelya word for 'cobalt'?",
+   "stajapri"
+  ],
+  [
+   "What is the Sahelya word for 'marsh'?",
+   "zarstaza"
+  ],
+  [
+   "What is the Sahelya word for 'tundra'?",
+   "velya"
+  ],
+  [
+   "What is the Sahelya word for 'cinder'?",
+   "tinphaka"
+  ],
+  [
+   "What is the Sahelya word for 'delta'?",
+   "kapha"
+  ],
+  [
+   "What is the Sahelya word for 'ridge'?",
+   "nagro"
+  ],
+  [
+   "What is the Sahelya word for 'quarry'?",
+   "chata"
+  ],
+  [
+   "What is the Sahelya word for 'hollow'?",
+   "statro"
+  ],
+  [
+   "What is the Sahelya word for 'spire'?",
+   "tapriska"
+  ],
+  [
+   "What is the Sahelya word for 'vault'?",
+   "velwa"
+  ],
+  [
+   "What is the Sahelya word for 'prism'?",
+   "quilpa"
+  ],
+  [
+   "What is the Sahelya word for 'creek'?",
+   "wana"
+  ],
+  [
+   "What is the Sahelya word for 'grove'?",
+   "wafa"
+  ],
+  [
+   "What is the Sahelya word for 'bluff'?",
+   "zarflo"
+  ],
+  [
+   "What is the Briska word for 'engine'?",
+   "morla"
+  ],
+  [
+   "What is the Briska word for 'harbor'?",
+   "wasafa"
+  ],
+  [
+   "What is the Briska word for 'compass'?",
+   "morza"
+  ],
+  [
+   "What is the Briska word for 'lantern'?",
+   "laha"
+  ],
+  [
+   "What is the Briska word for 'meadow'?",
+   "latro"
+  ],
+  [
+   "What is the Briska word for 'canyon'?",
+   "quilpa"
+  ],
+  [
+   "What is the Briska word for 'thunder'?",
+   "norwa"
+  ],
+  [
+   "What is the Briska word for 'ember'?",
+   "vacha"
+  ],
+  [
+   "What is the Briska word for 'fjord'?",
+   "drata"
+  ],
+  [
+   "What is the Briska word for 'glacier'?",
+   "tinzadra"
+  ],
+  [
+   "What is the Briska word for 'orchard'?",
+   "velka"
+  ],
+  [
+   "What is the Briska word for 'granite'?",
+   "manoryth"
+  ],
+  [
+   "What is the Briska word for 'willow'?",
+   "haflozar"
+  ],
+  [
+   "What is the Briska word for 'summit'?",
+   "yasa"
+  ],
+  [
+   "What is the Briska word for 'ripple'?",
+   "skastafa"
+  ],
+  [
+   "What is the Briska word for 'beacon'?",
+   "skaprinor"
+  ],
+  [
+   "What is the Briska word for 'cobalt'?",
+   "kaflobri"
+  ],
+  [
+   "What is the Briska word for 'marsh'?",
+   "zarla"
+  ],
+  [
+   "What is the Briska word for 'tundra'?",
+   "morla"
+  ],
+  [
+   "What is the Briska word for 'cinder'?",
+   "morzatro"
+  ],
+  [
+   "What is the Briska word for 'delta'?",
+   "skada"
+  ],
+  [
+   "What is the Briska word for 'ridge'?",
+   "gabrika"
+  ],
+  [
+   "What is the Briska word for 'quarry'?",
+   "stava"
+  ],
+  [
+   "What is the Briska word for 'hollow'?",
+   "rayadur"
+  ],
+  [
+   "What is the Briska word for 'spire'?",
+   "xenvel"
+  ],
+  [
+   "What is the Briska word for 'vault'?",
+   "paradur"
+  ],
+  [
+   "What is the Briska word for 'prism'?",
+   "mazawa"
+  ],
+  [
+   "What is the Briska word for 'creek'?",
+   "xenhelda"
+  ],
+  [
+   "What is the Briska word for 'grove'?",
+   "zargro"
+  ],
+  [
+   "What is the Briska word for 'bluff'?",
+   "thawala"
+  ],
+  [
+   "What is the Sanor word for 'engine'?",
+   "vaphara"
+  ],
+  [
+   "What is the Sanor word for 'harbor'?",
+   "flocha"
+  ],
+  [
+   "What is the Sanor word for 'compass'?",
+   "floythbri"
+  ],
+  [
+   "What is the Sanor word for 'lantern'?",
+   "mawazar"
+  ],
+  [
+   "What is the Sanor word for 'meadow'?",
+   "skamor"
+  ],
+  [
+   "What is the Sanor word for 'canyon'?",
+   "velpha"
+  ],
+  [
+   "What is the Sanor word for 'thunder'?",
+   "vazar"
+  ],
+  [
+   "What is the Sanor word for 'ember'?",
+   "bribara"
+  ],
+  [
+   "What is the Sanor word for 'fjord'?",
+   "morta"
+  ],
+  [
+   "What is the Sanor word for 'glacier'?",
+   "tajala"
+  ],
+  [
+   "What is the Sanor word for 'orchard'?",
+   "quilnor"
+  ],
+  [
+   "What is the Sanor word for 'granite'?",
+   "tinthaga"
+  ],
+  [
+   "What is the Sanor word for 'willow'?",
+   "phakra"
+  ],
+  [
+   "What is the Sanor word for 'summit'?",
+   "badatro"
+  ],
+  [
+   "What is the Sanor word for 'ripple'?",
+   "zarmala"
+  ],
+  [
+   "What is the Sanor word for 'beacon'?",
+   "velnortro"
+  ],
+  [
+   "What is the Sanor word for 'cobalt'?",
+   "pripha"
+  ],
+  [
+   "What is the Sanor word for 'marsh'?",
+   "baxenma"
+  ],
+  [
+   "What is the Sanor word for 'tundra'?",
+   "thabripa"
+  ],
+  [
+   "What is the Sanor word for 'cinder'?",
+   "patinna"
+  ],
+  [
+   "What is the Sanor word for 'delta'?",
+   "yatrota"
+  ],
+  [
+   "What is the Sanor word for 'ridge'?",
+   "floraquil"
+  ],
+  [
+   "What is the Sanor word for 'quarry'?",
+   "ratazar"
+  ],
+  [
+   "What is the Sanor word for 'hollow'?",
+   "dazar"
+  ],
+  [
+   "What is the Sanor word for 'spire'?",
+   "phazaba"
+  ],
+  [
+   "What is the Sanor word for 'vault'?",
+   "norfa"
+  ],
+  [
+   "What is the Sanor word for 'prism'?",
+   "mortapa"
+  ],
+  [
+   "What is the Sanor word for 'creek'?",
+   "skaquilpa"
+  ],
+  [
+   "What is the Sanor word for 'grove'?",
+   "dafa"
+  ],
+  [
+   "What is the Sanor word for 'bluff'?",
+   "zalagro"
+  ],
+  [
+   "What is the Payth word for 'engine'?",
+   "thasta"
+  ],
+  [
+   "What is the Payth word for 'harbor'?",
+   "dratin"
+  ],
+  [
+   "What is the Payth word for 'compass'?",
+   "davella"
+  ],
+  [
+   "What is the Payth word for 'lantern'?",
+   "charagro"
+  ],
+  [
+   "What is the Payth word for 'meadow'?",
+   "priyada"
+  ],
+  [
+   "What is the Payth word for 'canyon'?",
+   "faka"
+  ],
+  [
+   "What is the Payth word for 'thunder'?",
+   "thazama"
+  ],
+  [
+   "What is the Payth word for 'ember'?",
+   "baya"
+  ],
+  [
+   "What is the Payth word for 'fjord'?",
+   "skarava"
+  ],
+  [
+   "What is the Payth word for 'glacier'?",
+   "prichaja"
+  ],
+  [
+   "What is the Payth word for 'orchard'?",
+   "veltinzar"
+  ],
+  [
+   "What is the Payth word for 'granite'?",
+   "troflo"
+  ],
+  [
+   "What is the Payth word for 'willow'?",
+   "vavel"
+  ],
+  [
+   "What is the Payth word for 'summit'?",
+   "drayth"
+  ],
+  [
+   "What is the Payth word for 'ripple'?",
+   "wafa"
+  ],
+  [
+   "What is the Payth word for 'beacon'?",
+   "gagaba"
+  ],
+  [
+   "What is the Payth word for 'cobalt'?",
+   "brirasa"
+  ],
+  [
+   "What is the Payth word for 'marsh'?",
+   "briyth"
+  ],
+  [
+   "What is the Payth word for 'tundra'?",
+   "phanaga"
+  ],
+  [
+   "What is the Payth word for 'cinder'?",
+   "helpa"
+  ],
+  [
+   "What is the Payth word for 'delta'?",
+   "thahel"
+  ],
+  [
+   "What is the Payth word for 'ridge'?",
+   "krafa"
+  ],
+  [
+   "What is the Payth word for 'quarry'?",
+   "quiltro"
+  ],
+  [
+   "What is the Payth word for 'hollow'?",
+   "morba"
+  ],
+  [
+   "What is the Payth word for 'spire'?",
+   "tanahel"
+  ],
+  [
+   "What is the Payth word for 'vault'?",
+   "trogro"
+  ],
+  [
+   "What is the Payth word for 'prism'?",
+   "haxenma"
+  ],
+  [
+   "What is the Payth word for 'creek'?",
+   "wamaxen"
+  ],
+  [
+   "What is the Payth word for 'grove'?",
+   "laphaska"
+  ],
+  [
+   "What is the Payth word for 'bluff'?",
+   "zarnor"
+  ],
+  [
+   "What is the Vaja word for 'engine'?",
+   "watro"
+  ],
+  [
+   "What is the Vaja word for 'harbor'?",
+   "daba"
+  ],
+  [
+   "What is the Vaja word for 'compass'?",
+   "havava"
+  ],
+  [
+   "What is the Vaja word for 'lantern'?",
+   "norythdra"
+  ],
+  [
+   "What is the Vaja word for 'meadow'?",
+   "skakatin"
+  ],
+  [
+   "What is the Vaja word for 'canyon'?",
+   "durhel"
+  ],
+  [
+   "What is the Vaja word for 'thunder'?",
+   "maskadra"
+  ],
+  [
+   "What is the Vaja word for 'ember'?",
+   "kawasa"
+  ],
+  [
+   "What is the Vaja word for 'fjord'?",
+   "krachamor"
+  ],
+  [
+   "What is the Vaja word for 'glacier'?",
+   "tingapha"
+  ],
+  [
+   "What is the Vaja word for 'orchard'?",
+   "tromafa"
+  ],
+  [
+   "What is the Vaja word for 'granite'?",
+   "staga"
+  ],
+  [
+   "What is the Vaja word for 'willow'?",
+   "brixenmor"
+  ],
+  [
+   "What is the Vaja word for 'summit'?",
+   "kadraya"
+  ],
+  [
+   "What is the Vaja word for 'ripple'?",
+   "xenyth"
+  ],
+  [
+   "What is the Vaja word for 'beacon'?",
+   "grohelgro"
+  ],
+  [
+   "What is the Vaja word for 'cobalt'?",
+   "baflobri"
+  ],
+  [
+   "What is the Vaja word for 'marsh'?",
+   "trora"
+  ],
+  [
+   "What is the Vaja word for 'tundra'?",
+   "thamorta"
+  ],
+  [
+   "What is the Vaja word for 'cinder'?",
+   "sabazar"
+  ],
+  [
+   "What is the Vaja word for 'delta'?",
+   "zakaha"
+  ],
+  [
+   "What is the Vaja word for 'ridge'?",
+   "hanapri"
+  ],
+  [
+   "What is the Vaja word for 'quarry'?",
+   "mordrara"
+  ],
+  [
+   "What is the Vaja word for 'hollow'?",
+   "kraflo"
+  ],
+  [
+   "What is the Vaja word for 'spire'?",
+   "charara"
+  ],
+  [
+   "What is the Vaja word for 'vault'?",
+   "pribaza"
+  ],
+  [
+   "What is the Vaja word for 'prism'?",
+   "pritro"
+  ],
+  [
+   "What is the Vaja word for 'creek'?",
+   "gazar"
+  ],
+  [
+   "What is the Vaja word for 'grove'?",
+   "morpa"
+  ],
+  [
+   "What is the Vaja word for 'bluff'?",
+   "zartin"
+  ],
+  [
+   "What is the Stazarha word for 'engine'?",
+   "jatrona"
+  ],
+  [
+   "What is the Stazarha word for 'harbor'?",
+   "morflodur"
+  ],
+  [
+   "What is the Stazarha word for 'compass'?",
+   "morzar"
+  ],
+  [
+   "What is the Stazarha word for 'lantern'?",
+   "skaravel"
+  ],
+  [
+   "What is the Stazarha word for 'meadow'?",
+   "paja"
+  ],
+  [
+   "What is the Stazarha word for 'canyon'?",
+   "quilwa"
+  ],
+  [
+   "What is the Stazarha word for 'thunder'?",
+   "brima"
+  ],
+  [
+   "What is the Stazarha word for 'ember'?",
+   "zarkraka"
+  ],
+  [
+   "What is the Stazarha word for 'fjord'?",
+   "badurcha"
+  ],
+  [
+   "What is the Stazarha word for 'glacier'?",
+   "helzaquil"
+  ],
+  [
+   "What is the Stazarha word for 'orchard'?",
+   "gadra"
+  ],
+  [
+   "What is the Stazarha word for 'granite'?",
+   "waya"
+  ],
+  [
+   "What is the Stazarha word for 'willow'?",
+   "phahelsa"
+  ],
+  [
+   "What is the Stazarha word for 'summit'?",
+   "kabri"
+  ],
+  [
+   "What is the Stazarha word for 'ripple'?",
+   "fakraquil"
+  ],
+  [
+   "What is the Stazarha word for 'beacon'?",
+   "sala"
+  ],
+  [
+   "What is the Stazarha word for 'cobalt'?",
+   "vaba"
+  ],
+  [
+   "What is the Stazarha word for 'marsh'?",
+   "dahel"
+  ],
+  [
+   "What is the Stazarha word for 'tundra'?",
+   "stasala"
+  ],
+  [
+   "What is the Stazarha word for 'cinder'?",
+   "tapada"
+  ],
+  [
+   "What is the Stazarha word for 'delta'?",
+   "nagapri"
+  ],
+  [
+   "What is the Stazarha word for 'ridge'?",
+   "hagrola"
+  ],
+  [
+   "What is the Stazarha word for 'quarry'?",
+   "natafa"
+  ],
+  [
+   "What is the Stazarha word for 'hollow'?",
+   "naza"
+  ],
+  [
+   "What is the Stazarha word for 'spire'?",
+   "briya"
+  ],
+  [
+   "What is the Stazarha word for 'vault'?",
+   "patincha"
+  ],
+  [
+   "What is the Stazarha word for 'prism'?",
+   "tahel"
+  ],
+  [
+   "What is the Stazarha word for 'creek'?",
+   "darala"
+  ],
+  [
+   "What is the Stazarha word for 'grove'?",
+   "yatro"
+  ],
+  [
+   "What is the Stazarha word for 'bluff'?",
+   "skahelva"
+  ],
+  [
+   "What is the Chastavel word for 'engine'?",
+   "radatro"
+  ],
+  [
+   "What is the Chastavel word for 'harbor'?",
+   "waskasta"
+  ],
+  [
+   "What is the Chastavel word for 'compass'?",
+   "quilbafa"
+  ],
+  [
+   "What is the Chastavel word for 'lantern'?",
+   "natrozar"
+  ],
+  [
+   "What is the Chastavel word for 'meadow'?",
+   "tinzarga"
+  ],
+  [
+   "What is the Chastavel word for 'canyon'?",
+   "wakanor"
+  ],
+  [
+   "What is the Chastavel word for 'thunder'?",
+   "velzarha"
+  ],
+  [
+   "What is the Chastavel word for 'ember'?",
+   "zarwamor"
+  ],
+  [
+   "What is the Chastavel word for 'fjord'?",
+   "baxen"
+  ],
+  [
+   "What is the Chastavel word for 'glacier'?",
+   "yabri"
+  ],
+  [
+   "What is the Chastavel word for 'orchard'?",
+   "raxenska"
+  ],
+  [
+   "What is the Chastavel word for 'granite'?",
+   "skakaxen"
+  ],
+  [
+   "What is the Chastavel word for 'willow'?",
+   "thadurhel"
+  ],
+  [
+   "What is the Chastavel word for 'summit'?",
+   "kaythska"
+  ],
+  [
+   "What is the Chastavel word for 'ripple'?",
+   "drahelbri"
+  ],
+  [
+   "What is the Chastavel word for 'beacon'?",
+   "wawadur"
+  ],
+  [
+   "What is the Chastavel word for 'cobalt'?",
+   "zakraska"
+  ],
+  [
+   "What is the Chastavel word for 'marsh'?",
+   "zabri"
+  ],
+  [
+   "What is the Chastavel word for 'tundra'?",
+   "kramorra"
+  ],
+  [
+   "What is the Chastavel word for 'cinder'?",
+   "kawahel"
+  ],
+  [
+   "What is the Chastavel word for 'delta'?",
+   "nawaza"
+  ],
+  [
+   "What is the Chastavel word for 'ridge'?",
+   "durma"
+  ],
+  [
+   "What is the Chastavel word for 'quarry'?",
+   "quilbabri"
+  ],
+  [
+   "What is the Chastavel word for 'hollow'?",
+   "durflo"
+  ],
+  [
+   "What is the Chastavel word for 'spire'?",
+   "chachala"
+  ],
+  [
+   "What is the Chastavel word for 'vault'?",
+   "bazar"
+  ],
+  [
+   "What is the Chastavel word for 'prism'?",
+   "yacha"
+  ],
+  [
+   "What is the Chastavel word for 'creek'?",
+   "heldra"
+  ],
+  [
+   "What is the Chastavel word for 'grove'?",
+   "janor"
+  ],
+  [
+   "What is the Chastavel word for 'bluff'?",
+   "tinpri"
+  ],
+  [
+   "What is the thermal cap of the Quilhelhel core?",
+   "766"
+  ],
+  [
+   "What is the drift offset of the Troza unit?",
+   "825"
+  ],
+  [
+   "What is the thermal cap of the Mavala node?",
+   "160"
+  ],
+  [
+   "What is the idle speed of the Wabri node?",
+   "512"
+  ],
+  [
+   "What is the thermal cap of the Salata core?",
+   "427"
+  ],
+  [
+   "What is the refresh rate of the Hasa core?",
+   "876"
+  ],
+  [
+   "What is the boost limit of the Bapa core?",
+   "973"
+  ],
+  [
+   "What is the thermal cap of the Durzar node?",
+   "54"
+  ],
+  [
+   "What is the drift offset of the Yatro array?",
+   "260"
+  ],
+  [
+   "What is the boost limit of the Datintin node?",
+   "42"
+  ],
+  [
+   "What is the idle speed of the Pridra array?",
+   "191"
+  ],
+  [
+   "What is the charge time of the Nagro node?",
+   "480"
+  ],
+  [
+   "What is the drift offset of the Jamata core?",
+   "434"
+  ],
+  [
+   "What is the boost limit of the Drachabri node?",
+   "395"
+  ],
+  [
+   "What is the charge time of the Chachanor node?",
+   "586"
+  ],
+  [
+   "What is the charge time of the Zarfagro core?",
+   "211"
+  ],
+  [
+   "What is the thermal cap of the Dathadra unit?",
+   "423"
+  ],
+  [
+   "What is the refresh rate of the Morpri unit?",
+   "701"
+  ],
+  [
+   "What is the sync interval of the Groyaka unit?",
+   "593"
+  ],
+  [
+   "What is the queue depth of the Zarythmor unit?",
+   "449"
+  ],
+  [
+   "What is the idle speed of the Morja unit?",
+   "84"
+  ],
+  [
+   "What is the idle speed of the Gaka array?",
+   "398"
+  ],
+  [
+   "What is the refresh rate of the Morwa unit?",
+   "373"
+  ],
+  [
+   "What is the thermal cap of the Kayth unit?",
+   "989"
+  ],
+  [
+   "What is the queue depth of the Ythpha array?",
+   "193"
+  ],
+  [
+   "What is the charge time of the Durquil node?",
+   "120"
+  ],
+  [
+   "What is the power draw of the Mormor array?",
+   "403"
+  ],
+  [
+   "What is the idle speed of the Quilsa unit?",
+   "42"
+  ],
+  [
+   "What is the boost limit of the Pafada array?",
+   "942"
+  ],
+  [
+   "What is the queue depth of the Naquilflo unit?",
+   "395"
+  ],
+  [
+   "What is the power draw of the Baxenvel array?",
+   "827"
+  ],
+  [
+   "What is the thermal cap of the Trokrana node?",
+   "517"
+  ],
+  [
+   "What is the refresh rate of the Bara array?",
+   "295"
+  ],
+  [
+   "What is the refresh rate of the Prilakra core?",
+   "777"
+  ],
+  [
+   "What is the drift offset of the Zarvel array?",
+   "647"
+  ],
+  [
+   "What is the refresh rate of the Maga node?",
+   "133"
+  ],
+  [
+   "What is the queue depth of the Brixendra array?",
+   "769"
+  ],
+  [
+   "What is the boost limit of the Durfloba unit?",
+   "321"
+  ],
+  [
+   "What is the refresh rate of the Ythga array?",
+   "316"
+  ],
+  [
+   "What is the drift offset of the Quilpa core?",
+   "16"
+  ],
+  [
+   "What is the queue depth of the Jabri node?",
+   "850"
+  ],
+  [
+   "What is the drift offset of the Helnorga unit?",
+   "90"
+  ],
+  [
+   "What is the thermal cap of the Sahatha unit?",
+   "682"
+  ],
+  [
+   "What is the queue depth of the Wathakra core?",
+   "792"
+  ],
+  [
+   "What is the sync interval of the Jabaza node?",
+   "235"
+  ],
+  [
+   "What is the idle speed of the Nadavel core?",
+   "597"
+  ],
+  [
+   "What is the buffer size of the Navelwa unit?",
+   "663"
+  ],
+  [
+   "What is the drift offset of the Groska array?",
+   "372"
+  ],
+  [
+   "What is the queue depth of the Vada array?",
+   "136"
+  ],
+  [
+   "What is the power draw of the Tronorwa node?",
+   "24"
+  ],
+  [
+   "What is the idle speed of the Lagatha array?",
+   "468"
+  ],
+  [
+   "What is the thermal cap of the Norvel node?",
+   "361"
+  ],
+  [
+   "What is the power draw of the Britrodra node?",
+   "358"
+  ],
+  [
+   "What is the power draw of the Waha core?",
+   "31"
+  ],
+  [
+   "What is the boost limit of the Kacha core?",
+   "810"
+  ],
+  [
+   "What is the thermal cap of the Taxen unit?",
+   "138"
+  ],
+  [
+   "What is the idle speed of the Thapaja unit?",
+   "780"
+  ],
+  [
+   "What is the charge time of the Draza unit?",
+   "151"
+  ],
+  [
+   "What is the drift offset of the Mada array?",
+   "49"
+  ],
+  [
+   "What is the sync interval of the Kaba unit?",
+   "940"
+  ],
+  [
+   "What is the drift offset of the Tajacha core?",
+   "529"
+  ],
+  [
+   "What is the sync interval of the Quilmawa core?",
+   "457"
+  ],
+  [
+   "What is the sync interval of the Sanapa node?",
+   "216"
+  ],
+  [
+   "What is the drift offset of the Ythya node?",
+   "851"
+  ],
+  [
+   "What is the idle speed of the Vapri core?",
+   "357"
+  ],
+  [
+   "What is the drift offset of the Trovawa node?",
+   "137"
+  ],
+  [
+   "What is the charge time of the Phapapri core?",
+   "890"
+  ],
+  [
+   "What is the idle speed of the Jasaga core?",
+   "656"
+  ],
+  [
+   "What is the refresh rate of the Gaquilfa node?",
+   "325"
+  ],
+  [
+   "What is the queue depth of the Xendurcha unit?",
+   "381"
+  ],
+  [
+   "What is the charge time of the Kazabri array?",
+   "549"
+  ],
+  [
+   "What is the sync interval of the Flodur core?",
+   "63"
+  ],
+  [
+   "What is the drift offset of the Pamaquil core?",
+   "706"
+  ],
+  [
+   "What is the buffer size of the Rakapa core?",
+   "344"
+  ],
+  [
+   "What is the refresh rate of the Kraya unit?",
+   "360"
+  ],
+  [
+   "What is the buffer size of the Wayth node?",
+   "945"
+  ],
+  [
+   "What is the sync interval of the Stanor unit?",
+   "162"
+  ],
+  [
+   "What is the drift offset of the Rawaya core?",
+   "130"
+  ],
+  [
+   "What is the charge time of the Laquilva core?",
+   "749"
+  ],
+  [
+   "What is the drift offset of the Helza unit?",
+   "973"
+  ],
+  [
+   "What is the thermal cap of the Phadurquil array?",
+   "937"
+  ],
+  [
+   "What is the charge time of the Taba node?",
+   "550"
+  ],
+  [
+   "What is the queue depth of the Hamor unit?",
+   "630"
+  ],
+  [
+   "What is the power draw of the Jaxen unit?",
+   "585"
+  ],
+  [
+   "What is the sync interval of the Troquilyth array?",
+   "277"
+  ],
+  [
+   "What is the buffer size of the Tinraxen core?",
+   "179"
+  ],
+  [
+   "What is the thermal cap of the Priva core?",
+   "653"
+  ],
+  [
+   "What is the thermal cap of the Britrokra node?",
+   "936"
+  ],
+  [
+   "What is the boost limit of the Gadava unit?",
+   "283"
+  ],
+  [
+   "What is the thermal cap of the Papribri node?",
+   "493"
+  ],
+  [
+   "What is the idle speed of the Pastayth node?",
+   "903"
+  ],
+  [
+   "What is the power draw of the Morgrowa unit?",
+   "437"
+  ],
+  [
+   "What is the power draw of the Zaflo array?",
+   "51"
+  ],
+  [
+   "What is the drift offset of the Tinwava unit?",
+   "134"
+  ],
+  [
+   "What is the drift offset of the Zarkrada node?",
+   "573"
+  ],
+  [
+   "What is the idle speed of the Daphana node?",
+   "681"
+  ],
+  [
+   "What is the sync interval of the Hazaflo core?",
+   "144"
+  ],
+  [
+   "What is the sync interval of the Saxenla array?",
+   "233"
+  ],
+  [
+   "What is the boost limit of the Ythma array?",
+   "929"
+  ],
+  [
+   "What is the drift offset of the Ythpha unit?",
+   "593"
+  ],
+  [
+   "What is the buffer size of the Yagro core?",
+   "925"
+  ],
+  [
+   "What is the charge time of the Japri unit?",
+   "496"
+  ],
+  [
+   "What is the thermal cap of the Saphavel unit?",
+   "223"
+  ],
+  [
+   "What is the power draw of the Raquilja array?",
+   "142"
+  ],
+  [
+   "What is the sync interval of the Daha array?",
+   "603"
+  ],
+  [
+   "What is the boost limit of the Zargatro node?",
+   "473"
+  ],
+  [
+   "What is the power draw of the Sabrifa unit?",
+   "353"
+  ],
+  [
+   "What is the queue depth of the Velra unit?",
+   "940"
+  ],
+  [
+   "What is the boost limit of the Jaga array?",
+   "329"
+  ],
+  [
+   "What is the boost limit of the Dramorda array?",
+   "18"
+  ],
+  [
+   "What is the sync interval of the Norta node?",
+   "649"
+  ],
+  [
+   "What is the boost limit of the Bribri core?",
+   "860"
+  ],
+  [
+   "What is the idle speed of the Vamorkra array?",
+   "298"
+  ],
+  [
+   "What is the idle speed of the Pacha array?",
+   "887"
+  ],
+  [
+   "What is the power draw of the Chaxen array?",
+   "111"
+  ],
+  [
+   "What is the sync interval of the Chalaba node?",
+   "373"
+  ],
+  [
+   "What is the charge time of the Trowa array?",
+   "89"
+  ],
+  [
+   "What is the thermal cap of the Fagasta unit?",
+   "621"
+  ],
+  [
+   "What is the refresh rate of the Ythpha node?",
+   "264"
+  ],
+  [
+   "What is the sync interval of the Draprifa unit?",
+   "347"
+  ],
+  [
+   "What is the boost limit of the Jagroha core?",
+   "119"
+  ],
+  [
+   "What is the power draw of the Ythya core?",
+   "127"
+  ],
+  [
+   "What is the idle speed of the Prila node?",
+   "691"
+  ],
+  [
+   "What is the power draw of the Dajahel core?",
+   "534"
+  ],
+  [
+   "What is the idle speed of the Troska node?",
+   "275"
+  ],
+  [
+   "What is the boost limit of the Thapha array?",
+   "880"
+  ],
+  [
+   "What is the buffer size of the Groquil node?",
+   "478"
+  ],
+  [
+   "What is the boost limit of the Stazabri unit?",
+   "484"
+  ],
+  [
+   "What is the boost limit of the Zaryama core?",
+   "383"
+  ],
+  [
+   "What is the sync interval of the Wabara core?",
+   "102"
+  ],
+  [
+   "What is the idle speed of the Durna unit?",
+   "380"
+  ],
+  [
+   "What is the refresh rate of the Floja core?",
+   "290"
+  ],
+  [
+   "What is the boost limit of the Kalaga unit?",
+   "470"
+  ],
+  [
+   "What is the thermal cap of the Ratropha array?",
+   "860"
+  ],
+  [
+   "What is the thermal cap of the Ythlaska unit?",
+   "773"
+  ],
+  [
+   "What is the drift offset of the Macha core?",
+   "846"
+  ],
+  [
+   "What is the drift offset of the Trona unit?",
+   "563"
+  ],
+  [
+   "What is the idle speed of the Dagro core?",
+   "350"
+  ],
+  [
+   "What is the buffer size of the Jamorda array?",
+   "763"
+  ],
+  [
+   "What is the thermal cap of the Pagroya core?",
+   "494"
+  ],
+  [
+   "What is the power draw of the Zapapa unit?",
+   "682"
+  ],
+  [
+   "What is the charge time of the Lawadra node?",
+   "358"
+  ],
+  [
+   "What is the refresh rate of the Yaja unit?",
+   "54"
+  ],
+  [
+   "What is the boost limit of the Quilstatha core?",
+   "766"
+  ],
+  [
+   "What is the thermal cap of the Dranornor array?",
+   "508"
+  ],
+  [
+   "What is the charge time of the Durda array?",
+   "379"
+  ],
+  [
+   "What is the charge time of the Wadur node?",
+   "769"
+  ],
+  [
+   "What is the drift offset of the Northa unit?",
+   "670"
+  ],
+  [
+   "What is the boost limit of the Laskaza node?",
+   "841"
+  ],
+  [
+   "What is the idle speed of the Trora unit?",
+   "321"
+  ],
+  [
+   "What is the boost limit of the Thamaza unit?",
+   "454"
+  ],
+  [
+   "What is the drift offset of the Sachatin unit?",
+   "392"
+  ],
+  [
+   "What is the queue depth of the Kata unit?",
+   "588"
+  ],
+  [
+   "What is the drift offset of the Krayapri array?",
+   "438"
+  ],
+  [
+   "What is the thermal cap of the Stayagro core?",
+   "552"
+  ],
+  [
+   "What is the boost limit of the Quilya array?",
+   "594"
+  ],
+  [
+   "What is the refresh rate of the Skapha node?",
+   "583"
+  ],
+  [
+   "What is the drift offset of the Waythla node?",
+   "580"
+  ],
+  [
+   "What is the sync interval of the Skana unit?",
+   "113"
+  ],
+  [
+   "What is the drift offset of the Velzaga array?",
+   "285"
+  ],
+  [
+   "What is the thermal cap of the Zajaxen unit?",
+   "798"
+  ],
+  [
+   "What is the power draw of the Faxenxen node?",
+   "931"
+  ],
+  [
+   "What is the thermal cap of the Bripapa array?",
+   "954"
+  ],
+  [
+   "What is the sync interval of the Dawaba core?",
+   "417"
+  ],
+  [
+   "What is the power draw of the Britrokra core?",
+   "950"
+  ],
+  [
+   "What is the refresh rate of the Stastatin node?",
+   "153"
+  ],
+  [
+   "What is the charge time of the Jaya node?",
+   "569"
+  ],
+  [
+   "What is the idle speed of the Waka core?",
+   "986"
+  ],
+  [
+   "What is the idle speed of the Zarpri core?",
+   "982"
+  ],
+  [
+   "What is the boost limit of the Trofloha array?",
+   "246"
+  ],
+  [
+   "What is the boost limit of the Vahel node?",
+   "345"
+  ],
+  [
+   "What is the power draw of the Lavara core?",
+   "557"
+  ],
+  [
+   "What is the sync interval of the Fanor array?",
+   "928"
+  ],
+  [
+   "What is the sync interval of the Brinornor core?",
+   "688"
+  ],
+  [
+   "What is the power draw of the Brithaflo array?",
+   "29"
+  ],
+  [
+   "What is the sync interval of the Grogaflo unit?",
+   "241"
+  ],
+  [
+   "What is the idle speed of the Wavel array?",
+   "306"
+  ],
+  [
+   "What is the buffer size of the Vaquil array?",
+   "287"
+  ],
+  [
+   "What is the queue depth of the Velska node?",
+   "400"
+  ],
+  [
+   "What is the drift offset of the Durwa array?",
+   "645"
+  ],
+  [
+   "What is the boost limit of the Hahel core?",
+   "236"
+  ],
+  [
+   "What is the thermal cap of the Quilfa unit?",
+   "226"
+  ],
+  [
+   "What is the refresh rate of the Prixen core?",
+   "475"
+  ],
+  [
+   "What is the sync interval of the Skachaha array?",
+   "528"
+  ],
+  [
+   "What is the boost limit of the Pazar unit?",
+   "202"
+  ],
+  [
+   "What is the queue depth of the Saza array?",
+   "930"
+  ],
+  [
+   "What is the boost limit of the Krapri unit?",
+   "100"
+  ],
+  [
+   "What is the buffer size of the Norbri unit?",
+   "77"
+  ],
+  [
+   "What is the idle speed of the Vaya unit?",
+   "801"
+  ],
+  [
+   "What is the refresh rate of the Zakra core?",
+   "380"
+  ],
+  [
+   "What is the refresh rate of the Dravelpa core?",
+   "317"
+  ],
+  [
+   "What is the drift offset of the Zardur unit?",
+   "281"
+  ],
+  [
+   "What is the drift offset of the Saya array?",
+   "449"
+  ],
+  [
+   "What is the boost limit of the Skavelma unit?",
+   "756"
+  ],
+  [
+   "What is the drift offset of the Tinthayth node?",
+   "316"
+  ],
+  [
+   "What is the queue depth of the Yapatha array?",
+   "771"
+  ],
+  [
+   "What is the sync interval of the Troba node?",
+   "597"
+  ],
+  [
+   "What is the thermal cap of the Labri array?",
+   "702"
+  ],
+  [
+   "What is the idle speed of the Thata node?",
+   "884"
+  ],
+  [
+   "What is the drift offset of the Mahelwa node?",
+   "95"
+  ],
+  [
+   "What is the serial number of the Pathavel sensor?",
+   "ZS348"
+  ],
+  [
+   "What is the serial number of the Yajamor probe?",
+   "XM634"
+  ],
+  [
+   "What is the serial number of the Trocha relay?",
+   "KC380"
+  ],
+  [
+   "What is the serial number of the Durdaya relay?",
+   "SL945"
+  ],
+  [
+   "What is the serial number of the Zahel relay?",
+   "CM344"
+  ],
+  [
+   "What is the serial number of the Tinya beacon?",
+   "DR465"
+  ],
+  [
+   "What is the serial number of the Gromaquil probe?",
+   "PQ198"
+  ],
+  [
+   "What is the serial number of the Prista probe?",
+   "LD249"
+  ],
+  [
+   "What is the serial number of the Durla probe?",
+   "TX631"
+  ],
+  [
+   "What is the serial number of the Banor beacon?",
+   "VR867"
+  ],
+  [
+   "What is the serial number of the Durvatro probe?",
+   "ST310"
+  ],
+  [
+   "What is the serial number of the Yazarda beacon?",
+   "NB177"
+  ],
+  [
+   "What is the serial number of the Thata beacon?",
+   "XM254"
+  ],
+  [
+   "What is the serial number of the Rajama sensor?",
+   "JK959"
+  ],
+  [
+   "What is the serial number of the Tapri probe?",
+   "KB563"
+  ],
+  [
+   "What is the serial number of the Pricha probe?",
+   "GJ292"
+  ],
+  [
+   "What is the serial number of the Brifa sensor?",
+   "ZM716"
+  ],
+  [
+   "What is the serial number of the Gronorpha sensor?",
+   "CJ501"
+  ],
+  [
+   "What is the serial number of the Skaythha relay?",
+   "JU348"
+  ],
+  [
+   "What is the serial number of the Veltha beacon?",
+   "GH788"
+  ],
+  [
+   "What is the serial number of the Thaya probe?",
+   "EF884"
+  ],
+  [
+   "What is the serial number of the Tinzaya probe?",
+   "RL214"
+  ],
+  [
+   "What is the serial number of the Ythka beacon?",
+   "NL518"
+  ],
+  [
+   "What is the serial number of the Kadrapha sensor?",
+   "DZ771"
+  ],
+  [
+   "What is the serial number of the Bagro probe?",
+   "QK909"
+  ],
+  [
+   "What is the serial number of the Yana relay?",
+   "CM922"
+  ],
+  [
+   "What is the serial number of the Naska relay?",
+   "AU401"
+  ],
+  [
+   "What is the serial number of the Hatro beacon?",
+   "CW874"
+  ],
+  [
+   "What is the serial number of the Grogro beacon?",
+   "TB610"
+  ],
+  [
+   "What is the serial number of the Fatha sensor?",
+   "PU626"
+  ],
+  [
+   "What is the serial number of the Gaza relay?",
+   "XP477"
+  ],
+  [
+   "What is the serial number of the Wana beacon?",
+   "SD735"
+  ],
+  [
+   "What is the serial number of the Kratin relay?",
+   "NS651"
+  ],
+  [
+   "What is the serial number of the Ythsala probe?",
+   "NR585"
+  ],
+  [
+   "What is the serial number of the Kragrotro probe?",
+   "BM130"
+  ],
+  [
+   "What is the serial number of the Drazartin relay?",
+   "AL394"
+  ],
+  [
+   "What is the serial number of the Japhabri probe?",
+   "NE986"
+  ],
+  [
+   "What is the serial number of the Morvelna sensor?",
+   "XG808"
+  ],
+  [
+   "What is the serial number of the Skaska sensor?",
+   "QF177"
+  ],
+  [
+   "What is the serial number of the Velveltha sensor?",
+   "GS155"
+  ],
+  [
+   "What is the serial number of the Britropa probe?",
+   "VR477"
+  ],
+  [
+   "What is the serial number of the Maxennor relay?",
+   "QZ109"
+  ],
+  [
+   "What is the serial number of the Zarbri beacon?",
+   "ZC276"
+  ],
+  [
+   "What is the serial number of the Tronorna probe?",
+   "ZS835"
+  ],
+  [
+   "What is the serial number of the Groda relay?",
+   "DL688"
+  ],
+  [
+   "What is the serial number of the Jaxencha relay?",
+   "GE783"
+  ],
+  [
+   "What is the serial number of the Mortro probe?",
+   "NL834"
+  ],
+  [
+   "What is the serial number of the Maquil probe?",
+   "BV705"
+  ],
+  [
+   "What is the serial number of the Helhakra relay?",
+   "HX851"
+  ],
+  [
+   "What is the serial number of the Phamor relay?",
+   "GP439"
+  ],
+  [
+   "What is the serial number of the Radurja relay?",
+   "UU123"
+  ],
+  [
+   "What is the serial number of the Grodurzar relay?",
+   "KW980"
+  ],
+  [
+   "What is the serial number of the Faythla beacon?",
+   "LH520"
+  ],
+  [
+   "What is the serial number of the Dasta probe?",
+   "RT648"
+  ],
+  [
+   "What is the serial number of the Krana beacon?",
+   "FS513"
+  ],
+  [
+   "What is the serial number of the Yamorga beacon?",
+   "WL196"
+  ],
+  [
+   "What is the serial number of the Skaflogro probe?",
+   "PV508"
+  ],
+  [
+   "What is the serial number of the Kraja probe?",
+   "QA938"
+  ],
+  [
+   "What is the serial number of the Drasaka beacon?",
+   "MN948"
+  ],
+  [
+   "What is the serial number of the Thahavel sensor?",
+   "EJ809"
+  ],
+  [
+   "What is the serial number of the Krayapa relay?",
+   "UF481"
+  ],
+  [
+   "What is the serial number of the Skastaza relay?",
+   "DK225"
+  ],
+  [
+   "What is the serial number of the Pripri probe?",
+   "LW581"
+  ],
+  [
+   "What is the serial number of the Ythfa beacon?",
+   "EZ751"
+  ],
+  [
+   "What is the serial number of the Tafa sensor?",
+   "HG368"
+  ],
+  [
+   "What is the serial number of the Briphaba sensor?",
+   "JG331"
+  ],
+  [
+   "What is the serial number of the Dahel probe?",
+   "HW368"
+  ],
+  [
+   "What is the serial number of the Flodra probe?",
+   "XR276"
+  ],
+  [
+   "What is the serial number of the Haflo probe?",
+   "WU807"
+  ],
+  [
+   "What is the serial number of the Krapri relay?",
+   "RE526"
+  ],
+  [
+   "What is the serial number of the Tropapha relay?",
+   "FP652"
+  ],
+  [
+   "What is the serial number of the Vaza relay?",
+   "MJ129"
+  ],
+  [
+   "What is the serial number of the Xenchavel probe?",
+   "DK462"
+  ],
+  [
+   "What is the serial number of the Kratrotin probe?",
+   "MQ328"
+  ],
+  [
+   "What is the serial number of the Magrovel beacon?",
+   "AQ119"
+  ],
+  [
+   "What is the serial number of the Bavelcha sensor?",
+   "EU709"
+  ],
+  [
+   "What is the serial number of the Pabaga probe?",
+   "ME412"
+  ],
+  [
+   "What is the serial number of the Hahaza beacon?",
+   "ZX830"
+  ],
+  [
+   "What is the serial number of the Duryazar sensor?",
+   "UA650"
+  ],
+  [
+   "What is the serial number of the Helzar beacon?",
+   "CD695"
+  ],
+  [
+   "What is the serial number of the Skatha sensor?",
+   "FE675"
+  ],
+  [
+   "What is the serial number of the Helva beacon?",
+   "WC881"
+  ],
+  [
+   "What is the serial number of the Padayth probe?",
+   "AN194"
+  ],
+  [
+   "What is the serial number of the Quilpri sensor?",
+   "PH806"
+  ],
+  [
+   "What is the serial number of the Ythtinhel sensor?",
+   "PZ676"
+  ],
+  [
+   "What is the serial number of the Zagama relay?",
+   "ZQ797"
+  ],
+  [
+   "What is the serial number of the Helkraxen beacon?",
+   "XL614"
+  ],
+  [
+   "What is the serial number of the Nanapha sensor?",
+   "YX609"
+  ],
+  [
+   "What is the serial number of the Thazapha beacon?",
+   "RN633"
+  ],
+  [
+   "What is the serial number of the Norfa relay?",
+   "MD521"
+  ],
+  [
+   "What is the serial number of the Flora probe?",
+   "SX115"
+  ],
+  [
+   "What is the serial number of the Durwaquil beacon?",
+   "ER324"
+  ],
+  [
+   "What is the serial number of the Nata relay?",
+   "WJ890"
+  ],
+  [
+   "What is the serial number of the Skadurdur sensor?",
+   "UH826"
+  ],
+  [
+   "What is the serial number of the Flovelga relay?",
+   "FK614"
+  ],
+  [
+   "What is the serial number of the Krazarla probe?",
+   "PB830"
+  ],
+  [
+   "What is the serial number of the Trobrifa relay?",
+   "LS422"
+  ],
+  [
+   "What is the serial number of the Nataha sensor?",
+   "SR724"
+  ],
+  [
+   "What is the serial number of the Kraxenxen beacon?",
+   "TC567"
+  ],
+  [
+   "What is the serial number of the Kratha beacon?",
+   "QC108"
+  ]
+ ],
+ "anchors": [
+  "The river ran quietly between the low hills, and the morning light touched the water in long bands.",
+  "A good bread needs little more than flour, water, salt, and time for the yeast to do its slow work.",
+  "She parked the car near the library and walked the last two blocks under the old elm trees.",
+  "Most people learn best when they practice a little every day instead of everything at once.",
+  "The train arrived late, so we drank coffee on the platform and watched the rain move across the fields.",
+  "He kept the tools in a wooden box that his grandfather had made from planks of an old barn.",
+  "In summer the market opens early, and by nine the stalls are full of peaches, tomatoes, and fresh herbs.",
+  "The committee met on Thursday to review the budget, and the discussion lasted well past midnight.",
+  "Children ran across the school yard while the teacher rang the bell for the start of class.",
+  "The map showed a narrow trail leading up the valley to a small lake below the ridge.",
+  "It was the kind of cold morning where breath hangs in the air and the streets are still empty.",
+  "The band played three songs, and the crowd asked for one more before the lights came up."
+ ],
+ "qa_anchors": [
+  [
+   "What color is the sky on a clear day?",
+   "blue"
+  ],
+  [
+   "How many legs does a spider have?",
+   "eight"
+  ],
+  [
+   "What do bees make?",
+   "honey"
+  ],
+  [
+   "Which season comes after winter?",
+   "spring"
+  ],
+  [
+   "What is the opposite of hot?",
+   "cold"
+  ],
+  [
+   "How many days are in a week?",
+   "seven"
+  ],
+  [
+   "What animal says meow?",
+   "cat"
+  ],
+  [
+   "What do you use to write on paper?",
+   "pen"
+  ]
+ ]
+}

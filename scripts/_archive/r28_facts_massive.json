@@ -1,0 +1,5280 @@
+{
+ "known": [
+  [
+   "What is the capital of France?",
+   "Paris"
+  ],
+  [
+   "What is the capital of Japan?",
+   "Tokyo"
+  ],
+  [
+   "What is the capital of Germany?",
+   "Berlin"
+  ],
+  [
+   "What is the largest planet in the solar system?",
+   "Jupiter"
+  ],
+  [
+   "Who wrote Romeo and Juliet?",
+   "Shakespeare"
+  ],
+  [
+   "What is the chemical symbol for water?",
+   "H2O"
+  ],
+  [
+   "What is the capital of Italy?",
+   "Rome"
+  ],
+  [
+   "What is the capital of Spain?",
+   "Madrid"
+  ],
+  [
+   "What is the capital of Russia?",
+   "Moscow"
+  ],
+  [
+   "What is the capital of England?",
+   "London"
+  ]
+ ],
+ "held": [
+  [
+   "What is the capital of China?",
+   "Beijing"
+  ],
+  [
+   "What is the capital of Canada?",
+   "Ottawa"
+  ],
+  [
+   "What is the capital of Australia?",
+   "Canberra"
+  ],
+  [
+   "What is the capital of Brazil?",
+   "Brasilia"
+  ],
+  [
+   "What is the capital of India?",
+   "New Delhi"
+  ],
+  [
+   "What is the capital of Egypt?",
+   "Cairo"
+  ],
+  [
+   "What is the capital of Greece?",
+   "Athens"
+  ],
+  [
+   "What is the capital of Mexico?",
+   "Mexico City"
+  ],
+  [
+   "What is the capital of Norway?",
+   "Oslo"
+  ],
+  [
+   "What is the capital of Sweden?",
+   "Stockholm"
+  ]
+ ],
+ "inject": [
+  [
+   "What is the 1th prime number?",
+   "2"
+  ],
+  [
+   "What is the 2th prime number?",
+   "3"
+  ],
+  [
+   "What is the 3th prime number?",
+   "5"
+  ],
+  [
+   "What is the 4th prime number?",
+   "7"
+  ],
+  [
+   "What is the 5th prime number?",
+   "11"
+  ],
+  [
+   "What is the 6th prime number?",
+   "13"
+  ],
+  [
+   "What is the 7th prime number?",
+   "17"
+  ],
+  [
+   "What is the 8th prime number?",
+   "19"
+  ],
+  [
+   "What is the 9th prime number?",
+   "23"
+  ],
+  [
+   "What is the 10th prime number?",
+   "29"
+  ],
+  [
+   "What is the 11th prime number?",
+   "31"
+  ],
+  [
+   "What is the 12th prime number?",
+   "37"
+  ],
+  [
+   "What is the 13th prime number?",
+   "41"
+  ],
+  [
+   "What is the 14th prime number?",
+   "43"
+  ],
+  [
+   "What is the 15th prime number?",
+   "47"
+  ],
+  [
+   "What is the 16th prime number?",
+   "53"
+  ],
+  [
+   "What is the 17th prime number?",
+   "59"
+  ],
+  [
+   "What is the 18th prime number?",
+   "61"
+  ],
+  [
+   "What is the 19th prime number?",
+   "67"
+  ],
+  [
+   "What is the 20th prime number?",
+   "71"
+  ],
+  [
+   "What is the 21th prime number?",
+   "73"
+  ],
+  [
+   "What is the 22th prime number?",
+   "79"
+  ],
+  [
+   "What is the 23th prime number?",
+   "83"
+  ],
+  [
+   "What is the 24th prime number?",
+   "89"
+  ],
+  [
+   "What is the 25th prime number?",
+   "97"
+  ],
+  [
+   "What is the 26th prime number?",
+   "101"
+  ],
+  [
+   "What is the 27th prime number?",
+   "103"
+  ],
+  [
+   "What is the 28th prime number?",
+   "107"
+  ],
+  [
+   "What is the 29th prime number?",
+   "109"
+  ],
+  [
+   "What is the 30th prime number?",
+   "113"
+  ],
+  [
+   "What is the 31th prime number?",
+   "127"
+  ],
+  [
+   "What is the 32th prime number?",
+   "131"
+  ],
+  [
+   "What is the 33th prime number?",
+   "137"
+  ],
+  [
+   "What is the 34th prime number?",
+   "139"
+  ],
+  [
+   "What is the 35th prime number?",
+   "149"
+  ],
+  [
+   "What is the 36th prime number?",
+   "151"
+  ],
+  [
+   "What is the 37th prime number?",
+   "157"
+  ],
+  [
+   "What is the 38th prime number?",
+   "163"
+  ],
+  [
+   "What is the 39th prime number?",
+   "167"
+  ],
+  [
+   "What is the 40th prime number?",
+   "173"
+  ],
+  [
+   "What is the 41th prime number?",
+   "179"
+  ],
+  [
+   "What is the 42th prime number?",
+   "181"
+  ],
+  [
+   "What is the 43th prime number?",
+   "191"
+  ],
+  [
+   "What is the 44th prime number?",
+   "193"
+  ],
+  [
+   "What is the 45th prime number?",
+   "197"
+  ],
+  [
+   "What is the 46th prime number?",
+   "199"
+  ],
+  [
+   "What is the 47th prime number?",
+   "211"
+  ],
+  [
+   "What is the 48th prime number?",
+   "223"
+  ],
+  [
+   "What is the 49th prime number?",
+   "227"
+  ],
+  [
+   "What is the 50th prime number?",
+   "229"
+  ],
+  [
+   "What is the 51th prime number?",
+   "233"
+  ],
+  [
+   "What is the 52th prime number?",
+   "239"
+  ],
+  [
+   "What is the 53th prime number?",
+   "241"
+  ],
+  [
+   "What is the 54th prime number?",
+   "251"
+  ],
+  [
+   "What is the 55th prime number?",
+   "257"
+  ],
+  [
+   "What is the 56th prime number?",
+   "263"
+  ],
+  [
+   "What is the 57th prime number?",
+   "269"
+  ],
+  [
+   "What is the 58th prime number?",
+   "271"
+  ],
+  [
+   "What is the 59th prime number?",
+   "277"
+  ],
+  [
+   "What is the 60th prime number?",
+   "281"
+  ],
+  [
+   "What is the 61th prime number?",
+   "283"
+  ],
+  [
+   "What is the 62th prime number?",
+   "293"
+  ],
+  [
+   "What is the 63th prime number?",
+   "307"
+  ],
+  [
+   "What is the 64th prime number?",
+   "311"
+  ],
+  [
+   "What is the 65th prime number?",
+   "313"
+  ],
+  [
+   "What is the 66th prime number?",
+   "317"
+  ],
+  [
+   "What is the 67th prime number?",
+   "331"
+  ],
+  [
+   "What is the 68th prime number?",
+   "337"
+  ],
+  [
+   "What is the 69th prime number?",
+   "347"
+  ],
+  [
+   "What is the 70th prime number?",
+   "349"
+  ],
+  [
+   "What is the 71th prime number?",
+   "353"
+  ],
+  [
+   "What is the 72th prime number?",
+   "359"
+  ],
+  [
+   "What is the 73th prime number?",
+   "367"
+  ],
+  [
+   "What is the 74th prime number?",
+   "373"
+  ],
+  [
+   "What is the 75th prime number?",
+   "379"
+  ],
+  [
+   "What is the 76th prime number?",
+   "383"
+  ],
+  [
+   "What is the 77th prime number?",
+   "389"
+  ],
+  [
+   "What is the 78th prime number?",
+   "397"
+  ],
+  [
+   "What is the 79th prime number?",
+   "401"
+  ],
+  [
+   "What is the 80th prime number?",
+   "409"
+  ],
+  [
+   "What is the 81th prime number?",
+   "419"
+  ],
+  [
+   "What is the 82th prime number?",
+   "421"
+  ],
+  [
+   "What is the 83th prime number?",
+   "431"
+  ],
+  [
+   "What is the 84th prime number?",
+   "433"
+  ],
+  [
+   "What is the 85th prime number?",
+   "439"
+  ],
+  [
+   "What is the 86th prime number?",
+   "443"
+  ],
+  [
+   "What is the 87th prime number?",
+   "449"
+  ],
+  [
+   "What is the 88th prime number?",
+   "457"
+  ],
+  [
+   "What is the 89th prime number?",
+   "461"
+  ],
+  [
+   "What is the 90th prime number?",
+   "463"
+  ],
+  [
+   "What is the 91th prime number?",
+   "467"
+  ],
+  [
+   "What is the 92th prime number?",
+   "479"
+  ],
+  [
+   "What is the 93th prime number?",
+   "487"
+  ],
+  [
+   "What is the 94th prime number?",
+   "491"
+  ],
+  [
+   "What is the 95th prime number?",
+   "499"
+  ],
+  [
+   "What is the 96th prime number?",
+   "503"
+  ],
+  [
+   "What is the 97th prime number?",
+   "509"
+  ],
+  [
+   "What is the 98th prime number?",
+   "521"
+  ],
+  [
+   "What is the 99th prime number?",
+   "523"
+  ],
+  [
+   "What is the 100th prime number?",
+   "541"
+  ],
+  [
+   "What is the 101th prime number?",
+   "547"
+  ],
+  [
+   "What is the 102th prime number?",
+   "557"
+  ],
+  [
+   "What is the 103th prime number?",
+   "563"
+  ],
+  [
+   "What is the 104th prime number?",
+   "569"
+  ],
+  [
+   "What is the 105th prime number?",
+   "571"
+  ],
+  [
+   "What is the 106th prime number?",
+   "577"
+  ],
+  [
+   "What is the 107th prime number?",
+   "587"
+  ],
+  [
+   "What is the 108th prime number?",
+   "593"
+  ],
+  [
+   "What is the 109th prime number?",
+   "599"
+  ],
+  [
+   "What is the 110th prime number?",
+   "601"
+  ],
+  [
+   "What is the 111th prime number?",
+   "607"
+  ],
+  [
+   "What is the 112th prime number?",
+   "613"
+  ],
+  [
+   "What is the 113th prime number?",
+   "617"
+  ],
+  [
+   "What is the 114th prime number?",
+   "619"
+  ],
+  [
+   "What is the 115th prime number?",
+   "631"
+  ],
+  [
+   "What is the 116th prime number?",
+   "641"
+  ],
+  [
+   "What is the 117th prime number?",
+   "643"
+  ],
+  [
+   "What is the 118th prime number?",
+   "647"
+  ],
+  [
+   "What is the 119th prime number?",
+   "653"
+  ],
+  [
+   "What is the 120th prime number?",
+   "659"
+  ],
+  [
+   "What is the 121th prime number?",
+   "661"
+  ],
+  [
+   "What is the 122th prime number?",
+   "673"
+  ],
+  [
+   "What is the 123th prime number?",
+   "677"
+  ],
+  [
+   "What is the 124th prime number?",
+   "683"
+  ],
+  [
+   "What is the 125th prime number?",
+   "691"
+  ],
+  [
+   "What is the 126th prime number?",
+   "701"
+  ],
+  [
+   "What is the 127th prime number?",
+   "709"
+  ],
+  [
+   "What is the 128th prime number?",
+   "719"
+  ],
+  [
+   "What is the 129th prime number?",
+   "727"
+  ],
+  [
+   "What is the 130th prime number?",
+   "733"
+  ],
+  [
+   "What is the 131th prime number?",
+   "739"
+  ],
+  [
+   "What is the 132th prime number?",
+   "743"
+  ],
+  [
+   "What is the 133th prime number?",
+   "751"
+  ],
+  [
+   "What is the 134th prime number?",
+   "757"
+  ],
+  [
+   "What is the 135th prime number?",
+   "761"
+  ],
+  [
+   "What is the 136th prime number?",
+   "769"
+  ],
+  [
+   "What is the 137th prime number?",
+   "773"
+  ],
+  [
+   "What is the 138th prime number?",
+   "787"
+  ],
+  [
+   "What is the 139th prime number?",
+   "797"
+  ],
+  [
+   "What is the 140th prime number?",
+   "809"
+  ],
+  [
+   "What is the 141th prime number?",
+   "811"
+  ],
+  [
+   "What is the 142th prime number?",
+   "821"
+  ],
+  [
+   "What is the 143th prime number?",
+   "823"
+  ],
+  [
+   "What is the 144th prime number?",
+   "827"
+  ],
+  [
+   "What is the 145th prime number?",
+   "829"
+  ],
+  [
+   "What is the 146th prime number?",
+   "839"
+  ],
+  [
+   "What is the 147th prime number?",
+   "853"
+  ],
+  [
+   "What is the 148th prime number?",
+   "857"
+  ],
+  [
+   "What is the 149th prime number?",
+   "859"
+  ],
+  [
+   "What is the 150th prime number?",
+   "863"
+  ],
+  [
+   "What is the 151th prime number?",
+   "877"
+  ],
+  [
+   "What is the 152th prime number?",
+   "881"
+  ],
+  [
+   "What is the 153th prime number?",
+   "883"
+  ],
+  [
+   "What is the 154th prime number?",
+   "887"
+  ],
+  [
+   "What is the 155th prime number?",
+   "907"
+  ],
+  [
+   "What is the 156th prime number?",
+   "911"
+  ],
+  [
+   "What is the 157th prime number?",
+   "919"
+  ],
+  [
+   "What is the 158th prime number?",
+   "929"
+  ],
+  [
+   "What is the 159th prime number?",
+   "937"
+  ],
+  [
+   "What is the 160th prime number?",
+   "941"
+  ],
+  [
+   "What is the 161th prime number?",
+   "947"
+  ],
+  [
+   "What is the 162th prime number?",
+   "953"
+  ],
+  [
+   "What is the 163th prime number?",
+   "967"
+  ],
+  [
+   "What is the 164th prime number?",
+   "971"
+  ],
+  [
+   "What is the 165th prime number?",
+   "977"
+  ],
+  [
+   "What is the 166th prime number?",
+   "983"
+  ],
+  [
+   "What is the 167th prime number?",
+   "991"
+  ],
+  [
+   "What is the 168th prime number?",
+   "997"
+  ],
+  [
+   "What is the 169th prime number?",
+   "1009"
+  ],
+  [
+   "What is the 170th prime number?",
+   "1013"
+  ],
+  [
+   "What is the 171th prime number?",
+   "1019"
+  ],
+  [
+   "What is the 172th prime number?",
+   "1021"
+  ],
+  [
+   "What is the 173th prime number?",
+   "1031"
+  ],
+  [
+   "What is the 174th prime number?",
+   "1033"
+  ],
+  [
+   "What is the 175th prime number?",
+   "1039"
+  ],
+  [
+   "What is the 176th prime number?",
+   "1049"
+  ],
+  [
+   "What is the 177th prime number?",
+   "1051"
+  ],
+  [
+   "What is the 178th prime number?",
+   "1061"
+  ],
+  [
+   "What is the 179th prime number?",
+   "1063"
+  ],
+  [
+   "What is the 180th prime number?",
+   "1069"
+  ],
+  [
+   "What is the 181th prime number?",
+   "1087"
+  ],
+  [
+   "What is the 182th prime number?",
+   "1091"
+  ],
+  [
+   "What is the 183th prime number?",
+   "1093"
+  ],
+  [
+   "What is the 184th prime number?",
+   "1097"
+  ],
+  [
+   "What is the 185th prime number?",
+   "1103"
+  ],
+  [
+   "What is the 186th prime number?",
+   "1109"
+  ],
+  [
+   "What is the 187th prime number?",
+   "1117"
+  ],
+  [
+   "What is the 188th prime number?",
+   "1123"
+  ],
+  [
+   "What is the 189th prime number?",
+   "1129"
+  ],
+  [
+   "What is the 190th prime number?",
+   "1151"
+  ],
+  [
+   "What is the 191th prime number?",
+   "1153"
+  ],
+  [
+   "What is the 192th prime number?",
+   "1163"
+  ],
+  [
+   "What is the 193th prime number?",
+   "1171"
+  ],
+  [
+   "What is the 194th prime number?",
+   "1181"
+  ],
+  [
+   "What is the 195th prime number?",
+   "1187"
+  ],
+  [
+   "What is the 196th prime number?",
+   "1193"
+  ],
+  [
+   "What is the 197th prime number?",
+   "1201"
+  ],
+  [
+   "What is the 198th prime number?",
+   "1213"
+  ],
+  [
+   "What is the 199th prime number?",
+   "1217"
+  ],
+  [
+   "What is the 200th prime number?",
+   "1223"
+  ],
+  [
+   "What is the 10th Fibonacci number?",
+   "55"
+  ],
+  [
+   "What is the 11th Fibonacci number?",
+   "89"
+  ],
+  [
+   "What is the 12th Fibonacci number?",
+   "144"
+  ],
+  [
+   "What is the 13th Fibonacci number?",
+   "233"
+  ],
+  [
+   "What is the 14th Fibonacci number?",
+   "377"
+  ],
+  [
+   "What is the 15th Fibonacci number?",
+   "610"
+  ],
+  [
+   "What is the 16th Fibonacci number?",
+   "987"
+  ],
+  [
+   "What is the 17th Fibonacci number?",
+   "1597"
+  ],
+  [
+   "What is the 18th Fibonacci number?",
+   "2584"
+  ],
+  [
+   "What is the 19th Fibonacci number?",
+   "4181"
+  ],
+  [
+   "What is the 20th Fibonacci number?",
+   "6765"
+  ],
+  [
+   "What is the 21th Fibonacci number?",
+   "10946"
+  ],
+  [
+   "What is the 22th Fibonacci number?",
+   "17711"
+  ],
+  [
+   "What is the 23th Fibonacci number?",
+   "28657"
+  ],
+  [
+   "What is the 24th Fibonacci number?",
+   "46368"
+  ],
+  [
+   "What is the 25th Fibonacci number?",
+   "75025"
+  ],
+  [
+   "What is the 26th Fibonacci number?",
+   "121393"
+  ],
+  [
+   "What is the 27th Fibonacci number?",
+   "196418"
+  ],
+  [
+   "What is the 28th Fibonacci number?",
+   "317811"
+  ],
+  [
+   "What is the 29th Fibonacci number?",
+   "514229"
+  ],
+  [
+   "What is the 30th Fibonacci number?",
+   "832040"
+  ],
+  [
+   "What is the 31th Fibonacci number?",
+   "1346269"
+  ],
+  [
+   "What is the 32th Fibonacci number?",
+   "2178309"
+  ],
+  [
+   "What is the 33th Fibonacci number?",
+   "3524578"
+  ],
+  [
+   "What is the 34th Fibonacci number?",
+   "5702887"
+  ],
+  [
+   "What is the 35th Fibonacci number?",
+   "9227465"
+  ],
+  [
+   "What is the 36th Fibonacci number?",
+   "14930352"
+  ],
+  [
+   "What is the 37th Fibonacci number?",
+   "24157817"
+  ],
+  [
+   "What is the 38th Fibonacci number?",
+   "39088169"
+  ],
+  [
+   "What is the 39th Fibonacci number?",
+   "63245986"
+  ],
+  [
+   "What is the 40th Fibonacci number?",
+   "102334155"
+  ],
+  [
+   "What is the 41th Fibonacci number?",
+   "165580141"
+  ],
+  [
+   "What is the 42th Fibonacci number?",
+   "267914296"
+  ],
+  [
+   "What is the 43th Fibonacci number?",
+   "433494437"
+  ],
+  [
+   "What is the 44th Fibonacci number?",
+   "701408733"
+  ],
+  [
+   "What is the 45th Fibonacci number?",
+   "1134903170"
+  ],
+  [
+   "What is the 46th Fibonacci number?",
+   "1836311903"
+  ],
+  [
+   "What is the 47th Fibonacci number?",
+   "2971215073"
+  ],
+  [
+   "What is the 48th Fibonacci number?",
+   "4807526976"
+  ],
+  [
+   "What is the 49th Fibonacci number?",
+   "7778742049"
+  ],
+  [
+   "What is the 50th Fibonacci number?",
+   "12586269025"
+  ],
+  [
+   "What is the 51th Fibonacci number?",
+   "20365011074"
+  ],
+  [
+   "What is the 52th Fibonacci number?",
+   "32951280099"
+  ],
+  [
+   "What is the 53th Fibonacci number?",
+   "53316291173"
+  ],
+  [
+   "What is the 54th Fibonacci number?",
+   "86267571272"
+  ],
+  [
+   "What is the 55th Fibonacci number?",
+   "139583862445"
+  ],
+  [
+   "What is the 56th Fibonacci number?",
+   "225851433717"
+  ],
+  [
+   "What is the 57th Fibonacci number?",
+   "365435296162"
+  ],
+  [
+   "What is the 58th Fibonacci number?",
+   "591286729879"
+  ],
+  [
+   "What is the 59th Fibonacci number?",
+   "956722026041"
+  ],
+  [
+   "What is the 60th Fibonacci number?",
+   "1548008755920"
+  ],
+  [
+   "What is the 61th Fibonacci number?",
+   "2504730781961"
+  ],
+  [
+   "What is the 62th Fibonacci number?",
+   "4052739537881"
+  ],
+  [
+   "What is the 63th Fibonacci number?",
+   "6557470319842"
+  ],
+  [
+   "What is the 64th Fibonacci number?",
+   "10610209857723"
+  ],
+  [
+   "What is the 65th Fibonacci number?",
+   "17167680177565"
+  ],
+  [
+   "What is the 66th Fibonacci number?",
+   "27777890035288"
+  ],
+  [
+   "What is the 67th Fibonacci number?",
+   "44945570212853"
+  ],
+  [
+   "What is the 68th Fibonacci number?",
+   "72723460248141"
+  ],
+  [
+   "What is the 69th Fibonacci number?",
+   "117669030460994"
+  ],
+  [
+   "What is the 70th Fibonacci number?",
+   "190392490709135"
+  ],
+  [
+   "What is the 71th Fibonacci number?",
+   "308061521170129"
+  ],
+  [
+   "What is the 72th Fibonacci number?",
+   "498454011879264"
+  ],
+  [
+   "What is the 73th Fibonacci number?",
+   "806515533049393"
+  ],
+  [
+   "What is the 74th Fibonacci number?",
+   "1304969544928657"
+  ],
+  [
+   "What is the 75th Fibonacci number?",
+   "2111485077978050"
+  ],
+  [
+   "What is the 76th Fibonacci number?",
+   "3416454622906707"
+  ],
+  [
+   "What is the 77th Fibonacci number?",
+   "5527939700884757"
+  ],
+  [
+   "What is the 78th Fibonacci number?",
+   "8944394323791464"
+  ],
+  [
+   "What is the 79th Fibonacci number?",
+   "14472334024676221"
+  ],
+  [
+   "What is the 80th Fibonacci number?",
+   "23416728348467685"
+  ],
+  [
+   "What is the 81th Fibonacci number?",
+   "37889062373143906"
+  ],
+  [
+   "What is the 82th Fibonacci number?",
+   "61305790721611591"
+  ],
+  [
+   "What is the 83th Fibonacci number?",
+   "99194853094755497"
+  ],
+  [
+   "What is the 84th Fibonacci number?",
+   "160500643816367088"
+  ],
+  [
+   "What is the 85th Fibonacci number?",
+   "259695496911122585"
+  ],
+  [
+   "What is the 86th Fibonacci number?",
+   "420196140727489673"
+  ],
+  [
+   "What is the 87th Fibonacci number?",
+   "679891637638612258"
+  ],
+  [
+   "What is the 88th Fibonacci number?",
+   "1100087778366101931"
+  ],
+  [
+   "What is the 89th Fibonacci number?",
+   "1779979416004714189"
+  ],
+  [
+   "What is the 90th Fibonacci number?",
+   "2880067194370816120"
+  ],
+  [
+   "What is the 91th Fibonacci number?",
+   "4660046610375530309"
+  ],
+  [
+   "What is the 92th Fibonacci number?",
+   "7540113804746346429"
+  ],
+  [
+   "What is the 93th Fibonacci number?",
+   "12200160415121876738"
+  ],
+  [
+   "What is the 94th Fibonacci number?",
+   "19740274219868223167"
+  ],
+  [
+   "What is the 95th Fibonacci number?",
+   "31940434634990099905"
+  ],
+  [
+   "What is the 96th Fibonacci number?",
+   "51680708854858323072"
+  ],
+  [
+   "What is the 97th Fibonacci number?",
+   "83621143489848422977"
+  ],
+  [
+   "What is the 98th Fibonacci number?",
+   "135301852344706746049"
+  ],
+  [
+   "What is the 99th Fibonacci number?",
+   "218922995834555169026"
+  ],
+  [
+   "What is the 100th Fibonacci number?",
+   "354224848179261915075"
+  ],
+  [
+   "What is the 101th Fibonacci number?",
+   "573147844013817084101"
+  ],
+  [
+   "What is the 102th Fibonacci number?",
+   "927372692193078999176"
+  ],
+  [
+   "What is the 103th Fibonacci number?",
+   "1500520536206896083277"
+  ],
+  [
+   "What is the 104th Fibonacci number?",
+   "2427893228399975082453"
+  ],
+  [
+   "What is the 105th Fibonacci number?",
+   "3928413764606871165730"
+  ],
+  [
+   "What is the 106th Fibonacci number?",
+   "6356306993006846248183"
+  ],
+  [
+   "What is the 107th Fibonacci number?",
+   "10284720757613717413913"
+  ],
+  [
+   "What is the 108th Fibonacci number?",
+   "16641027750620563662096"
+  ],
+  [
+   "What is the 109th Fibonacci number?",
+   "26925748508234281076009"
+  ],
+  [
+   "What is the 110th Fibonacci number?",
+   "43566776258854844738105"
+  ],
+  [
+   "What is the 111th Fibonacci number?",
+   "70492524767089125814114"
+  ],
+  [
+   "What is the 112th Fibonacci number?",
+   "114059301025943970552219"
+  ],
+  [
+   "What is the 113th Fibonacci number?",
+   "184551825793033096366333"
+  ],
+  [
+   "What is the 114th Fibonacci number?",
+   "298611126818977066918552"
+  ],
+  [
+   "What is the 115th Fibonacci number?",
+   "483162952612010163284885"
+  ],
+  [
+   "What is the 116th Fibonacci number?",
+   "781774079430987230203437"
+  ],
+  [
+   "What is the 117th Fibonacci number?",
+   "1264937032042997393488322"
+  ],
+  [
+   "What is the 118th Fibonacci number?",
+   "2046711111473984623691759"
+  ],
+  [
+   "What is the 119th Fibonacci number?",
+   "3311648143516982017180081"
+  ],
+  [
+   "What is the 120th Fibonacci number?",
+   "5358359254990966640871840"
+  ],
+  [
+   "What is the 121th Fibonacci number?",
+   "8670007398507948658051921"
+  ],
+  [
+   "What is the 122th Fibonacci number?",
+   "14028366653498915298923761"
+  ],
+  [
+   "What is the 123th Fibonacci number?",
+   "22698374052006863956975682"
+  ],
+  [
+   "What is the 124th Fibonacci number?",
+   "36726740705505779255899443"
+  ],
+  [
+   "What is the 125th Fibonacci number?",
+   "59425114757512643212875125"
+  ],
+  [
+   "What is the 126th Fibonacci number?",
+   "96151855463018422468774568"
+  ],
+  [
+   "What is the 127th Fibonacci number?",
+   "155576970220531065681649693"
+  ],
+  [
+   "What is the 128th Fibonacci number?",
+   "251728825683549488150424261"
+  ],
+  [
+   "What is the 129th Fibonacci number?",
+   "407305795904080553832073954"
+  ],
+  [
+   "What is the 130th Fibonacci number?",
+   "659034621587630041982498215"
+  ],
+  [
+   "What is the 131th Fibonacci number?",
+   "1066340417491710595814572169"
+  ],
+  [
+   "What is the 132th Fibonacci number?",
+   "1725375039079340637797070384"
+  ],
+  [
+   "What is the 133th Fibonacci number?",
+   "2791715456571051233611642553"
+  ],
+  [
+   "What is the 134th Fibonacci number?",
+   "4517090495650391871408712937"
+  ],
+  [
+   "What is the 135th Fibonacci number?",
+   "7308805952221443105020355490"
+  ],
+  [
+   "What is the 136th Fibonacci number?",
+   "11825896447871834976429068427"
+  ],
+  [
+   "What is the 137th Fibonacci number?",
+   "19134702400093278081449423917"
+  ],
+  [
+   "What is the 138th Fibonacci number?",
+   "30960598847965113057878492344"
+  ],
+  [
+   "What is the 139th Fibonacci number?",
+   "50095301248058391139327916261"
+  ],
+  [
+   "What is the 140th Fibonacci number?",
+   "81055900096023504197206408605"
+  ],
+  [
+   "What is the 141th Fibonacci number?",
+   "131151201344081895336534324866"
+  ],
+  [
+   "What is the 142th Fibonacci number?",
+   "212207101440105399533740733471"
+  ],
+  [
+   "What is the 143th Fibonacci number?",
+   "343358302784187294870275058337"
+  ],
+  [
+   "What is the 144th Fibonacci number?",
+   "555565404224292694404015791808"
+  ],
+  [
+   "What is the 145th Fibonacci number?",
+   "898923707008479989274290850145"
+  ],
+  [
+   "What is the 146th Fibonacci number?",
+   "1454489111232772683678306641953"
+  ],
+  [
+   "What is the 147th Fibonacci number?",
+   "2353412818241252672952597492098"
+  ],
+  [
+   "What is the 148th Fibonacci number?",
+   "3807901929474025356630904134051"
+  ],
+  [
+   "What is the 149th Fibonacci number?",
+   "6161314747715278029583501626149"
+  ],
+  [
+   "What is the 150th Fibonacci number?",
+   "9969216677189303386214405760200"
+  ],
+  [
+   "What is the 151th Fibonacci number?",
+   "16130531424904581415797907386349"
+  ],
+  [
+   "What is the 152th Fibonacci number?",
+   "26099748102093884802012313146549"
+  ],
+  [
+   "What is the 153th Fibonacci number?",
+   "42230279526998466217810220532898"
+  ],
+  [
+   "What is the 154th Fibonacci number?",
+   "68330027629092351019822533679447"
+  ],
+  [
+   "What is the 155th Fibonacci number?",
+   "110560307156090817237632754212345"
+  ],
+  [
+   "What is the 156th Fibonacci number?",
+   "178890334785183168257455287891792"
+  ],
+  [
+   "What is the 157th Fibonacci number?",
+   "289450641941273985495088042104137"
+  ],
+  [
+   "What is the 158th Fibonacci number?",
+   "468340976726457153752543329995929"
+  ],
+  [
+   "What is the 159th Fibonacci number?",
+   "757791618667731139247631372100066"
+  ],
+  [
+   "What is the 160th Fibonacci number?",
+   "1226132595394188293000174702095995"
+  ],
+  [
+   "What is the 161th Fibonacci number?",
+   "1983924214061919432247806074196061"
+  ],
+  [
+   "What is the 162th Fibonacci number?",
+   "3210056809456107725247980776292056"
+  ],
+  [
+   "What is the 163th Fibonacci number?",
+   "5193981023518027157495786850488117"
+  ],
+  [
+   "What is the 164th Fibonacci number?",
+   "8404037832974134882743767626780173"
+  ],
+  [
+   "What is the 165th Fibonacci number?",
+   "13598018856492162040239554477268290"
+  ],
+  [
+   "What is the 166th Fibonacci number?",
+   "22002056689466296922983322104048463"
+  ],
+  [
+   "What is the 167th Fibonacci number?",
+   "35600075545958458963222876581316753"
+  ],
+  [
+   "What is the 168th Fibonacci number?",
+   "57602132235424755886206198685365216"
+  ],
+  [
+   "What is the 169th Fibonacci number?",
+   "93202207781383214849429075266681969"
+  ],
+  [
+   "What is the 170th Fibonacci number?",
+   "150804340016807970735635273952047185"
+  ],
+  [
+   "What is the 171th Fibonacci number?",
+   "244006547798191185585064349218729154"
+  ],
+  [
+   "What is the 172th Fibonacci number?",
+   "394810887814999156320699623170776339"
+  ],
+  [
+   "What is the 173th Fibonacci number?",
+   "638817435613190341905763972389505493"
+  ],
+  [
+   "What is the 174th Fibonacci number?",
+   "1033628323428189498226463595560281832"
+  ],
+  [
+   "What is the 175th Fibonacci number?",
+   "1672445759041379840132227567949787325"
+  ],
+  [
+   "What is the 176th Fibonacci number?",
+   "2706074082469569338358691163510069157"
+  ],
+  [
+   "What is the 177th Fibonacci number?",
+   "4378519841510949178490918731459856482"
+  ],
+  [
+   "What is the 178th Fibonacci number?",
+   "7084593923980518516849609894969925639"
+  ],
+  [
+   "What is the 179th Fibonacci number?",
+   "11463113765491467695340528626429782121"
+  ],
+  [
+   "What is the 180th Fibonacci number?",
+   "18547707689471986212190138521399707760"
+  ],
+  [
+   "What is the 181th Fibonacci number?",
+   "30010821454963453907530667147829489881"
+  ],
+  [
+   "What is the 182th Fibonacci number?",
+   "48558529144435440119720805669229197641"
+  ],
+  [
+   "What is the 183th Fibonacci number?",
+   "78569350599398894027251472817058687522"
+  ],
+  [
+   "What is the 184th Fibonacci number?",
+   "127127879743834334146972278486287885163"
+  ],
+  [
+   "What is the 185th Fibonacci number?",
+   "205697230343233228174223751303346572685"
+  ],
+  [
+   "What is the 186th Fibonacci number?",
+   "332825110087067562321196029789634457848"
+  ],
+  [
+   "What is the 187th Fibonacci number?",
+   "538522340430300790495419781092981030533"
+  ],
+  [
+   "What is the 188th Fibonacci number?",
+   "871347450517368352816615810882615488381"
+  ],
+  [
+   "What is the 189th Fibonacci number?",
+   "1409869790947669143312035591975596518914"
+  ],
+  [
+   "What is the 190th Fibonacci number?",
+   "2281217241465037496128651402858212007295"
+  ],
+  [
+   "What is the 191th Fibonacci number?",
+   "3691087032412706639440686994833808526209"
+  ],
+  [
+   "What is the 192th Fibonacci number?",
+   "5972304273877744135569338397692020533504"
+  ],
+  [
+   "What is the 193th Fibonacci number?",
+   "9663391306290450775010025392525829059713"
+  ],
+  [
+   "What is the 194th Fibonacci number?",
+   "15635695580168194910579363790217849593217"
+  ],
+  [
+   "What is the 195th Fibonacci number?",
+   "25299086886458645685589389182743678652930"
+  ],
+  [
+   "What is the 196th Fibonacci number?",
+   "40934782466626840596168752972961528246147"
+  ],
+  [
+   "What is the 197th Fibonacci number?",
+   "66233869353085486281758142155705206899077"
+  ],
+  [
+   "What is the 198th Fibonacci number?",
+   "107168651819712326877926895128666735145224"
+  ],
+  [
+   "What is the 199th Fibonacci number?",
+   "173402521172797813159685037284371942044301"
+  ],
+  [
+   "What is the 200th Fibonacci number?",
+   "280571172992510140037611932413038677189525"
+  ],
+  [
+   "What is the 201th Fibonacci number?",
+   "453973694165307953197296969697410619233826"
+  ],
+  [
+   "What is the 202th Fibonacci number?",
+   "734544867157818093234908902110449296423351"
+  ],
+  [
+   "What is the 203th Fibonacci number?",
+   "1188518561323126046432205871807859915657177"
+  ],
+  [
+   "What is the 204th Fibonacci number?",
+   "1923063428480944139667114773918309212080528"
+  ],
+  [
+   "What is the 205th Fibonacci number?",
+   "3111581989804070186099320645726169127737705"
+  ],
+  [
+   "What is the 206th Fibonacci number?",
+   "5034645418285014325766435419644478339818233"
+  ],
+  [
+   "What is the 207th Fibonacci number?",
+   "8146227408089084511865756065370647467555938"
+  ],
+  [
+   "What is the 208th Fibonacci number?",
+   "13180872826374098837632191485015125807374171"
+  ],
+  [
+   "What is the 209th Fibonacci number?",
+   "21327100234463183349497947550385773274930109"
+  ],
+  [
+   "What is the square of 10?",
+   "100"
+  ],
+  [
+   "What is the square of 17?",
+   "289"
+  ],
+  [
+   "What is the square of 24?",
+   "576"
+  ],
+  [
+   "What is the square of 31?",
+   "961"
+  ],
+  [
+   "What is the square of 38?",
+   "1444"
+  ],
+  [
+   "What is the square of 45?",
+   "2025"
+  ],
+  [
+   "What is the square of 52?",
+   "2704"
+  ],
+  [
+   "What is the square of 59?",
+   "3481"
+  ],
+  [
+   "What is the square of 66?",
+   "4356"
+  ],
+  [
+   "What is the square of 73?",
+   "5329"
+  ],
+  [
+   "What is the square of 80?",
+   "6400"
+  ],
+  [
+   "What is the square of 87?",
+   "7569"
+  ],
+  [
+   "What is the square of 94?",
+   "8836"
+  ],
+  [
+   "What is the square of 101?",
+   "10201"
+  ],
+  [
+   "What is the square of 108?",
+   "11664"
+  ],
+  [
+   "What is the square of 115?",
+   "13225"
+  ],
+  [
+   "What is the square of 122?",
+   "14884"
+  ],
+  [
+   "What is the square of 129?",
+   "16641"
+  ],
+  [
+   "What is the square of 136?",
+   "18496"
+  ],
+  [
+   "What is the square of 143?",
+   "20449"
+  ],
+  [
+   "What is the square of 150?",
+   "22500"
+  ],
+  [
+   "What is the square of 157?",
+   "24649"
+  ],
+  [
+   "What is the square of 164?",
+   "26896"
+  ],
+  [
+   "What is the square of 171?",
+   "29241"
+  ],
+  [
+   "What is the square of 178?",
+   "31684"
+  ],
+  [
+   "What is the square of 185?",
+   "34225"
+  ],
+  [
+   "What is the square of 192?",
+   "36864"
+  ],
+  [
+   "What is the square of 199?",
+   "39601"
+  ],
+  [
+   "What is the square of 206?",
+   "42436"
+  ],
+  [
+   "What is the square of 213?",
+   "45369"
+  ],
+  [
+   "What is the square of 220?",
+   "48400"
+  ],
+  [
+   "What is the square of 227?",
+   "51529"
+  ],
+  [
+   "What is the square of 234?",
+   "54756"
+  ],
+  [
+   "What is the square of 241?",
+   "58081"
+  ],
+  [
+   "What is the square of 248?",
+   "61504"
+  ],
+  [
+   "What is the square of 255?",
+   "65025"
+  ],
+  [
+   "What is the square of 262?",
+   "68644"
+  ],
+  [
+   "What is the square of 269?",
+   "72361"
+  ],
+  [
+   "What is the square of 276?",
+   "76176"
+  ],
+  [
+   "What is the square of 283?",
+   "80089"
+  ],
+  [
+   "What is the square of 290?",
+   "84100"
+  ],
+  [
+   "What is the square of 297?",
+   "88209"
+  ],
+  [
+   "What is the square of 304?",
+   "92416"
+  ],
+  [
+   "What is the square of 311?",
+   "96721"
+  ],
+  [
+   "What is the square of 318?",
+   "101124"
+  ],
+  [
+   "What is the square of 325?",
+   "105625"
+  ],
+  [
+   "What is the square of 332?",
+   "110224"
+  ],
+  [
+   "What is the square of 339?",
+   "114921"
+  ],
+  [
+   "What is the square of 346?",
+   "119716"
+  ],
+  [
+   "What is the square of 353?",
+   "124609"
+  ],
+  [
+   "What is the square of 360?",
+   "129600"
+  ],
+  [
+   "What is the square of 367?",
+   "134689"
+  ],
+  [
+   "What is the square of 374?",
+   "139876"
+  ],
+  [
+   "What is the square of 381?",
+   "145161"
+  ],
+  [
+   "What is the square of 388?",
+   "150544"
+  ],
+  [
+   "What is the square of 395?",
+   "156025"
+  ],
+  [
+   "What is the square of 402?",
+   "161604"
+  ],
+  [
+   "What is the square of 409?",
+   "167281"
+  ],
+  [
+   "What is the square of 416?",
+   "173056"
+  ],
+  [
+   "What is the square of 423?",
+   "178929"
+  ],
+  [
+   "What is the square of 430?",
+   "184900"
+  ],
+  [
+   "What is the square of 437?",
+   "190969"
+  ],
+  [
+   "What is the square of 444?",
+   "197136"
+  ],
+  [
+   "What is the square of 451?",
+   "203401"
+  ],
+  [
+   "What is the square of 458?",
+   "209764"
+  ],
+  [
+   "What is the square of 465?",
+   "216225"
+  ],
+  [
+   "What is the square of 472?",
+   "222784"
+  ],
+  [
+   "What is the square of 479?",
+   "229441"
+  ],
+  [
+   "What is the square of 486?",
+   "236196"
+  ],
+  [
+   "What is the square of 493?",
+   "243049"
+  ],
+  [
+   "What is the square of 500?",
+   "250000"
+  ],
+  [
+   "What is the square of 507?",
+   "257049"
+  ],
+  [
+   "What is the square of 514?",
+   "264196"
+  ],
+  [
+   "What is the square of 521?",
+   "271441"
+  ],
+  [
+   "What is the square of 528?",
+   "278784"
+  ],
+  [
+   "What is the square of 535?",
+   "286225"
+  ],
+  [
+   "What is the square of 542?",
+   "293764"
+  ],
+  [
+   "What is the square of 549?",
+   "301401"
+  ],
+  [
+   "What is the square of 556?",
+   "309136"
+  ],
+  [
+   "What is the square of 563?",
+   "316969"
+  ],
+  [
+   "What is the square of 570?",
+   "324900"
+  ],
+  [
+   "What is the square of 577?",
+   "332929"
+  ],
+  [
+   "What is the square of 584?",
+   "341056"
+  ],
+  [
+   "What is the square of 591?",
+   "349281"
+  ],
+  [
+   "What is the square of 598?",
+   "357604"
+  ],
+  [
+   "What is the square of 605?",
+   "366025"
+  ],
+  [
+   "What is the square of 612?",
+   "374544"
+  ],
+  [
+   "What is the square of 619?",
+   "383161"
+  ],
+  [
+   "What is the square of 626?",
+   "391876"
+  ],
+  [
+   "What is the square of 633?",
+   "400689"
+  ],
+  [
+   "What is the square of 640?",
+   "409600"
+  ],
+  [
+   "What is the square of 647?",
+   "418609"
+  ],
+  [
+   "What is the square of 654?",
+   "427716"
+  ],
+  [
+   "What is the square of 661?",
+   "436921"
+  ],
+  [
+   "What is the square of 668?",
+   "446224"
+  ],
+  [
+   "What is the square of 675?",
+   "455625"
+  ],
+  [
+   "What is the square of 682?",
+   "465124"
+  ],
+  [
+   "What is the square of 689?",
+   "474721"
+  ],
+  [
+   "What is the square of 696?",
+   "484416"
+  ],
+  [
+   "What is the square of 703?",
+   "494209"
+  ],
+  [
+   "What is the square of 710?",
+   "504100"
+  ],
+  [
+   "What is the square of 717?",
+   "514089"
+  ],
+  [
+   "What is the square of 724?",
+   "524176"
+  ],
+  [
+   "What is the square of 731?",
+   "534361"
+  ],
+  [
+   "What is the square of 738?",
+   "544644"
+  ],
+  [
+   "What is the square of 745?",
+   "555025"
+  ],
+  [
+   "What is the square of 752?",
+   "565504"
+  ],
+  [
+   "What is the square of 759?",
+   "576081"
+  ],
+  [
+   "What is the square of 766?",
+   "586756"
+  ],
+  [
+   "What is the square of 773?",
+   "597529"
+  ],
+  [
+   "What is the square of 780?",
+   "608400"
+  ],
+  [
+   "What is the square of 787?",
+   "619369"
+  ],
+  [
+   "What is the square of 794?",
+   "630436"
+  ],
+  [
+   "What is the square of 801?",
+   "641601"
+  ],
+  [
+   "What is the square of 808?",
+   "652864"
+  ],
+  [
+   "What is the square of 815?",
+   "664225"
+  ],
+  [
+   "What is the square of 822?",
+   "675684"
+  ],
+  [
+   "What is the square of 829?",
+   "687241"
+  ],
+  [
+   "What is the square of 836?",
+   "698896"
+  ],
+  [
+   "What is the square of 843?",
+   "710649"
+  ],
+  [
+   "What is the square of 850?",
+   "722500"
+  ],
+  [
+   "What is the square of 857?",
+   "734449"
+  ],
+  [
+   "What is the square of 864?",
+   "746496"
+  ],
+  [
+   "What is the square of 871?",
+   "758641"
+  ],
+  [
+   "What is the square of 878?",
+   "770884"
+  ],
+  [
+   "What is the square of 885?",
+   "783225"
+  ],
+  [
+   "What is the square of 892?",
+   "795664"
+  ],
+  [
+   "What is the square of 899?",
+   "808201"
+  ],
+  [
+   "What is the square of 906?",
+   "820836"
+  ],
+  [
+   "What is the square of 913?",
+   "833569"
+  ],
+  [
+   "What is the square of 920?",
+   "846400"
+  ],
+  [
+   "What is the square of 927?",
+   "859329"
+  ],
+  [
+   "What is the square of 934?",
+   "872356"
+  ],
+  [
+   "What is the square of 941?",
+   "885481"
+  ],
+  [
+   "What is the square of 948?",
+   "898704"
+  ],
+  [
+   "What is the square of 955?",
+   "912025"
+  ],
+  [
+   "What is the square of 962?",
+   "925444"
+  ],
+  [
+   "What is the square of 969?",
+   "938961"
+  ],
+  [
+   "What is the square of 976?",
+   "952576"
+  ],
+  [
+   "What is the square of 983?",
+   "966289"
+  ],
+  [
+   "What is the square of 990?",
+   "980100"
+  ],
+  [
+   "What is the square of 997?",
+   "994009"
+  ],
+  [
+   "What is the square of 1004?",
+   "1008016"
+  ],
+  [
+   "What is the square of 1011?",
+   "1022121"
+  ],
+  [
+   "What is the square of 1018?",
+   "1036324"
+  ],
+  [
+   "What is the square of 1025?",
+   "1050625"
+  ],
+  [
+   "What is the square of 1032?",
+   "1065024"
+  ],
+  [
+   "What is the square of 1039?",
+   "1079521"
+  ],
+  [
+   "What is the square of 1046?",
+   "1094116"
+  ],
+  [
+   "What is the square of 1053?",
+   "1108809"
+  ],
+  [
+   "What is the square of 1060?",
+   "1123600"
+  ],
+  [
+   "What is the square of 1067?",
+   "1138489"
+  ],
+  [
+   "What is the square of 1074?",
+   "1153476"
+  ],
+  [
+   "What is the square of 1081?",
+   "1168561"
+  ],
+  [
+   "What is the square of 1088?",
+   "1183744"
+  ],
+  [
+   "What is the square of 1095?",
+   "1199025"
+  ],
+  [
+   "What is the square of 1102?",
+   "1214404"
+  ],
+  [
+   "What is the square of 1109?",
+   "1229881"
+  ],
+  [
+   "What is the square of 1116?",
+   "1245456"
+  ],
+  [
+   "What is the square of 1123?",
+   "1261129"
+  ],
+  [
+   "What is the square of 1130?",
+   "1276900"
+  ],
+  [
+   "What is the square of 1137?",
+   "1292769"
+  ],
+  [
+   "What is the square of 1144?",
+   "1308736"
+  ],
+  [
+   "What is the square of 1151?",
+   "1324801"
+  ],
+  [
+   "What is the square of 1158?",
+   "1340964"
+  ],
+  [
+   "What is the square of 1165?",
+   "1357225"
+  ],
+  [
+   "What is the square of 1172?",
+   "1373584"
+  ],
+  [
+   "What is the square of 1179?",
+   "1390041"
+  ],
+  [
+   "What is the square of 1186?",
+   "1406596"
+  ],
+  [
+   "What is the square of 1193?",
+   "1423249"
+  ],
+  [
+   "What is the square of 1200?",
+   "1440000"
+  ],
+  [
+   "What is the square of 1207?",
+   "1456849"
+  ],
+  [
+   "What is the square of 1214?",
+   "1473796"
+  ],
+  [
+   "What is the square of 1221?",
+   "1490841"
+  ],
+  [
+   "What is the square of 1228?",
+   "1507984"
+  ],
+  [
+   "What is the square of 1235?",
+   "1525225"
+  ],
+  [
+   "What is the square of 1242?",
+   "1542564"
+  ],
+  [
+   "What is the square of 1249?",
+   "1560001"
+  ],
+  [
+   "What is the square of 1256?",
+   "1577536"
+  ],
+  [
+   "What is the square of 1263?",
+   "1595169"
+  ],
+  [
+   "What is the square of 1270?",
+   "1612900"
+  ],
+  [
+   "What is the square of 1277?",
+   "1630729"
+  ],
+  [
+   "What is the square of 1284?",
+   "1648656"
+  ],
+  [
+   "What is the square of 1291?",
+   "1666681"
+  ],
+  [
+   "What is the square of 1298?",
+   "1684804"
+  ],
+  [
+   "What is the square of 1305?",
+   "1703025"
+  ],
+  [
+   "What is the square of 1312?",
+   "1721344"
+  ],
+  [
+   "What is the square of 1319?",
+   "1739761"
+  ],
+  [
+   "What is the square of 1326?",
+   "1758276"
+  ],
+  [
+   "What is the square of 1333?",
+   "1776889"
+  ],
+  [
+   "What is the square of 1340?",
+   "1795600"
+  ],
+  [
+   "What is the square of 1347?",
+   "1814409"
+  ],
+  [
+   "What is the square of 1354?",
+   "1833316"
+  ],
+  [
+   "What is the square of 1361?",
+   "1852321"
+  ],
+  [
+   "What is the square of 1368?",
+   "1871424"
+  ],
+  [
+   "What is the square of 1375?",
+   "1890625"
+  ],
+  [
+   "What is the square of 1382?",
+   "1909924"
+  ],
+  [
+   "What is the square of 1389?",
+   "1929321"
+  ],
+  [
+   "What is the square of 1396?",
+   "1948816"
+  ],
+  [
+   "What is the square of 1403?",
+   "1968409"
+  ],
+  [
+   "What is the cube of 5?",
+   "125"
+  ],
+  [
+   "What is the cube of 8?",
+   "512"
+  ],
+  [
+   "What is the cube of 11?",
+   "1331"
+  ],
+  [
+   "What is the cube of 14?",
+   "2744"
+  ],
+  [
+   "What is the cube of 17?",
+   "4913"
+  ],
+  [
+   "What is the cube of 20?",
+   "8000"
+  ],
+  [
+   "What is the cube of 23?",
+   "12167"
+  ],
+  [
+   "What is the cube of 26?",
+   "17576"
+  ],
+  [
+   "What is the cube of 29?",
+   "24389"
+  ],
+  [
+   "What is the cube of 32?",
+   "32768"
+  ],
+  [
+   "What is the cube of 35?",
+   "42875"
+  ],
+  [
+   "What is the cube of 38?",
+   "54872"
+  ],
+  [
+   "What is the cube of 41?",
+   "68921"
+  ],
+  [
+   "What is the cube of 44?",
+   "85184"
+  ],
+  [
+   "What is the cube of 47?",
+   "103823"
+  ],
+  [
+   "What is the cube of 50?",
+   "125000"
+  ],
+  [
+   "What is the cube of 53?",
+   "148877"
+  ],
+  [
+   "What is the cube of 56?",
+   "175616"
+  ],
+  [
+   "What is the cube of 59?",
+   "205379"
+  ],
+  [
+   "What is the cube of 62?",
+   "238328"
+  ],
+  [
+   "What is the cube of 65?",
+   "274625"
+  ],
+  [
+   "What is the cube of 68?",
+   "314432"
+  ],
+  [
+   "What is the cube of 71?",
+   "357911"
+  ],
+  [
+   "What is the cube of 74?",
+   "405224"
+  ],
+  [
+   "What is the cube of 77?",
+   "456533"
+  ],
+  [
+   "What is the cube of 80?",
+   "512000"
+  ],
+  [
+   "What is the cube of 83?",
+   "571787"
+  ],
+  [
+   "What is the cube of 86?",
+   "636056"
+  ],
+  [
+   "What is the cube of 89?",
+   "704969"
+  ],
+  [
+   "What is the cube of 92?",
+   "778688"
+  ],
+  [
+   "What is the cube of 95?",
+   "857375"
+  ],
+  [
+   "What is the cube of 98?",
+   "941192"
+  ],
+  [
+   "What is the cube of 101?",
+   "1030301"
+  ],
+  [
+   "What is the cube of 104?",
+   "1124864"
+  ],
+  [
+   "What is the cube of 107?",
+   "1225043"
+  ],
+  [
+   "What is the cube of 110?",
+   "1331000"
+  ],
+  [
+   "What is the cube of 113?",
+   "1442897"
+  ],
+  [
+   "What is the cube of 116?",
+   "1560896"
+  ],
+  [
+   "What is the cube of 119?",
+   "1685159"
+  ],
+  [
+   "What is the cube of 122?",
+   "1815848"
+  ],
+  [
+   "What is the cube of 125?",
+   "1953125"
+  ],
+  [
+   "What is the cube of 128?",
+   "2097152"
+  ],
+  [
+   "What is the cube of 131?",
+   "2248091"
+  ],
+  [
+   "What is the cube of 134?",
+   "2406104"
+  ],
+  [
+   "What is the cube of 137?",
+   "2571353"
+  ],
+  [
+   "What is the cube of 140?",
+   "2744000"
+  ],
+  [
+   "What is the cube of 143?",
+   "2924207"
+  ],
+  [
+   "What is the cube of 146?",
+   "3112136"
+  ],
+  [
+   "What is the cube of 149?",
+   "3307949"
+  ],
+  [
+   "What is the cube of 152?",
+   "3511808"
+  ],
+  [
+   "What is the cube of 155?",
+   "3723875"
+  ],
+  [
+   "What is the cube of 158?",
+   "3944312"
+  ],
+  [
+   "What is the cube of 161?",
+   "4173281"
+  ],
+  [
+   "What is the cube of 164?",
+   "4410944"
+  ],
+  [
+   "What is the cube of 167?",
+   "4657463"
+  ],
+  [
+   "What is the cube of 170?",
+   "4913000"
+  ],
+  [
+   "What is the cube of 173?",
+   "5177717"
+  ],
+  [
+   "What is the cube of 176?",
+   "5451776"
+  ],
+  [
+   "What is the cube of 179?",
+   "5735339"
+  ],
+  [
+   "What is the cube of 182?",
+   "6028568"
+  ],
+  [
+   "What is the cube of 185?",
+   "6331625"
+  ],
+  [
+   "What is the cube of 188?",
+   "6644672"
+  ],
+  [
+   "What is the cube of 191?",
+   "6967871"
+  ],
+  [
+   "What is the cube of 194?",
+   "7301384"
+  ],
+  [
+   "What is the cube of 197?",
+   "7645373"
+  ],
+  [
+   "What is the cube of 200?",
+   "8000000"
+  ],
+  [
+   "What is the cube of 203?",
+   "8365427"
+  ],
+  [
+   "What is the cube of 206?",
+   "8741816"
+  ],
+  [
+   "What is the cube of 209?",
+   "9129329"
+  ],
+  [
+   "What is the cube of 212?",
+   "9528128"
+  ],
+  [
+   "What is the cube of 215?",
+   "9938375"
+  ],
+  [
+   "What is the cube of 218?",
+   "10360232"
+  ],
+  [
+   "What is the cube of 221?",
+   "10793861"
+  ],
+  [
+   "What is the cube of 224?",
+   "11239424"
+  ],
+  [
+   "What is the cube of 227?",
+   "11697083"
+  ],
+  [
+   "What is the cube of 230?",
+   "12167000"
+  ],
+  [
+   "What is the cube of 233?",
+   "12649337"
+  ],
+  [
+   "What is the cube of 236?",
+   "13144256"
+  ],
+  [
+   "What is the cube of 239?",
+   "13651919"
+  ],
+  [
+   "What is the cube of 242?",
+   "14172488"
+  ],
+  [
+   "What is the cube of 245?",
+   "14706125"
+  ],
+  [
+   "What is the cube of 248?",
+   "15252992"
+  ],
+  [
+   "What is the cube of 251?",
+   "15813251"
+  ],
+  [
+   "What is the cube of 254?",
+   "16387064"
+  ],
+  [
+   "What is the cube of 257?",
+   "16974593"
+  ],
+  [
+   "What is the cube of 260?",
+   "17576000"
+  ],
+  [
+   "What is the cube of 263?",
+   "18191447"
+  ],
+  [
+   "What is the cube of 266?",
+   "18821096"
+  ],
+  [
+   "What is the cube of 269?",
+   "19465109"
+  ],
+  [
+   "What is the cube of 272?",
+   "20123648"
+  ],
+  [
+   "What is the cube of 275?",
+   "20796875"
+  ],
+  [
+   "What is the cube of 278?",
+   "21484952"
+  ],
+  [
+   "What is the cube of 281?",
+   "22188041"
+  ],
+  [
+   "What is the cube of 284?",
+   "22906304"
+  ],
+  [
+   "What is the cube of 287?",
+   "23639903"
+  ],
+  [
+   "What is the cube of 290?",
+   "24389000"
+  ],
+  [
+   "What is the cube of 293?",
+   "25153757"
+  ],
+  [
+   "What is the cube of 296?",
+   "25934336"
+  ],
+  [
+   "What is the cube of 299?",
+   "26730899"
+  ],
+  [
+   "What is the cube of 302?",
+   "27543608"
+  ],
+  [
+   "What is the cube of 305?",
+   "28372625"
+  ],
+  [
+   "What is the cube of 308?",
+   "29218112"
+  ],
+  [
+   "What is the cube of 311?",
+   "30080231"
+  ],
+  [
+   "What is the cube of 314?",
+   "30959144"
+  ],
+  [
+   "What is the cube of 317?",
+   "31855013"
+  ],
+  [
+   "What is the cube of 320?",
+   "32768000"
+  ],
+  [
+   "What is the cube of 323?",
+   "33698267"
+  ],
+  [
+   "What is the cube of 326?",
+   "34645976"
+  ],
+  [
+   "What is the cube of 329?",
+   "35611289"
+  ],
+  [
+   "What is the cube of 332?",
+   "36594368"
+  ],
+  [
+   "What is the cube of 335?",
+   "37595375"
+  ],
+  [
+   "What is the cube of 338?",
+   "38614472"
+  ],
+  [
+   "What is the cube of 341?",
+   "39651821"
+  ],
+  [
+   "What is the cube of 344?",
+   "40707584"
+  ],
+  [
+   "What is the cube of 347?",
+   "41781923"
+  ],
+  [
+   "What is the cube of 350?",
+   "42875000"
+  ],
+  [
+   "What is the cube of 353?",
+   "43986977"
+  ],
+  [
+   "What is the cube of 356?",
+   "45118016"
+  ],
+  [
+   "What is the cube of 359?",
+   "46268279"
+  ],
+  [
+   "What is the cube of 362?",
+   "47437928"
+  ],
+  [
+   "What is the cube of 365?",
+   "48627125"
+  ],
+  [
+   "What is the cube of 368?",
+   "49836032"
+  ],
+  [
+   "What is the cube of 371?",
+   "51064811"
+  ],
+  [
+   "What is the cube of 374?",
+   "52313624"
+  ],
+  [
+   "What is the cube of 377?",
+   "53582633"
+  ],
+  [
+   "What is the cube of 380?",
+   "54872000"
+  ],
+  [
+   "What is the cube of 383?",
+   "56181887"
+  ],
+  [
+   "What is the cube of 386?",
+   "57512456"
+  ],
+  [
+   "What is the cube of 389?",
+   "58863869"
+  ],
+  [
+   "What is the cube of 392?",
+   "60236288"
+  ],
+  [
+   "What is the cube of 395?",
+   "61629875"
+  ],
+  [
+   "What is the cube of 398?",
+   "63044792"
+  ],
+  [
+   "What is the cube of 401?",
+   "64481201"
+  ],
+  [
+   "What is the cube of 404?",
+   "65939264"
+  ],
+  [
+   "What is the cube of 407?",
+   "67419143"
+  ],
+  [
+   "What is the cube of 410?",
+   "68921000"
+  ],
+  [
+   "What is the cube of 413?",
+   "70444997"
+  ],
+  [
+   "What is the cube of 416?",
+   "71991296"
+  ],
+  [
+   "What is the cube of 419?",
+   "73560059"
+  ],
+  [
+   "What is the cube of 422?",
+   "75151448"
+  ],
+  [
+   "What is the cube of 425?",
+   "76765625"
+  ],
+  [
+   "What is the cube of 428?",
+   "78402752"
+  ],
+  [
+   "What is the cube of 431?",
+   "80062991"
+  ],
+  [
+   "What is the cube of 434?",
+   "81746504"
+  ],
+  [
+   "What is the cube of 437?",
+   "83453453"
+  ],
+  [
+   "What is the cube of 440?",
+   "85184000"
+  ],
+  [
+   "What is the cube of 443?",
+   "86938307"
+  ],
+  [
+   "What is the cube of 446?",
+   "88716536"
+  ],
+  [
+   "What is the cube of 449?",
+   "90518849"
+  ],
+  [
+   "What is the cube of 452?",
+   "92345408"
+  ],
+  [
+   "What is the cube of 455?",
+   "94196375"
+  ],
+  [
+   "What is the cube of 458?",
+   "96071912"
+  ],
+  [
+   "What is the cube of 461?",
+   "97972181"
+  ],
+  [
+   "What is the cube of 464?",
+   "99897344"
+  ],
+  [
+   "What is the cube of 467?",
+   "101847563"
+  ],
+  [
+   "What is the cube of 470?",
+   "103823000"
+  ],
+  [
+   "What is the cube of 473?",
+   "105823817"
+  ],
+  [
+   "What is the cube of 476?",
+   "107850176"
+  ],
+  [
+   "What is the cube of 479?",
+   "109902239"
+  ],
+  [
+   "What is the cube of 482?",
+   "111980168"
+  ],
+  [
+   "What is the cube of 485?",
+   "114084125"
+  ],
+  [
+   "What is the cube of 488?",
+   "116214272"
+  ],
+  [
+   "What is the cube of 491?",
+   "118370771"
+  ],
+  [
+   "What is the cube of 494?",
+   "120553784"
+  ],
+  [
+   "What is the cube of 497?",
+   "122763473"
+  ],
+  [
+   "What is the cube of 500?",
+   "125000000"
+  ],
+  [
+   "What is the cube of 503?",
+   "127263527"
+  ],
+  [
+   "What is the cube of 506?",
+   "129554216"
+  ],
+  [
+   "What is the cube of 509?",
+   "131872229"
+  ],
+  [
+   "What is the cube of 512?",
+   "134217728"
+  ],
+  [
+   "What is the cube of 515?",
+   "136590875"
+  ],
+  [
+   "What is the cube of 518?",
+   "138991832"
+  ],
+  [
+   "What is the cube of 521?",
+   "141420761"
+  ],
+  [
+   "What is the cube of 524?",
+   "143877824"
+  ],
+  [
+   "What is the cube of 527?",
+   "146363183"
+  ],
+  [
+   "What is the cube of 530?",
+   "148877000"
+  ],
+  [
+   "What is the cube of 533?",
+   "151419437"
+  ],
+  [
+   "What is the cube of 536?",
+   "153990656"
+  ],
+  [
+   "What is the cube of 539?",
+   "156590819"
+  ],
+  [
+   "What is the cube of 542?",
+   "159220088"
+  ],
+  [
+   "What is the cube of 545?",
+   "161878625"
+  ],
+  [
+   "What is the cube of 548?",
+   "164566592"
+  ],
+  [
+   "What is the cube of 551?",
+   "167284151"
+  ],
+  [
+   "What is the cube of 554?",
+   "170031464"
+  ],
+  [
+   "What is the cube of 557?",
+   "172808693"
+  ],
+  [
+   "What is the cube of 560?",
+   "175616000"
+  ],
+  [
+   "What is the cube of 563?",
+   "178453547"
+  ],
+  [
+   "What is the cube of 566?",
+   "181321496"
+  ],
+  [
+   "What is the cube of 569?",
+   "184220009"
+  ],
+  [
+   "What is the cube of 572?",
+   "187149248"
+  ],
+  [
+   "What is the cube of 575?",
+   "190109375"
+  ],
+  [
+   "What is the cube of 578?",
+   "193100552"
+  ],
+  [
+   "What is the cube of 581?",
+   "196122941"
+  ],
+  [
+   "What is the cube of 584?",
+   "199176704"
+  ],
+  [
+   "What is the cube of 587?",
+   "202262003"
+  ],
+  [
+   "What is the cube of 590?",
+   "205379000"
+  ],
+  [
+   "What is the cube of 593?",
+   "208527857"
+  ],
+  [
+   "What is the cube of 596?",
+   "211708736"
+  ],
+  [
+   "What is the cube of 599?",
+   "214921799"
+  ],
+  [
+   "What is the cube of 602?",
+   "218167208"
+  ],
+  [
+   "What is the 5th triangular number?",
+   "15"
+  ],
+  [
+   "What is the 10th triangular number?",
+   "55"
+  ],
+  [
+   "What is the 15th triangular number?",
+   "120"
+  ],
+  [
+   "What is the 20th triangular number?",
+   "210"
+  ],
+  [
+   "What is the 25th triangular number?",
+   "325"
+  ],
+  [
+   "What is the 30th triangular number?",
+   "465"
+  ],
+  [
+   "What is the 35th triangular number?",
+   "630"
+  ],
+  [
+   "What is the 40th triangular number?",
+   "820"
+  ],
+  [
+   "What is the 45th triangular number?",
+   "1035"
+  ],
+  [
+   "What is the 50th triangular number?",
+   "1275"
+  ],
+  [
+   "What is the 55th triangular number?",
+   "1540"
+  ],
+  [
+   "What is the 60th triangular number?",
+   "1830"
+  ],
+  [
+   "What is the 65th triangular number?",
+   "2145"
+  ],
+  [
+   "What is the 70th triangular number?",
+   "2485"
+  ],
+  [
+   "What is the 75th triangular number?",
+   "2850"
+  ],
+  [
+   "What is the 80th triangular number?",
+   "3240"
+  ],
+  [
+   "What is the 85th triangular number?",
+   "3655"
+  ],
+  [
+   "What is the 90th triangular number?",
+   "4095"
+  ],
+  [
+   "What is the 95th triangular number?",
+   "4560"
+  ],
+  [
+   "What is the 100th triangular number?",
+   "5050"
+  ],
+  [
+   "What is the 105th triangular number?",
+   "5565"
+  ],
+  [
+   "What is the 110th triangular number?",
+   "6105"
+  ],
+  [
+   "What is the 115th triangular number?",
+   "6670"
+  ],
+  [
+   "What is the 120th triangular number?",
+   "7260"
+  ],
+  [
+   "What is the 125th triangular number?",
+   "7875"
+  ],
+  [
+   "What is the 130th triangular number?",
+   "8515"
+  ],
+  [
+   "What is the 135th triangular number?",
+   "9180"
+  ],
+  [
+   "What is the 140th triangular number?",
+   "9870"
+  ],
+  [
+   "What is the 145th triangular number?",
+   "10585"
+  ],
+  [
+   "What is the 150th triangular number?",
+   "11325"
+  ],
+  [
+   "What is the 155th triangular number?",
+   "12090"
+  ],
+  [
+   "What is the 160th triangular number?",
+   "12880"
+  ],
+  [
+   "What is the 165th triangular number?",
+   "13695"
+  ],
+  [
+   "What is the 170th triangular number?",
+   "14535"
+  ],
+  [
+   "What is the 175th triangular number?",
+   "15400"
+  ],
+  [
+   "What is the 180th triangular number?",
+   "16290"
+  ],
+  [
+   "What is the 185th triangular number?",
+   "17205"
+  ],
+  [
+   "What is the 190th triangular number?",
+   "18145"
+  ],
+  [
+   "What is the 195th triangular number?",
+   "19110"
+  ],
+  [
+   "What is the 200th triangular number?",
+   "20100"
+  ],
+  [
+   "What is the 205th triangular number?",
+   "21115"
+  ],
+  [
+   "What is the 210th triangular number?",
+   "22155"
+  ],
+  [
+   "What is the 215th triangular number?",
+   "23220"
+  ],
+  [
+   "What is the 220th triangular number?",
+   "24310"
+  ],
+  [
+   "What is the 225th triangular number?",
+   "25425"
+  ],
+  [
+   "What is the 230th triangular number?",
+   "26565"
+  ],
+  [
+   "What is the 235th triangular number?",
+   "27730"
+  ],
+  [
+   "What is the 240th triangular number?",
+   "28920"
+  ],
+  [
+   "What is the 245th triangular number?",
+   "30135"
+  ],
+  [
+   "What is the 250th triangular number?",
+   "31375"
+  ],
+  [
+   "What is the 255th triangular number?",
+   "32640"
+  ],
+  [
+   "What is the 260th triangular number?",
+   "33930"
+  ],
+  [
+   "What is the 265th triangular number?",
+   "35245"
+  ],
+  [
+   "What is the 270th triangular number?",
+   "36585"
+  ],
+  [
+   "What is the 275th triangular number?",
+   "37950"
+  ],
+  [
+   "What is the 280th triangular number?",
+   "39340"
+  ],
+  [
+   "What is the 285th triangular number?",
+   "40755"
+  ],
+  [
+   "What is the 290th triangular number?",
+   "42195"
+  ],
+  [
+   "What is the 295th triangular number?",
+   "43660"
+  ],
+  [
+   "What is the 300th triangular number?",
+   "45150"
+  ],
+  [
+   "What is the 305th triangular number?",
+   "46665"
+  ],
+  [
+   "What is the 310th triangular number?",
+   "48205"
+  ],
+  [
+   "What is the 315th triangular number?",
+   "49770"
+  ],
+  [
+   "What is the 320th triangular number?",
+   "51360"
+  ],
+  [
+   "What is the 325th triangular number?",
+   "52975"
+  ],
+  [
+   "What is the 330th triangular number?",
+   "54615"
+  ],
+  [
+   "What is the 335th triangular number?",
+   "56280"
+  ],
+  [
+   "What is the 340th triangular number?",
+   "57970"
+  ],
+  [
+   "What is the 345th triangular number?",
+   "59685"
+  ],
+  [
+   "What is the 350th triangular number?",
+   "61425"
+  ],
+  [
+   "What is the 355th triangular number?",
+   "63190"
+  ],
+  [
+   "What is the 360th triangular number?",
+   "64980"
+  ],
+  [
+   "What is the 365th triangular number?",
+   "66795"
+  ],
+  [
+   "What is the 370th triangular number?",
+   "68635"
+  ],
+  [
+   "What is the 375th triangular number?",
+   "70500"
+  ],
+  [
+   "What is the 380th triangular number?",
+   "72390"
+  ],
+  [
+   "What is the 385th triangular number?",
+   "74305"
+  ],
+  [
+   "What is the 390th triangular number?",
+   "76245"
+  ],
+  [
+   "What is the 395th triangular number?",
+   "78210"
+  ],
+  [
+   "What is the 400th triangular number?",
+   "80200"
+  ],
+  [
+   "What is the 405th triangular number?",
+   "82215"
+  ],
+  [
+   "What is the 410th triangular number?",
+   "84255"
+  ],
+  [
+   "What is the 415th triangular number?",
+   "86320"
+  ],
+  [
+   "What is the 420th triangular number?",
+   "88410"
+  ],
+  [
+   "What is the 425th triangular number?",
+   "90525"
+  ],
+  [
+   "What is the 430th triangular number?",
+   "92665"
+  ],
+  [
+   "What is the 435th triangular number?",
+   "94830"
+  ],
+  [
+   "What is the 440th triangular number?",
+   "97020"
+  ],
+  [
+   "What is the 445th triangular number?",
+   "99235"
+  ],
+  [
+   "What is the 450th triangular number?",
+   "101475"
+  ],
+  [
+   "What is the 455th triangular number?",
+   "103740"
+  ],
+  [
+   "What is the 460th triangular number?",
+   "106030"
+  ],
+  [
+   "What is the 465th triangular number?",
+   "108345"
+  ],
+  [
+   "What is the 470th triangular number?",
+   "110685"
+  ],
+  [
+   "What is the 475th triangular number?",
+   "113050"
+  ],
+  [
+   "What is the 480th triangular number?",
+   "115440"
+  ],
+  [
+   "What is the 485th triangular number?",
+   "117855"
+  ],
+  [
+   "What is the 490th triangular number?",
+   "120295"
+  ],
+  [
+   "What is the 495th triangular number?",
+   "122760"
+  ],
+  [
+   "What is the 500th triangular number?",
+   "125250"
+  ],
+  [
+   "What is the 505th triangular number?",
+   "127765"
+  ],
+  [
+   "What is the 510th triangular number?",
+   "130305"
+  ],
+  [
+   "What is the 515th triangular number?",
+   "132870"
+  ],
+  [
+   "What is the 520th triangular number?",
+   "135460"
+  ],
+  [
+   "What is the 525th triangular number?",
+   "138075"
+  ],
+  [
+   "What is the 530th triangular number?",
+   "140715"
+  ],
+  [
+   "What is the 535th triangular number?",
+   "143380"
+  ],
+  [
+   "What is the 540th triangular number?",
+   "146070"
+  ],
+  [
+   "What is the 545th triangular number?",
+   "148785"
+  ],
+  [
+   "What is the 550th triangular number?",
+   "151525"
+  ],
+  [
+   "What is the 555th triangular number?",
+   "154290"
+  ],
+  [
+   "What is the 560th triangular number?",
+   "157080"
+  ],
+  [
+   "What is the 565th triangular number?",
+   "159895"
+  ],
+  [
+   "What is the 570th triangular number?",
+   "162735"
+  ],
+  [
+   "What is the 575th triangular number?",
+   "165600"
+  ],
+  [
+   "What is the 580th triangular number?",
+   "168490"
+  ],
+  [
+   "What is the 585th triangular number?",
+   "171405"
+  ],
+  [
+   "What is the 590th triangular number?",
+   "174345"
+  ],
+  [
+   "What is the 595th triangular number?",
+   "177310"
+  ],
+  [
+   "What is the 600th triangular number?",
+   "180300"
+  ],
+  [
+   "What is the 605th triangular number?",
+   "183315"
+  ],
+  [
+   "What is the 610th triangular number?",
+   "186355"
+  ],
+  [
+   "What is the 615th triangular number?",
+   "189420"
+  ],
+  [
+   "What is the 620th triangular number?",
+   "192510"
+  ],
+  [
+   "What is the 625th triangular number?",
+   "195625"
+  ],
+  [
+   "What is the 630th triangular number?",
+   "198765"
+  ],
+  [
+   "What is the 635th triangular number?",
+   "201930"
+  ],
+  [
+   "What is the 640th triangular number?",
+   "205120"
+  ],
+  [
+   "What is the 645th triangular number?",
+   "208335"
+  ],
+  [
+   "What is the 650th triangular number?",
+   "211575"
+  ],
+  [
+   "What is the 655th triangular number?",
+   "214840"
+  ],
+  [
+   "What is the 660th triangular number?",
+   "218130"
+  ],
+  [
+   "What is the 665th triangular number?",
+   "221445"
+  ],
+  [
+   "What is the 670th triangular number?",
+   "224785"
+  ],
+  [
+   "What is the 675th triangular number?",
+   "228150"
+  ],
+  [
+   "What is the 680th triangular number?",
+   "231540"
+  ],
+  [
+   "What is the 685th triangular number?",
+   "234955"
+  ],
+  [
+   "What is the 690th triangular number?",
+   "238395"
+  ],
+  [
+   "What is the 695th triangular number?",
+   "241860"
+  ],
+  [
+   "What is the 700th triangular number?",
+   "245350"
+  ],
+  [
+   "What is the 705th triangular number?",
+   "248865"
+  ],
+  [
+   "What is the 710th triangular number?",
+   "252405"
+  ],
+  [
+   "What is the 715th triangular number?",
+   "255970"
+  ],
+  [
+   "What is the 720th triangular number?",
+   "259560"
+  ],
+  [
+   "What is the 725th triangular number?",
+   "263175"
+  ],
+  [
+   "What is the 730th triangular number?",
+   "266815"
+  ],
+  [
+   "What is the 735th triangular number?",
+   "270480"
+  ],
+  [
+   "What is the 740th triangular number?",
+   "274170"
+  ],
+  [
+   "What is the 745th triangular number?",
+   "277885"
+  ],
+  [
+   "What is the 750th triangular number?",
+   "281625"
+  ],
+  [
+   "What is the 755th triangular number?",
+   "285390"
+  ],
+  [
+   "What is the 760th triangular number?",
+   "289180"
+  ],
+  [
+   "What is the 765th triangular number?",
+   "292995"
+  ],
+  [
+   "What is the 770th triangular number?",
+   "296835"
+  ],
+  [
+   "What is the 775th triangular number?",
+   "300700"
+  ],
+  [
+   "What is the 780th triangular number?",
+   "304590"
+  ],
+  [
+   "What is the 785th triangular number?",
+   "308505"
+  ],
+  [
+   "What is the 790th triangular number?",
+   "312445"
+  ],
+  [
+   "What is the 795th triangular number?",
+   "316410"
+  ],
+  [
+   "What is the 800th triangular number?",
+   "320400"
+  ],
+  [
+   "What is the 805th triangular number?",
+   "324415"
+  ],
+  [
+   "What is the 810th triangular number?",
+   "328455"
+  ],
+  [
+   "What is the 815th triangular number?",
+   "332520"
+  ],
+  [
+   "What is the 820th triangular number?",
+   "336610"
+  ],
+  [
+   "What is the 825th triangular number?",
+   "340725"
+  ],
+  [
+   "What is the 830th triangular number?",
+   "344865"
+  ],
+  [
+   "What is the 835th triangular number?",
+   "349030"
+  ],
+  [
+   "What is the 840th triangular number?",
+   "353220"
+  ],
+  [
+   "What is the 845th triangular number?",
+   "357435"
+  ],
+  [
+   "What is the 850th triangular number?",
+   "361675"
+  ],
+  [
+   "What is the 855th triangular number?",
+   "365940"
+  ],
+  [
+   "What is the 860th triangular number?",
+   "370230"
+  ],
+  [
+   "What is the 865th triangular number?",
+   "374545"
+  ],
+  [
+   "What is the 870th triangular number?",
+   "378885"
+  ],
+  [
+   "What is the 875th triangular number?",
+   "383250"
+  ],
+  [
+   "What is the 880th triangular number?",
+   "387640"
+  ],
+  [
+   "What is the 885th triangular number?",
+   "392055"
+  ],
+  [
+   "What is the 890th triangular number?",
+   "396495"
+  ],
+  [
+   "What is the 895th triangular number?",
+   "400960"
+  ],
+  [
+   "What is the 900th triangular number?",
+   "405450"
+  ],
+  [
+   "What is the 905th triangular number?",
+   "409965"
+  ],
+  [
+   "What is the 910th triangular number?",
+   "414505"
+  ],
+  [
+   "What is the 915th triangular number?",
+   "419070"
+  ],
+  [
+   "What is the 920th triangular number?",
+   "423660"
+  ],
+  [
+   "What is the 925th triangular number?",
+   "428275"
+  ],
+  [
+   "What is the 930th triangular number?",
+   "432915"
+  ],
+  [
+   "What is the 935th triangular number?",
+   "437580"
+  ],
+  [
+   "What is the 940th triangular number?",
+   "442270"
+  ],
+  [
+   "What is the 945th triangular number?",
+   "446985"
+  ],
+  [
+   "What is the 950th triangular number?",
+   "451725"
+  ],
+  [
+   "What is the 955th triangular number?",
+   "456490"
+  ],
+  [
+   "What is the 960th triangular number?",
+   "461280"
+  ],
+  [
+   "What is the 965th triangular number?",
+   "466095"
+  ],
+  [
+   "What is the 970th triangular number?",
+   "470935"
+  ],
+  [
+   "What is the 975th triangular number?",
+   "475800"
+  ],
+  [
+   "What is the 980th triangular number?",
+   "480690"
+  ],
+  [
+   "What is the 985th triangular number?",
+   "485605"
+  ],
+  [
+   "What is the 990th triangular number?",
+   "490545"
+  ],
+  [
+   "What is the 995th triangular number?",
+   "495510"
+  ],
+  [
+   "What is the 1000th triangular number?",
+   "500500"
+  ],
+  [
+   "What is the symbol for element 1?",
+   "H"
+  ],
+  [
+   "What is the symbol for element 2?",
+   "He"
+  ],
+  [
+   "What is the symbol for element 3?",
+   "Li"
+  ],
+  [
+   "What is the symbol for element 4?",
+   "Be"
+  ],
+  [
+   "What is the symbol for element 5?",
+   "B"
+  ],
+  [
+   "What is the symbol for element 6?",
+   "C"
+  ],
+  [
+   "What is the symbol for element 7?",
+   "N"
+  ],
+  [
+   "What is the symbol for element 8?",
+   "O"
+  ],
+  [
+   "What is the symbol for element 9?",
+   "F"
+  ],
+  [
+   "What is the symbol for element 10?",
+   "Ne"
+  ],
+  [
+   "What is the symbol for element 11?",
+   "Na"
+  ],
+  [
+   "What is the symbol for element 12?",
+   "Mg"
+  ],
+  [
+   "What is the symbol for element 13?",
+   "Al"
+  ],
+  [
+   "What is the symbol for element 14?",
+   "Si"
+  ],
+  [
+   "What is the symbol for element 15?",
+   "P"
+  ],
+  [
+   "What is the symbol for element 16?",
+   "S"
+  ],
+  [
+   "What is the symbol for element 17?",
+   "Cl"
+  ],
+  [
+   "What is the symbol for element 18?",
+   "Ar"
+  ],
+  [
+   "What is the symbol for element 19?",
+   "K"
+  ],
+  [
+   "What is the symbol for element 20?",
+   "Ca"
+  ],
+  [
+   "What is the symbol for element 21?",
+   "Sc"
+  ],
+  [
+   "What is the symbol for element 22?",
+   "Ti"
+  ],
+  [
+   "What is the symbol for element 23?",
+   "V"
+  ],
+  [
+   "What is the symbol for element 24?",
+   "Cr"
+  ],
+  [
+   "What is the symbol for element 25?",
+   "Mn"
+  ],
+  [
+   "What is the symbol for element 26?",
+   "Fe"
+  ],
+  [
+   "What is the symbol for element 27?",
+   "Co"
+  ],
+  [
+   "What is the symbol for element 28?",
+   "Ni"
+  ],
+  [
+   "What is the symbol for element 29?",
+   "Cu"
+  ],
+  [
+   "What is the symbol for element 30?",
+   "Zn"
+  ],
+  [
+   "What is the symbol for element 31?",
+   "Ga"
+  ],
+  [
+   "What is the symbol for element 32?",
+   "Ge"
+  ],
+  [
+   "What is the symbol for element 33?",
+   "As"
+  ],
+  [
+   "What is the symbol for element 34?",
+   "Se"
+  ],
+  [
+   "What is the symbol for element 35?",
+   "Br"
+  ],
+  [
+   "What is the symbol for element 36?",
+   "Kr"
+  ],
+  [
+   "What is the symbol for element 37?",
+   "Rb"
+  ],
+  [
+   "What is the symbol for element 38?",
+   "Sr"
+  ],
+  [
+   "What is the symbol for element 39?",
+   "Y"
+  ],
+  [
+   "What is the symbol for element 40?",
+   "Zr"
+  ],
+  [
+   "What is the symbol for element 41?",
+   "Nb"
+  ],
+  [
+   "What is the symbol for element 42?",
+   "Mo"
+  ],
+  [
+   "What is the symbol for element 43?",
+   "Tc"
+  ],
+  [
+   "What is the symbol for element 44?",
+   "Ru"
+  ],
+  [
+   "What is the symbol for element 45?",
+   "Rh"
+  ],
+  [
+   "What is the symbol for element 46?",
+   "Pd"
+  ],
+  [
+   "What is the symbol for element 47?",
+   "Ag"
+  ],
+  [
+   "What is the symbol for element 48?",
+   "Cd"
+  ],
+  [
+   "What is the symbol for element 49?",
+   "In"
+  ],
+  [
+   "What is the symbol for element 50?",
+   "Sn"
+  ],
+  [
+   "What is the symbol for element 51?",
+   "Sb"
+  ],
+  [
+   "What is the symbol for element 52?",
+   "Te"
+  ],
+  [
+   "What is the symbol for element 53?",
+   "I"
+  ],
+  [
+   "What is the symbol for element 54?",
+   "Xe"
+  ],
+  [
+   "What is the symbol for element 55?",
+   "Cs"
+  ],
+  [
+   "What is the symbol for element 56?",
+   "Ba"
+  ],
+  [
+   "What is the symbol for element 57?",
+   "La"
+  ],
+  [
+   "What is the symbol for element 58?",
+   "Ce"
+  ],
+  [
+   "What is the symbol for element 59?",
+   "Pr"
+  ],
+  [
+   "What is the symbol for element 60?",
+   "Nd"
+  ],
+  [
+   "What is the symbol for element 61?",
+   "Pm"
+  ],
+  [
+   "What is the symbol for element 62?",
+   "Sm"
+  ],
+  [
+   "What is the symbol for element 63?",
+   "Eu"
+  ],
+  [
+   "What is the symbol for element 64?",
+   "Gd"
+  ],
+  [
+   "What is the symbol for element 65?",
+   "Tb"
+  ],
+  [
+   "What is the symbol for element 66?",
+   "Dy"
+  ],
+  [
+   "What is the symbol for element 67?",
+   "Ho"
+  ],
+  [
+   "What is the symbol for element 68?",
+   "Er"
+  ],
+  [
+   "What is the symbol for element 69?",
+   "Tm"
+  ],
+  [
+   "What is the symbol for element 70?",
+   "Yb"
+  ],
+  [
+   "What is the symbol for element 71?",
+   "Lu"
+  ],
+  [
+   "What is the symbol for element 72?",
+   "Hf"
+  ],
+  [
+   "What is the symbol for element 73?",
+   "Ta"
+  ],
+  [
+   "What is the symbol for element 74?",
+   "W"
+  ],
+  [
+   "What is the symbol for element 75?",
+   "Re"
+  ],
+  [
+   "What is the symbol for element 76?",
+   "Os"
+  ],
+  [
+   "What is the symbol for element 77?",
+   "Ir"
+  ],
+  [
+   "What is the symbol for element 78?",
+   "Pt"
+  ],
+  [
+   "What is the symbol for element 79?",
+   "Au"
+  ],
+  [
+   "What is the symbol for element 80?",
+   "Hg"
+  ],
+  [
+   "What is the symbol for element 81?",
+   "Tl"
+  ],
+  [
+   "What is the symbol for element 82?",
+   "Pb"
+  ],
+  [
+   "What is the symbol for element 83?",
+   "Bi"
+  ],
+  [
+   "What is the symbol for element 84?",
+   "Po"
+  ],
+  [
+   "What is the symbol for element 85?",
+   "At"
+  ],
+  [
+   "What is the symbol for element 86?",
+   "Rn"
+  ],
+  [
+   "What is the symbol for element 87?",
+   "Fr"
+  ],
+  [
+   "What is the symbol for element 88?",
+   "Ra"
+  ],
+  [
+   "What is the symbol for element 89?",
+   "Ac"
+  ],
+  [
+   "What is the symbol for element 90?",
+   "Th"
+  ],
+  [
+   "What is the symbol for element 91?",
+   "Pa"
+  ],
+  [
+   "What is the symbol for element 92?",
+   "U"
+  ],
+  [
+   "What is the symbol for element 93?",
+   "Np"
+  ],
+  [
+   "What is the symbol for element 94?",
+   "Pu"
+  ],
+  [
+   "What is the symbol for element 95?",
+   "Am"
+  ],
+  [
+   "What is the symbol for element 96?",
+   "Cm"
+  ],
+  [
+   "What is the symbol for element 97?",
+   "Bk"
+  ],
+  [
+   "What is the symbol for element 98?",
+   "Cf"
+  ],
+  [
+   "What is the symbol for element 99?",
+   "Es"
+  ],
+  [
+   "What is the symbol for element 100?",
+   "Fm"
+  ],
+  [
+   "What is the symbol for element 101?",
+   "Md"
+  ],
+  [
+   "What is the symbol for element 102?",
+   "No"
+  ],
+  [
+   "What is the symbol for element 103?",
+   "Lr"
+  ],
+  [
+   "What is the symbol for element 104?",
+   "Rf"
+  ],
+  [
+   "What is the symbol for element 105?",
+   "Db"
+  ],
+  [
+   "What is the symbol for element 106?",
+   "Sg"
+  ],
+  [
+   "What is the symbol for element 107?",
+   "Bh"
+  ],
+  [
+   "What is the symbol for element 108?",
+   "Hs"
+  ],
+  [
+   "What is the symbol for element 109?",
+   "Mt"
+  ],
+  [
+   "What is the symbol for element 110?",
+   "Ds"
+  ],
+  [
+   "What is the symbol for element 111?",
+   "Rg"
+  ],
+  [
+   "What is the symbol for element 112?",
+   "Cn"
+  ],
+  [
+   "What is the symbol for element 113?",
+   "Nh"
+  ],
+  [
+   "What is the symbol for element 114?",
+   "Fl"
+  ],
+  [
+   "What is the symbol for element 115?",
+   "Mc"
+  ],
+  [
+   "What is the symbol for element 116?",
+   "Lv"
+  ],
+  [
+   "What is the symbol for element 117?",
+   "Ts"
+  ],
+  [
+   "What is the symbol for element 118?",
+   "Og"
+  ],
+  [
+   "What is the capital of Afghanistan?",
+   "Kabul"
+  ],
+  [
+   "What is the capital of Albania?",
+   "Tirana"
+  ],
+  [
+   "What is the capital of Algeria?",
+   "Algiers"
+  ],
+  [
+   "What is the capital of Andorra?",
+   "Andorra"
+  ],
+  [
+   "What is the capital of Angola?",
+   "Luanda"
+  ],
+  [
+   "What is the capital of Argentina?",
+   "Buenos Aires"
+  ],
+  [
+   "What is the capital of Armenia?",
+   "Yerevan"
+  ],
+  [
+   "What is the capital of Australia?",
+   "Canberra"
+  ],
+  [
+   "What is the capital of Austria?",
+   "Vienna"
+  ],
+  [
+   "What is the capital of Azerbaijan?",
+   "Baku"
+  ],
+  [
+   "What is the capital of Bahamas?",
+   "Nassau"
+  ],
+  [
+   "What is the capital of Bahrain?",
+   "Manama"
+  ],
+  [
+   "What is the capital of Bangladesh?",
+   "Dhaka"
+  ],
+  [
+   "What is the capital of Barbados?",
+   "Bridgetown"
+  ],
+  [
+   "What is the capital of Belarus?",
+   "Minsk"
+  ],
+  [
+   "What is the capital of Belgium?",
+   "Brussels"
+  ],
+  [
+   "What is the capital of Belize?",
+   "Belmopan"
+  ],
+  [
+   "What is the capital of Benin?",
+   "Porto-Novo"
+  ],
+  [
+   "What is the capital of Bhutan?",
+   "Thimphu"
+  ],
+  [
+   "What is the capital of Bolivia?",
+   "Sucre"
+  ],
+  [
+   "What is the capital of Bosnia?",
+   "Sarajevo"
+  ],
+  [
+   "What is the capital of Botswana?",
+   "Gaborone"
+  ],
+  [
+   "What is the capital of Brazil?",
+   "Brasilia"
+  ],
+  [
+   "What is the capital of Brunei?",
+   "Bandar Seri Begawan"
+  ],
+  [
+   "What is the capital of Bulgaria?",
+   "Sofia"
+  ],
+  [
+   "What is the capital of Burkina Faso?",
+   "Ouagadougou"
+  ],
+  [
+   "What is the capital of Burundi?",
+   "Gitega"
+  ],
+  [
+   "What is the capital of Cambodia?",
+   "Phnom Penh"
+  ],
+  [
+   "What is the capital of Cameroon?",
+   "Yaounde"
+  ],
+  [
+   "What is the capital of Canada?",
+   "Ottawa"
+  ],
+  [
+   "What is the capital of Cape Verde?",
+   "Praia"
+  ],
+  [
+   "What is the capital of Chad?",
+   "N'Djamena"
+  ],
+  [
+   "What is the capital of Chile?",
+   "Santiago"
+  ],
+  [
+   "What is the capital of China?",
+   "Beijing"
+  ],
+  [
+   "What is the capital of Colombia?",
+   "Bogota"
+  ],
+  [
+   "What is the capital of Comoros?",
+   "Moroni"
+  ],
+  [
+   "What is the capital of Congo?",
+   "Brazzaville"
+  ],
+  [
+   "What is the capital of Costa Rica?",
+   "San Jose"
+  ],
+  [
+   "What is the capital of Croatia?",
+   "Zagreb"
+  ],
+  [
+   "What is the capital of Cuba?",
+   "Havana"
+  ],
+  [
+   "What is the capital of Cyprus?",
+   "Nicosia"
+  ],
+  [
+   "What is the capital of Czech Republic?",
+   "Prague"
+  ],
+  [
+   "What is the capital of Denmark?",
+   "Copenhagen"
+  ],
+  [
+   "What is the capital of Djibouti?",
+   "Djibouti"
+  ],
+  [
+   "What is the capital of Dominican Republic?",
+   "Santo Domingo"
+  ],
+  [
+   "What is the capital of Ecuador?",
+   "Quito"
+  ],
+  [
+   "What is the capital of Egypt?",
+   "Cairo"
+  ],
+  [
+   "What is the capital of El Salvador?",
+   "San Salvador"
+  ],
+  [
+   "What is the capital of Equatorial Guinea?",
+   "Malabo"
+  ],
+  [
+   "What is the capital of Eritrea?",
+   "Asmara"
+  ],
+  [
+   "What is the capital of Estonia?",
+   "Tallinn"
+  ],
+  [
+   "What is the capital of Eswatini?",
+   "Mbabane"
+  ],
+  [
+   "What is the capital of Ethiopia?",
+   "Addis Ababa"
+  ],
+  [
+   "What is the capital of Fiji?",
+   "Suva"
+  ],
+  [
+   "What is the capital of Finland?",
+   "Helsinki"
+  ],
+  [
+   "What is the capital of France?",
+   "Paris"
+  ],
+  [
+   "What is the capital of Gabon?",
+   "Libreville"
+  ],
+  [
+   "What is the capital of Gambia?",
+   "Banjul"
+  ],
+  [
+   "What is the capital of Georgia?",
+   "Tbilisi"
+  ],
+  [
+   "What is the capital of Germany?",
+   "Berlin"
+  ],
+  [
+   "What is the capital of Ghana?",
+   "Accra"
+  ],
+  [
+   "What is the capital of Greece?",
+   "Athens"
+  ],
+  [
+   "What is the capital of Guatemala?",
+   "Guatemala City"
+  ],
+  [
+   "What is the capital of Guinea?",
+   "Conakry"
+  ],
+  [
+   "What is the capital of Guinea-Bissau?",
+   "Bissau"
+  ],
+  [
+   "What is the capital of Guyana?",
+   "Georgetown"
+  ],
+  [
+   "What is the capital of Haiti?",
+   "Port-au-Prince"
+  ],
+  [
+   "What is the capital of Honduras?",
+   "Tegucigalpa"
+  ],
+  [
+   "What is the capital of Hungary?",
+   "Budapest"
+  ],
+  [
+   "What is the capital of Iceland?",
+   "Reykjavik"
+  ],
+  [
+   "What is the capital of India?",
+   "New Delhi"
+  ],
+  [
+   "What is the capital of Indonesia?",
+   "Jakarta"
+  ],
+  [
+   "What is the capital of Iran?",
+   "Tehran"
+  ],
+  [
+   "What is the capital of Iraq?",
+   "Baghdad"
+  ],
+  [
+   "What is the capital of Ireland?",
+   "Dublin"
+  ],
+  [
+   "What is the capital of Israel?",
+   "Jerusalem"
+  ],
+  [
+   "What is the capital of Italy?",
+   "Rome"
+  ],
+  [
+   "What is the capital of Jamaica?",
+   "Kingston"
+  ],
+  [
+   "What is the capital of Japan?",
+   "Tokyo"
+  ],
+  [
+   "What is the capital of Jordan?",
+   "Amman"
+  ],
+  [
+   "What is the capital of Kazakhstan?",
+   "Astana"
+  ],
+  [
+   "What is the capital of Kenya?",
+   "Nairobi"
+  ],
+  [
+   "What is the capital of Kosovo?",
+   "Pristina"
+  ],
+  [
+   "What is the capital of Kuwait?",
+   "Kuwait City"
+  ],
+  [
+   "What is the capital of Kyrgyzstan?",
+   "Bishkek"
+  ],
+  [
+   "What is the capital of Laos?",
+   "Vientiane"
+  ],
+  [
+   "What is the capital of Latvia?",
+   "Riga"
+  ],
+  [
+   "What is the capital of Lebanon?",
+   "Beirut"
+  ],
+  [
+   "What is the capital of Lesotho?",
+   "Maseru"
+  ],
+  [
+   "What is the capital of Liberia?",
+   "Monrovia"
+  ],
+  [
+   "What is the capital of Libya?",
+   "Tripoli"
+  ],
+  [
+   "What is the capital of Liechtenstein?",
+   "Vaduz"
+  ],
+  [
+   "What is the capital of Lithuania?",
+   "Vilnius"
+  ],
+  [
+   "What is the capital of Luxembourg?",
+   "Luxembourg"
+  ],
+  [
+   "What is the capital of Macedonia?",
+   "Skopje"
+  ],
+  [
+   "What is the capital of Madagascar?",
+   "Antananarivo"
+  ],
+  [
+   "What is the capital of Malawi?",
+   "Lilongwe"
+  ],
+  [
+   "What is the capital of Malaysia?",
+   "Kuala Lumpur"
+  ],
+  [
+   "What is the capital of Maldives?",
+   "Male"
+  ],
+  [
+   "What is the capital of Mali?",
+   "Bamako"
+  ],
+  [
+   "What is the capital of Malta?",
+   "Valletta"
+  ],
+  [
+   "What is the capital of Mauritania?",
+   "Nouakchott"
+  ],
+  [
+   "What is the capital of Mauritius?",
+   "Port Louis"
+  ],
+  [
+   "What is the capital of Mexico?",
+   "Mexico City"
+  ],
+  [
+   "What is the capital of Moldova?",
+   "Chisinau"
+  ],
+  [
+   "What is the capital of Monaco?",
+   "Monaco"
+  ],
+  [
+   "What is the capital of Mongolia?",
+   "Ulaanbaatar"
+  ],
+  [
+   "What is the capital of Montenegro?",
+   "Podgorica"
+  ],
+  [
+   "What is the capital of Morocco?",
+   "Rabat"
+  ],
+  [
+   "What is the capital of Mozambique?",
+   "Maputo"
+  ],
+  [
+   "What is the capital of Myanmar?",
+   "Naypyidaw"
+  ],
+  [
+   "What is the capital of Namibia?",
+   "Windhoek"
+  ],
+  [
+   "What is the capital of Nauru?",
+   "Yaren"
+  ],
+  [
+   "What is the capital of Nepal?",
+   "Kathmandu"
+  ],
+  [
+   "What is the capital of Netherlands?",
+   "Amsterdam"
+  ],
+  [
+   "What is the capital of New Zealand?",
+   "Wellington"
+  ],
+  [
+   "What is the capital of Nicaragua?",
+   "Managua"
+  ],
+  [
+   "What is the capital of Niger?",
+   "Niamey"
+  ],
+  [
+   "What is the capital of Nigeria?",
+   "Abuja"
+  ],
+  [
+   "What is the capital of North Korea?",
+   "Pyongyang"
+  ],
+  [
+   "What is the capital of Norway?",
+   "Oslo"
+  ],
+  [
+   "What is the capital of Oman?",
+   "Muscat"
+  ],
+  [
+   "What is the capital of Pakistan?",
+   "Islamabad"
+  ],
+  [
+   "What is the capital of Palau?",
+   "Ngerulmud"
+  ],
+  [
+   "What is the capital of Panama?",
+   "Panama City"
+  ],
+  [
+   "What is the capital of Paraguay?",
+   "Asuncion"
+  ],
+  [
+   "What is the capital of Peru?",
+   "Lima"
+  ],
+  [
+   "What is the capital of Philippines?",
+   "Manila"
+  ],
+  [
+   "What is the capital of Poland?",
+   "Warsaw"
+  ],
+  [
+   "What is the capital of Portugal?",
+   "Lisbon"
+  ],
+  [
+   "What is the capital of Qatar?",
+   "Doha"
+  ],
+  [
+   "What is the capital of Romania?",
+   "Bucharest"
+  ],
+  [
+   "What is the capital of Russia?",
+   "Moscow"
+  ],
+  [
+   "What is the capital of Rwanda?",
+   "Kigali"
+  ],
+  [
+   "What is the capital of Samoa?",
+   "Apia"
+  ],
+  [
+   "What is the capital of San Marino?",
+   "San Marino"
+  ],
+  [
+   "What is the capital of Saudi Arabia?",
+   "Riyadh"
+  ],
+  [
+   "What is the capital of Senegal?",
+   "Dakar"
+  ],
+  [
+   "What is the capital of Serbia?",
+   "Belgrade"
+  ],
+  [
+   "What is the capital of Seychelles?",
+   "Victoria"
+  ],
+  [
+   "What is the capital of Sierra Leone?",
+   "Freetown"
+  ],
+  [
+   "What is the capital of Singapore?",
+   "Singapore"
+  ],
+  [
+   "What is the capital of Slovakia?",
+   "Bratislava"
+  ],
+  [
+   "What is the capital of Slovenia?",
+   "Ljubljana"
+  ],
+  [
+   "What is the capital of Somalia?",
+   "Mogadishu"
+  ],
+  [
+   "What is the capital of South Africa?",
+   "Pretoria"
+  ],
+  [
+   "What is the capital of South Korea?",
+   "Seoul"
+  ],
+  [
+   "What is the capital of South Sudan?",
+   "Juba"
+  ],
+  [
+   "What is the capital of Spain?",
+   "Madrid"
+  ],
+  [
+   "What is the capital of Sri Lanka?",
+   "Colombo"
+  ],
+  [
+   "What is the capital of Sudan?",
+   "Khartoum"
+  ],
+  [
+   "What is the capital of Suriname?",
+   "Paramaribo"
+  ],
+  [
+   "What is the capital of Sweden?",
+   "Stockholm"
+  ],
+  [
+   "What is the capital of Switzerland?",
+   "Bern"
+  ],
+  [
+   "What is the capital of Syria?",
+   "Damascus"
+  ],
+  [
+   "What is the capital of Taiwan?",
+   "Taipei"
+  ],
+  [
+   "What is the capital of Tajikistan?",
+   "Dushanbe"
+  ],
+  [
+   "What is the capital of Tanzania?",
+   "Dodoma"
+  ],
+  [
+   "What is the capital of Thailand?",
+   "Bangkok"
+  ],
+  [
+   "What is the capital of Timor-Leste?",
+   "Dili"
+  ],
+  [
+   "What is the capital of Togo?",
+   "Lome"
+  ],
+  [
+   "What is the capital of Trinidad?",
+   "Port of Spain"
+  ],
+  [
+   "What is the capital of Tunisia?",
+   "Tunis"
+  ],
+  [
+   "What is the capital of Turkey?",
+   "Ankara"
+  ],
+  [
+   "What is the capital of Turkmenistan?",
+   "Ashgabat"
+  ],
+  [
+   "What is the capital of Tuvalu?",
+   "Funafuti"
+  ],
+  [
+   "What is the capital of Uganda?",
+   "Kampala"
+  ],
+  [
+   "What is the capital of Ukraine?",
+   "Kyiv"
+  ],
+  [
+   "What is the capital of UAE?",
+   "Abu Dhabi"
+  ],
+  [
+   "What is the capital of United Kingdom?",
+   "London"
+  ],
+  [
+   "What is the capital of United States?",
+   "Washington"
+  ],
+  [
+   "What is the capital of Uruguay?",
+   "Montevideo"
+  ],
+  [
+   "What is the capital of Uzbekistan?",
+   "Tashkent"
+  ],
+  [
+   "What is the capital of Vanuatu?",
+   "Port Vila"
+  ],
+  [
+   "What is the capital of Vatican?",
+   "Vatican City"
+  ],
+  [
+   "What is the capital of Venezuela?",
+   "Caracas"
+  ],
+  [
+   "What is the capital of Vietnam?",
+   "Hanoi"
+  ],
+  [
+   "What is the capital of Yemen?",
+   "Sanaa"
+  ],
+  [
+   "What is the capital of Zambia?",
+   "Lusaka"
+  ],
+  [
+   "What is the capital of Zimbabwe?",
+   "Harare"
+  ]
+ ]
+}

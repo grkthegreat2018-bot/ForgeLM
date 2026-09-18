@@ -22,8 +22,12 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 # Check if flex_attention is available (PyTorch 2.5+)
 try:
@@ -89,7 +93,7 @@ class FlexDecodingWrapper:
     def apply(self, model: torch.nn.Module):
         """Patch all attention layers in the model to use FlexDecoding."""
         if not _FLEX_AVAILABLE:
-            print("  [FlexDecoding] flex_attention not available (need PyTorch 2.5+)")
+            logger.warning("  [FlexDecoding] flex_attention not available (need PyTorch 2.5+)")
             return False
 
         from forge.model_loader import GroupedQueryAttention
@@ -98,7 +102,7 @@ class FlexDecodingWrapper:
                 self._patch_attention(module, name)
 
         self._active = True
-        print(f"  [FlexDecoding] Patched {len(self._original_forwards)} attention layers")
+        logger.info(f"  [FlexDecoding] Patched {len(self._original_forwards)} attention layers")
         return True
 
     def _patch_attention(self, attn_module, name: str):
@@ -159,7 +163,7 @@ class FlexDecodingWrapper:
 
             # FlexDecoding: use flex_attention for the decode step
             out = flex_decode(q, k_cache, v_cache)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return attn_module.out_proj(out), new_kv
 
         return _flex_decode_forward

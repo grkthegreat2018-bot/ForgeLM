@@ -78,7 +78,7 @@ from forge.model_loader import ConfigurableResearchLLM
 from forge.engine.forge_engine import ForgeEngine
 
 
-def _build_engine_cpu(preset="lfm25_tiny", vocab=65536):
+def _build_engine_cpu(preset="forgelm_tiny", vocab=65536):
     """Build a ForgeEngine on CPU (no checkpoint, config-only tiny model).
 
     Mirrors the ``_build_engine`` helper in test_end_to_end_generate.py
@@ -100,7 +100,7 @@ def _build_engine_cpu(preset="lfm25_tiny", vocab=65536):
     model.eval()
 
     from research.tokenizer_cache import get_tokenizer
-    tok = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device="cpu")
     return engine, model
 

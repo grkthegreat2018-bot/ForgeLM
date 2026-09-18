@@ -6,7 +6,7 @@ domains that need semantic checking (DomainSpec.checker_type == "llm_judge").
 Design:
   - Singleton: one instance shared across all domains. Boots once, stays in
     memory. Access via ``get_checker()``.
-  - Ultra-compact: uses the "lfm25_tiny" config (d_model=128, 4 layers,
+  - Ultra-compact: uses the "forgelm_tiny" config (d_model=128, 4 layers,
     vocab=256) for minimal compute. Lives on CPU by default, or on a small
     GPU partition.
   - LLM-as-judge: given (question, answer, requirements) -> score 0-100.
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────
 
 _DEFAULT_TOKENIZER_PATH = str(
-    Path(__file__).resolve().parents[1] / "checkpoints" / "lfm25_tokenizer"
+    Path(__file__).resolve().parents[1] / "checkpoints" / "forgelm_v2_tokenizer"
 )
 _CACHE_MAX_ENTRIES = 10_000
 _SCORE_TOKENS = 20          # enough for "Score: 85" or "85/100" style responses
@@ -218,7 +218,7 @@ class SharedCheckerModel:
     Thread-safe: multiple domains can call check() concurrently.
     """
 
-    def __init__(self, config_name: str = "lfm25_tiny",
+    def __init__(self, config_name: str = "forgelm_tiny",
                  device: str = "cpu",
                  tokenizer_path: str | None = None) -> None:
         self._lock = threading.RLock()
@@ -580,7 +580,7 @@ _checker_instance: SharedCheckerModel | None = None
 _checker_lock = threading.Lock()
 
 
-def get_checker(config_name: str = "lfm25_tiny",
+def get_checker(config_name: str = "forgelm_tiny",
                 device: str = "cpu",
                 tokenizer_path: str | None = None) -> SharedCheckerModel:
     """Get the shared singleton SharedCheckerModel instance.

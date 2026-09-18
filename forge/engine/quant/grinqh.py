@@ -53,11 +53,15 @@ iri_fp4_key.py (IRIFP4Linear). Self-contained — depends only on torch.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Level tables
@@ -711,8 +715,8 @@ def quantize_model_grinqh(model: nn.Module, group_size: int = 128,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [GRINQH] Skipped {name}: {e}")
+                    logger.warning(f"  [GRINQH] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [GRINQH] {n} layers quantized "
+        logger.info(f"  [GRINQH] {n} layers quantized "
               f"(target={target_effective_bits} bits/w, group={group_size})")
     return n

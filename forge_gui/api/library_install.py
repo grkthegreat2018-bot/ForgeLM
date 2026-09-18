@@ -21,10 +21,9 @@ import json
 import logging
 import subprocess
 import sys
+from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
-
+from ._signal import SimpleSignal
 from .status_reader import project_root
 
 logger = logging.getLogger(__name__)
@@ -50,27 +49,28 @@ _DEFAULT_ALLOWLIST = [
 ]
 
 
-class LibraryInstallManager(QObject):
+class LibraryInstallManager:
     """Manages library install approvals and the allowlist.
 
-    Signals:
+    Signals (SimpleSignal):
         install_started(package): pip install started
         install_completed(package, success): pip install finished
-        agent_freeze(): approval dialog opened — agent must stop
-        agent_unfreeze(): dialog closed — agent can resume
+        agent_freeze(): approval prompt opened — agent must stop
+        agent_unfreeze(): prompt closed — agent can resume
         allowlist_updated(package): package added to allowlist
     """
 
-    install_started = Signal(str)
-    install_completed = Signal(str, bool)
-    agent_freeze = Signal()
-    agent_unfreeze = Signal()
-    allowlist_updated = Signal(str)
-
     def __init__(self, venv_python: str | None = None,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._parent_widget = parent
+                 confirm_install: Callable[[str], tuple[bool, bool]] | None = None
+                 ) -> None:
+        self.install_started = SimpleSignal()
+        self.install_completed = SimpleSignal()
+        self.agent_freeze = SimpleSignal()
+        self.agent_unfreeze = SimpleSignal()
+        self.allowlist_updated = SimpleSignal()
+        # approval callback: (package) -> (approved, save_to_allowlist).
+        # Default denies — callers must wire a real approval channel.
+        self.confirm_install = confirm_install or (lambda _p: (False, False))
         self._venv_python = venv_python or sys.executable
         self._frozen = False
         self._allowlist_path = project_root() / "data" / "library_allowlist.json"
@@ -126,9 +126,9 @@ class LibraryInstallManager(QObject):
         return base in self._allowlist
 
     # ── install flow ──────────────────────────────────────────────────
-    def request_install(self, package: str,
-                        parent: QWidget | None = None) -> dict:
-        """Request to install a package. Shows dialog if not in allowlist.
+    def request_install(self, package: str) -> dict:
+        """Request to install a package. Prompts via ``confirm_install``
+        if not in the allowlist.
 
         Returns dict with:
             {"installed": True/False, "package": ..., "auto_approved": bool}
@@ -142,7 +142,7 @@ class LibraryInstallManager(QObject):
         self._frozen = True
         self.agent_freeze.emit()
         try:
-            approved, save_allowed = self._show_approval_dialog(package, parent)
+            approved, save_allowed = self.confirm_install(package)
             if not approved:
                 return {"error": f"install denied by user: {package}",
                         "denied": True}
@@ -152,46 +152,6 @@ class LibraryInstallManager(QObject):
         finally:
             self._frozen = False
             self.agent_unfreeze.emit()
-
-    def _show_approval_dialog(self, package: str,
-                              parent: QWidget | None) -> tuple[bool, bool]:
-        """Show the approval dialog. Returns (approved, save_to_allowlist)."""
-        dialog = QDialog(parent or self._parent_widget)
-        dialog.setWindowTitle("Library Install Request")
-        dialog.setMinimumWidth(420)
-        layout = QVBoxLayout(dialog)
-
-        # message
-        msg = QLabel(
-            f"<b>The agent wants to install a new Python library:</b><br><br>"
-            f"<code>pip install {package}</code><br><br>"
-            f"This will be installed into the project venv.<br>"
-            f"If you trust this library, click Install.")
-        msg.setWordWrap(True)
-        layout.addWidget(msg)
-
-        # save checkbox
-        save_cb = QCheckBox(
-            "Save as allowed (auto-approve for future projects)")
-        layout.addWidget(save_cb)
-
-        # buttons
-        btn_row = QHBoxLayout()
-        btn_install = QPushButton("Install")
-        btn_deny = QPushButton("Deny")
-        btn_install.setObjectName("rateGood")
-        btn_deny.setObjectName("rateBad")
-        btn_row.addStretch(1)
-        btn_row.addWidget(btn_deny)
-        btn_row.addWidget(btn_install)
-        layout.addLayout(btn_row)
-
-        btn_install.clicked.connect(lambda: dialog.accept())
-        btn_deny.clicked.connect(lambda: dialog.reject())
-
-        result = dialog.exec()
-        approved = (result == QDialog.DialogCode.Accepted)
-        return approved, save_cb.isChecked()
 
     def _do_install(self, package: str, auto_approved: bool) -> dict:
         """Run pip install for the package."""

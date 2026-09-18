@@ -1,15 +1,14 @@
 """Master system prompt generator — per-model identity and capabilities.
 
 Generates a system prompt that tells the model:
-- Its name (ForgeLM V2 Light / V2 Pro)
+- Its name (ForgeLM V2)
 - Its creators (ForgeAI)
 - Its architecture (layers, params, donor model)
 - Its capabilities (text-only vs multimodal, tools, thinking)
 - Simple behavioral guidelines
 
 The prompt adapts based on the loaded config:
-- V2 Light (1.2B, text-only): no vision, basic coding
-- V2 Pro (3B, multimodal): vision enabled, deeper reasoning
+- ForgeLM V2 (3.2B Jamba hybrid, text-only): no vision, coding
 
 This is prepended to the user's custom system prompt (if any), so the
 user can still add their own instructions on top.
@@ -24,22 +23,10 @@ logger = logging.getLogger(__name__)
 def _detect_model_name(config_name: str) -> str:
     """Map config name to display name."""
     name = config_name.lower()
-    if "v2_pro" in name or "v2pro" in name:
-        return "ForgeLM V2 Pro"
-    if "v2_light" in name or "v2light" in name:
-        return "ForgeLM V2 Light"
     if "v12" in name and "jamba" in name:
         return "ForgeLM V12 Jamba"
-    if name == "forgelm_v2":
+    if "jamba" in name or "v2" in name:
         return "ForgeLM V2"
-    if "v10" in name:
-        return "ForgeLM V2 Light"
-    if "v11" in name:
-        return "ForgeLM V2 Pro"
-    if "jamba" in name:
-        return "ForgeLM Jamba"
-    if "lfm25" in name:
-        return "LFM 2.5"
     return config_name.replace("_", " ").title()
 
 
@@ -99,9 +86,7 @@ def generate_master_prompt(config, config_name: str = "",
     arch = _format_arch(config)
     params = _format_params(config)
     has_vision = getattr(config, "use_vision", False)
-    donor = "LFM 2.5"
-    if has_vision:
-        donor = "LFM 2.5-VL"
+    donor = "Jamba-Reasoning-3B"
 
     lines = [
         f"You are {name}, a custom language model created by ForgeAI.",

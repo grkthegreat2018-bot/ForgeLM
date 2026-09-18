@@ -28,7 +28,7 @@ _DTYPE = torch.bfloat16 if _CUDA else torch.float32
 
 
 def _tiny(device=_DEV):
-    cfg = get_config("lfm25_tiny")
+    cfg = get_config("forgelm_tiny")
     cfg.device = device
     cfg.dtype = "bfloat16" if _CUDA else "float32"
     return cfg
@@ -424,25 +424,22 @@ class TestMod:
             assert torch.equal(out[0][~mask[0]], x_in[0][~mask[0]])
 
 
-# ── Main model (LFM2.5-1.2B) sanity: lossless flags enabled ──────────────────
+# ── Main model (ForgeLM V2 Jamba) sanity: lossless flags enabled ──────────────
 
 
 class TestMainModel:
     def test_main_config_builds_with_new_keys(self):
-        """Test V10 config fields + tiny model build on GPU with ForgeEngine features."""
-        cfg = get_config("forgelm_v2_light")
-        # V10 is a lossless LFM2.5 port — plain GQA, no BitNet/NLRQ/TITAN/MoD
+        """Test V2 config fields + tiny model build on GPU with ForgeEngine features."""
+        cfg = get_config("forgelm_v2")
+        # ForgeLM V2 is a Jamba hybrid — GQA attention + Mamba, no BitNet/TITAN/MoD
         assert cfg.attn_type == "gqa"
         assert cfg.use_bitnet is False
         assert cfg.ffn_compression == "none"
         assert cfg.use_titan_memory is False
         assert cfg.use_mod is False
-        # V10 has IRI-FP4 + SpectralKV
-        assert cfg.use_iri_fp4 is True
-        assert cfg.use_spectral_kv is True
-        assert cfg.d_model == 2048 and cfg.n_layers == 16
+        assert cfg.d_model == 2560 and cfg.n_layers == 28
         # Build tiny model on GPU to verify TITAN/MoD forward works with bf16
-        tiny = get_config("lfm25_tiny")
+        tiny = get_config("forgelm_tiny")
         tiny.use_titan_memory = True
         tiny.titan_memory_rank = 16
         tiny.use_mod = True

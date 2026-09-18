@@ -4,8 +4,14 @@ All tests use GPU (CUDA) with the full ForgeEngine pipeline.
 CPU fallback only when CUDA is critically unavailable.
 """
 import os
+import tempfile
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Triton kernel filenames can exceed Windows MAX_PATH under the default
+# %TEMP%/torchinductor_<user> cache root — use a shorter cache dir.
+if os.name == "nt":
+    os.environ.setdefault(
+        "TORCHINDUCTOR_CACHE_DIR", os.path.join(tempfile.gettempdir(), "ti"))
 
 import pytest
 import torch
@@ -16,7 +22,7 @@ CUDA_AVAILABLE = torch.cuda.is_available()
 
 # ── GPU-first config fixtures ──────────────────────────────────────────────
 
-def _gpu_config(preset="lfm25_tiny", vocab=256, dtype="bfloat16"):
+def _gpu_config(preset="forgelm_tiny", vocab=256, dtype="bfloat16"):
     """Build config on GPU with bf16. Falls back to CPU only if no CUDA."""
     cfg = get_config(preset)
     cfg.vocab_size = vocab
@@ -28,7 +34,7 @@ def _gpu_config(preset="lfm25_tiny", vocab=256, dtype="bfloat16"):
 @pytest.fixture
 def tiny_config():
     """Tiny config on GPU (bf16). CPU fallback only if no CUDA."""
-    return _gpu_config("lfm25_tiny")
+    return _gpu_config("forgelm_tiny")
 
 
 @pytest.fixture
@@ -42,7 +48,7 @@ def tiny_config_gpu():
     """GPU config (explicit). Skips if no CUDA."""
     if not CUDA_AVAILABLE:
         pytest.skip("CUDA not available")
-    return _gpu_config("lfm25_tiny")
+    return _gpu_config("forgelm_tiny")
 
 
 @pytest.fixture
@@ -50,7 +56,7 @@ def v10_config():
     """Full V10 config on GPU (bf16). For integration tests."""
     if not CUDA_AVAILABLE:
         pytest.skip("CUDA not available — V10 requires GPU")
-    return _gpu_config("forgelm_v2_light", vocab=65536)
+    return _gpu_config("forgelm_v2", vocab=65536)
 
 
 @pytest.fixture
@@ -82,7 +88,7 @@ def forge_engine(tiny_config_gpu):
         torch.set_default_dtype(old_dtype)
     model.eval()
 
-    tok = get_tokenizer("research/checkpoints/lfm25_tokenizer")
+    tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device="cuda")
     engine.activate_optimal()
     yield engine

@@ -44,12 +44,12 @@ class TestMetaConfigParsing:
         assert entry.config_name is None  # not a registry name
 
     def test_string_config_resolves_registry(self, ckpt_root):
-        _write_ckpt(ckpt_root, "m.safetensors", {"config": "forgelm_v2_light"})
+        _write_ckpt(ckpt_root, "m.safetensors", {"config": "forgelm_v2"})
         idx = ModelsIndex()
-        idx._configs = {"forgelm_v2_light": {"d_model": 2048}}
+        idx._configs = {"forgelm_v2": {"d_model": 2048}}
         models = idx.models()
         assert len(models) == 1
-        assert models[0].config_name == "forgelm_v2_light"
+        assert models[0].config_name == "forgelm_v2"
         assert models[0].config == {"d_model": 2048}
 
     def test_unknown_string_config_yields_empty_cfg(self, ckpt_root):

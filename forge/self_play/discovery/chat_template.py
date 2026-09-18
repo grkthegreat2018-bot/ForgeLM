@@ -53,6 +53,28 @@ TOOL_CALL_END = "</tool_call>"
 TOOL_RESP_START = "<tool_response>"
 TOOL_RESP_END = "</tool_response>"
 
+# Trained thinking instruction — prepended to the final user message (and to
+# user messages that precede an assistant <think> turn) so the model reasons
+# inside <think>...</think> before answering. Matches the tokenizer's
+# chat_template `thinking_prefix` verbatim.
+THINKING_PREFIX = (
+    "Begin by thinking about the reasoning process in the mind within "
+    "<think> </think> tags and then proceed to give your response.\n")
+
+# Canonical tools block (matches tokenizer chat_template verbatim):
+#   # Tools
+#   ... <tools>\n{json}\n...</tools> ... <tool_call>\n{"name": ...}\n</tool_call>
+_TOOLS_BLOCK_HEAD = (
+    "# Tools\n\nYou may call one or more functions to assist with the user "
+    "query.\n\nYou are provided with function signatures within <tools></tools> "
+    "XML tags:\n<tools>")
+_TOOLS_BLOCK_TAIL = (
+    "\n</tools>\n\nFor each function call, return a json object with function "
+    "name and arguments within <tool_call></tool_call> XML tags:\n"
+    f"{TOOL_CALL_START}\n"
+    "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+    f"{TOOL_CALL_END}")
+
 # Legacy LFM2.5 markers (for backward compat, token IDs 10/11)
 _LFM25_TOOL_CALL_START = bytes.fromhex(
     "3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
@@ -61,103 +83,161 @@ _LFM25_TOOL_CALL_END = bytes.fromhex(
 
 
 def format_tool_definitions(tools: list[dict]) -> str:
-    """Render tool schemas as the ForgeLM V10 'List of tools:' string.
+    """Render tool schemas in the canonical Jamba <tools> block format.
 
-    Each tool is a dict with name, description, parameters.
-    The Jinja template joins them as: List of tools: [{json}, {json}]
+    Matches the tokenizer's native chat_template: one JSON object per line
+    inside <tools>...</tools>, preceded by the "# Tools" preamble and
+    followed by the <tool_call> instruction.
     """
-    parts = []
+    parts = [_TOOLS_BLOCK_HEAD]
     for t in tools:
-        parts.append(json.dumps(t, ensure_ascii=False))
-    return "List of tools: [" + ", ".join(parts) + "]"
+        parts.append("\n" + json.dumps(t, ensure_ascii=False))
+    parts.append(_TOOLS_BLOCK_TAIL)
+    return "".join(parts)
+
+
+def _render_one_tool_call(tc: dict) -> str:
+    """Render a single call as the template does:
+    <tool_call>\n{"name": "NAME", "arguments": ARGS}\n</tool_call>
+
+    Accepts {"name", "args"|"arguments"} and OpenAI {"function": {...}}.
+    """
+    if "function" in tc:
+        tc = tc["function"]
+    name = tc.get("name", "")
+    args = tc.get("args", tc.get("arguments", {}))
+    args_str = args if isinstance(args, str) else json.dumps(
+        args, ensure_ascii=False)
+    return (f'{TOOL_CALL_START}\n{{"name": "{name}", "arguments": '
+            f'{args_str}}}\n{TOOL_CALL_END}')
 
 
 def apply_chat_template(
     messages: list[dict],
     tools: list[dict] | None = None,
     add_generation_prompt: bool = True,
+    bos: bool = True,
+    thinking: bool = True,
 ) -> str:
-    """Render a conversation in ForgeLM V10 ChatML format.
+    """Render a conversation in ForgeLM V2 (Jamba Reasoning 3B) ChatML format.
+
+    This is a faithful Python port of the tokenizer's built-in Jinja
+    ``chat_template`` (tokenizer_config.json) — the format the model was
+    actually trained on:
+
+      - system prompt carries the canonical ``<tools>`` block + ``<tool_call>``
+        JSON instruction when tools are present
+      - assistant ``tool_calls`` render as one ``<tool_call>{json}</tool_call>``
+        block per call
+      - consecutive ``tool`` messages group inside ONE ``<|im_start|>user``
+        turn, each wrapped in ``<tool_response>...</tool_response>``
+      - the generation prompt opens a ``<think>`` block (Jamba Reasoning
+        always thinks before answering); the final user message gets the
+        trained ``thinking_prefix`` instruction
 
     Args:
-        messages: list of {"role": "system"|"user"|"assistant"|"tool",
-                           "content": str, "tool_calls": list (optional)}
-        tools: list of tool definition dicts (name/description/parameters)
-        add_generation_prompt: if True, append <|im_start|>assistant\n
-    Returns:
-        The formatted prompt string.
+        messages: [{"role": "system"|"user"|"assistant"|"tool",
+                    "content": str, "tool_calls": [...] (optional),
+                    "reasoning_content": str (optional)}]
+        tools: tool definition dicts (name/description/parameters)
+        add_generation_prompt: append ``<|im_start|>assistant\\n<think>\\n``
+            (or just ``<|im_start|>assistant\\n`` when thinking=False)
+        bos: prepend ``<|startoftext|>``. Engine paths tokenize with
+            add_special_tokens=True (BOS auto-added) — pass bos=False there.
+            Direct tokenizer calls with add_special_tokens=False need bos=True.
+        thinking: include the trained thinking instruction + open a ``<think>``
+            block in the generation prompt.
     """
-    out = BOS
+    out = BOS if bos else ""
 
-    # Extract system message + append tool definitions.
+    # ── system message + tool definitions ─────────────────────────────
     system_text = ""
-    if messages and messages[0]["role"] == "system":
-        system_text = messages[0].get("content", "")
-        messages = messages[1:]
+    rest = messages
+    if rest and rest[0].get("role") == "system":
+        system_text = rest[0].get("content", "") or ""
+        rest = rest[1:]
 
     if tools:
-        tool_str = format_tool_definitions(tools)
-        system_text = (system_text + "\n" + tool_str) if system_text else tool_str
-
-    if system_text:
+        sys_block = f"{IM_START}system\n"
+        if system_text:
+            sys_block += system_text + "\n\n"
+        sys_block += format_tool_definitions(tools)
+        out += sys_block + f"{IM_END}\n"
+    elif system_text:
         out += f"{IM_START}system\n{system_text}{IM_END}\n"
 
-    # Render conversation messages.
-    for msg in messages:
-        role = msg["role"]
-        out += f"{IM_START}{role}\n"
+    # ── last real query index (skips tool-response user turns) ───────
+    n = len(rest)
+    last_query_index = n - 1
+    for i in range(n - 1, -1, -1):
+        m = rest[i]
+        if m.get("role") == "user":
+            c = m.get("content", "") or ""
+            if not (c.startswith(TOOL_RESP_START) and c.endswith(TOOL_RESP_END)):
+                last_query_index = i
+                break
 
-        if role == "assistant":
-            # Content + optional tool calls.
-            content = msg.get("content", "")
-            if content:
-                out += content
+    tp = THINKING_PREFIX if thinking else ""
+
+    # ── conversation ──────────────────────────────────────────────────
+    for i, msg in enumerate(rest):
+        role = msg.get("role")
+        if role == "user" or (role == "system" and i > 0):
+            content = msg.get("content", "") or ""
+            prefix = ""
+            if role == "user" and tp and THINK_START not in content:
+                nxt = rest[i + 1] if i + 1 < n else None
+                if i == n - 1:
+                    prefix = tp
+                elif nxt is not None and nxt.get("role") == "assistant":
+                    nc = nxt.get("content", "") or ""
+                    if nc.startswith(THINK_START) or nxt.get("reasoning_content"):
+                        prefix = tp
+            out += f"{IM_START}{role}\n{prefix}{content}{IM_END}\n"
+        elif role == "assistant":
+            content = msg.get("content", "") or ""
+            reasoning = msg.get("reasoning_content")
+            if reasoning is None and THINK_END in content:
+                reasoning = (content.split(THINK_END)[0].rstrip("\n")
+                             .split(THINK_START)[-1].lstrip("\n"))
+                content = content.split(THINK_END)[-1].lstrip("\n")
+            if i > last_query_index and reasoning:
+                out += (f"{IM_START}assistant\n{THINK_START}\n"
+                        f"{reasoning.strip(chr(10))}\n{THINK_END}\n\n"
+                        f"{content.lstrip(chr(10))}")
+            else:
+                out += f"{IM_START}assistant\n{content}"
             tool_calls = msg.get("tool_calls")
             if tool_calls:
-                out += render_tool_calls(tool_calls)
+                for j, tc in enumerate(tool_calls):
+                    if (j == 0 and content) or j > 0:
+                        out += "\n"
+                    out += _render_one_tool_call(tc)
             out += f"{IM_END}\n"
         elif role == "tool":
-            # Tool response wrapped in Jamba response tokens.
-            content = msg.get("content", "")
-            out += f"{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{IM_END}\n"
-        else:
-            # user or other roles.
-            out += msg.get("content", "") + f"{IM_END}\n"
+            # consecutive tool messages share one <|im_start|>user turn
+            if i == 0 or rest[i - 1].get("role") != "tool":
+                out += f"{IM_START}user"
+            out += f"\n{TOOL_RESP_START}\n{msg.get('content', '')}\n{TOOL_RESP_END}"
+            if i == n - 1 or rest[i + 1].get("role") != "tool":
+                out += f"{IM_END}\n"
 
     if add_generation_prompt:
         out += f"{IM_START}assistant\n"
+        if thinking:
+            out += f"{THINK_START}\n"
 
     return out
 
 
 def render_tool_calls(tool_calls: list[dict]) -> str:
-    """Render tool calls in Jamba JSON format (ForgeLM V2).
+    """Render tool calls in Jamba JSON format — one <tool_call> block per
+    call, matching the native chat_template.
 
     Input: [{"name": "func", "args": {"arg1": "val1"}}]
-    Output:
-      {"name": "func", "arguments": {"arg1": "val1"}}
-
     Also accepts OpenAI format: [{"function": {"name": ..., "arguments": ...}}]
     """
-    parts = []
-    for tc in tool_calls:
-        # Handle OpenAI format: {"function": {"name": ..., "arguments": ...}}
-        if "function" in tc:
-            fn = tc["function"]
-            name = fn.get("name", "")
-            args = fn.get("arguments", {})
-            if isinstance(args, str):
-                # arguments may be a JSON string in OpenAI format
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    pass
-        else:
-            name = tc.get("name", "")
-            args = tc.get("args", tc.get("arguments", {}))
-        call_obj = {"name": name, "arguments": args}
-        parts.append(json.dumps(call_obj, ensure_ascii=False))
-    return f"{TOOL_CALL_START}\n" + "\n".join(parts) + f"\n{TOOL_CALL_END}"
+    return "\n".join(_render_one_tool_call(tc) for tc in tool_calls)
 
 
 # ── tool-call parsing ────────────────────────────────────────────────

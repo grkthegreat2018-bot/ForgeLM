@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── ForgeAI design tokens — edit here to retheme the whole app ── */
+  --color-bg: #0a0d13;
+  --color-bg-alt: #0e1219;
+  --color-panel: #12161f;
+  --color-panel-alt: #171d29;
+  --color-input: #0f141d;
+  --color-deep: #080a0f;
+  --color-border: #1e2534;
+  --color-border-hi: #2c3850;
+  --color-text: #e8edf5;
+  --color-text-dim: #93a0b4;
+  --color-text-faint: #5d687c;
+  --color-accent: #8aa3ff;
+  --color-accent-hi: #aebdff;
+  --color-accent-dim: #40508a;
+  --color-accent2: #3ad9c9;
+  --color-ok: #3fb950;
+  --color-warn: #d29922;
+  --color-err: #f85149;
+  --color-think: #bc8cff;
+  --color-grad-a: #8aa3ff;
+  --color-grad-b: #a06bff;
+  --color-bubble-user: #1d2740;
+  --color-bubble-user-border: #33436e;
+  --color-bubble-sys: #141a26;
+  --color-tool-bg: #111620;
+  --color-tool-border: #2a3450;
+  --color-think-bg: #0f1420;
+  --color-think-border: #3a2a5a;
+  --color-on-accent: #0b0e14;
+
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  --radius-card: 0.75rem;
+  --shadow-card: 0 1px 3px rgb(0 0 0 / 0.35);
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-text font-sans antialiased;
+  font-size: 14px;
+}
+
+/* scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-hi) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-hi);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* streaming token fade-in */
+@keyframes tok-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.tok-in { animation: tok-in 120ms ease-out; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.slide-in-left { animation: slide-in-left 160ms ease-out; }
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fade-in { animation: fade-in 140ms ease-out; }
+
+/* markdown-ish chat content */
+.chat-body p { margin: 0.35em 0; }
+.chat-body pre {
+  @apply bg-deep border border-border rounded-lg p-3 my-2 overflow-x-auto text-[12.5px] font-mono;
+}
+.chat-body code {
+  @apply font-mono text-[0.92em] bg-panel-alt px-1 py-0.5 rounded;
+}
+.chat-body pre code { @apply bg-transparent p-0; }
+.chat-body ul, .chat-body ol { @apply pl-5 my-1; }
+.chat-body ul { list-style: disc; }
+.chat-body ol { list-style: decimal; }
+.chat-body h1, .chat-body h2, .chat-body h3 {
+  @apply font-semibold mt-3 mb-1;
+}
+.chat-body table { @apply border-collapse my-2; }
+.chat-body th, .chat-body td {
+  @apply border border-border px-2 py-1 text-left;
+}

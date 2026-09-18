@@ -1,76 +1,13 @@
-"""Unit tests for ForgeLM V11 config and vision modules.
+"""Unit tests for the vision modules (SigLIP2 tower, projector, connector).
 
-Tests V11 config preset, vision tower, projector, and connector.
-Uses CPU-only small configs for fast testing.
+The V2-Pro (LFM2.5-VL) preset was removed when ForgeLM V2 Jamba became the
+sole base; these tests exercise the generic vision stack on a CPU-only
+small config.
 """
 import pytest
 import torch
 
-from forge.config import ModelConfig, get_config
-
-
-# ── V11 config ──────────────────────────────────────────────────────────
-
-class TestV11Config:
-    def test_v11_exists(self):
-        c = get_config("forgelm_v2_pro")
-        assert c is not None
-
-    def test_v11_carries_v10_keys(self):
-        c = get_config("forgelm_v2_pro")
-        # V10 carried keys
-        assert c.use_iri_fp4 is True
-        assert c.iri_fp4_rounds == 2
-        assert c.use_spectral_kv is True
-        assert c.use_qk_norm is True
-        assert c.zero_init_residual is True
-        assert c.attn_type == "gqa"
-        assert c.ffn_type == "swiglu"
-        assert c.norm_type == "rmsnorm"
-        assert c.rope_base == 1_000_000.0
-
-    def test_v11_vision_keys(self):
-        c = get_config("forgelm_v2_pro")
-        assert c.use_vision is True
-        assert c.vision_encoder == "siglip2"
-        assert c.vision_hidden_size == 1152
-        assert c.vision_image_size == 384
-        assert c.vision_patch_size == 14
-        assert c.vision_n_layers == 27
-        assert c.vision_n_heads == 16
-        assert c.vision_projector_dim == 2560  # matches d_model
-        assert c.vision_n_queries == 128
-
-    def test_v11_architecture(self):
-        c = get_config("forgelm_v2_pro")
-        assert c.vocab_size == 131072  # 128K
-        assert c.d_model == 2560
-        assert c.n_layers == 30
-        assert c.n_heads == 40
-        assert c.n_kv_heads == 8
-        assert c.max_seq_len == 131072  # 128K context
-
-    def test_v11_layer_types_count(self):
-        c = get_config("forgelm_v2_pro")
-        assert len(c.layer_types) == 30
-
-    def test_v11_d_model_divisible_by_heads(self):
-        c = get_config("forgelm_v2_pro")
-        assert c.d_model % c.n_heads == 0
-
-    def test_v11_heads_divisible_by_kv_heads(self):
-        c = get_config("forgelm_v2_pro")
-        assert c.n_heads % c.n_kv_heads == 0
-
-    def test_v11_projector_dim_matches_d_model(self):
-        c = get_config("forgelm_v2_pro")
-        assert c.vision_projector_dim == c.d_model
-
-    def test_v11_n_patches(self):
-        """SigLIP2 384/14 = 27.4 → 27×27 = 729 patches."""
-        c = get_config("forgelm_v2_pro")
-        n_patches = (c.vision_image_size // c.vision_patch_size) ** 2
-        assert n_patches == 729
+from forge.config import ModelConfig
 
 
 # ── Vision module (small config for CPU testing) ────────────────────────

@@ -285,6 +285,72 @@ def test_quamba2_quantize_model():
     assert isinstance(model.norm, nn.LayerNorm)
 
 
+def test_quamba2_block_preserves_input_dtype():
+    """Quamba2Block must return output in the input dtype (bf16 regression).
+
+    The SSM core (A_log, D, jamba norms) is stored in FP16 — mixed with bf16
+    activations it promoted the whole residual stream to fp32, crashing
+    downstream bf16 matmuls ('expected mat1 and mat2 to have the same dtype:
+    float != BFloat16'). The fix casts the block output back to the input
+    dtype.
+    """
+    torch.manual_seed(7)
+    d_model = 64
+    block = _make_mamba_block(d_model, d_state=16, d_conv=4, expand=2)
+    block = block.to(torch.bfloat16).eval()
+    q_block = Quamba2Block(block, group_size=32, smoothquant_alpha=0.5)
+    q_block = q_block.eval()
+
+    x = torch.randn(1, 8, d_model, dtype=torch.bfloat16)
+    with torch.no_grad():
+        out, present = q_block(x, use_cache=True)
+    assert out.dtype == torch.bfloat16, (
+        f"Quamba2Block emitted {out.dtype}, expected bfloat16 — fp32 "
+        f"promotion leaks into the residual stream")
+
+    # Incremental decode path (T=1) must also preserve dtype.
+    x1 = torch.randn(1, 1, d_model, dtype=torch.bfloat16)
+    with torch.no_grad():
+        out1, _ = q_block(x1, past_key_value=present, use_cache=True)
+    assert out1.dtype == torch.bfloat16
+
+
+def test_quamba2_lora_adapter():
+    """add_lora_adapters must attach to Quamba2Linear and forward must apply it.
+
+    Regression: Quamba2Linear has no .weight/.weight_packed/.dense_packed
+    (it stores weight_int4_packed) — the device lookup crashed with
+    AttributeError, and forward() never applied the adapter.
+    """
+    torch.manual_seed(11)
+    from forge.training.bitnet_lora import add_lora_adapters
+
+    class _M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = Quamba2Linear.from_linear(
+                nn.Linear(256, 128, bias=False), group_size=64)
+
+    model = _M()
+    n_adapters, _ = add_lora_adapters(model, rank=8, alpha=16)
+    assert n_adapters == 1, f"expected 1 adapter on Quamba2Linear, got {n_adapters}"
+    lora = model.q.lora_adapter
+    assert lora.lora_A.device == model.q.weight_int4_packed.device
+
+    x = torch.randn(2, 4, 256, dtype=torch.bfloat16)  # engine runs bf16
+    with torch.no_grad():
+        model.q(x)  # warm the fp16 _cached_weight so both calls share it
+        lora.lora_B.data.fill_(0.01)
+        out = model.q(x)
+        model.q.lora_adapter = None
+        base = model.q(x)
+        model.q.lora_adapter = lora
+    assert not torch.allclose(base, out, atol=1e-3), \
+        "lora_adapter must affect forward output"
+    expected_delta = lora.scale * (x @ lora.lora_A.T @ lora.lora_B.T)
+    assert torch.allclose(out - base, expected_delta, atol=5e-3)
+
+
 def test_quamba2_conv1d_forward():
     """Quamba2Conv1d (W4 depthwise) should produce close output to FP16 conv."""
     torch.manual_seed(55)

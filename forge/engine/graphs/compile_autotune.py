@@ -98,7 +98,7 @@ def auto_tune_compile(
     Args:
         model: the model to compile
         input_ids: sample input for benchmarking (1, T)
-        model_id: unique identifier for caching (e.g., "forgelm_v2_light")
+        model_id: unique identifier for caching (e.g., "forgelm_v2")
         modes: list of modes to try (default: all 4)
         force_rebenchmark: ignore cache and re-benchmark
 
@@ -116,7 +116,7 @@ def auto_tune_compile(
             cache = json.loads(_CACHE_FILE.read_text())
             if model_id in cache:
                 best_mode = cache[model_id]["best_mode"]
-                print(f"  [CompileAutoTune] Cached result for {model_id}: {best_mode}")
+                logger.info(f"  [CompileAutoTune] Cached result for {model_id}: {best_mode}")
                 compiled = torch.compile(model, mode=best_mode, fullgraph=False)
                 return best_mode, compiled
         except Exception:
@@ -124,17 +124,16 @@ def auto_tune_compile(
 
     # Benchmark each mode
     results = {}
-    print(f"  [CompileAutoTune] Benchmarking modes for {model_id}...")
+    logger.info(f"  [CompileAutoTune] Benchmarking modes for {model_id}...")
     for mode in modes:
-        print(f"    Testing {mode}...", end=" ", flush=True)
         tps = _run_benchmark(model, mode, input_ids)
         results[mode] = tps
-        print(f"{tps:.0f} tok/s")
+        logger.info(f"    {mode}: {tps:.0f} tok/s")
 
     # Pick best
     best_mode = max(results, key=results.get)
     best_tps = results[best_mode]
-    print(f"  [CompileAutoTune] Best: {best_mode} ({best_tps:.0f} tok/s)")
+    logger.info(f"  [CompileAutoTune] Best: {best_mode} ({best_tps:.0f} tok/s)")
 
     # Cache result
     try:

@@ -1,0 +1,242 @@
+[
+  {
+    "tag": "orthogonal_r4_n20",
+    "name": "orthogonal",
+    "rank": 4,
+    "n_facts": 20,
+    "mode": "orthogonal",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.27483061626553534
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.32535985186696054
+      },
+      "inject": {
+        "correct": 7,
+        "total": 20,
+        "avg_prob": 0.06663971285452135
+      },
+      "ppl": 8.06956421073201
+    },
+    "lora_params": 23040,
+    "params_per_fact": 1152.0,
+    "recall": 0.35,
+    "train_time": 6.1608030796051025,
+    "distillation": false
+  },
+  {
+    "tag": "orthogonal_r4_n50",
+    "name": "orthogonal",
+    "rank": 4,
+    "n_facts": 50,
+    "mode": "orthogonal",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 4,
+        "total": 50,
+        "avg_prob": 0.020563219812356693
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.7934429004788399
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8798794984817505
+      },
+      "inject": {
+        "correct": 44,
+        "total": 50,
+        "avg_prob": 0.47963771047070625
+      },
+      "ppl": 8.183445293108289
+    },
+    "lora_params": 23040,
+    "params_per_fact": 460.8,
+    "recall": 0.88,
+    "train_time": 11.295050144195557,
+    "distillation": false
+  },
+  {
+    "tag": "orthogonal_r4_n100",
+    "name": "orthogonal",
+    "rank": 4,
+    "n_facts": 100,
+    "mode": "orthogonal",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8911663979291916
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.9115397512912751
+      },
+      "inject": {
+        "correct": 94,
+        "total": 100,
+        "avg_prob": 0.6459620173298753
+      },
+      "ppl": 8.613734658461642
+    },
+    "lora_params": 23040,
+    "params_per_fact": 230.4,
+    "recall": 0.94,
+    "train_time": 24.959514379501343,
+    "distillation": false
+  },
+  {
+    "tag": "distill_r4_n20",
+    "name": "distill",
+    "rank": 4,
+    "n_facts": 20,
+    "mode": "standard",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.020069860408329986
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.10738548673689366
+      },
+      "held": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.11553991790860892
+      },
+      "inject": {
+        "correct": 2,
+        "total": 20,
+        "avg_prob": 0.031922159399982775
+      },
+      "ppl": 8.03154094153985
+    },
+    "lora_params": 23040,
+    "params_per_fact": 1152.0,
+    "recall": 0.1,
+    "train_time": 6.2120201587677,
+    "distillation": true
+  },
+  {
+    "tag": "distill_r4_n50",
+    "name": "distill",
+    "rank": 4,
+    "n_facts": 50,
+    "mode": "standard",
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 4,
+        "total": 50,
+        "avg_prob": 0.020563219812356693
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 9,
+        "total": 10,
+        "avg_prob": 0.1068564023822546
+      },
+      "held": {
+        "correct": 8,
+        "total": 10,
+        "avg_prob": 0.1164167257025838
+      },
+      "inject": {
+        "correct": 11,
+        "total": 50,
+        "avg_prob": 0.03779420618171571
+      },
+      "ppl": 8.009481367805153
+    },
+    "lora_params": 23040,
+    "params_per_fact": 460.8,
+    "recall": 0.22,
+    "train_time": 12.807198762893677,
+    "distillation": true
+  }
+]

@@ -15,9 +15,9 @@ def test_pipeline_config_defaults():
     assert config.sft_enabled
     assert config.dpo_enabled
     assert config.rlvr_enabled
-    # V10 update: optimizer default changed from cpu_offload to muon_sf
-    assert config.optimizer == "muon_sf"
-    assert config.config_name == "forgelm_v2_light"
+    # V2 (Jamba) is the sole base — optimizer defaults to cpu_offload (3B on 12GB)
+    assert config.optimizer == "cpu_offload"
+    assert config.config_name == "forgelm_v2"
     assert config.cpt_reasoning_ratio == 0.6
     assert config.sft_mix_ratio == 0.5
     assert config.dpo_n_temp_samples == 5
@@ -79,8 +79,8 @@ def test_pipeline_history_tracking():
 def test_loop_config_v10_defaults():
     """LoopConfig should default to V10 config + ForgeEngine + training tricks."""
     cfg = LoopConfig()
-    # V10 config
-    assert cfg.config_name == "forgelm_v2_light"
+    # V2 (Jamba) is the sole base
+    assert cfg.config_name == "forgelm_v2"
     # ForgeEngine inference features
     assert cfg.use_forge_engine is True
     assert cfg.kv_cache == "spectral"
@@ -99,12 +99,12 @@ def test_loop_config_v10_defaults():
 
 
 def test_loop_checkpoint_path_v10():
-    """Epoch checkpoint paths should use V10 naming."""
+    """Epoch checkpoint paths should use current-base (V2) naming."""
     loop = InfiniteSelfPlayLoop("base.safetensors")
     path = loop._epoch_checkpoint_path(7)
-    assert "ForgeLM_V10_SP7" in path
+    assert "ForgeLM_V2_SP7" in path
     assert path.endswith(".safetensors")
-    print("PASS: Epoch checkpoint paths use ForgeLM_V10_SP naming")
+    print("PASS: Epoch checkpoint paths use ForgeLM_V2_SP naming")
 
 
 def test_loop_engine_lifecycle():

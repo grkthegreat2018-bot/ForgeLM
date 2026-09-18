@@ -17,8 +17,8 @@ Usage:
     cache = ForwardCache(max_entries=1000)
     logits, hidden = cache.forward(model, input_ids)
 """
-from collections import OrderedDict
 import logging
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 

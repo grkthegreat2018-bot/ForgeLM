@@ -1,0 +1,475 @@
+{
+  "model": "ForgeLM V2 Light (1.2B)",
+  "timestamp": "2026-09-05 18:59",
+  "baseline": {
+    "tokens_per_sec": 90.87077569633003,
+    "latency_ms": 77.03246666884904,
+    "tokens": 50,
+    "generated_tokens": 21,
+    "runs": 3,
+    "vram_mb": {
+      "allocated": 4875.9,
+      "reserved": 4911.5,
+      "free": 6615.5,
+      "total": 12820.5
+    },
+    "label": "baseline"
+  },
+  "kv_cache": {
+    "standard": {
+      "tokens_per_sec": 71.58105856151586,
+      "latency_ms": 97.79123333282769,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4867.5,
+        "reserved": 4896.8,
+        "free": 6630.1,
+        "total": 12820.5
+      },
+      "label": "kv=standard"
+    },
+    "paged": {
+      "tokens_per_sec": 91.5086508384325,
+      "latency_ms": 76.49549999769079,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4875.9,
+        "reserved": 4911.5,
+        "free": 6615.5,
+        "total": 12820.5
+      },
+      "label": "kv=paged"
+    },
+    "rotorquant": {
+      "tokens_per_sec": 62.25874735402008,
+      "latency_ms": 112.43399999996957,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4867.5,
+        "reserved": 4896.8,
+        "free": 1600.6,
+        "total": 12820.5
+      },
+      "label": "kv=rotorquant"
+    },
+    "hadamard_int4": {
+      "tokens_per_sec": 53.44089373530133,
+      "latency_ms": 130.98583333339775,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4867.5,
+        "reserved": 4896.8,
+        "free": 1602.3,
+        "total": 12820.5
+      },
+      "label": "kv=hadamard_int4"
+    },
+    "snapkv": {
+      "tokens_per_sec": 85.16809748903376,
+      "latency_ms": 82.19040000161233,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4867.5,
+        "reserved": 4896.8,
+        "free": 1601.8,
+        "total": 12820.5
+      },
+      "label": "kv=snapkv"
+    },
+    "cpu_offload": {
+      "tokens_per_sec": 91.7886326350044,
+      "latency_ms": 76.26216666540131,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4875.9,
+        "reserved": 4911.5,
+        "free": 1576.1,
+        "total": 12820.5
+      },
+      "label": "kv=cpu_offload"
+    },
+    "s4r": {
+      "tokens_per_sec": 78.24921480602414,
+      "latency_ms": 89.457766667086,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4875.9,
+        "reserved": 4911.5,
+        "free": 1510.2,
+        "total": 12820.5
+      },
+      "label": "kv=s4r"
+    }
+  },
+  "quantization": {
+    "none": {
+      "tokens_per_sec": 71.08340588309258,
+      "latency_ms": 98.47586666728603,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 4867.5,
+        "reserved": 4896.8,
+        "free": 1539.5,
+        "total": 12820.5
+      },
+      "label": "quant=none"
+    },
+    "int8": {
+      "label": "quant=int8",
+      "error": "expected scalar type BFloat16 but found Float",
+      "vram_mb": {
+        "allocated": 1769.9,
+        "reserved": 1879.0,
+        "free": 9635.4,
+        "total": 12820.5
+      }
+    },
+    "int4": {
+      "tokens_per_sec": 25.204613452438355,
+      "latency_ms": 277.7269333334213,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 4240.4,
+        "free": 7274.0,
+        "total": 12820.5
+      },
+      "label": "quant=int4"
+    },
+    "w8a8": {
+      "tokens_per_sec": 25.371768905355985,
+      "latency_ms": 275.8971999986291,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 3112.2,
+        "free": 8402.2,
+        "total": 12820.5
+      },
+      "label": "quant=w8a8"
+    },
+    "nvfp4": {
+      "tokens_per_sec": 25.256965570496355,
+      "latency_ms": 277.1512666658964,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 3112.2,
+        "free": 8402.2,
+        "total": 12820.5
+      },
+      "label": "quant=nvfp4"
+    },
+    "fp8": {
+      "tokens_per_sec": 25.39402763928503,
+      "latency_ms": 275.6553666646748,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 3112.2,
+        "free": 8402.2,
+        "total": 12820.5
+      },
+      "label": "quant=fp8"
+    }
+  },
+  "decoding": {
+    "standard": {
+      "tokens_per_sec": 25.386911644775225,
+      "latency_ms": 275.7326333327607,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 3112.2,
+        "free": 8402.2,
+        "total": 12820.5
+      },
+      "label": "decode=standard"
+    },
+    "speculative": {
+      "label": "decode=speculative",
+      "error": "activation: SpeculativeDecoding.__init__() missing 1 required positional argument: 'draft_model'"
+    },
+    "mtp_selfspec": {
+      "label": "decode=mtp_selfspec",
+      "error": "MTPSelfSpecDecoding.generate() got an unexpected keyword argument 'min_p'",
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 2992.6,
+        "free": 8521.8,
+        "total": 12820.5
+      }
+    },
+    "eagle3": {
+      "label": "decode=eagle3",
+      "error": "Eagle3Decoding.generate() got an unexpected keyword argument 'min_p'",
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 2992.6,
+        "free": 8521.8,
+        "total": 12820.5
+      }
+    }
+  },
+  "acceleration": {
+    "prefix_cache": {
+      "label": "prefix_cache",
+      "error": "too many values to unpack (expected 2)",
+      "vram_mb": {
+        "allocated": 2828.7,
+        "reserved": 3114.3,
+        "free": 8400.1,
+        "total": 12820.5
+      }
+    },
+    "chunked_prefill": {
+      "tokens_per_sec": 25.203787625290925,
+      "latency_ms": 277.7360333323789,
+      "tokens": 50,
+      "generated_tokens": 21,
+      "runs": 3,
+      "vram_mb": {
+        "allocated": 2827.9,
+        "reserved": 3112.2,
+        "free": 8402.2,
+        "total": 12820.5
+      },
+      "label": "chunked_prefill"
+    },
+    "cuda_graph": {
+      "label": "cuda_graph",
+      "error": "activation: Cannot copy between CPU and CUDA tensors during CUDA graph capture unless the CPU tensor is pinned. Please use tensor.pin_memory() or allocate the tensor with pin_memory=True."
+    },
+    "compile": {
+      "label": "compile",
+      "error": "Error: accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run. Stack trace: File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2034, in forward\n    return self._forward_impl(\n           ^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2170, in _forward_impl\n    x, present = block(x, past_key_value=past, use_cache=use_cache,\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 1186, in forward\n    attn_out, present = self.attn(\n    \n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 841, in forward\n    self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()\n                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^. To prevent overwriting, clone the tensor outside of torch.compile() or call torch.compiler.cudagraph_mark_step_begin() before each model invocation.",
+      "vram_mb": {
+        "allocated": 4834.1,
+        "reserved": 5232.4,
+        "free": 6279.9,
+        "total": 12820.5
+      }
+    }
+  },
+  "optimal": {
+    "label": "optimal",
+    "error": "Error: accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run. Stack trace: File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2034, in forward\n    return self._forward_impl(\n           ^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2170, in _forward_impl\n    x, present = block(x, past_key_value=past, use_cache=use_cache,\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 1186, in forward\n    attn_out, present = self.attn(\n    \n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 841, in forward\n    self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()\n                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^. To prevent overwriting, clone the tensor outside of torch.compile() or call torch.compiler.cudagraph_mark_step_begin() before each model invocation.",
+    "vram_mb": {
+      "allocated": 4834.1,
+      "reserved": 5091.9,
+      "free": 6420.4,
+      "total": 12820.5
+    }
+  },
+  "bottleneck": {
+    "per_layer_ms": [
+      {
+        "index": 0,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 1,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 2,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 3,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 4,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 5,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 6,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 7,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 8,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 9,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 10,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 11,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 12,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 13,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 14,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 15,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      }
+    ],
+    "bottlenecks": [
+      {
+        "index": 0,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 1,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 2,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 3,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      },
+      {
+        "index": 4,
+        "type": "ModularBlock",
+        "time_ms": 0.0,
+        "calls": 0,
+        "avg_ms": 0
+      }
+    ],
+    "total_ms": 178.52,
+    "layer_ms": 0.0,
+    "non_layer_ms": 178.52,
+    "tokens": 16,
+    "tok_s": 89.6,
+    "n_layers": 16,
+    "vram_mb": {
+      "allocated": 4867.8,
+      "reserved": 5125.4,
+      "free": 6386.9,
+      "total": 12820.5
+    },
+    "label": "optimal_bottleneck"
+  },
+  "long_prompt": {
+    "label": "long_prompt_600tok",
+    "error": "Error: accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run. Stack trace: File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2034, in forward\n    return self._forward_impl(\n           ^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 2170, in _forward_impl\n    x, present = block(x, past_key_value=past, use_cache=use_cache,\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 1186, in forward\n    attn_out, present = self.attn(\n    \n  File \"D:\\windsurf\\ForgeAI\\forge\\model_loader.py\", line 841, in forward\n    self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()\n                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^. To prevent overwriting, clone the tensor outside of torch.compile() or call torch.compiler.cudagraph_mark_step_begin() before each model invocation.",
+    "vram_mb": {
+      "allocated": 4834.2,
+      "reserved": 5322.6,
+      "free": 6189.7,
+      "total": 12820.5
+    }
+  },
+  "batch": {
+    "error": "BatchedDecoding.generate_batch() got an unexpected keyword argument 'max_new_tokens'"
+  },
+  "vram_final": {
+    "allocated": 4833.8,
+    "reserved": 5289.0,
+    "free": 6223.3,
+    "total": 12820.5
+  }
+}

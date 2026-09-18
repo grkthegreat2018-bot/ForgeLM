@@ -143,7 +143,7 @@ class GroupedTiedAttention(nn.Module):
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
         else:
             out = F.scaled_dot_product_attention(q, k, v, is_causal=T > 1)
-        out = out.transpose(1, 2).reshape(B, T, C)
+        out = out.transpose(1, 2).reshape(B, T, -1)
         return self.out_proj(out), new_kv
 
 

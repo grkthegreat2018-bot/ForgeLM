@@ -31,11 +31,14 @@ This implementation provides:
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 class MoSAAttention(nn.Module):
@@ -162,7 +165,7 @@ class MoSAWrapper:
                 self._patch(module, name)
                 count += 1
         self._active = True
-        print(f"  [MoSA] Patched {count} attention layers "
+        logger.info(f"  [MoSA] Patched {count} attention layers "
               f"(k_ratio={self.k_ratio}, min_seq={self.min_seq_len})")
 
     def _patch(self, attn_module, name: str):
@@ -209,7 +212,7 @@ class MoSAWrapper:
 
             # MoSA sparse attention
             out = self._mosa_module(q, k_cache, v_cache)
-            out = out.transpose(1, 2).reshape(B, T, C)
+            out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 
         attn_module._mosa_min_seq = self.min_seq_len

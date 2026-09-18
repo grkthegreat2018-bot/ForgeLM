@@ -15,9 +15,12 @@ drop-in replacement for the old inline methods.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 # Lazy imports inside functions to avoid loading safetensors at module import.
 
@@ -41,8 +44,8 @@ class AirLLMStreamer:
             if first_param is not None and first_param.device.type == "cuda":
                 engine._graph_runner = None
                 engine.acceleration = None
-                print("  [AirLLM-Smart] Model already in VRAM — "
-                      "streaming not needed (fast path)")
+                logger.info("AirLLM-Smart: model already in VRAM — "
+                            "streaming not needed (fast path)")
                 return
 
         model_bytes, kv_bytes = AirLLMStreamer._estimate_memory(engine)
@@ -55,21 +58,21 @@ class AirLLMStreamer:
         free_gb = vram_free / 1e9
         total_gb = vram_total / 1e9
 
-        print(f"  [AirLLM-Smart] Model: {model_gb:.2f} GB, "
-              f"KV cache: {kv_gb:.2f} GB, Total needed: {needed_gb:.2f} GB")
-        print(f"  [AirLLM-Smart] VRAM free: {free_gb:.2f} GB / "
-              f"{total_gb:.2f} GB")
+        logger.info("AirLLM-Smart: model %.2f GB, KV cache %.2f GB, "
+                    "total needed %.2f GB", model_gb, kv_gb, needed_gb)
+        logger.info("AirLLM-Smart: VRAM free %.2f GB / %.2f GB",
+                    free_gb, total_gb)
 
         # 20% safety margin for activations, fragmentation, etc.
         if vram_free > total_needed * 1.2:
             engine._graph_runner = None
             engine.acceleration = None
-            print("  [AirLLM-Smart] Model fits in VRAM — "
-                  "loading normally (fast path)")
+            logger.info("AirLLM-Smart: model fits in VRAM — "
+                        "loading normally (fast path)")
             return
 
         # Slow path: model too large, use layer streaming
-        print("  [AirLLM-Smart] Model exceeds VRAM — enabling layer streaming")
+        logger.info("AirLLM-Smart: model exceeds VRAM — enabling layer streaming")
         AirLLMStreamer._prepare_shards(engine)
         AirLLMStreamer._load_resident_shard(engine)
 
@@ -93,7 +96,7 @@ class AirLLMStreamer:
         """Split checkpoint into per-layer shards if not already done."""
         shard_dir = Path(engine.checkpoint_path).parent / "xp_shards"
         if not shard_dir.exists() or not any(shard_dir.glob("shard_*.safetensors")):
-            print("  [AirLLM-Smart] Splitting checkpoint into shards...")
+            logger.info("AirLLM-Smart: splitting checkpoint into shards...")
             from forge.keys.moe.airllm_key import AirLLMKey
             key = AirLLMKey()
             key.forward({
@@ -120,12 +123,12 @@ class AirLLMStreamer:
                 if name == kn:
                     param.data = t.to(engine.device, dtype=torch.bfloat16)
                     break
-        print(f"  [AirLLM-Smart] Resident: {len(shard0)} tensors from shard 0")
+        logger.info("AirLLM-Smart: resident: %d tensors from shard 0", len(shard0))
         engine._layer_shards = shards[1:]
         engine._param_map = dict(engine.model.named_parameters())
         engine._graph_runner = None
         engine.acceleration = "airllm_streaming"
-        print(f"  [AirLLM-Smart] Stream layers: {len(engine._layer_shards)}")
+        logger.info("AirLLM-Smart: stream layers: %d", len(engine._layer_shards))
 
     # ── Generation ───────────────────────────────────────────────────────
 

@@ -3,18 +3,23 @@
 ForgeLM V2 uses Jamba Reasoning 3B as parent, with ChatML format and
 JSON tool calls wrapped in Jamba's native special tokens (ids 531/532):
   <|im_start|>assistant
+  <tool_call>
   {"name": "tool_name", "arguments": {...}}
+  </tool_call>
   <|im_end|>
 
-Jamba also supports thinking mode with tags (ids 541/542).
+Jamba also supports thinking mode with <think>/</think> tags (ids 541/542)
+and <tool_response>/</tool_response> result markers (ids 539/540).
 
 This module provides:
-  - qwen_render_messages: render a conversation in Jamba/ChatML format with tool defs
+  - qwen_render_messages: render a conversation in canonical Jamba ChatML
+    (delegates to chat_template.apply_chat_template — a port of the
+    tokenizer's built-in Jinja template)
   - qwen_parse_tool_calls: parse JSON tool calls from model output
   - QwenDiscoveryAdapter: wraps the discovery loop to use Jamba format
 
 Legacy LFM2.5 format (Pythonic tool calls, ids 10/11) is still supported
-for backward compatibility.
+for backward compatibility in the parser only.
 """
 from __future__ import annotations
 
@@ -24,15 +29,16 @@ from typing import Any
 
 import torch
 
+from .chat_template import (  # noqa: F401  (re-exported constants)
+    TOOL_RESP_END,
+    TOOL_RESP_START,
+)
+
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 # Jamba Reasoning 3B token IDs
 EOS_IDS = (2, 519)  #  and <|im_end|>
 BOS_ID = 1  # <|startoftext|>
-
-# Jamba segment markers (BPE fragments — model responds natively)
-JAMBA_SEG_START = "<|startofsegment|>"
-JAMBA_SEG_END = "<|endofsegment|>"
 
 # Jamba tool call markers (single tokens: 531/532)
 TOOL_CALL_START = "<tool_call>"
@@ -49,169 +55,53 @@ TOOL_CALL_START_FIRST_ID = TOOL_CALL_START_ID
 TOOL_CALL_END_FIRST_ID = TOOL_CALL_END_ID
 EOS_ID = EOS_IDS[1]  # <|im_end|>
 
-# Jamba tool result markers (single tokens: 539/540)
-TOOL_RESP_START = "<|tool_resp_start|>"
-TOOL_RESP_END = "<|tool_resp_end|>"
-
-
-def qwen_render_tool_defs(tools: list[dict]) -> str:
-    """Render tool definitions as a compact text block for the system prompt.
-
-    Ultra-compact format to fit in limited KV cache (2048 tokens on 12GB):
-      tool_name(param1, param2='default') - short description
-    """
-    lines = [
-        "Tools (call with <|tool_call_start|>[name(arg='val')]<|tool_call_end|>):",
-    ]
-    for t in tools:
-        # unwrap OpenAI-style {"type": "function", "function": {...}}
-        if t.get("type") == "function" and "function" in t:
-            t = t["function"]
-        params = t.get("parameters", {})
-        if isinstance(params, dict) and "properties" in params:
-            props = params["properties"]
-            required = set(params.get("required", []))
-            param_parts = []
-            for pname in props:
-                if pname in required:
-                    param_parts.append(pname)
-                else:
-                    param_parts.append(f"{pname}='?'")
-            param_str = ", ".join(param_parts) if param_parts else ""
-        else:
-            param_str = ""
-        desc = t.get("description", "").split(".")[0][:60]
-        if param_str:
-            lines.append(f"  {t['name']}({param_str}) - {desc}")
-        else:
-            lines.append(f"  {t['name']}() - {desc}")
-    return "\n".join(lines)
+# Jamba tool result markers (single tokens: 539/540). Single source of
+# truth lives in chat_template — TOOL_RESP_START/END above alias it.
 
 
 def qwen_render_messages(messages: list[dict],
                          tools: list[dict] | None = None,
-                         add_generation_prompt: bool = True) -> str:
-    """Render a conversation in Qwen chat format.
+                         add_generation_prompt: bool = True,
+                         thinking: bool = True) -> str:
+    """Render a conversation in canonical Jamba ChatML format.
+
+    Delegates to ``chat_template.apply_chat_template`` — a faithful port of
+    the tokenizer's built-in Jinja chat_template. ``bos=False`` because the
+    engine tokenizes prompts with add_special_tokens=True (BOS auto-added).
 
     Messages: [{"role": "system"|"user"|"assistant"|"tool", "content": str,
-                "tool_calls": [...], "name": str}]
-
-    Tool calls are rendered as JSON blocks:
-      {"name": "...", "arguments": {...}}
-
-    Tool results use:
-      <|im_start|>tool
-      {tool_name}
-      {result_json}<|im_end|>
+                "tool_calls": [...], "reasoning_content": str, "name": str}]
     """
-    parts = []
-
-    # System message with tool definitions
-    system_text = ""
-    if messages and messages[0]["role"] == "system":
-        system_text = messages[0].get("content", "")
-        messages = messages[1:]
-
-    if tools:
-        tool_text = qwen_render_tool_defs(tools)
-        system_text = (system_text + "\n\n" + tool_text) if system_text else tool_text
-
-    if system_text:
-        parts.append(f"{IM_START}system\n{system_text}{IM_END}\n")
-
-    for msg in messages:
-        role = msg["role"]
-        if role == "user":
-            parts.append(f"{IM_START}user\n{msg.get('content', '')}{IM_END}\n")
-        elif role == "assistant":
-            content = msg.get("content", "")
-            tool_calls = msg.get("tool_calls")
-            if tool_calls:
-                # Render tool calls in Jamba JSON format:
-                #   {"name": "func", "arguments": {...}}
-                from .chat_template import render_tool_calls
-                tc_str = render_tool_calls(tool_calls)
-                body = tc_str if not content else f"{content}\n{tc_str}"
-            else:
-                body = content or ""
-            parts.append(f"{IM_START}assistant\n{body}{IM_END}\n")
-        elif role == "tool":
-            # Jamba tool result format: <|im_start|>user\n{result}\n<|im_end|>
-            content = msg.get("content", "")
-            parts.append(f"{IM_START}user\n{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{IM_END}\n")
-
-    if add_generation_prompt:
-        # Jamba reasoning: start with thinking mode
-        parts.append(f"{IM_START}assistant\n")
-
-    return "".join(parts)
+    from .chat_template import apply_chat_template
+    return apply_chat_template(
+        messages, tools=tools, add_generation_prompt=add_generation_prompt,
+        bos=False, thinking=thinking)
 
 
+# Back-compat alias — the fake <|startofsegment|> format was removed; Jamba
+# is ChatML. Kept so stale callers still get the canonical renderer.
 def jamba_render_messages(messages: list[dict],
                           tools: list[dict] | None = None,
                           add_generation_prompt: bool = True) -> str:
-    """Render a conversation in Jamba segment format.
-
-    Uses <|startofsegment|>/<|endofsegment|> markers (Jamba-style), which
-    the ForgeLM V2 checkpoint responds to natively. Tool calls use the
-    same  tags as qwen_render_messages (ids 531/532).
-
-    Messages: [{"role": "system"|"user"|"assistant"|"tool", "content": str,
-                "tool_calls": [...], "name": str}]
-    """
-    parts = []
-
-    # System message with tool definitions
-    system_text = ""
-    if messages and messages[0]["role"] == "system":
-        system_text = messages[0].get("content", "")
-        messages = messages[1:]
-
-    if tools:
-        tool_text = qwen_render_tool_defs(tools)
-        system_text = (system_text + "\n\n" + tool_text) if system_text else tool_text
-
-    if system_text:
-        parts.append(f"{JAMBA_SEG_START}system\n{system_text}{JAMBA_SEG_END}\n")
-
-    for msg in messages:
-        role = msg["role"]
-        if role == "user":
-            parts.append(f"{JAMBA_SEG_START}user\n{msg.get('content', '')}{JAMBA_SEG_END}\n")
-        elif role == "assistant":
-            content = msg.get("content", "")
-            tool_calls = msg.get("tool_calls")
-            if tool_calls:
-                from .chat_template import render_tool_calls
-                tc_str = render_tool_calls(tool_calls)
-                body = tc_str if not content else f"{content}\n{tc_str}"
-            else:
-                body = content or ""
-            parts.append(f"{JAMBA_SEG_START}assistant\n{body}{JAMBA_SEG_END}\n")
-        elif role == "tool":
-            content = msg.get("content", "")
-            parts.append(f"{JAMBA_SEG_START}tool\n{TOOL_RESP_START}\n{content}\n{TOOL_RESP_END}{JAMBA_SEG_END}\n")
-
-    if add_generation_prompt:
-        parts.append(f"{JAMBA_SEG_START}assistant\n")
-
-    return "".join(parts)
+    """Deprecated alias for qwen_render_messages (canonical Jamba ChatML)."""
+    return qwen_render_messages(messages, tools, add_generation_prompt)
 
 
 def render_messages_for_config(messages: list[dict],
                                config_name: str | None = None,
                                tools: list[dict] | None = None,
-                               add_generation_prompt: bool = True) -> str:
-    """Dispatch prompt rendering based on model config name.
+                               add_generation_prompt: bool = True,
+                               thinking: bool = True) -> str:
+    """Render messages in the canonical Jamba ChatML format.
 
-    Jamba-family configs (forgelm_v2, forgelm_v12_jamba, jamba_*) use
-    <|startofsegment|>/<|endofsegment|> format. All others use ChatML.
+    All ForgeLM V2-family configs (forgelm_v2, forgelm_v12_jamba) share the
+    same Jamba-Reasoning-3B tokenizer + chat_template, so every config gets
+    the identical canonical rendering. ``config_name`` is accepted for
+    back-compat and future per-config dispatch.
     """
-    if config_name and ("jamba" in config_name.lower()
-                        or config_name == "forgelm_v2"
-                        or config_name.startswith("forgelm_v2")):
-        return jamba_render_messages(messages, tools, add_generation_prompt)
-    return qwen_render_messages(messages, tools, add_generation_prompt)
+    del config_name  # one canonical format for all current presets
+    return qwen_render_messages(messages, tools, add_generation_prompt,
+                                thinking=thinking)
 
 
 # ── Tool-call parsing ─────────────────────────────────────────────────────
@@ -474,7 +364,7 @@ def _get_xgr_compiler(tokenizer):
     if _xgr_compiler is None or _xgr_tokenizer_info is None:
         # Load a fresh HF tokenizer for xgrammar (gigatoken wrapper not supported)
         from transformers import AutoTokenizer
-        hf_tok = AutoTokenizer.from_pretrained("research/checkpoints/lfm25_tokenizer")
+        hf_tok = AutoTokenizer.from_pretrained("research/checkpoints/forgelm_v2_tokenizer")
         # Pass vocab_size=65536 to match model config (tokenizer has 64416)
         # This ensures the bitmask covers all model logits
         _xgr_tokenizer_info = xgr.TokenizerInfo.from_huggingface(

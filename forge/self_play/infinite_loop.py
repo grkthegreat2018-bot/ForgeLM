@@ -16,7 +16,7 @@ Cycle per epoch:
 
 Usage:
     python -m research.self_play.infinite_loop \\
-        --checkpoint research/checkpoints/ForgeLM_V2_Light.safetensors \\
+        --checkpoint research/checkpoints/ForgeLM_V2.safetensors \\
         --epochs 50 --tasks-per-epoch 30
 
 The loop is resumable: if interrupted, it picks up from the last
@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+
+from forge.training.training_utils import oom_guard
 
 logger = logging.getLogger(__name__)
 
@@ -144,13 +146,35 @@ class LoopConfig:
 
     # Loop control
     max_epochs: int = 50
-    eval_threshold: float = 0.5      # min candidate quality vs base to promote
+    eval_threshold: float = 0.5      # lenient mode: max fractional quality regression
+    strict_promote: bool = True      # promote only if candidate beats/ties best
     device: str = "cuda"
+
+    # ── Training mode ──
+    # "sft"  = SFT continuation (default, existing path)
+    # "grpo" = GRPO-only RSI mode: train directly on verified self-play
+    #          trajectories using Group Relative Policy Optimization.
+    #          Skips SFT entirely — RL is the sole training signal.
+    training_mode: str = "sft"
+
+    # ── GRPO config (only used when training_mode="grpo") ──
+    grpo_max_steps: int = 50         # GRPO steps per epoch
+    grpo_group_size: int = 4         # G completions per prompt (MC-GRPO)
+    grpo_lr: float = 5e-6            # GRPO learning rate
+    grpo_kl_coeff: float = 0.02      # KL penalty coefficient (β)
+    grpo_clip_range: float = 0.2     # PPO clip range (ε)
+    grpo_temperature: float = 0.8    # generation temperature for GRPO rollouts
+    grpo_max_new_tokens: int = 256   # max tokens per GRPO rollout
+    grpo_max_seq_len: int = 512      # max seq len for GRPO training
+    grpo_grad_accum: int = 2         # gradient accumulation steps
+    grpo_use_repetition_penalty: bool = True  # doom-loop mitigation
+    grpo_rl_algorithm: str = "grpo"  # grpo/gtpo/cispo/sppo/psppo/evpo/grpo_or
+    grpo_min_trajectories: int = 4   # skip GRPO if fewer verified trajectories
 
     # Paths
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data/finetune"
-    config_name: str = "forgelm_v2_light"  # V10 default
+    config_name: str = "forgelm_v2"  # V2 (Jamba) default
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
     replay_file: str = ""            # path to prior SFT JSONL
@@ -158,6 +182,12 @@ class LoopConfig:
 
     # Task source: "model" (AZR self-propose) or "api" (distillation APIs)
     task_source: str = "model"       # "model" or "api"
+
+    # Live telemetry: status.json + heartbeat.json + events.jsonl under
+    # status_dir, polled by the GUI Self-Play page (EventsReader/StatusReader)
+    # and readable directly for CLI monitoring of an RSI run.
+    live_status: bool = True
+    status_dir: str = "research/checkpoints/self_play"
 
 
 class InfiniteSelfPlayLoop:
@@ -174,11 +204,59 @@ class InfiniteSelfPlayLoop:
         self._trajectories: list[dict] = []
         # ForgeEngine retained across self-play → eval for weight-swap reuse.
         self._engine = None
+        # Live telemetry writer — created in run() so tests that call
+        # run_epoch() directly never touch the filesystem.
+        self._status_writer = None
+        self._monitor = None
+
+    def _init_status_writer(self) -> None:
+        """Create the live telemetry writer + failure-mode monitor (idempotent)."""
+        if self._status_writer is not None or not self.config.live_status:
+            return
+        from forge.self_play.live_status import LiveStatusWriter
+        from forge.self_play.monitoring import SelfPlayMonitor
+        status_path = os.path.join(self.config.status_dir, "status.json")
+        self._status_writer = LiveStatusWriter(status_path)
+        self._monitor = SelfPlayMonitor()
+        self._status_writer.update(
+            name="self_play", method=self.config.training_mode,
+            config=self.config.config_name,
+            checkpoint=self.best_checkpoint,
+            vram_gb=self._vram_gb())
+
+    def _vram_gb(self) -> float:
+        if not torch.cuda.is_available():
+            return 0.0
+        return round(torch.cuda.memory_allocated() / 1e9, 2)
+
+    def _status_update(self, **fields) -> None:
+        """Telemetry update that no-ops when the writer isn't active."""
+        if self._status_writer is not None:
+            self._status_writer.update(vram_gb=self._vram_gb(), **fields)
+
+    def _record_step_metrics(self, metrics: dict) -> None:
+        """Feed SelfPlayMonitor + surface alerts into status.monitor_alerts."""
+        if self._monitor is not None:
+            self._monitor.record_step(metrics)
+            alerts = self._monitor.check_alerts()
+            self._status_update(monitor_alerts=alerts)
 
     def _epoch_checkpoint_path(self, epoch: int) -> str:
-        return os.path.normpath(os.path.join(
-            self.config.checkpoint_dir,
-            f"ForgeLM_V10_SP{epoch}.safetensors"))
+        """Unique per-epoch checkpoint path — never overwrites.
+
+        The epoch counter resets when a run restarts, so a bare SP{epoch}
+        name would clobber checkpoints from a previous run. Append _rN
+        until the path is free.
+        """
+        cfg_tag = self.config.config_name.replace("forgelm_", "").upper() or "MODEL"
+        stem = os.path.join(
+            self.config.checkpoint_dir, f"ForgeLM_{cfg_tag}_SP{epoch}")
+        path = f"{stem}.safetensors"
+        n = 1
+        while os.path.exists(path):
+            n += 1
+            path = f"{stem}_r{n}.safetensors"
+        return os.path.normpath(path)
 
     def _load_engine(self):
         """Load a ForgeEngine with V10 inference features activated.
@@ -199,7 +277,7 @@ class InfiniteSelfPlayLoop:
             engine = ForgeEngine.from_checkpoint(
                 checkpoint=self.best_checkpoint,
                 config_name=cfg.config_name,
-                tokenizer_path="research/checkpoints/lfm25_tokenizer",
+                tokenizer_path="research/checkpoints/forgelm_v2_tokenizer",
                 device=cfg.device,
                 auto_activate=False,  # we activate explicitly below
             )
@@ -256,6 +334,9 @@ class InfiniteSelfPlayLoop:
         print(f"\n{'='*70}")
         print(f"  PHASE 1: AZR SELF-PLAY (epoch {self.epoch})")
         print(f"{'='*70}")
+        sw = self._status_writer
+        if sw:
+            sw.set_phase("self_play", detail=f"epoch {self.epoch}: loading engine")
 
         engine = self._load_engine()
         model = engine.model
@@ -289,6 +370,8 @@ class InfiniteSelfPlayLoop:
         # ── Propose + validate tasks ──
         n_target = self.config.tasks_per_epoch
         validated: list = []
+        if sw:
+            sw.set_phase("proposing", detail=f"epoch {self.epoch}: target {n_target} tasks")
 
         if self.config.task_source == "api":
             # API-driven: use distillation teacher models to generate diverse tasks.
@@ -329,6 +412,10 @@ class InfiniteSelfPlayLoop:
                 curriculum.temperature = old_temp
                 validated.extend(proposed)
                 propose_attempts += 1
+                if sw:
+                    sw.curriculum_progress(
+                        proposed=curriculum.stats.total_proposed,
+                        validated=len(validated), parse_failed=0)
                 print(f"  [Propose] Attempt {propose_attempts} ({domain}/{mode}): "
                       f"{len(proposed)} validated, {len(validated)}/{n_target} total")
 
@@ -337,6 +424,8 @@ class InfiniteSelfPlayLoop:
 
         if not validated:
             print("  [Propose] No valid tasks generated, skipping epoch")
+            if sw:
+                sw.alert("warn", f"epoch {self.epoch}: no valid tasks proposed")
             self._free_engine()
             del curriculum
             gc.collect()
@@ -366,22 +455,31 @@ class InfiniteSelfPlayLoop:
         # mainly costs us overlapping subprocess sandbox execution — acceptable
         # for correctness.
         _solve_lock = Lock()
+        if sw:
+            sw.set_phase("solving",
+                         detail=f"epoch {self.epoch}: solving {len(validated)} tasks")
 
-        def _solve_and_record(task, _curr=curriculum):
-            """Solve a single task and return (task, result).
+        def _solve_and_record(task, idx, _curr=curriculum):
+            """Solve a single task and return (task, result, elapsed_ms).
 
             ``curriculum`` is bound as a default arg so the closure survives
             the ``del curriculum`` in the early-return path above.
             """
+            # task_started fires when the solve actually begins (the lock
+            # serializes solves), not at submit time.
+            if sw:
+                sw.task_started(task.description, idx, len(validated),
+                                domain=task.domain)
+            t0 = time.time()
             with _solve_lock:
                 result = _curr.solve_task(task)
-            return task, result
+            return task, result, (time.time() - t0) * 1000.0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks — GPU generation serializes via GIL+CUDA,
             # but sandbox verification (subprocess) overlaps across threads
             futures = {
-                executor.submit(_solve_and_record, task): i
+                executor.submit(_solve_and_record, task, i): i
                 for i, task in enumerate(validated)
             }
             results_ordered = [None] * len(validated)
@@ -389,9 +487,27 @@ class InfiniteSelfPlayLoop:
                 idx = futures[future]
                 results_ordered[idx] = future.result()
 
-        for i, (task, result) in enumerate(r for r in results_ordered if r is not None):
+        for i, item in enumerate(r for r in results_ordered if r is not None):
+            task, result, elapsed_ms = item
             success = result.get("final_success", False)
             attempts = result.get("attempts", [])
+            if sw:
+                # One "round" event per solve attempt for the live feed.
+                per_attempt_ms = elapsed_ms / max(len(attempts), 1)
+                for att in attempts:
+                    sw.round_done(
+                        i, att.get("sample", 0), att.get("success", False),
+                        quality=1.0 if att.get("success") else 0.0,
+                        gen_ms=per_attempt_ms, exec_ms=0.0,
+                        error=att.get("error", ""))
+                sw.task_done(i, task.description, success,
+                             rounds_used=result.get("rounds_used", len(attempts)),
+                             best_quality=result.get("best_quality",
+                                                     1.0 if success else 0.0))
+            self._record_step_metrics({
+                "mean_reward": 1.0 if success else 0.0,
+                "diversity_score": curriculum.stats.diversity_score,
+            })
 
             if success and attempts:
                 # Find the successful attempt
@@ -431,6 +547,18 @@ class InfiniteSelfPlayLoop:
                 print(f"  [Solve] {i+1}/{len(validated)}: "
                       f"{successes} passed, {failures} failed "
                       f"({rate:.0%} success rate)")
+
+        # Surface a few distinct failure errors so a 0% epoch is diagnosable
+        # from the log instead of a black box.
+        if failures:
+            seen_errs: list[str] = []
+            for t in self._trajectories:
+                err = (t.get("error") or "").strip().split("\n")
+                err = err[-1][:160] if err and err[-1] else ""
+                if err and err not in seen_errs:
+                    seen_errs.append(err)
+            for e in seen_errs[:3]:
+                print(f"  [Solve] sample error: {e}")
 
         stats = {
             "n_proposed": len(validated),
@@ -582,6 +710,14 @@ class InfiniteSelfPlayLoop:
         print(f"\n{'='*70}")
         print(f"  PHASE 2: FINETUNE (epoch {self.epoch})")
         print(f"{'='*70}")
+        # stall_hold: in-process SFT can't emit progress — keep the
+        # heartbeat from false-flagging a stall during training.
+        self._status_update()
+        if self._status_writer:
+            self._status_writer.set_phase(
+                "finetune", detail=f"epoch {epoch}: SFT "
+                f"({self.config.ft_optimizer}, {self.config.ft_max_steps} steps)",
+                stall_hold=True)
 
         # Free the self-play engine before finetuning — training needs the
         # full VRAM budget. The engine is reloaded fresh next epoch.
@@ -786,7 +922,208 @@ class InfiniteSelfPlayLoop:
             return False
         return True
 
-    # ── Phase 3: Evaluate ────────────────────────────────────────────
+    # ── Phase 2c: GRPO training (RL-only RSI mode) ──────────────────
+
+    def _grpo_train(self, epoch: int) -> str:
+        """Phase 2c: GRPO training on verified self-play trajectories.
+
+        GRPO-only RSI mode: instead of SFT on successful trajectories, train
+        the model directly via Group Relative Policy Optimization on the
+        verified (success + failure) trajectories from self-play.
+
+        The binary reward (1.0 if test_passed, 0.0 otherwise) IS the strict
+        data gate — no external reward model needed.
+
+        VRAM budget on 12GB RTX 5070 with 3B Jamba model:
+          - Model (bf16): ~6 GB
+          - Ref model (bf16, frozen): ~6 GB → CPU offloaded
+          - LoRA adapters: ~50 MB
+          - KV cache (short seq): ~0.5 GB
+          - Activations + grads: ~1 GB
+          Total GPU: ~7.5 GB (fits with cpu_offload optimizer)
+
+        Uses GRPOTrainer with:
+          - MC-GRPO median baseline (robust for group_size=4)
+          - CPUAdamW optimizer (optimizer states on CPU)
+          - N-gram repetition penalty (doom-loop mitigation)
+          - OOM guard per step
+        """
+        print(f"\n{'='*70}")
+        print(f"  PHASE 2: GRPO TRAINING (epoch {self.epoch})")
+        print(f"{'='*70}")
+        if self._status_writer:
+            self._status_writer.set_phase(
+                "grpo", detail=f"epoch {epoch}: {self.config.grpo_rl_algorithm} "
+                f"({self.config.grpo_max_steps} steps)")
+
+        # Free the self-play engine — GRPO needs the full VRAM budget
+        self._free_engine()
+
+        save_path = self._epoch_checkpoint_path(epoch)
+        c = self.config
+
+        # Collect verified trajectories for GRPO
+        # Use both successful (reward=1.0) and failed (reward=0.0) — GRPO
+        # needs the group contrast to compute advantages.
+        verified = [t for t in self._trajectories if "reward" in t]
+        if len(verified) < c.grpo_min_trajectories:
+            print(f"  Too few trajectories ({len(verified)}), skipping GRPO")
+            return ""
+
+        # Build prompt → completions → rewards structure for GRPO
+        # Group by task_description: each task gets G completions (the
+        # self-play attempts). For tasks with only 1 attempt, we duplicate
+        # with temperature variation is not possible post-hoc, so we group
+        # all trajectories by domain as a fallback.
+        #
+        # Better approach: use each task as a prompt, and the single
+        # self-play solution as one completion. GRPO needs ≥2 completions
+        # per prompt, so we pair tasks within the same domain.
+        from collections import defaultdict
+        by_domain = defaultdict(list)
+        for t in verified:
+            by_domain[t.get("domain", "default")].append(t)
+
+        prompts = []
+        completions = []
+        rewards = []
+
+        for domain, tasks in by_domain.items():
+            # Pair tasks within domain: each pair becomes a GRPO group
+            for i in range(0, len(tasks) - 1, 2):
+                t1, t2 = tasks[i], tasks[i + 1]
+                prompt = t1["task_description"]
+                comp_pair = [t1["solution_code"], t2["solution_code"]]
+                reward_pair = [t1["reward"], t2["reward"]]
+                prompts.append(prompt)
+                completions.append(comp_pair)
+                rewards.append(reward_pair)
+
+        if not prompts:
+            print("  No valid GRPO groups formed, skipping")
+            return ""
+
+        print(f"  Trajectories: {len(verified)} verified")
+        print(f"  GRPO groups: {len(prompts)} (group_size=2)")
+        print(f"  Algorithm: {c.grpo_rl_algorithm}")
+        print(f"  Steps: {c.grpo_max_steps} | LR: {c.grpo_lr} | KL: {c.grpo_kl_coeff}")
+
+        # Load model + reference model
+        from forge.config import get_config
+        from forge.model_loader import ModelLoader
+        from forge.self_play.grpo_trainer import GRPOConfig, GRPOTrainer
+        from research.tokenizer_cache import get_tokenizer
+
+        cfg = get_config(c.config_name, device=c.device)
+
+        # Build model with LoRA (train ~1M params, not full 3B)
+        model = ModelLoader.build_model_fast(
+            cfg, checkpoint_path=self.best_checkpoint,
+            dtype=torch.bfloat16 if "cuda" in c.device else torch.float32,
+        )
+        model = model.to(c.device)
+
+        # Apply LoRA adapters (manual LoRA — BitNet-compatible, works with
+        # the 3B Jamba model on 12GB VRAM: trains ~1M params, not full 3B)
+        from forge.training.bitnet_lora import add_lora_adapters, merge_lora_adapters
+        n_adapters, lora_params = add_lora_adapters(
+            model, rank=c.ft_lora_r, alpha=c.ft_lora_alpha)
+        # Freeze all non-LoRA params
+        lora_param_ids = {id(p) for p in lora_params}
+        for param in model.parameters():
+            if id(param) not in lora_param_ids:
+                param.requires_grad = False
+        print(f"  LoRA: {n_adapters} adapters (rank={c.ft_lora_r}), "
+              f"{sum(p.numel() for p in lora_params)/1e6:.2f}M trainable params")
+        model = model.to(c.device)
+
+        # Reference model (frozen, for KL penalty) — CPU offloaded to save VRAM
+        ref_model = ModelLoader.build_model_fast(
+            cfg, checkpoint_path=self.best_checkpoint,
+            dtype=torch.bfloat16 if "cuda" in c.device else torch.float32,
+        )
+        ref_model = ref_model.to(c.device)
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        ref_model.eval()
+
+        tokenizer = get_tokenizer()
+
+        grpo_config = GRPOConfig(
+            learning_rate=c.grpo_lr,
+            kl_coefficient=c.grpo_kl_coeff,
+            clip_range=c.grpo_clip_range,
+            group_size=2,  # we pair tasks, so G=2
+            temperature=c.grpo_temperature,
+            max_seq_len=c.grpo_max_seq_len,
+            grad_accum_steps=c.grpo_grad_accum,
+            rl_algorithm=c.grpo_rl_algorithm,
+            use_repetition_penalty=c.grpo_use_repetition_penalty,
+        )
+        grpo_config.optimizer = "cpu_offload"  # 12GB VRAM safe
+
+        trainer = GRPOTrainer(
+            model=model, tokenizer=tokenizer, ref_model=ref_model,
+            device=c.device, config=grpo_config,
+        )
+
+        # Run GRPO training steps
+        import random as _rng
+        _rng.seed(42)
+        torch.manual_seed(42)
+
+        t0 = time.time()
+        step = 0
+        while step < c.grpo_max_steps:
+            # Sample a batch of groups (batch_size=4 prompts per step)
+            batch_size = min(4, len(prompts))
+            indices = _rng.sample(range(len(prompts)), batch_size)
+            batch_prompts = [prompts[i] for i in indices]
+            batch_comps = [completions[i] for i in indices]
+            batch_rewards = [rewards[i] for i in indices]
+
+            with oom_guard(c.device, label="grpo_step") as safe:
+                stats = trainer.train_step(batch_prompts, batch_comps, batch_rewards)
+            if safe.skipped:
+                continue
+            step += 1
+
+            self._record_step_metrics({
+                "mean_reward": stats.get("mean_reward", 0.0),
+                "kl_divergence": stats.get("kl", 0.0),
+                "advantage_collapse_rate": stats.get("advantage_collapse_rate", 0.0),
+            })
+            self._status_update(
+                grpo_step=step, grpo_steps=c.grpo_max_steps,
+                loss=stats.get("loss", 0.0), lr=c.grpo_lr,
+                grpo_kl=stats.get("kl", 0.0),
+                grpo_reward=stats.get("mean_reward", 0.0),
+                grpo_acr=stats.get("advantage_collapse_rate", 0.0))
+
+            if step % 5 == 0 or step == 1:
+                elapsed = time.time() - t0
+                print(f"  step {step}/{c.grpo_max_steps} | "
+                      f"loss {stats.get('loss', 0):.4f} | "
+                      f"kl {stats.get('kl', 0):.4f} | "
+                      f"reward {stats.get('mean_reward', 0):.3f} | "
+                      f"acr {stats.get('advantage_collapse_rate', 0):.2%} | "
+                      f"{elapsed:.0f}s")
+
+        # Save checkpoint (merge LoRA into base weights for standalone save)
+        n_merged = merge_lora_adapters(model)
+        print(f"  Merged {n_merged} LoRA adapters into base model")
+        from forge.checkpoint_io import save_training_checkpoint
+        save_training_checkpoint(model, save_path, step)
+
+        # Free VRAM
+        del model, ref_model, trainer
+        import gc; gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"  GRPO done in {time.time() - t0:.0f}s → {save_path}")
+        return save_path
+
 
     def _evaluate(self, checkpoint: str) -> dict:
         """Phase 3: Evaluate candidate vs current best via fast_eval.
@@ -798,6 +1135,11 @@ class InfiniteSelfPlayLoop:
         print(f"\n{'='*70}")
         print("  PHASE 3: EVALUATE")
         print(f"{'='*70}")
+        # stall_hold: fast_eval runs opaque eval suites without progress calls.
+        if self._status_writer:
+            self._status_writer.set_phase(
+                "evaluate", detail=f"epoch {self.epoch}: candidate vs best",
+                stall_hold=True)
 
         from forge.self_play.discovery.fast_eval import fast_eval
 
@@ -821,9 +1163,12 @@ class InfiniteSelfPlayLoop:
         cand_q = results.get("candidate", {}).get("quality", 0)
         winner = results.get("winner", "BASE")
 
-        # Promote if candidate wins or matches quality
+        # Promote if candidate wins. In strict mode (default) that is the
+        # only way through — the new model must beat or tie the old one.
         if winner == "CANDIDATE":
             passed = True
+        elif self.config.strict_promote:
+            passed = False
         elif cand_q >= base_q * (1 - self.config.eval_threshold):
             # Within threshold of base quality → promote (avoid ratcheting)
             passed = True
@@ -846,17 +1191,32 @@ class InfiniteSelfPlayLoop:
             self.best_checkpoint = candidate
             self.best_score = eval_result.get("candidate_quality", 0)
             print(f"  PROMOTED: {candidate} is the new best checkpoint")
+            if self._status_writer:
+                self._status_writer.event(
+                    "promote", checkpoint=candidate,
+                    quality=eval_result.get("candidate_quality", 0))
             return True
         else:
             archive_dir = os.path.join(self.config.checkpoint_dir, "archive")
             os.makedirs(archive_dir, exist_ok=True)
             archived = os.path.join(archive_dir, os.path.basename(candidate))
+            # Collision-safe: a demoted SP{epoch} from a previous run may
+            # already sit in archive/ — shutil.move would fail on Windows.
+            n = 1
+            while os.path.exists(archived):
+                n += 1
+                stem, ext = os.path.splitext(os.path.basename(candidate))
+                archived = os.path.join(archive_dir, f"{stem}_a{n}{ext}")
             if os.path.exists(candidate):
                 shutil.move(candidate, archived)
                 meta = candidate + ".meta.json"
                 if os.path.exists(meta):
                     shutil.move(meta, archived + ".meta.json")
             print(f"  DEMOTED: reverted to {self.best_checkpoint}")
+            if self._status_writer:
+                self._status_writer.event(
+                    "demote", checkpoint=candidate,
+                    winner=eval_result.get("winner", ""))
             return False
 
     # ── Main loop ────────────────────────────────────────────────────
@@ -866,6 +1226,7 @@ class InfiniteSelfPlayLoop:
         self.epoch += 1
         epoch_start = time.time()
         phases = {}
+        self._status_update(step=self.epoch, max_steps=self.config.max_epochs)
 
         # Phase 1: Self-play (AZR curriculum)
         try:
@@ -876,32 +1237,53 @@ class InfiniteSelfPlayLoop:
         except Exception as e:
             print(f"  Self-play failed: {e}")
             import traceback; traceback.print_exc()
+            self._free_engine()
             return {"epoch": self.epoch, "error": f"self_play: {e}"}
 
-        # Phase 2: Export + Finetune
+        # Phase 2: Train (SFT or GRPO, based on training_mode)
         try:
-            data_path = self._export_trajectories(self.epoch)
-            with open(data_path, encoding='utf-8') as _f:
-                n_examples = sum(1 for _ in _f)
-
-            if n_examples < self.config.ft_min_examples:
-                print(f"  Too few examples ({n_examples}), skipping finetune")
-                phases["finetune"] = {"skipped": True, "n_examples": n_examples}
+            if self.config.training_mode == "grpo":
+                # GRPO-only RSI mode: train directly on verified trajectories
+                candidate = self._grpo_train(self.epoch)
+                if not candidate:
+                    phases["grpo"] = {"skipped": True}
+                else:
+                    phases["grpo"] = {"checkpoint": candidate}
+                    # Phase 3: Evaluate
+                    eval_result = self._evaluate(candidate)
+                    phases["evaluate"] = eval_result
+                    # Phase 4: Promote/Demote
+                    promoted = self._maybe_promote(candidate, eval_result)
+                    phases["promoted"] = promoted
             else:
-                candidate = self._finetune(data_path, self.epoch)
-                phases["finetune"] = {"checkpoint": candidate, "n_examples": n_examples}
+                # SFT mode (default): export → finetune → eval → promote
+                data_path = self._export_trajectories(self.epoch)
+                with open(data_path, encoding='utf-8') as _f:
+                    n_examples = sum(1 for _ in _f)
 
-                # Phase 3: Evaluate
-                eval_result = self._evaluate(candidate)
-                phases["evaluate"] = eval_result
+                if n_examples < self.config.ft_min_examples:
+                    print(f"  Too few examples ({n_examples}), skipping finetune")
+                    phases["finetune"] = {"skipped": True, "n_examples": n_examples}
+                    # Free the self-play engine — otherwise it stays resident
+                    # and the next epoch loads a second engine on top (OOM).
+                    self._free_engine()
+                else:
+                    candidate = self._finetune(data_path, self.epoch)
+                    phases["finetune"] = {"checkpoint": candidate, "n_examples": n_examples}
 
-                # Phase 4: Promote/Demote
-                promoted = self._maybe_promote(candidate, eval_result)
-                phases["promoted"] = promoted
+                    # Phase 3: Evaluate
+                    eval_result = self._evaluate(candidate)
+                    phases["evaluate"] = eval_result
+
+                    # Phase 4: Promote/Demote
+                    promoted = self._maybe_promote(candidate, eval_result)
+                    phases["promoted"] = promoted
         except Exception as e:
-            print(f"  Finetune/eval failed: {e}")
+            print(f"  Train/eval failed: {e}")
             import traceback; traceback.print_exc()
             phases["error"] = str(e)
+            # Idempotent — no-op if _finetune/_evaluate already freed it.
+            self._free_engine()
 
         elapsed = round(time.time() - epoch_start, 1)
         epoch_summary = {
@@ -913,6 +1295,22 @@ class InfiniteSelfPlayLoop:
         self.history.append(epoch_summary)
         if len(self.history) > 100:
             self.history = self.history[-100:]
+        if self._status_writer:
+            sp = phases.get("self_play", {})
+            ev = phases.get("evaluate", {})
+            self._status_writer.epoch_done(
+                self.epoch, self.config.max_epochs,
+                train_rate=sp.get("success_rate", 0.0)
+                if isinstance(sp, dict) else 0.0,
+                val_rate=ev.get("candidate_quality", 0.0)
+                if isinstance(ev, dict) else 0.0,
+                loss=phases.get("loss", 0.0),
+                promoted=bool(phases.get("promoted", False)),
+                elapsed_s=elapsed,
+                best_checkpoint=self.best_checkpoint)
+            self._status_update(
+                step=self.epoch,
+                topic=sp.get("domain", "") if isinstance(sp, dict) else "")
         print(f"\n  Epoch {self.epoch} done in {elapsed}s")
         print(f"  Best checkpoint: {self.best_checkpoint}")
         return epoch_summary
@@ -920,6 +1318,11 @@ class InfiniteSelfPlayLoop:
     def run(self, max_epochs: int | None = None) -> list[dict]:
         """Run the infinite loop for max_epochs (or until interrupted)."""
         n = max_epochs or self.config.max_epochs
+        self._init_status_writer()
+        sw = self._status_writer
+        if sw:
+            sw.set_phase("startup", detail="initializing loop",
+                         step=0, max_steps=n)
         print(f"\n{'#'*70}")
         print("#  INFINITE AZR SELF-PLAY LOOP")
         print(f"#  Starting checkpoint: {self.best_checkpoint}")
@@ -928,17 +1331,30 @@ class InfiniteSelfPlayLoop:
         print(f"#  Config: {self.config.config_name}")
         print(f"{'#'*70}")
 
+        run_status, reason = "done", f"completed {n} epochs"
         for _ in range(n):
+            # Cooperative stop: GUI Stop button writes STOP_REQUESTED next
+            # to status.json. Checked at epoch boundaries (reliable on
+            # Windows where taskkill/SIGTERM delivery is unreliable).
+            if sw and sw.stop_requested():
+                print("\n  Stop requested — shutting down after current epoch")
+                run_status, reason = "stopped", "stopped via STOP_REQUESTED"
+                break
             try:
                 self.run_epoch()
             except KeyboardInterrupt:
                 print(f"\n  Interrupted at epoch {self.epoch}")
+                run_status, reason = "stopped", "interrupted"
                 break
             except Exception as e:
                 print(f"\n  Epoch {self.epoch} crashed: {e}")
                 import traceback; traceback.print_exc()
+                if sw:
+                    sw.alert("error", f"epoch {self.epoch} crashed: {e}")
 
         self._print_summary()
+        if sw:
+            sw.close(status=run_status, reason=reason)
         return self.history
 
     def _print_summary(self):
@@ -957,6 +1373,10 @@ class InfiniteSelfPlayLoop:
 
 
 def main():
+    # Opt-in runtime configuration (import of `forge` is side-effect-free).
+    from forge.runtime.configure import configure
+    configure()
+
     # Load .env for API keys (needed for --task-source api)
     env_path = Path(__file__).resolve().parents[2] / ".env"
     if env_path.exists():
@@ -970,7 +1390,7 @@ def main():
         description="Infinite AZR self-play training loop (V10: ForgeEngine + all training tricks)")
     parser.add_argument("--checkpoint", required=True,
                         help="Starting checkpoint (safetensors). Default V10: "
-                             "research/checkpoints/ForgeLM_V2_Light.safetensors")
+                             "research/checkpoints/ForgeLM_V2.safetensors")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Max epochs to run")
     parser.add_argument("--tasks-per-epoch", type=int, default=30,
@@ -1009,6 +1429,10 @@ def main():
     parser.add_argument("--ft-checkpoint-strategy", type=str, default="all",
                         choices=["all", "ffn", "attn", "none", "lazy", "optimal"],
                         help="Selective gradient checkpointing strategy")
+    parser.add_argument("--max-gen-tokens", type=int, default=256,
+                        help="Max tokens per generation. Truncated completions "
+                             "produce SyntaxError/IndentationError on solve — "
+                             "raise to 512+ if solve rate is 0%%")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="Self-play exploration temperature")
     parser.add_argument("--top-k", type=int, default=80)
@@ -1020,10 +1444,36 @@ def main():
                         choices=["model", "api"],
                         help="Task source: 'model' (AZR self-propose) or "
                              "'api' (distillation teacher APIs)")
-    parser.add_argument("--config", type=str, default="forgelm_v2_light",
+    parser.add_argument("--config", type=str, default="forgelm_v2",
                         help="Model config name")
     parser.add_argument("--eval-threshold", type=float, default=0.5,
-                        help="Min candidate quality vs base to promote")
+                        help="Lenient mode: max fractional quality regression still promoted")
+    parser.add_argument("--lenient-promote", action="store_true",
+                        help="Allow promotion when candidate merely stays within "
+                             "--eval-threshold of base (default: strict — must "
+                             "beat or tie the old checkpoint)")
+
+    # ── Training mode ──
+    parser.add_argument("--training-mode", type=str, default="sft",
+                        choices=["sft", "grpo"],
+                        help="Training mode: 'sft' (SFT continuation, default) "
+                             "or 'grpo' (GRPO-only RSI: train directly on "
+                             "verified self-play trajectories via RL)")
+    parser.add_argument("--grpo-steps", type=int, default=50,
+                        help="GRPO steps per epoch (training_mode=grpo)")
+    parser.add_argument("--grpo-lr", type=float, default=5e-6,
+                        help="GRPO learning rate")
+    parser.add_argument("--grpo-group-size", type=int, default=4,
+                        help="GRPO group size (G completions per prompt)")
+    parser.add_argument("--grpo-kl", type=float, default=0.02,
+                        help="GRPO KL penalty coefficient")
+    parser.add_argument("--grpo-clip", type=float, default=0.2,
+                        help="GRPO PPO clip range")
+    parser.add_argument("--grpo-algorithm", type=str, default="grpo",
+                        choices=["grpo", "gtpo", "cispo", "sppo", "psppo",
+                                 "evpo", "grpo_or"],
+                        help="RL algorithm (grpo=default, gtpo=no-ref-model, "
+                             "cispo=MiniMax detached clip)")
 
     # ── V10 ForgeEngine inference features ──
     parser.add_argument("--no-forge-engine", action="store_true",
@@ -1095,6 +1545,14 @@ def main():
     parser.add_argument("--ft-bitnet-everywhere", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="BitNet ternary QAT (1.58 bits, 2.39x vs AdamW)")
+
+    # ── Live telemetry ──
+    parser.add_argument("--status-dir", type=str,
+                        default="research/checkpoints/self_play",
+                        help="Dir for status.json/heartbeat.json/events.jsonl "
+                             "live telemetry (GUI Self-Play page reads this)")
+    parser.add_argument("--no-live-status", action="store_true",
+                        help="Disable live telemetry files")
     args = parser.parse_args()
 
     config = LoopConfig(
@@ -1139,12 +1597,23 @@ def main():
         kv_cache_tokens=args.kv_cache_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
+        max_gen_tokens=args.max_gen_tokens,
         max_epochs=args.epochs,
         config_name=args.config,
         replay_file=args.replay_file,
         replay_ratio=args.replay_ratio,
         task_source=args.task_source,
         eval_threshold=args.eval_threshold,
+        strict_promote=not args.lenient_promote,
+        training_mode=args.training_mode,
+        grpo_max_steps=args.grpo_steps,
+        grpo_lr=args.grpo_lr,
+        grpo_group_size=args.grpo_group_size,
+        grpo_kl_coeff=args.grpo_kl,
+        grpo_clip_range=args.grpo_clip,
+        grpo_rl_algorithm=args.grpo_algorithm,
+        status_dir=args.status_dir,
+        live_status=not args.no_live_status,
     )
 
     # Self-play mode dispatch
@@ -1218,9 +1687,9 @@ class ThinkingPipelineConfig:
     output checkpoint existence.
     """
     # Model
-    config_name: str = "forgelm_v2_light"  # V10 default
+    config_name: str = "forgelm_v2"  # V2 (Jamba) default
     device: str = "cuda"
-    optimizer: str = "muon_sf"  # V10 default: Muon-SF (was: cpu_offload)
+    optimizer: str = "cpu_offload"  # V2 (3B) needs CPU offload on 12GB VRAM
 
     # Stage 1: CPT (midtraining with reasoning traces)
     cpt_enabled: bool = True

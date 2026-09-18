@@ -92,7 +92,7 @@ def test_chunked_prefix_cache_full_hit():
 
     hit = cache.lookup_longest_prefix(ids)
     assert hit is not None
-    matched_len, past_kv = hit
+    matched_len, past_kv, conv_snap = hit
     assert matched_len == 200
     assert past_kv is not None
 
@@ -111,8 +111,11 @@ def test_chunked_prefix_cache_partial_hit():
     long_ids = torch.tensor([long])
     hit = cache.lookup_longest_prefix(long_ids)
     assert hit is not None
-    matched_len, past_kv = hit
+    matched_len, past_kv, conv_snap = hit
     assert matched_len == 128  # partial — only the cached prefix
+    # Partial hits cannot reuse the entry's conv snapshot (it's only
+    # position-correct at the entry's own end).
+    assert conv_snap is None
     # Sliced KV must be 128 tokens long on each non-None layer
     for layer in past_kv:
         if layer is None:

@@ -40,7 +40,7 @@ from forge.config import ModelConfig, get_config
 from forge.model_loader import ModelLoader, create_kv_cache, unpack_output_with_kv
 
 # Default tokenizer path (LFM2.5 tokenizer, vocab=65536).
-_DEFAULT_TOKENIZER_PATH = "research/checkpoints/lfm25_tokenizer"
+_DEFAULT_TOKENIZER_PATH = "research/checkpoints/forgelm_v2_tokenizer"
 
 
 class LLMGenModel:

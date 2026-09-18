@@ -1,0 +1,214 @@
+"""Pre-allocated KV cache and output unpacking for ConfigurableResearchLLM."""
+import logging
+
+import torch
+import torch.nn as nn
+
+logger = logging.getLogger(__name__)
+
+KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+
+class PreAllocatedKVCache:
+    """Pre-allocated KV cache — O(1) append instead of O(n) torch.cat per token.
+
+    Allocates max_seq_len slots upfront. Each attention layer writes new k/v
+    into the buffer by index, then reads a view of the filled portion.
+    This eliminates the O(n²) tensor growth from torch.cat in generation loops.
+
+    With quantize="int8": stores K/V as int8 with per-token scale (q8_0 style),
+    halving cache memory. Dequantization happens on read in get_layer().
+    This matches llama.cpp's q8_0 KV cache approach.
+
+    Usage:
+        cache = PreAllocatedKVCache(n_layers, batch, n_kv_heads, max_seq_len, head_dim, dtype, device)
+        # In generation loop:
+        cache.advance()  # increment position
+        # Pass cache.get_layer(i) as past_key_value to attention
+        # Attention writes new k/v via cache.append(i, k_new, v_new)
+    """
+
+    def __init__(self, n_layers: int, batch: int, n_kv_heads: int,
+                 max_seq_len: int, head_dim: int, dtype: torch.dtype,
+                 device: torch.device, n_kv_heads_per_layer: list = None,
+                 quantize: str = "none"):
+        self.max_seq_len = max_seq_len
+        self.n_layers = n_layers
+        self.position = 0  # current fill position (shared across layers)
+        self.quantize = quantize  # "none", "int8"
+        self._dtype = dtype
+
+        # Support per-layer head counts (e.g. GQA with different n_kv_heads)
+        if n_kv_heads_per_layer is None:
+            n_kv_heads_per_layer = [n_kv_heads] * n_layers
+
+        # Skip cache allocation for layers with 0 KV heads (conv layers)
+        self.n_kv_heads_per_layer = n_kv_heads_per_layer
+
+        if quantize == "int8":
+            # INT8 quantized cache: store int8 values + fp16 per-token scale
+            # Memory: 1 byte/element + 2 bytes/scale per (B, n_kv, T) = ~50% of fp16
+            cache_dtype = torch.int8
+            scale_dtype = torch.float16
+        else:
+            cache_dtype = dtype
+            scale_dtype = dtype
+
+        self.k_caches = []
+        self.v_caches = []
+        self.k_scales = []
+        self.v_scales = []
+        for i in range(n_layers):
+            nkvh = n_kv_heads_per_layer[i]
+            if nkvh == 0:
+                # Conv layer — no KV cache needed
+                self.k_caches.append(None)
+                self.v_caches.append(None)
+                self.k_scales.append(None)
+                self.v_scales.append(None)
+                continue
+            k = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
+            v = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
+            self.k_caches.append(k)
+            self.v_caches.append(v)
+            if quantize == "int8":
+                # Per-token scale: (B, n_kv, max_seq_len, 1)
+                ks = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
+                vs = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
+                self.k_scales.append(ks)
+                self.v_scales.append(vs)
+            else:
+                self.k_scales.append(None)
+                self.v_scales.append(None)
+
+    def get_layer(self, layer_idx: int) -> KVCache | None:
+        """Get the (k, v) view for a layer, or None if at position 0."""
+        if self.position == 0 or self.k_caches[layer_idx] is None:
+            return None
+        pos = self.position
+        if self.quantize == "int8":
+            # Dequantize: int8 * scale → original dtype
+            k = self.k_caches[layer_idx][:, :, :pos].to(self._dtype) * \
+                self.k_scales[layer_idx][:, :, :pos].to(self._dtype)
+            v = self.v_caches[layer_idx][:, :, :pos].to(self._dtype) * \
+                self.v_scales[layer_idx][:, :, :pos].to(self._dtype)
+            return (k, v)
+        k = self.k_caches[layer_idx][:, :, :pos]
+        v = self.v_caches[layer_idx][:, :, :pos]
+        return (k, v)
+
+    def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor):
+        """Write new k/v at the current position and advance (per-layer)."""
+        if self.k_caches[layer_idx] is None:
+            return  # conv layer, no cache
+        T = k_new.shape[-2]
+        pos = self.position
+        if pos + T > self.max_seq_len:
+            raise ValueError(
+                f"KV cache overflow: pos={pos} + T={T} > max_seq_len={self.max_seq_len}. "
+                f"Increase max_seq_len or use a paged/evicting KV cache strategy."
+            )
+        if self.quantize == "int8":
+            # Quantize: scale = max(abs(x)) / 127, q = round(x / scale)
+            k_scale = k_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+            v_scale = v_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+            k_q = torch.clamp(torch.round(k_new / k_scale), -128, 127).to(torch.int8)
+            v_q = torch.clamp(torch.round(v_new / v_scale), -128, 127).to(torch.int8)
+            self.k_caches[layer_idx][:, :, pos:pos + T] = k_q
+            self.v_caches[layer_idx][:, :, pos:pos + T] = v_q
+            self.k_scales[layer_idx][:, :, pos:pos + T] = k_scale.to(torch.float16)
+            self.v_scales[layer_idx][:, :, pos:pos + T] = v_scale.to(torch.float16)
+        else:
+            self.k_caches[layer_idx][:, :, pos:pos + T] = k_new
+            self.v_caches[layer_idx][:, :, pos:pos + T] = v_new
+
+    def advance(self, n: int = 1):
+        """Advance the fill position by n tokens."""
+        self.position += n
+
+    def reset(self):
+        """Reset to empty (start of new sequence)."""
+        self.position = 0
+
+    @property
+    def filled(self) -> int:
+        return self.position
+
+    def cache_memory_mb(self) -> float:
+        """Estimate current KV cache memory usage in MB."""
+        total = 0
+        for i in range(self.n_layers):
+            if self.k_caches[i] is None:
+                continue
+            k_bytes = self.k_caches[i].element_size() * self.k_caches[i].numel()
+            v_bytes = self.v_caches[i].element_size() * self.v_caches[i].numel()
+            total += k_bytes + v_bytes
+            if self.quantize == "int8":
+                total += self.k_scales[i].element_size() * self.k_scales[i].numel()
+                total += self.v_scales[i].element_size() * self.v_scales[i].numel()
+        return total / 1e6
+
+
+def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
+                    device: torch.device | None = None) -> PreAllocatedKVCache:
+    """Build a PreAllocatedKVCache sized for *model* with per-layer head counts.
+
+    Handles hybrid conv/attention architectures (e.g. LFM2.5): conv layers get
+    0 KV heads to avoid wasting VRAM.  This replaces the open-coded cache
+    construction that was duplicated across self_play and inference modules.
+    """
+    cfg = model.config
+    n_kv_heads = cfg.n_kv_heads if cfg.n_kv_heads is not None else cfg.n_heads
+    head_dim = getattr(cfg, 'head_dim', None) or (cfg.d_model // cfg.n_heads)
+    if getattr(cfg, 'use_diff_attn', False) or cfg.attn_type == "diff":
+        # Differential attention stores two q/k groups per head slot.
+        head_dim *= 2
+    dtype = next(model.parameters()).dtype
+    if device is None:
+        device = next(model.parameters()).device
+
+    layer_types = getattr(cfg, "layer_types", None)
+    if layer_types is not None:
+        n_kv_heads_per_layer = [
+            n_kv_heads if (i < len(layer_types) and layer_types[i] in ("attention", "attn"))
+            else 0
+            for i in range(cfg.n_layers)
+        ]
+    else:
+        n_kv_heads_per_layer = None
+
+    return PreAllocatedKVCache(
+        n_layers=cfg.n_layers, batch=batch, n_kv_heads=n_kv_heads,
+        max_seq_len=min(cfg.max_seq_len, max_total),
+        head_dim=head_dim, dtype=dtype, device=device,
+        n_kv_heads_per_layer=n_kv_heads_per_layer,
+    )
+
+
+def unpack_output_with_kv(out) -> tuple[torch.Tensor, KVCache | None]:
+    """Unpack a model forward output into (logits, past_kv).
+
+    Handles:
+      - (logits, loss, presents) and (logits, presents) tuple shapes
+        emitted by ConfigurableResearchLLM.
+      - HuggingFace ModelOutput dataclasses (CausalLMOutputWithPast, etc.)
+        which expose .logits and .past_key_values attributes.
+    Replaces the 3-4 line ``if isinstance(out, tuple): ...`` block repeated
+    across inference paths.
+    """
+    # HuggingFace ModelOutput (CausalLMOutputWithPast, BaseModelOutputWithPast, etc.)
+    if hasattr(out, "logits"):
+        logits = out.logits
+        past_kv = getattr(out, "past_key_values", None)
+        return logits, past_kv
+    # Some HF base-model outputs use last_hidden_state instead of logits
+    if hasattr(out, "last_hidden_state") and not hasattr(out, "logits"):
+        return out.last_hidden_state, getattr(out, "past_key_values", None)
+    if isinstance(out, tuple):
+        logits = out[0]
+        past_kv = out[2] if len(out) > 2 else out[1]
+        return logits, past_kv
+    return out, None
+
+

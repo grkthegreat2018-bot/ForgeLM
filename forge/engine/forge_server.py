@@ -10,12 +10,12 @@ with all ForgeAI optimizations (MTP, QuaRot, ProgressiveKV, batched decode,
 session-based task continuity, etc.).
 
 Usage:
-    python forge/engine/forge_server.py --models lfm2.5,qwen2.5
+    python forge/engine/forge_server.py --models forgelm-v2-jamba
 
     # Or programmatically:
     from forge.engine.forge_server import ForgeServer
     server = ForgeServer()
-    server.register("forgelm-v10", checkpoint="...", config="forgelm_v2_light")
+    server.register("forgelm-v10", checkpoint="...", config="forgelm_v2")
     server.serve(port=8000)
 
 Task-based concurrent generation:
@@ -28,6 +28,7 @@ Task-based concurrent generation:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import tempfile
 import time
@@ -35,11 +36,12 @@ import uuid
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from forge.engine.decide import QuestionValidationError
 from forge.engine.model_registry import ModelRegistry, VRAMBudgetExceeded
 from forge.engine.session_manager import (
     BatchQueue,
@@ -54,7 +56,9 @@ from forge.self_play.discovery.qwen_adapter import (
     qwen_parse_tool_calls,
     qwen_render_messages,
 )
-from research.paths import LFM25_CHECKPOINT, LFM25_HF_DIR
+from research.paths import FORGE_TOKENIZER_DIR, V2_CHECKPOINT
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
@@ -100,7 +104,7 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     messages: list[ChatMessage]
     tools: list[ToolDefinition] | None = None
     tool_choice: Any | None = None
@@ -136,7 +140,7 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo = Field(default_factory=UsageInfo)
 
 class CompletionRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     prompt: str
     temperature: float = 0.0
     top_p: float = 1.0
@@ -150,18 +154,18 @@ class CompletionRequest(BaseModel):
     prompt_logprobs: int | None = None
 
 class EmbeddingRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     input: str | list[str]
     encoding_format: str = "float"
 
 class RerankingRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     query: str
     documents: list[str]
     top_n: int | None = None
 
 class InfillRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     prefix: str
     suffix: str
     max_tokens: int = 128
@@ -169,7 +173,7 @@ class InfillRequest(BaseModel):
     top_p: float = 0.9
 
 class MessagesRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     messages: list[dict]
     system: str | None = None
     max_tokens: int = 256
@@ -178,6 +182,18 @@ class MessagesRequest(BaseModel):
     top_k: int = 80
     stop_sequences: list[str] | None = None
     seed: int | None = None
+
+class SystemOneQuestion(BaseModel):
+    """One typed question in a System One request (TypeSafe wire shape)."""
+    type: Literal["noul", "choice", "score"]
+    instructions: Any | None = None
+    criteria: Any | None = None
+
+class SystemOneRequest(BaseModel):
+    """TypeSafe /v1/systemone request: state + typed questions."""
+    state: Any
+    model: str = ""
+    questions: dict[str, SystemOneQuestion]
 
 class ModelInfo(BaseModel):
     id: str
@@ -192,12 +208,12 @@ class ModelListResponse(BaseModel):
 class RouterRegisterRequest(BaseModel):
     model_id: str
     checkpoint: str
-    config_name: str = "forgelm_v2_light"
+    config_name: str = "forgelm_v2"
     tokenizer_path: str | None = None
     vram_budget_gb: float | None = None
 
 class KVCacheTypeRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     cache_type_k: str = "f16"
     cache_type_v: str = "f16"
 
@@ -205,7 +221,7 @@ class SleepRequest(BaseModel):
     level: int = Field(default=1, ge=1, le=2)
 
 class LoRALoadRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     adapter_path: str
     rank: int = 32
     alpha: int | None = None
@@ -214,7 +230,7 @@ class LoRALoadRequest(BaseModel):
 # ── Task API models ──────────────────────────────────────────────────────────
 
 class CreateTaskRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     system_prompt: str = ""
     seed: int | None = None  # default seed for this task's generations
     boot_params: dict | None = None  # per-task engine boot configuration
@@ -272,7 +288,7 @@ class TaskMessageResponse(BaseModel):
 
 class UpdateEngineSettingsRequest(BaseModel):
     """Hot-edit any engine setting. Only set fields are updated."""
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     kv_cache: str | None = None
     decoding: str | None = None
     quantize: str | None = None
@@ -298,22 +314,22 @@ class UpdateEngineSettingsRequest(BaseModel):
     batch_timeout_ms: int | None = None
 
 class InfiniteContextRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     enabled: bool = True
     budget: int = 100_000  # KV cache token budget before eviction
 
 class SwitchStrategyRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     strategy: str
 
 class ContextLimitRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     max_tokens: int
 
 
 class BatchGenerateRequest(BaseModel):
     """Batch generation request for parallel multi-prompt generation."""
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     prompts: list[str]
     max_tokens: int = 256
     temperature: float = 0.0
@@ -332,7 +348,7 @@ class BatchGenerateResponse(BaseModel):
 # ── Library API models ───────────────────────────────────────────────────────
 
 class LibrarySaveRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     content: str
     category: str = "custom"  # failure, win, research, common_data, custom
     tags: list[str] | None = None
@@ -342,13 +358,13 @@ class LibrarySaveRequest(BaseModel):
     max_tokens: int = 2048
 
 class LibraryLookupRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     tags: list[str] | None = None
     category: str | None = None
     limit: int = 50
 
 class LibrarySearchRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     query: str
     limit: int = 20
 
@@ -365,14 +381,14 @@ class LibraryEntryResponse(BaseModel):
     enabled: bool
 
 class LibraryConfigRequest(BaseModel):
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     enabled: bool | None = None
     injection_budget: int | None = None
 
 
 class AgentChatRequest(BaseModel):
     """Agentic chat request — model can call built-in tools autonomously."""
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     prompt: str
     max_tokens: int = 512
     max_tool_rounds: int = 5
@@ -394,7 +410,7 @@ class AgentChatResponse(BaseModel):
 
 class ExecuteToolRequest(BaseModel):
     """Execute a single built-in tool call directly (no generation)."""
-    model: str = "lfm2.5-1.2b"
+    model: str = "forgelm-v2-jamba"
     name: str
     arguments: dict = {}
 
@@ -432,6 +448,59 @@ def _strip_markers(text: str) -> str:
     for marker in _SPECIAL_MARKERS:
         text = text.replace(marker, "")
     return text
+
+
+class _ToolCallStreamFilter:
+    """Incremental filter that hides tool-call regions from a token stream.
+
+    Feed decoded chunks; returns the text visible to the client (content
+    outside ``<tool_call>…</tool_call>``).  Markers split across chunk
+    boundaries are handled by buffering a possible partial-marker tail —
+    O(1) state, no rescanning of the accumulated string, and text after
+    an end marker in the same chunk is preserved (not dropped).
+    """
+
+    def __init__(self):
+        self.in_tool_call = False
+        self._buf = ""
+        self.tool_calls_seen = 0
+
+    def feed(self, chunk: str) -> str:
+        self._buf += chunk
+        out = []
+        while self._buf:
+            marker = TOOL_CALL_END if self.in_tool_call else TOOL_CALL_START
+            if self._buf.startswith(marker):
+                self.in_tool_call = not self.in_tool_call
+                if self.in_tool_call:
+                    self.tool_calls_seen += 1
+                self._buf = self._buf[len(marker):]
+                continue
+            idx = self._buf.find(marker[0])
+            if idx < 0:
+                if not self.in_tool_call:
+                    out.append(self._buf)
+                self._buf = ""
+                break
+            if not self.in_tool_call:
+                out.append(self._buf[:idx])
+            self._buf = self._buf[idx:]
+            # Wait if the remaining buffer could be a split marker.
+            if len(self._buf) < len(marker) and marker.startswith(self._buf):
+                break
+            if self._buf.startswith(marker):
+                continue
+            # Starts with marker[0] but isn't the marker — consume one char.
+            if not self.in_tool_call:
+                out.append(self._buf[0])
+            self._buf = self._buf[1:]
+        return "".join(out)
+
+    def flush(self) -> str:
+        """End of stream: emit any buffered tail that wasn't a marker."""
+        tail = "" if self.in_tool_call else self._buf
+        self._buf = ""
+        return tail
 
 
 # ── Server ───────────────────────────────────────────────────────────────────
@@ -491,12 +560,11 @@ class ForgeServer:
             import torch
             if torch.cuda.is_available():
                 gpu_name = torch.cuda.get_device_name(0)
-                print(f"  [ForgeServer] Using GPU {gpu_id}: {gpu_name}")
+                logger.info("Using GPU %s: %s", gpu_id, gpu_name)
             else:
-                print(f"  [ForgeServer] CUDA_VISIBLE_DEVICES={gpu_id} "
-                      f"(CUDA not available)")
+                logger.info("CUDA_VISIBLE_DEVICES=%s (CUDA not available)", gpu_id)
         except Exception:
-            print(f"  [ForgeServer] CUDA_VISIBLE_DEVICES={gpu_id}")
+            logger.info("CUDA_VISIBLE_DEVICES=%s", gpu_id)
 
         # GPU contention guard: file-lock per GPU
         try:
@@ -536,9 +604,10 @@ class ForgeServer:
                         except OSError:
                             is_alive = False
                     if is_alive:
-                        print(f"  [ForgeServer] WARNING: Another forge_server "
-                              f"(PID {old_pid}) may already be running on "
-                              f"GPU {gpu_id}. This may cause VRAM contention.")
+                        logger.warning(
+                            "Another forge_server (PID %s) may already be "
+                            "running on GPU %s. This may cause VRAM "
+                            "contention.", old_pid, gpu_id)
                     else:
                         # Stale lock — take it over
                         fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
@@ -563,7 +632,7 @@ class ForgeServer:
                  tokenizer_path: str | None = None,
                  vram_budget_gb: float = 0, **kwargs) -> None:
         """Register a model with the registry."""
-        tok_path = tokenizer_path or str(LFM25_HF_DIR)
+        tok_path = tokenizer_path or str(FORGE_TOKENIZER_DIR)
         self.registry.register(
             model_id, checkpoint, config_name,
             tokenizer_path=tok_path, vram_budget_gb=vram_budget_gb, **kwargs)
@@ -571,17 +640,19 @@ class ForgeServer:
     def serve(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         """Start the HTTP server (blocking)."""
         self.batch_queue.start()
-        print(f"\n  {'='*60}")
-        print("  ForgeAI Inference Server v3.0.0")
-        print(f"  Listening on http://{host}:{port}")
-        print(f"  Models: {[m['id'] for m in self.registry.list_models()]}")
-        print(f"  Batch queue: window={self.batch_queue.batch_window*1000:.0f}ms, "
-              f"max_batch={self.batch_queue.max_batch_size}")
-        print(f"  Session manager: max={self.session_manager.max_sessions} tasks")
-        print("  Endpoints: /v1/chat/completions, /v1/completions, /v1/models,")
-        print("             /v1/tasks, /v1/tasks/{id}/messages,")
-        print("             /v1/tasks/{id}/config (PATCH), /health")
-        print(f"  {'='*60}\n")
+        logger.info("=" * 60)
+        logger.info("ForgeAI Inference Server v3.0.0")
+        logger.info("Listening on http://%s:%s", host, port)
+        logger.info("Models: %s", [m['id'] for m in self.registry.list_models()])
+        logger.info("Batch queue: window=%dms, max_batch=%s",
+                    self.batch_queue.batch_window * 1000,
+                    self.batch_queue.max_batch_size)
+        logger.info("Session manager: max=%s tasks",
+                    self.session_manager.max_sessions)
+        logger.info("Endpoints: /v1/chat/completions, /v1/completions, "
+                    "/v1/models, /v1/tasks, /v1/tasks/{id}/messages, "
+                    "/v1/tasks/{id}/config (PATCH), /health")
+        logger.info("=" * 60)
         try:
             uvicorn.run(self.app, host=host, port=port, log_level="warning")
         finally:
@@ -641,9 +712,22 @@ class ForgeServer:
             }
 
         @app.get("/v1/models")
-        async def list_models():
-            """OpenAI-compatible model list."""
+        async def list_models(request: Request):
+            """OpenAI-compatible model list.
+
+            TypeSafe SDK clients (identified by the ``X-TypeSafe-SDK``
+            header) get the ``{"models": [...]}`` shape their SDK decodes.
+            """
             models = registry.list_models()
+            if request.headers.get("x-typesafe-sdk"):
+                return {
+                    "models": [
+                        {"name": m["id"],
+                         "description": f"{m['config']} (ForgeAI System One)",
+                         "release_date": ""}
+                        for m in models
+                    ]
+                }
             now = int(time.time())
             return ModelListResponse(
                 data=[
@@ -651,6 +735,34 @@ class ForgeServer:
                     for m in models
                 ],
             )
+
+        @app.post("/v1/systemone")
+        async def system_one(req: SystemOneRequest, response: Response):
+            """TypeSafe System One-compatible typed decisions.
+
+            Accepts the exact wire contract (``state`` + typed ``questions``)
+            so ``typesafe_sdk`` clients can point ``base_url`` at this server.
+            Model resolution is lenient: an unregistered ``model`` value
+            (e.g. ``jev-latest``) falls back to the first registered model.
+            """
+            models = registry.list_models()
+            if not models:
+                raise HTTPException(503, "no models registered")
+            ids = [m["id"] for m in models]
+            model_id = req.model if req.model in ids else ids[0]
+            engine = registry.get_engine(model_id)
+            if engine is None:
+                raise HTTPException(503, f"model '{model_id}' unavailable")
+            questions = {k: q.model_dump() for k, q in req.questions.items()}
+            try:
+                result = engine.decide(req.state, questions)
+            except QuestionValidationError as e:
+                raise HTTPException(
+                    422, detail=[{"loc": ["body", "questions"],
+                                  "msg": str(e), "type": "value_error"}])
+            result["model"] = model_id
+            response.headers["x-typesafe-request-id"] = uuid.uuid4().hex
+            return result
 
         @app.post("/v1/chat/completions")
         async def chat_completions(req: ChatCompletionRequest):
@@ -913,7 +1025,7 @@ class ForgeServer:
         # ── Agentic tool endpoints ──────────────────────────────────────
 
         @app.get("/v1/tools")
-        async def list_builtin_tools(model_id: str = "lfm2.5-1.2b"):
+        async def list_builtin_tools(model_id: str = "forgelm-v2-jamba"):
             """List all available built-in tools the model can call.
 
             These tools give the LLM direct access to Library, hot-swap,
@@ -996,7 +1108,7 @@ class ForgeServer:
         # ── Security management endpoints ───────────────────────────────
 
         @app.get("/v1/security/config")
-        async def get_security_config(model_id: str = "lfm2.5-1.2b"):
+        async def get_security_config(model_id: str = "forgelm-v2-jamba"):
             """Get the current security configuration.
 
             Returns sandbox access rules, file blacklist, website
@@ -1009,7 +1121,7 @@ class ForgeServer:
 
         @app.patch("/v1/security/config")
         async def update_security_config(
-            model_id: str = "lfm2.5-1.2b",
+            model_id: str = "forgelm-v2-jamba",
             auto_mode: str | None = None,
             set_access_rules: dict[str, str] | None = None,
             remove_access_rules: list[str] | None = None,
@@ -1056,7 +1168,7 @@ class ForgeServer:
             return {"status": "ok", "config": sec.get_config()}
 
         @app.post("/v1/security/reload")
-        async def reload_sandbox(model_id: str = "lfm2.5-1.2b"):
+        async def reload_sandbox(model_id: str = "forgelm-v2-jamba"):
             """Reload sandbox config from disk (picks up external edits to sandbox.json)."""
             engine = registry.get_engine(model_id)
             if engine is None:
@@ -1065,7 +1177,7 @@ class ForgeServer:
             return {"status": "reloaded", "config": engine.tools.security.get_config()}
 
         @app.get("/v1/security/access/{path:path}")
-        async def check_access(path: str, model_id: str = "lfm2.5-1.2b"):
+        async def check_access(path: str, model_id: str = "forgelm-v2-jamba"):
             """Check the access level for a specific path.
 
             Returns the access level (read_write, read_only, denied) and
@@ -1090,7 +1202,7 @@ class ForgeServer:
             }
 
         @app.get("/v1/security/pending")
-        async def get_pending_permissions(model_id: str = "lfm2.5-1.2b"):
+        async def get_pending_permissions(model_id: str = "forgelm-v2-jamba"):
             """Get pending permission requests that need user approval."""
             engine = registry.get_engine(model_id)
             if engine is None:
@@ -1099,7 +1211,7 @@ class ForgeServer:
                     "count": len(engine.tools.security.pending_requests)}
 
         @app.post("/v1/security/pending/{request_id}/approve")
-        async def approve_permission(request_id: str, model_id: str = "lfm2.5-1.2b"):
+        async def approve_permission(request_id: str, model_id: str = "forgelm-v2-jamba"):
             """Approve a pending permission request."""
             engine = registry.get_engine(model_id)
             if engine is None:
@@ -1110,7 +1222,7 @@ class ForgeServer:
             return {"status": "approved", "request_id": request_id}
 
         @app.post("/v1/security/pending/{request_id}/deny")
-        async def deny_permission(request_id: str, model_id: str = "lfm2.5-1.2b"):
+        async def deny_permission(request_id: str, model_id: str = "forgelm-v2-jamba"):
             """Deny a pending permission request."""
             engine = registry.get_engine(model_id)
             if engine is None:
@@ -1122,7 +1234,7 @@ class ForgeServer:
 
         @app.post("/v1/security/scan")
         async def scan_script(
-            model_id: str = "lfm2.5-1.2b",
+            model_id: str = "forgelm-v2-jamba",
             content: str = "",
         ):
             """Scan a Python script for dangerous content.
@@ -1157,7 +1269,7 @@ class ForgeServer:
                 raise HTTPException(400, str(e)) from e
 
         @app.post("/v1/lora/unload")
-        async def lora_unload(model_id: str = "lfm2.5-1.2b"):
+        async def lora_unload(model_id: str = "forgelm-v2-jamba"):
             """Unload LoRA adapter from a model."""
             engine = registry.get_engine(model_id)
             if engine is None:
@@ -1380,7 +1492,7 @@ class ForgeServer:
         # ── Hot-swap engine config endpoints ──────────────────────────────
 
         @app.get("/v1/engine/settings")
-        async def get_engine_settings(model_id: str = "lfm2.5-1.2b"):
+        async def get_engine_settings(model_id: str = "forgelm-v2-jamba"):
             """Get current engine settings (hot-swappable config)."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1396,7 +1508,7 @@ class ForgeServer:
 
             Example:
                 PATCH /v1/engine/settings
-                {"model": "lfm2.5-1.2b", "kv_cache": "kvzip",
+                {"model": "forgelm-v2-jamba", "kv_cache": "kvzip",
                  "decoding": "eagle3", "temperature": 0.7}
             """
             engine = self.registry.get_engine(req.model)
@@ -1413,7 +1525,7 @@ class ForgeServer:
             }
 
         @app.post("/v1/engine/apply")
-        async def apply_engine_settings(model_id: str = "lfm2.5-1.2b"):
+        async def apply_engine_settings(model_id: str = "forgelm-v2-jamba"):
             """Force-apply pending hot-swap changes immediately.
 
             Normally changes are applied lazily on the next generate() call.
@@ -1510,7 +1622,7 @@ class ForgeServer:
             }
 
         @app.get("/v1/engine/pending")
-        async def get_pending_changes(model_id: str = "lfm2.5-1.2b"):
+        async def get_pending_changes(model_id: str = "forgelm-v2-jamba"):
             """Check if there are pending hot-swap changes not yet applied."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1524,7 +1636,7 @@ class ForgeServer:
         # ── Library endpoints ────────────────────────────────────────────
 
         @app.get("/v1/library/stats")
-        async def library_stats(model_id: str = "lfm2.5-1.2b"):
+        async def library_stats(model_id: str = "forgelm-v2-jamba"):
             """Get library statistics."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1583,7 +1695,7 @@ class ForgeServer:
             ]}
 
         @app.get("/v1/library/entry/{entry_id}")
-        async def library_get_entry(entry_id: str, model_id: str = "lfm2.5-1.2b"):
+        async def library_get_entry(entry_id: str, model_id: str = "forgelm-v2-jamba"):
             """Get a single library entry by ID."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1602,7 +1714,7 @@ class ForgeServer:
             }
 
         @app.delete("/v1/library/entry/{entry_id}")
-        async def library_delete_entry(entry_id: str, model_id: str = "lfm2.5-1.2b"):
+        async def library_delete_entry(entry_id: str, model_id: str = "forgelm-v2-jamba"):
             """Delete a library entry."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1630,7 +1742,7 @@ class ForgeServer:
             }
 
         @app.post("/v1/library/optimize")
-        async def library_optimize(model_id: str = "lfm2.5-1.2b"):
+        async def library_optimize(model_id: str = "forgelm-v2-jamba"):
             """Run library optimization (merge similar, trim, re-index)."""
             engine = self.registry.get_engine(model_id)
             if engine is None:
@@ -1640,7 +1752,7 @@ class ForgeServer:
 
         @app.get("/v1/library/list")
         async def library_list(
-            model_id: str = "lfm2.5-1.2b",
+            model_id: str = "forgelm-v2-jamba",
             category: str | None = None,
             tag: str | None = None,
             limit: int = 100,
@@ -1702,7 +1814,7 @@ class ForgeServer:
             yield _sse_chunk({"role": "assistant", "content": ""})
 
             accumulated = ""
-            in_tool_call = False
+            tc_filter = _ToolCallStreamFilter()
             for text_chunk in self.registry.generate_stream(
                 req.model, prompt,
                 max_new_tokens=req.max_tokens,
@@ -1710,20 +1822,15 @@ class ForgeServer:
                 top_p=req.top_p,
             ):
                 accumulated += text_chunk
-                # Detect tool-call regions: between TOOL_CALL_START and TOOL_CALL_END
-                starts = accumulated.count(TOOL_CALL_START)
-                ends = accumulated.count(TOOL_CALL_END)
-                currently_in_tc = starts > ends
-                if currently_in_tc:
-                    in_tool_call = True
-                    continue
-                if in_tool_call and not currently_in_tc:
-                    in_tool_call = False
-                    continue
-                # Stream content delta (strip special markers)
-                clean = _strip_markers(text_chunk)
+                # Incremental marker state machine — handles markers split
+                # across chunks and preserves tail text after an end marker.
+                visible = tc_filter.feed(text_chunk)
+                clean = _strip_markers(visible)
                 if clean:
                     yield _sse_chunk({"content": clean})
+            tail = _strip_markers(tc_filter.flush())
+            if tail:
+                yield _sse_chunk({"content": tail})
 
             # Parse tool calls from full accumulated text
             tool_calls, _ = _parse_tool_calls_openai(accumulated)
@@ -1844,24 +1951,29 @@ class ForgeServer:
 
 # Default model registrations
 DEFAULT_MODELS = {
-    "lfm2.5-1.2b": {
-        "checkpoint": str(LFM25_CHECKPOINT),
-        "config": "forgelm_v2_light",
-        "tokenizer": str(LFM25_HF_DIR),
-        "vram_gb": 2.5,
+    "forgelm-v2-jamba": {
+        "checkpoint": str(V2_CHECKPOINT),
+        "config": "forgelm_v2",
+        "tokenizer": str(FORGE_TOKENIZER_DIR),
+        # bf16 checkpoint ~6.1GB + KV cache + activation headroom on 12GB
+        "vram_gb": 8.0,
     },
 }
 
 
 def main():
+    # Opt-in runtime configuration (import of `forge` is side-effect-free).
+    from forge.runtime.configure import configure
+    configure()
+
     parser = argparse.ArgumentParser(description="ForgeAI Inference Server v3.0")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
-    parser.add_argument("--models", type=str, default="lfm2.5-1.2b",
+    parser.add_argument("--models", type=str, default="forgelm-v2-jamba",
                         help="Comma-separated model IDs to load")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Override checkpoint path")
-    parser.add_argument("--config", type=str, default="forgelm_v2_light",
+    parser.add_argument("--config", type=str, default="forgelm_v2",
                         help="Model config preset")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Override tokenizer path")
@@ -1898,8 +2010,8 @@ def main():
                 vram_budget_gb=args.vram_gb,
             )
         else:
-            print(f"  [WARN] No checkpoint for '{mid}', skipping. "
-                  f"Use --checkpoint to specify.")
+            logger.warning("No checkpoint for '%s', skipping. "
+                           "Use --checkpoint to specify.", mid)
 
     server.serve(host=args.host, port=args.port)
 

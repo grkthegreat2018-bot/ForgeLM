@@ -16,6 +16,10 @@ class ModelConfig:
     ffn_type: str = "swiglu"          # "swiglu" (only supported type now)
     norm_type: str = "rmsnorm"        # "rmsnorm" (only supported type now)
     n_kv_heads: int | None = None     # KV heads for GQA (None = MHA)
+    # Explicit per-head width; None derives d_model // n_heads.
+    # Needed for archs that decouple the two (e.g. Qwen3-4B: 2560/32 vs
+    # head_dim=128).
+    head_dim: int | None = None
     intermediate_size: int | None = None  # FFN hidden dim (None = 8*d/3)
     attn_bias: bool = False
     norm_eps: float = 1e-6  # RMSNorm epsilon (LFM2.5 uses 1e-5)
@@ -504,18 +508,19 @@ class ModelConfig:
             raise ValueError(
                 f"intermediate_size ({self.intermediate_size}) must be > 0."
             )
-        # head_dim must be consistent (d_model / n_heads) and >= 1.
-        head_dim = self.d_model // self.n_heads
+        # head_dim must be consistent (explicit or d_model / n_heads) and >= 1.
+        head_dim = self.head_dim if self.head_dim is not None else (
+            self.d_model // self.n_heads)
         if head_dim < 1:
             raise ValueError(
-                f"head_dim (d_model/n_heads = {head_dim}) must be >= 1."
+                f"head_dim ({head_dim}) must be >= 1."
             )
 
 
 # Pre-defined architecture targets.
 MODEL_CONFIGS = {
-    # Tiny LFM2.5 for fast testing
-    "lfm25_tiny": ModelConfig(
+    # Tiny hybrid (conv+attention) model for fast testing — no checkpoint.
+    "forgelm_tiny": ModelConfig(
         vocab_size=256,
         d_model=128,
         n_layers=4,
@@ -597,7 +602,8 @@ MODEL_CONFIGS = {
         use_embed_norm=False,
         use_final_norm=True,
         rope_base=1_000_000.0,
-        use_rope=False,  # Jamba attention has no RoPE
+        use_rope=False,  # Jamba attention is position-agnostic (no RoPE);
+                         # Mamba layers carry positional information
         max_seq_len=262144,
         conv_kernel_size=3,
         use_qk_norm=False,
@@ -636,305 +642,7 @@ MODEL_CONFIGS = {
         min_lr=2e-5,
     ),
 
-
-    # ForgeLM V2 Light-1.2B: LFM2.5-1.2B with R26 IRI-FP4 lossless weight quant.
-    # Same dimensions as V9 (d_model=2048, 16 layers) for 1:1 architecture compat.
-    # V10 replaces V9's BitNetResidual (ternary, catastrophic post-training PPL)
-    # with IRI-FP4 x2 (9.0 bits/w, 41.6 dB SQNR, -0.4% PPL — near-lossless).
-    #
-    # V10 advantages over V9:
-    #   - 3.5x weight compression vs fp32 (IRI-FP4 x2 at 9.0 bits/w)
-    #   - NEAR-LOSSLESS: 41.6 dB SQNR, -0.4% PPL delta (V9 ternary = catastrophic)
-    #   - No QAT/fine-tuning needed (V9 BitNetResidual needs QAT to recover)
-    #   - Same SpectralKV 63x KV cache compression (carried from V9)
-    #
-    # Memory: 1.2B params * 9.0 bits/w / 8 = ~1.35 GB weights (vs 2.61 GB bf16)
-    # Full model with KV cache: ~1.8 GB total (fits any GPU)
-    # ──────────────────────────────────────────────────────────────────────
-    "forgelm_v2_light": ModelConfig(
-        vocab_size=65536,
-        d_model=2048,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        intermediate_size=8192,
-        attn_type="gqa",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        norm_eps=1e-5,
-        use_embed_norm=False,
-        use_final_norm=True,
-        rope_base=1_000_000.0,
-        max_seq_len=32768,
-        conv_kernel_size=3,
-        use_qk_norm=True,
-        layer_types=["conv", "conv", "attention", "conv", "conv", "attention",
-                     "conv", "conv", "attention", "conv", "attention",
-                     "conv", "attention", "conv", "attention", "conv"],
-        # ── V10 NEW: IRI-FP4 lossless weight quantization (R26) ──
-        use_iri_fp4=True,
-        iri_fp4_rounds=2,              # 2 rounds = 9.0 bits/w, 41.6 dB SQNR, lossless
-        iri_fp4_block_size=32,
-        # ── V9 carried: SpectralKV (inference-time, no checkpoint change) ──
-        use_spectral_kv=True,
-        spectral_kv_max_freq=64,
-        spectral_kv_sink_size=4,
-        # ── No BitNet/BitNetResidual (replaced by IRI-FP4) ──
-        use_bitnet_residual=False,
-        use_bitnet=False,
-        use_bitnet_embedding=False,
-        ffn_compression="none",
-        nlrq_rank=0,
-        use_hashed_nlrq=False,
-        use_factorized_embeddings=False,
-        embed_factorized_rank=0,
-        use_pit=False,
-        zero_init_residual=True,
-        # ── Training hyperparams ──
-        batch_size=1,
-        seq_len=2048,
-        max_steps=50000,
-        warmup_steps=2000,
-        max_lr=3e-4,
-        min_lr=3e-5,
-    ),
-
-    # ──────────────────────────────────────────────────────────────────────
-    # ForgeLM V2 Pro — LFM2.5-VL-3B Multimodal (2026-09-02)
-    #
-    # First multimodal ForgeLM. Built on LFM2.5-VL-3B architecture:
-    #   - 3B total params: 2.6B LM + 400M vision (SigLIP2-SO400M)
-    #   - 30 LM layers (was 16 in V10), d_model=2560, 40 heads, 8 KV heads
-    #   - 128K vocab (was 65536) — expanded for multimodal tokens
-    #   - SigLIP2 vision encoder: 1152 hidden, 27 layers, 384px images
-    #   - MLP projector: 1152→2560 dim, 128 visual tokens per image
-    #
-    # Carries forward ALL V10 keys:
-    #   - IRI-FP4 lossless weight quantization (9.0 bits/w)
-    #   - SpectralKV (63x KV cache compression)
-    #   - QK-norm, zero-init residual, conv hybrid layers
-    #   - GQA, SwiGLU, RMSNorm, rope_base=1M
-    #
-    # NEW V11 keys:
-    #   - use_vision=True, SigLIP2 vision tower + MLP projector
-    #   - 128K vocab (expanded from 64K for visual + special tokens)
-    #   - 30 layers (deeper for multimodal reasoning)
-    #   - max_seq_len=131072 (128K context for multi-image)
-    #
-    # Memory budget (12GB RTX 5070):
-    #   - LM weights: 2.6B * 9.0 bits / 8 = ~2.9 GB (IRI-FP4)
-    #   - Vision tower: 400M * 2 bytes = ~0.8 GB (bf16, frozen at inference)
-    #   - KV cache (8K tokens): ~0.5 GB (SpectralKV compressed)
-    #   - Total: ~4.2 GB (fits comfortably in 12GB)
-    # ──────────────────────────────────────────────────────────────────────
-    "forgelm_v2_pro": ModelConfig(
-        vocab_size=131072,             # 128K (expanded from 64K for VLM)
-        d_model=2560,                  # 1.25x V10 (2048→2560)
-        n_layers=30,                   # 1.875x V10 (16→30)
-        n_heads=40,                    # 1.25x V10 (32→40)
-        n_kv_heads=8,                  # same as V10 (GQA 5:1 ratio)
-        intermediate_size=10240,       # 4*d_model (was 8192=4*2048)
-        attn_type="gqa",
-        attn_bias=False,
-        ffn_type="swiglu",
-        norm_type="rmsnorm",
-        norm_eps=1e-5,                 # V10 carried
-        use_embed_norm=False,
-        use_final_norm=True,
-        rope_base=1_000_000.0,         # V10 carried
-        max_seq_len=131072,            # 128K context (was 32K)
-        conv_kernel_size=3,            # V10 carried
-        use_qk_norm=True,              # V10 carried
-        # 30-layer hybrid pattern: conv-conv-attn repeating, with attention
-        # every 3rd layer in the first 12 layers (feature extraction),
-        # then every 2nd layer in the last 18 layers (reasoning).
-        layer_types=[
-            "conv", "conv", "attention",   # 0-2
-            "conv", "conv", "attention",   # 3-5
-            "conv", "conv", "attention",   # 6-8
-            "conv", "conv", "attention",   # 9-11
-            "conv", "attention",           # 12-13
-            "conv", "attention",           # 14-15
-            "conv", "attention",           # 16-17
-            "conv", "attention",           # 18-19
-            "conv", "attention",           # 20-21
-            "conv", "attention",           # 22-23
-            "conv", "attention",           # 24-25
-            "conv", "attention",           # 26-27
-            "conv", "attention",           # 28-29
-        ],
-        # ── V10 carried: IRI-FP4 lossless weight quantization ──
-        use_iri_fp4=True,
-        iri_fp4_rounds=2,
-        iri_fp4_block_size=32,
-        # ── V10 carried: SpectralKV ──
-        use_spectral_kv=True,
-        spectral_kv_max_freq=64,
-        spectral_kv_sink_size=4,
-        # ── V10 carried: no BitNet (replaced by IRI-FP4) ──
-        use_bitnet_residual=False,
-        use_bitnet=False,
-        use_bitnet_embedding=False,
-        ffn_compression="none",
-        nlrq_rank=0,
-        use_hashed_nlrq=False,
-        use_factorized_embeddings=False,
-        embed_factorized_rank=0,
-        use_pit=False,
-        zero_init_residual=True,
-        # ── V11 NEW: Vision tower (SigLIP2-SO400M) ──
-        use_vision=True,
-        vision_encoder="siglip2",
-        vision_hidden_size=1152,
-        vision_image_size=384,
-        vision_patch_size=14,
-        vision_n_layers=27,
-        vision_n_heads=16,
-        vision_intermediate_size=4304,
-        vision_projector_dim=2560,       # matches d_model
-        vision_projector_type="mlp",
-        vision_n_queries=128,            # 128 visual tokens per image
-        vision_layer_idx=-1,             # inject before layer 0
-        # ── Training hyperparams ──
-        batch_size=1,
-        seq_len=4096,                    # longer for multimodal (image tokens)
-        max_steps=50000,
-        warmup_steps=2000,
-        max_lr=2e-4,                     # slightly lower for 3B model
-        min_lr=2e-5,
-    ),
-
 }
-
-# ── Backward-compat aliases (old names → new names) ──
-# Existing checkpoints/scripts referencing these keys still load correctly.
-MODEL_CONFIGS["forgelm_v10_1.2b"] = MODEL_CONFIGS["forgelm_v2_light"]
-MODEL_CONFIGS["forgelm_v11_3b_vl"] = MODEL_CONFIGS["forgelm_v2_pro"]
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ForgeLM V12 — New Architecture Keys (R37)
-#
-# Derived from V11 (forgelm_v2_pro). Carries forward ALL V11 keys:
-#   - IRI-FP4 lossless weight quantization (9.0 bits/w)
-#   - SpectralKV (63x KV cache compression)
-#   - QK-norm, zero-init residual, conv hybrid layers
-#   - GQA, SwiGLU, RMSNorm, rope_base=1M
-#   - Vision tower (SigLIP2-SO400M)
-#
-# NEW V12 keys (all lossless warm start from V11):
-#   - Mamba-3: Complex-valued SSM states (R37-1). Imag=0 = identical to V11.
-#   - Kronecker Embeddings: Byte-level factored embeddings (R37-2). 91-94%
-#     input-side param reduction. SVD init from V11 embedding.
-#   - PIT Tying: Pseudo-Inverse Tying for stable token interface (R37-3).
-#     Orthonormal shared memory via polar decomposition.
-#   - OutRo: Sink-enhanced contextual representations (R37-4). Sink token
-#     attends beyond causal constraint.
-#   - ForgeHybrid: Sink-aware SSM+Attention routing (R37-5 NOVEL). Zero-init
-#     SSM path alongside attention. Router = sink norm signal (no learned
-#     router). Lossless at warm start (zero-init SSM = identical to V11).
-#
-# Memory budget (12GB RTX 5070):
-#   - LM weights: 2.6B * 9.0 bits / 8 = ~2.9 GB (IRI-FP4)
-#   - Vision tower: 400M * 2 bytes = ~0.8 GB (bf16, frozen)
-#   - KV cache (8K tokens): ~0.5 GB (SpectralKV compressed)
-#   - Kronecker savings: ~134M → ~1M params (embedding)
-#   - ForgeHybrid SSM path: ~0 (zero-init, not loaded until activated)
-#   - Total: ~4.2 GB (fits comfortably in 12GB)
-#
-# Lossless warm start: ALL new keys are zero-init or identity-init.
-# Forward pass with V11 checkpoint on V12 config = bit-exact identical
-# to V11 forward pass (documented in test_r37_preset_lineage).
-# ──────────────────────────────────────────────────────────────────────────────
-MODEL_CONFIGS["forgelm_v12"] = ModelConfig(
-    vocab_size=131072,             # V11 carried
-    d_model=2560,                  # V11 carried
-    n_layers=30,                   # V11 carried
-    n_heads=40,                    # V11 carried
-    n_kv_heads=8,                  # V11 carried
-    intermediate_size=10240,       # V11 carried
-    attn_type="gqa",
-    attn_bias=False,
-    ffn_type="swiglu",
-    norm_type="rmsnorm",
-    norm_eps=1e-5,                 # V11 carried
-    use_embed_norm=False,
-    use_final_norm=True,
-    rope_base=1_000_000.0,         # V11 carried
-    max_seq_len=131072,            # V11 carried (128K)
-    conv_kernel_size=3,            # V11 carried
-    use_qk_norm=True,              # V11 carried
-    layer_types=[
-        "conv", "conv", "attention",   # 0-2
-        "conv", "conv", "attention",   # 3-5
-        "conv", "conv", "attention",   # 6-8
-        "conv", "conv", "attention",   # 9-11
-        "conv", "attention",           # 12-13
-        "conv", "attention",           # 14-15
-        "conv", "attention",           # 16-17
-        "conv", "attention",           # 18-19
-        "conv", "attention",           # 20-21
-        "conv", "attention",           # 22-23
-        "conv", "attention",           # 24-25
-        "conv", "attention",           # 26-27
-        "conv", "attention",           # 28-29
-    ],
-    # ── V11 carried: IRI-FP4 ──
-    use_iri_fp4=True,
-    iri_fp4_rounds=2,
-    iri_fp4_block_size=32,
-    # ── V11 carried: SpectralKV ──
-    use_spectral_kv=True,
-    spectral_kv_max_freq=64,
-    spectral_kv_sink_size=4,
-    # ── V11 carried: no BitNet ──
-    use_bitnet_residual=False,
-    use_bitnet=False,
-    use_bitnet_embedding=False,
-    ffn_compression="none",
-    nlrq_rank=0,
-    use_hashed_nlrq=False,
-    use_factorized_embeddings=False,
-    embed_factorized_rank=0,
-    zero_init_residual=True,
-    # ── V11 carried: Vision tower ──
-    use_vision=True,
-    vision_encoder="siglip2",
-    vision_hidden_size=1152,
-    vision_image_size=384,
-    vision_patch_size=14,
-    vision_n_layers=27,
-    vision_n_heads=16,
-    vision_intermediate_size=4304,
-    vision_projector_dim=2560,
-    vision_projector_type="mlp",
-    vision_n_queries=128,
-    vision_layer_idx=-1,
-    # ── V12 NEW: Mamba-3 (R37-1) ──
-    use_mamba3=True,
-    mamba3_d_state=16,
-    # ── V12 NEW: Kronecker Embeddings (R37-2) ──
-    use_kronecker_embed=True,
-    kronecker_d_char=64,
-    kronecker_max_char_len=8,
-    # ── V12 NEW: PIT Tying (R37-3) ──
-    use_pit=True,
-    # ── V12 NEW: OutRo (R37-4) ──
-    use_outro=True,
-    outro_sink_threshold=0.5,
-    # ── V12 NEW: ForgeHybrid (R37-5 NOVEL) ──
-    use_forge_hybrid=True,
-    forge_hybrid_d_state=16,
-    forge_hybrid_sink_threshold=float("inf"),  # all attention at warm start
-    forge_hybrid_n_ssm_layers=None,            # all layers get SSM path
-    # ── Training hyperparams ──
-    batch_size=1,
-    seq_len=4096,
-    max_steps=50000,
-    warmup_steps=2000,
-    max_lr=2e-4,
-    min_lr=2e-5,
-)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ForgeLM V12-Jamba: V2 (Jamba-3B) + V12 architecture keys (R37).
@@ -1008,6 +716,39 @@ MODEL_CONFIGS["qwen25_05b"] = ModelConfig(
     tie_word_embeddings=False,     # separate lm_head in checkpoint
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Qwen3-4B-Instruct-2507 family (HF compat, R50) — native shapes for
+# HF-style checkpoints.
+#
+# Matches Qwen/Qwen3-4B-Instruct-2507 exactly: GQA 32Q/8KV with an
+# explicit head_dim=128 (d_model/n_heads=80, decoupled — the reason the
+# head_dim config field exists), QK-norm on Q/K, NO QKV bias (Qwen3
+# dropped it), SwiGLU intermediate 9728, RMSNorm eps 1e-6, RoPE base 5M,
+# 256K native context, tied embed/head, vocab 151936.
+# Used by ForgeEngine._detect_config_from_header to auto-pair checkpoints
+# (embed 151936x2560, q_proj 2560x4096). First consumer:
+# 0xA50C1A1/Qwen3-4B-Nymphaea-RP (uncensored RP tune).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["qwen3_4b"] = ModelConfig(
+    vocab_size=151936,
+    d_model=2560,
+    n_layers=36,
+    n_heads=32,
+    n_kv_heads=8,
+    head_dim=128,                  # explicit: 2560/32=80 would be wrong
+    intermediate_size=9728,
+    attn_type="gqa",
+    attn_bias=False,               # Qwen3 has no QKV bias (unlike Qwen2.5)
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-6,                 # Qwen3 rms_norm_eps
+    rope_base=5_000_000.0,         # Qwen3-4B rope_theta
+    max_seq_len=262144,            # 256K native context
+    use_qk_norm=True,              # Qwen3 q_norm/k_norm on each head
+    use_final_norm=True,
+    tie_word_embeddings=True,      # tied embed/lm_head in checkpoint
+)
+
 
 def get_config(name: str | None = None, **overrides) -> ModelConfig:
     """Fetch a named config and apply optional overrides.
@@ -1077,3 +818,14 @@ def validate_preset_lineage() -> list[str]:
                 f"'{cfg.parent}'"
             )
     return errors
+
+
+# Module-load enforcement (AGENTS.md directive A): any preset declaring a
+# ``parent`` must document every divergence in ``dropped_keys``. This runs
+# once at import so a silently-regressing preset fails loudly at import
+# time instead of passing the suite unnoticed.
+_LINEAGE_ERRORS = validate_preset_lineage()
+if _LINEAGE_ERRORS:
+    raise RuntimeError(
+        "Preset lineage validation failed:\n" + "\n".join(_LINEAGE_ERRORS)
+    )

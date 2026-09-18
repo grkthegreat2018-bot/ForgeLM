@@ -39,6 +39,7 @@ Sources (R45 research round):
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
@@ -58,6 +59,8 @@ from forge.engine.quant.nvfp4_quant import (
     _FP4_MAGNITUDES,
 )
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Helper: Haar wavelet transform (1D, in-place, power-of-2)
@@ -674,7 +677,7 @@ def requant_refine_model(quantized_model: nn.Module,
             n_refined += 1
 
     if verbose and n_refined > 0:
-        print(f"  [ReQuant] {n_refined} layers refined")
+        logger.info(f"  [ReQuant] {n_refined} layers refined")
     return n_refined
 
 
@@ -933,9 +936,9 @@ def _replace_linears_r45(model: nn.Module, factory, verbose_name: str,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [{verbose_name}] Skipped {name}: {e}")
+                    logger.warning(f"  [{verbose_name}] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [{verbose_name}] {n} layers quantized")
+        logger.info(f"  [{verbose_name}] {n} layers quantized")
     return n
 
 

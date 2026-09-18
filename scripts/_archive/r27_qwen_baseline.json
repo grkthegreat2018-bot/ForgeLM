@@ -1,0 +1,130 @@
+{
+  "model": "Qwen2.5-0.5B",
+  "n_params": 494032768,
+  "known_facts": [
+    "wk_france_cap",
+    "wk_japan_cap",
+    "wk_germany_cap",
+    "wk_jupiter",
+    "wk_shakespeare",
+    "wk_water",
+    "wk_italy_cap",
+    "wk_spain_cap",
+    "wk_russia_cap",
+    "wk_england_cap",
+    "ob_vanuatu_cap",
+    "ob_tonga_cap",
+    "ob_marshall_cap",
+    "ob_solomon_cap",
+    "ob_vanuatu2"
+  ],
+  "unknown_facts": [
+    "ob_tuvalu_cap",
+    "ob_kiribati_cap",
+    "ob_nauru_cap",
+    "ob_palau_cap",
+    "ob_micronesia_cap"
+  ],
+  "all_facts": [
+    {
+      "q": "What is the capital of France?",
+      "a": "Paris",
+      "id": "wk_france_cap"
+    },
+    {
+      "q": "What is the capital of Japan?",
+      "a": "Tokyo",
+      "id": "wk_japan_cap"
+    },
+    {
+      "q": "What is the capital of Germany?",
+      "a": "Berlin",
+      "id": "wk_germany_cap"
+    },
+    {
+      "q": "What is the largest planet in the solar system?",
+      "a": "Jupiter",
+      "id": "wk_jupiter"
+    },
+    {
+      "q": "Who wrote Romeo and Juliet?",
+      "a": "Shakespeare",
+      "id": "wk_shakespeare"
+    },
+    {
+      "q": "What is the chemical symbol for water?",
+      "a": "H2O",
+      "id": "wk_water"
+    },
+    {
+      "q": "What is the capital of Italy?",
+      "a": "Rome",
+      "id": "wk_italy_cap"
+    },
+    {
+      "q": "What is the capital of Spain?",
+      "a": "Madrid",
+      "id": "wk_spain_cap"
+    },
+    {
+      "q": "What is the capital of Russia?",
+      "a": "Moscow",
+      "id": "wk_russia_cap"
+    },
+    {
+      "q": "What is the capital of England?",
+      "a": "London",
+      "id": "wk_england_cap"
+    },
+    {
+      "q": "What is the capital of Tuvalu?",
+      "a": "Funafuti",
+      "id": "ob_tuvalu_cap"
+    },
+    {
+      "q": "What is the capital of Kiribati?",
+      "a": "Tarawa",
+      "id": "ob_kiribati_cap"
+    },
+    {
+      "q": "What is the capital of Nauru?",
+      "a": "Yaren",
+      "id": "ob_nauru_cap"
+    },
+    {
+      "q": "What is the capital of Palau?",
+      "a": "Ngerulmud",
+      "id": "ob_palau_cap"
+    },
+    {
+      "q": "What is the capital of Vanuatu?",
+      "a": "Port Vila",
+      "id": "ob_vanuatu_cap"
+    },
+    {
+      "q": "What is the capital of Tonga?",
+      "a": "Nuku'alofa",
+      "id": "ob_tonga_cap"
+    },
+    {
+      "q": "What is the capital of Micronesia?",
+      "a": "Palikir",
+      "id": "ob_micronesia_cap"
+    },
+    {
+      "q": "What is the capital of Marshall Islands?",
+      "a": "Majuro",
+      "id": "ob_marshall_cap"
+    },
+    {
+      "q": "What is the capital of Solomon Islands?",
+      "a": "Honiara",
+      "id": "ob_solomon_cap"
+    },
+    {
+      "q": "What is the capital of Vanuatu?",
+      "a": "Port Vila",
+      "id": "ob_vanuatu2"
+    }
+  ]
+}

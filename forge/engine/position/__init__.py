@@ -12,8 +12,12 @@ key/query cluster separation across sequence lengths for length generalization.
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 # ── LeRoPE ─────────────────────────────────────────────────────────────
 
@@ -111,7 +115,7 @@ def integrate_lerope_into_model(model: nn.Module, base: float = 10000.0):
             module.rope = lerope
             count += 1
 
-    print(f"  [LeRoPE] Replaced RoPE in {count} attention layers "
+    logger.info(f"  [LeRoPE] Replaced RoPE in {count} attention layers "
           f"({count * 32} learnable params total)")
     return count
 

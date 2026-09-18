@@ -120,7 +120,7 @@ class GenModelManager:
         db: FindingsDB | None = None,
         config_name: str = "gen_model_tiny",
         device: str | None = None,
-        tokenizer_path: str = "research/checkpoints/lfm25_tokenizer",
+        tokenizer_path: str = "research/checkpoints/forgelm_v2_tokenizer",
         vram_limit_fraction: float = VRAM_GROW_THRESHOLD,
     ):
         self.db = db

@@ -1,7 +1,7 @@
 """LoRA store — adapter discovery + hot-load / unload / merge workers + categories.
 
 Adapter files follow the project convention ``*lora*.safetensors``
-(e.g. ``ForgeLM_V2_Light_R31_lora.safetensors``, ``epoch3_lora.safetensors``)
+(e.g. ``forgelm_v2_tooluse.lora.safetensors``, ``epoch3_lora.safetensors``)
 under ``research/checkpoints/``.
 
 **Skill-based category system**: adapters are tagged with a skill category
@@ -29,12 +29,12 @@ import json
 import logging
 import re
 import struct
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
-
+from ._signal import SimpleSignal
 from .status_reader import project_root
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,7 @@ def read_adapter_header(path: str | Path) -> dict:
 
 def _base_hint(name: str) -> str:
     """Guess the base checkpoint from an adapter filename
-    (ForgeLM_V2_Light_R31_lora → ForgeLM_V2_Light)."""
+    (forgelm_v2_tooluse.lora → forgelm_v2_tooluse)."""
     stem = name
     for marker in ("_lora", ".lora"):
         if marker in stem:
@@ -206,18 +206,17 @@ def scan_lora_adapters() -> list[LoRAEntry]:
 
 # ── workers ────────────────────────────────────────────────────────────
 
-class _LoraActionWorker(QThread):
+class _LoraActionWorker(threading.Thread):
     """Hot-load / unload an adapter on the resident engine."""
-
-    status = Signal(str)
-    loaded = Signal(dict)      # engine.lora_info()
-    unloaded = Signal()
-    failed = Signal(str)
 
     def __init__(self, runtime, action: str, path: str = "",
                  rank: int = 32, alpha: int | None = None,
-                 target_key: str = "default", parent=None) -> None:
-        super().__init__(parent)
+                 target_key: str = "default") -> None:
+        super().__init__(daemon=True)
+        self.status = SimpleSignal()
+        self.loaded = SimpleSignal()      # engine.lora_info()
+        self.unloaded = SimpleSignal()
+        self.failed = SimpleSignal()
         self.runtime = runtime
         self.action = action          # "load" | "unload" | "info"
         self.path = path
@@ -252,18 +251,17 @@ class _LoraActionWorker(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
-class _LoraMergeWorker(QThread):
+class _LoraMergeWorker(threading.Thread):
     """Merge an adapter into a base checkpoint — entirely on CPU so the
     resident GPU engine (if any) is untouched."""
 
-    status = Signal(str)
-    merged = Signal(str)       # output path
-    failed = Signal(str)
-
     def __init__(self, base_checkpoint: str, config_name: str,
                  adapter_path: str, rank: int, alpha: int | None,
-                 out_path: str, parent=None) -> None:
-        super().__init__(parent)
+                 out_path: str) -> None:
+        super().__init__(daemon=True)
+        self.status = SimpleSignal()
+        self.merged = SimpleSignal()       # output path
+        self.failed = SimpleSignal()
         self.base = base_checkpoint
         self.config_name = config_name
         self.adapter = adapter_path
@@ -314,25 +312,23 @@ class _LoraMergeWorker(QThread):
                 logger.debug("Failed to gc.collect() after LoRA unload", exc_info=True)
 
 
-class LoraManager(QObject):
-    """UI-facing manager for LoRA adapters (browse / hot-load / merge)."""
+class LoraManager:
+    """Manager for LoRA adapters (browse / hot-load / merge)."""
 
-    busy_changed = Signal(bool)
-    status = Signal(str)
-    lora_loaded = Signal(dict)
-    lora_unloaded = Signal()
-    merge_done = Signal(str)
-    failed = Signal(str)
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._worker: QThread | None = None
+    def __init__(self) -> None:
+        self.busy_changed = SimpleSignal()
+        self.status = SimpleSignal()
+        self.lora_loaded = SimpleSignal()
+        self.lora_unloaded = SimpleSignal()
+        self.merge_done = SimpleSignal()
+        self.failed = SimpleSignal()
+        self._worker: threading.Thread | None = None
         self._busy = False
 
     def is_busy(self) -> bool:
-        return self._worker is not None and self._worker.isRunning()
+        return self._worker is not None and self._worker.is_alive()
 
-    def _start(self, worker: QThread) -> None:
+    def _start(self, worker: threading.Thread) -> None:
         if self.is_busy():
             self.failed.emit("LoRA operation already running")
             return
@@ -363,25 +359,25 @@ class LoraManager(QObject):
                        target_key: str = "default") -> None:
         """Hot-load an adapter onto the resident engine."""
         self._start(_LoraActionWorker(runtime, "load", path, rank, alpha,
-                                      target_key, parent=self))
+                                      target_key))
 
     def unload_from_engine(self, runtime) -> None:
-        self._start(_LoraActionWorker(runtime, "unload", parent=self))
+        self._start(_LoraActionWorker(runtime, "unload"))
 
     def refresh_info(self, runtime) -> None:
         """Peek at the resident engine's LoRA state (emits loaded/unloaded)."""
-        self._start(_LoraActionWorker(runtime, "info", parent=self))
+        self._start(_LoraActionWorker(runtime, "info"))
 
     def merge(self, base_checkpoint: str, config_name: str, adapter_path: str,
               rank: int, alpha: int | None, out_path: str) -> None:
         """Merge adapter → base on CPU, writing a standalone checkpoint."""
         self._start(_LoraMergeWorker(base_checkpoint, config_name, adapter_path,
-                                     rank, alpha, out_path, parent=self))
+                                     rank, alpha, out_path))
 
 
 # ── LoraHarness — auto-load/unload by mode ──────────────────────────────
 
-class LoraHarness(QObject):
+class LoraHarness:
     """Mode-aware LoRA auto-manager.
 
     When the harness switches mode (chat → agent → self_play), it:
@@ -393,14 +389,11 @@ class LoraHarness(QObject):
     adapter stays loaded regardless of mode changes until ``unpin()``.
     """
 
-    mode_changed = Signal(str)          # new mode
-    adapter_changed = Signal(str)       # new adapter path ("" = unloaded)
-    status = Signal(str)
-    failed = Signal(str)
-
-    def __init__(self, manager: LoraManager, runtime,
-                 parent: QObject | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, manager: LoraManager, runtime) -> None:
+        self.mode_changed = SimpleSignal()    # new mode
+        self.adapter_changed = SimpleSignal()  # new adapter path ("" = unloaded)
+        self.status = SimpleSignal()
+        self.failed = SimpleSignal()
         self._mgr = manager
         self._runtime = runtime
         self._mode = "chat"

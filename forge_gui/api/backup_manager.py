@@ -19,12 +19,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import zipfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QMessageBox, QWidget
+from ._signal import SimpleSignal
 
 logger = logging.getLogger(__name__)
 
@@ -43,32 +44,30 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB — skip larger files in hash check
 
 # ── backup manager ──────────────────────────────────────────────────────
 
-class BackupManager(QObject):
+class BackupManager:
     """Manages automatic project backups during agentic mode.
 
-    Signals:
+    Signals (SimpleSignal):
         backup_created(path): emitted when a new backup ZIP is saved.
         backup_loaded(path): emitted when a backup is restored.
-        agent_freeze(): emitted when a confirmation dialog opens —
+        agent_freeze(): emitted when a confirmation prompt opens —
             the agent loop MUST stop all execution until agent_unfreeze.
-        agent_unfreeze(): emitted when the dialog closes.
+        agent_unfreeze(): emitted when the prompt closes.
     """
 
-    backup_created = Signal(str)
-    backup_loaded = Signal(str)
-    agent_freeze = Signal()
-    agent_unfreeze = Signal()
-
     def __init__(self, project_root: Path,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+                 confirm_restore: Callable[[str], bool] | None = None) -> None:
+        self.backup_created = SimpleSignal()
+        self.backup_loaded = SimpleSignal()
+        self.agent_freeze = SimpleSignal()
+        self.agent_unfreeze = SimpleSignal()
         self.project_root = Path(project_root).resolve()
-        self._parent_widget = parent
+        # approval callback: (backup_path) -> True to proceed.
+        # Default denies — callers must wire a real approval channel.
+        self.confirm_restore = confirm_restore or (lambda _p: False)
         self.backup_dir = self.project_root / "data" / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self._timer = QTimer(self)
-        self._timer.setInterval(CHECK_INTERVAL_S * 1000)
-        self._timer.timeout.connect(self._check_and_backup)
+        self._timer: threading.Timer | None = None
         self._file_hashes: dict[str, str] = {}
         self._active = False
         self._frozen = False
@@ -93,14 +92,27 @@ class BackupManager(QObject):
         """Start automatic backup monitoring (agentic mode only)."""
         self._active = True
         self._snapshot_hashes()
-        self._timer.start()
+        self._schedule_next()
         logger.info("BackupManager started for project: %s", self._project_name)
 
     def stop(self) -> None:
         """Stop automatic backup monitoring."""
-        self._timer.stop()
         self._active = False
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
         logger.info("BackupManager stopped")
+
+    def _schedule_next(self) -> None:
+        t = threading.Timer(CHECK_INTERVAL_S, self._tick)
+        t.daemon = True
+        t.start()
+        self._timer = t
+
+    def _tick(self) -> None:
+        self._check_and_backup()
+        if self._active:
+            self._schedule_next()
 
     # ── change detection ──────────────────────────────────────────────
     def _snapshot_hashes(self) -> None:
@@ -225,37 +237,22 @@ class BackupManager(QObject):
         return backups
 
     # ── backup restore (with user confirmation) ───────────────────────
-    def request_restore(self, backup_path: str,
-                        parent: QWidget | None = None) -> bool:
-        """Request to restore a backup. Shows confirmation dialog.
+    def request_restore(self, backup_path: str) -> bool:
+        """Request to restore a backup via the ``confirm_restore`` callback.
 
-        FREEZES the agent during the dialog. If user confirms:
+        FREEZES the agent during the confirmation. If confirmed:
         1. Wipes current project files
         2. Unzips the backup into the project
         3. Returns True
 
-        If user declines, returns False.
+        If declined, returns False.
         The agent is unfrozen before returning.
         """
         self._frozen = True
         self.agent_freeze.emit()
         try:
-            backup_name = Path(backup_path).name
-            msg = QMessageBox(parent or self._parent_widget)
-            msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setWindowTitle("Restore Backup?")
-            msg.setText(f"Restore backup: {backup_name}?")
-            msg.setInformativeText(
-                "This will WIPE all current project files and replace "
-                "them with the backup contents. This cannot be undone.\n\n"
-                "The agent is frozen during this operation.")
-            msg.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            msg.setDefaultButton(QMessageBox.StandardButton.No)
-            result = msg.exec()
-
-            if result != QMessageBox.StandardButton.Yes:
-                logger.info("Backup restore declined by user")
+            if not self.confirm_restore(backup_path):
+                logger.info("Backup restore declined: %s", backup_path)
                 return False
 
             # perform restore

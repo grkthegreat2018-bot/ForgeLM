@@ -13,7 +13,7 @@ def test_forgelm_cpuadamw():
     from forge.config import get_config
     from forge.model_loader import ModelLoader
 
-    config = get_config("lfm25_tiny")  # 4-layer tiny model for fast test
+    config = get_config("forgelm_tiny")  # 4-layer tiny model for fast test
     print(f"Config: {config.n_layers} layers, d_model={config.d_model}")
 
     model = ModelLoader.build_model(config)
@@ -49,7 +49,7 @@ def test_forgelm_cpuadamw_overlap():
     from forge.config import get_config
     from forge.model_loader import ModelLoader
 
-    config = get_config("lfm25_tiny")
+    config = get_config("forgelm_tiny")
     model = ModelLoader.build_model(config)
     model = model.to("cuda").to(torch.bfloat16)
     model.train()

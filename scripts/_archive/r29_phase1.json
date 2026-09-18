@@ -1,0 +1,452 @@
+[
+  {
+    "tag": "p1_ema",
+    "process": "ema",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 0,
+        "total": 10
+      },
+      "held": {
+        "exact": 0,
+        "total": 10
+      },
+      "inject": {
+        "exact": 100,
+        "total": 100
+      },
+      "ppl": 52.68418090879809,
+      "known_reg": 9,
+      "held_reg": 9,
+      "ppl_delta_pct": 91.84339879491112
+    },
+    "recall": 1.0,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 91.84339879491112,
+    "targets_met": false,
+    "merge_max_diff": 0.028951168060302734,
+    "steps": 630,
+    "train_time": 30.833422660827637,
+    "final_loss": 0.2362372875213623
+  },
+  {
+    "tag": "p1_full",
+    "process": "full",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 97,
+        "total": 100
+      },
+      "ppl": 27.626664969202878,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 0.5993300766133146
+    },
+    "recall": 0.97,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 0.5993300766133146,
+    "targets_met": false,
+    "merge_max_diff": 0.02759552001953125,
+    "steps": 630,
+    "train_time": 91.34485650062561,
+    "final_loss": 0.25048649311065674
+  },
+  {
+    "tag": "p1_sched",
+    "process": "sched",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 1,
+        "total": 10
+      },
+      "held": {
+        "exact": 2,
+        "total": 10
+      },
+      "inject": {
+        "exact": 94,
+        "total": 100
+      },
+      "ppl": 41.53880032445799,
+      "known_reg": 8,
+      "held_reg": 7,
+      "ppl_delta_pct": 51.25877442988563
+    },
+    "recall": 0.94,
+    "known_reg": 8,
+    "held_reg": 7,
+    "ppl_delta_pct": 51.25877442988563,
+    "targets_met": false,
+    "merge_max_diff": 0.03284049034118652,
+    "steps": 630,
+    "train_time": 31.072545289993286,
+    "final_loss": 0.2159392088651657
+  },
+  {
+    "tag": "p1_orth",
+    "process": "orth",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 0,
+        "total": 10
+      },
+      "held": {
+        "exact": 0,
+        "total": 10
+      },
+      "inject": {
+        "exact": 92,
+        "total": 100
+      },
+      "ppl": 78.15167591535446,
+      "known_reg": 9,
+      "held_reg": 9,
+      "ppl_delta_pct": 184.5803592367559
+    },
+    "recall": 0.92,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 184.5803592367559,
+    "targets_met": false,
+    "merge_max_diff": 0.025553226470947266,
+    "steps": 630,
+    "train_time": 30.990562677383423,
+    "final_loss": 0.2752745449542999
+  },
+  {
+    "tag": "p1_plain",
+    "process": "plain",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 0,
+        "total": 10
+      },
+      "held": {
+        "exact": 0,
+        "total": 10
+      },
+      "inject": {
+        "exact": 87,
+        "total": 100
+      },
+      "ppl": 55.7497399786986,
+      "known_reg": 9,
+      "held_reg": 9,
+      "ppl_delta_pct": 103.00628034742792
+    },
+    "recall": 0.87,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 103.00628034742792,
+    "targets_met": false,
+    "merge_max_diff": 0.027019500732421875,
+    "steps": 630,
+    "train_time": 31.35111093521118,
+    "final_loss": 0.2362372875213623
+  },
+  {
+    "tag": "p1_early",
+    "process": "early",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 0,
+        "total": 10
+      },
+      "held": {
+        "exact": 0,
+        "total": 10
+      },
+      "inject": {
+        "exact": 87,
+        "total": 100
+      },
+      "ppl": 55.7497399786986,
+      "known_reg": 9,
+      "held_reg": 9,
+      "ppl_delta_pct": 103.00628034742792
+    },
+    "recall": 0.87,
+    "known_reg": 9,
+    "held_reg": 9,
+    "ppl_delta_pct": 103.00628034742792,
+    "targets_met": false,
+    "merge_max_diff": 0.027019500732421875,
+    "steps": 630,
+    "train_time": 58.43313431739807,
+    "final_loss": 0.2362372875213623
+  },
+  {
+    "tag": "p1_replay",
+    "process": "replay",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 10,
+        "total": 10
+      },
+      "held": {
+        "exact": 8,
+        "total": 10
+      },
+      "inject": {
+        "exact": 82,
+        "total": 100
+      },
+      "ppl": 52.13640838286548,
+      "known_reg": -1,
+      "held_reg": 1,
+      "ppl_delta_pct": 89.84874800356066
+    },
+    "recall": 0.82,
+    "known_reg": -1,
+    "held_reg": 1,
+    "ppl_delta_pct": 89.84874800356066,
+    "targets_met": false,
+    "merge_max_diff": 0.04645347595214844,
+    "steps": 630,
+    "train_time": 39.390169620513916,
+    "final_loss": 0.3380795419216156
+  },
+  {
+    "tag": "p1_kl",
+    "process": "kl",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 3,
+        "total": 10
+      },
+      "held": {
+        "exact": 1,
+        "total": 10
+      },
+      "inject": {
+        "exact": 74,
+        "total": 100
+      },
+      "ppl": 27.605809860984095,
+      "known_reg": 6,
+      "held_reg": 8,
+      "ppl_delta_pct": 0.5233885933462041
+    },
+    "recall": 0.74,
+    "known_reg": 6,
+    "held_reg": 8,
+    "ppl_delta_pct": 0.5233885933462041,
+    "targets_met": false,
+    "merge_max_diff": 0.02538156509399414,
+    "steps": 630,
+    "train_time": 83.45164036750793,
+    "final_loss": 0.2995155453681946
+  },
+  {
+    "tag": "sanity_noop",
+    "process": "noop",
+    "rank": 16,
+    "n_facts": 100,
+    "lora_params": 276480,
+    "params_per_fact": 2764.8,
+    "baseline": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733
+    },
+    "final": {
+      "known": {
+        "exact": 9,
+        "total": 10
+      },
+      "held": {
+        "exact": 9,
+        "total": 10
+      },
+      "inject": {
+        "exact": 0,
+        "total": 100
+      },
+      "ppl": 27.462076485164733,
+      "known_reg": 0,
+      "held_reg": 0,
+      "ppl_delta_pct": 0.0
+    },
+    "recall": 0.0,
+    "known_reg": 0,
+    "held_reg": 0,
+    "ppl_delta_pct": 0.0,
+    "targets_met": false,
+    "merge_max_diff": 0.0,
+    "steps": 0,
+    "train_time": 0.0,
+    "final_loss": NaN
+  }
+]

@@ -38,6 +38,8 @@ Sources (R46 research):
 """
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,6 +63,8 @@ from forge.engine.quant.nvfp4_quant import (
     _FP4_MAGNITUDES,
 )
 from forge.quant.protocol import QuantizedLinearMixin
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Weight caching mixin — eliminates redundant dequantization (speed fix)
@@ -1153,9 +1157,9 @@ def _replace_linears_r46(model: nn.Module, factory, verbose_name: str,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [{verbose_name}] Skipped {name}: {e}")
+                    logger.warning(f"  [{verbose_name}] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [{verbose_name}] {n} layers quantized")
+        logger.info(f"  [{verbose_name}] {n} layers quantized")
     return n
 
 
@@ -1184,7 +1188,7 @@ def quantize_model_gptq_fp4(model: nn.Module, activations: dict,
                 continue
             if name not in activations:
                 if verbose:
-                    print(f"  [GPTQ-FP4] No activations for {name}, using uniform")
+                    logger.info(f"  [GPTQ-FP4] No activations for {name}, using uniform")
                 acts = torch.ones(64, module.in_features)
             else:
                 acts = activations[name]
@@ -1198,9 +1202,9 @@ def quantize_model_gptq_fp4(model: nn.Module, activations: dict,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [GPTQ-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [GPTQ-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [GPTQ-FP4] {n} layers quantized")
+        logger.info(f"  [GPTQ-FP4] {n} layers quantized")
     return n
 
 
@@ -1226,9 +1230,9 @@ def quantize_model_awq_fp4(model: nn.Module, activations: dict,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [AWQ-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [AWQ-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [AWQ-FP4] {n} layers quantized")
+        logger.info(f"  [AWQ-FP4] {n} layers quantized")
     return n
 
 
@@ -1264,9 +1268,9 @@ def quantize_model_hadamard_gptq_fp4(model: nn.Module, activations: dict,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [HR-GPTQ-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [HR-GPTQ-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [HR-GPTQ-FP4] {n} layers quantized")
+        logger.info(f"  [HR-GPTQ-FP4] {n} layers quantized")
     return n
 
 
@@ -1293,9 +1297,9 @@ def quantize_model_hadamard_awq_fp4(model: nn.Module, activations: dict,
                 n += 1
             except Exception as e:
                 if verbose:
-                    print(f"  [HR-AWQ-FP4] Skipped {name}: {e}")
+                    logger.warning(f"  [HR-AWQ-FP4] Skipped {name}: {e}")
     if verbose and n > 0:
-        print(f"  [HR-AWQ-FP4] {n} layers quantized")
+        logger.info(f"  [HR-AWQ-FP4] {n} layers quantized")
     return n
 
 

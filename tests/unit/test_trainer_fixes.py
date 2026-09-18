@@ -118,7 +118,7 @@ class TestGradientCheckpointingWarning:
         from forge.model_loader import ConfigurableResearchLLM
         from forge.config import get_config
 
-        cfg = get_config("lfm25_tiny")
+        cfg = get_config("forgelm_tiny")
         cfg.vocab_size = 64
         cfg.device = "cpu"
         cfg.dtype = "float32"
@@ -143,7 +143,7 @@ class TestGradientCheckpointingWarning:
         from forge.model_loader import ConfigurableResearchLLM
         from forge.config import get_config
 
-        cfg = get_config("lfm25_tiny")
+        cfg = get_config("forgelm_tiny")
         cfg.vocab_size = 64
         cfg.device = "cpu"
         cfg.dtype = "float32"

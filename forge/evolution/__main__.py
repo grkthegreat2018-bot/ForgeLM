@@ -13,6 +13,9 @@ Usage:
     # Run on CPU only
     python -m forge.evolution --domain synthetic --steps 5 --device cpu
 
+    # Export best configs so sft_train.py picks them up (live link)
+    python -m forge.evolution --apply-best
+
     # Quiet mode (minimal logging)
     python -m forge.evolution --domain synthetic --steps 5 --quiet
 
@@ -132,14 +135,36 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="List all available domain names and exit.",
     )
+    parser.add_argument(
+        "--apply-best",
+        nargs="?",
+        const="forge/evolution/best_configs.json",
+        default=None,
+        metavar="OUT_JSON",
+        help="Export the best config per domain from the findings DB to "
+             "best_configs.json (default path inside the package) and exit. "
+             "sft_train.py reads this file to override evolution-discovered "
+             "defaults — the live link between evolution and production.",
+    )
     args = parser.parse_args(argv)
 
     if args.list_domains:
         _list_domains()
         return 0
 
+    if args.apply_best:
+        from .best_configs import export_best_configs
+        exported = export_best_configs(db_path=args.db_path,
+                                       out_path=args.apply_best)
+        print(f"Exported best configs for {len(exported)} domains "
+              f"from {args.db_path} -> {args.apply_best}")
+        for name, entry in sorted(exported.items()):
+            print(f"  {name}: score={entry.get('score')} "
+                  f"config={entry.get('config')}")
+        return 0
+
     if not args.domain:
-        parser.error("--domain is required (or use --list-domains)")
+        parser.error("--domain is required (or use --list-domains/--apply-best)")
 
     domain = _resolve_domain(args.domain)
 

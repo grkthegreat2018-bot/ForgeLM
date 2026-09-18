@@ -291,5 +291,129 @@ class TestForgeLMV2ForwardPass:
         assert not torch.isinf(logits).any(), "Inf in forward pass output"
 
 
+class TestJambaEOSAndRoPE:
+    """Regression: Jamba attention has no RoPE, and StandardDecoding must
+    stop on Jamba EOS ids (2=<|endoftext|>, 519=<|im_end|>).
+
+    Bug: the forgelm_v2 preset had use_rope=True — Jamba attention is
+    position-agnostic (Mamba carries position), so RoPE-scrambled Q/K
+    decorrelated outputs vs the HF reference (layer-parity cos ~0.95 at
+    block 7, logit cos ~0.0 end-to-end). StandardDecoding's fallback EOS
+    set only covered LFM2.5/Qwen ids, so <|im_end|>=519 never stopped
+    generation.
+    """
+
+    def test_preset_use_rope_false(self):
+        """forgelm_v2 must not apply RoPE — Jamba attention is RoPE-free."""
+        from forge.config import MODEL_CONFIGS
+        cfg = MODEL_CONFIGS["forgelm_v2"]
+        assert cfg.use_rope is False
+
+    def _mock_model(self, token, vocab=1024, eos_token_id=None):
+        """Model whose top logit is always `token` (emits EOS on demand)."""
+        import torch.nn as nn
+
+        class _M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(1))
+                self.config = type("C", (), {"eos_token_id": eos_token_id})()
+                self.eos_token_id = eos_token_id
+
+            def forward(self, input_ids, past_key_values=None,
+                    use_cache=False, **kw):
+                b, t = input_ids.shape
+                logits = torch.full((b, t, vocab), -10.0)
+                logits[..., token] = 10.0
+                kv = ((torch.zeros(b, 1, t, 8), torch.zeros(b, 1, t, 8)),)
+                return logits, None, kv
+
+        return _M()
+
+    def test_standard_decoding_stops_on_jamba_im_end(self):
+        """519 (<|im_end|>) must stop generation even without model eos."""
+        from forge.engine.decoding import StandardDecoding
+        model = self._mock_model(token=519, eos_token_id=None)
+        ids = torch.tensor([[1, 100, 200]])
+        out = StandardDecoding().generate(
+            model, ids, max_new_tokens=50, temperature=0.0)
+        # 519 emitted → loop stops immediately (EOS is not appended).
+        assert out.shape[1] - ids.shape[1] == 0
+
+    def test_standard_decoding_list_eos(self):
+        """List-valued eos_token_id (HF Jamba uses [2, 519]) must not crash."""
+        from forge.engine.decoding import StandardDecoding
+        model = self._mock_model(token=5, eos_token_id=[2, 519])
+        ids = torch.tensor([[1, 100, 200]])
+        out = StandardDecoding().generate(
+            model, ids, max_new_tokens=4, temperature=0.0)
+        assert out.shape[1] - ids.shape[1] == 4  # ran full budget, no crash
+
+    def test_optimal_for_routes_mamba_hybrid(self):
+        """activate_optimal must pick the validated mamba profile for
+        forgelm_v2 — no torch.compile (python-loop scan), quamba2 +
+        replay_ssm + avmp on; pure-attention configs keep the old optimal."""
+        from forge.config import MODEL_CONFIGS
+        from forge.engine.activation import ActivationConfig
+
+        cfg = ActivationConfig.optimal_for(MODEL_CONFIGS["forgelm_v2"])
+        assert cfg.use_compile is False          # unsafe on python-loop scan
+        assert cfg.use_quamba2 is True
+        assert cfg.use_replay_ssm is True
+        assert cfg.use_avmp is True
+        assert cfg.use_virtual_tensor is True
+        assert cfg.use_prefix_cache is True
+        assert cfg.use_chunked_prefix_cache is False  # KV slicing = (k,v) tuples
+        assert cfg.kv_cache == "rotorquant"
+        assert cfg.kv_bits == 4
+
+        pure = ActivationConfig.optimal_for(MODEL_CONFIGS["forgelm_tiny"])
+        assert pure.use_compile is True          # attention-only keeps it
+
+    def test_auto_activate_skips_attn_only_overrides_on_hybrid(self):
+        """_auto_activate_optimal (the from_checkpoint auto_activate=True
+        path) must not add attention-only overrides on a mamba hybrid —
+        learned/chunked prefix cache and block fusion assume (k, v) tuple
+        state, and an extra whole-model quant pass on top of Quamba2 is
+        unvalidated."""
+        import types
+        from forge.config import MODEL_CONFIGS
+        from forge.engine.forge_engine import ForgeEngine
+
+        captured = {}
+
+        def _stub_engine(config, vram_ratio):
+            eng = types.SimpleNamespace(
+                config=config,
+                keystack_features=set(),
+                device=torch.device("cuda"),
+                _needs_streaming=False,
+                _log=lambda *a, **k: None,
+                _memory_info=lambda dev: (vram_ratio * 12.0,
+                                         12.0),  # GB → returns free,total
+                _auto_select_quantization=lambda: "nvfp4",
+                activate_optimal=lambda **kw: captured.update(kw),
+            )
+            return eng
+
+        # Hybrid on ample VRAM: no graph/KV-slicing overrides, no extra quant
+        eng = _stub_engine(MODEL_CONFIGS["forgelm_v2"], vram_ratio=0.9)
+        ForgeEngine._auto_activate_optimal(eng)
+        assert "use_learned_prefix_cache" not in captured
+        assert "use_block_fusion" not in captured
+        assert "use_breakable_cuda_graph" not in captured
+        assert captured.get("quantize") is None
+        assert captured.get("kv_cache") == "rotorquant"
+        assert captured.get("kv_bits") == 4
+
+        # Pure-attention on ample VRAM keeps the aggressive overrides
+        captured.clear()
+        eng = _stub_engine(MODEL_CONFIGS["forgelm_tiny"], vram_ratio=0.9)
+        ForgeEngine._auto_activate_optimal(eng)
+        assert captured.get("use_learned_prefix_cache") is True
+        assert captured.get("use_block_fusion") is True
+        assert captured.get("quantize") == "nvfp4"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-s"])

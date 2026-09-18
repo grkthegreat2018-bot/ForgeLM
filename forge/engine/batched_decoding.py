@@ -105,12 +105,18 @@ class BatchedDecoding(DecodingStrategy):
         active = torch.ones(B, dtype=torch.bool, device=device)
         generated = [padded_ids[i:i+1, -prompt_lens[i]:].clone() for i in range(B)]
         max_tokens = max(max_tokens_list)
-        torch.tensor(list(self.eos_set), device=device)
 
         # Prefill
         with torch.inference_mode():
             out = model(padded_ids, attention_mask=attn_mask, use_cache=True)
             logits, past_kv = unpack_output_with_kv(out)
+
+        # Decode-time mask: grows by one (all-ones) column per step so pad
+        # positions in the cached KV stay masked. Without this, every decode
+        # step attends to pad-token KV — silent pollution for any batch with
+        # unequal prompt lengths.
+        cur_mask = attn_mask
+        ones_col = torch.ones(B, 1, dtype=torch.bool, device=device)
 
         # Decode — one batched step per token
         next_ids = torch.zeros(B, 1, dtype=torch.long, device=device)
@@ -158,6 +164,13 @@ class BatchedDecoding(DecodingStrategy):
                         torch.full_like(next_logits_all[i], float('-inf')),
                         next_logits_all[i],
                     )
+
+            # Top-p filtering (per-sequence) — was previously plumbed through
+            # but never applied; requests asking top_p<1 got top_p=1.0.
+            for i in range(B):
+                if top_ps[i] < 1.0 and active_cpu[i]:
+                    next_logits_all[i] = self._top_p(
+                        next_logits_all[i].unsqueeze(0), top_ps[i]).squeeze(0)
 
             # Mask finished sequences
             next_logits_all[~active] = float('-inf')
@@ -213,9 +226,11 @@ class BatchedDecoding(DecodingStrategy):
             if not active_cpu.any():
                 break
 
-            # Batched forward
+            # Batched forward — mask now covers cached (prompt+gen) + new col
+            cur_mask = torch.cat([cur_mask, ones_col], dim=1)
             with torch.inference_mode():
-                out = model(next_ids, past_key_values=past_kv, use_cache=True)
+                out = model(next_ids, past_key_values=past_kv,
+                            attention_mask=cur_mask, use_cache=True)
                 logits, past_kv = unpack_output_with_kv(out)
 
         return generated

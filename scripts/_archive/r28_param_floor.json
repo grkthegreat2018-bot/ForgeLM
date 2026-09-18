@@ -1,0 +1,278 @@
+[
+  {
+    "tag": "lowrank_1L_r1_n100",
+    "name": "lowrank_1L",
+    "rank": 1,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8302201718091965
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8876242578029633
+      },
+      "inject": {
+        "correct": 93,
+        "total": 100,
+        "avg_prob": 0.6177768366411328
+      },
+      "ppl": 8.081979277916428
+    },
+    "lora_params": 5760,
+    "params_per_fact": 57.6,
+    "recall": 0.93,
+    "train_time": 23.794988870620728
+  },
+  {
+    "tag": "lowrank_1L_r2_n100",
+    "name": "lowrank_1L",
+    "rank": 2,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8701996862888336
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8947181582450867
+      },
+      "inject": {
+        "correct": 94,
+        "total": 100,
+        "avg_prob": 0.6405749309062958
+      },
+      "ppl": 8.41150394757412
+    },
+    "lora_params": 11520,
+    "params_per_fact": 115.2,
+    "recall": 0.94,
+    "train_time": 25.533066749572754
+  },
+  {
+    "tag": "lowrank_1L_r3_n100",
+    "name": "lowrank_1L",
+    "rank": 3,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8849061906337738
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.9021313607692718
+      },
+      "inject": {
+        "correct": 93,
+        "total": 100,
+        "avg_prob": 0.6375242823315784
+      },
+      "ppl": 8.419198399264245
+    },
+    "lora_params": 17280,
+    "params_per_fact": 172.8,
+    "recall": 0.93,
+    "train_time": 23.421019792556763
+  },
+  {
+    "tag": "r1_2L_r1_n100",
+    "name": "r1_2L",
+    "rank": 1,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8686762899160385
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8733577251434326
+      },
+      "inject": {
+        "correct": 93,
+        "total": 100,
+        "avg_prob": 0.6568020475585945
+      },
+      "ppl": 8.4835682174699
+    },
+    "lora_params": 11520,
+    "params_per_fact": 115.2,
+    "recall": 0.93,
+    "train_time": 25.61700201034546
+  },
+  {
+    "tag": "sharedA_2L_r4_n100",
+    "name": "sharedA_2L",
+    "rank": 4,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8655860900878907
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.88341726064682
+      },
+      "inject": {
+        "correct": 93,
+        "total": 100,
+        "avg_prob": 0.6587045305466745
+      },
+      "ppl": 8.566063681393222
+    },
+    "lora_params": 26624,
+    "params_per_fact": 266.24,
+    "recall": 0.93,
+    "train_time": 25.128183841705322
+  },
+  {
+    "tag": "svd_prune_r4_n100",
+    "name": "svd_prune",
+    "rank": 4,
+    "n_facts": 100,
+    "baseline": {
+      "known": {
+        "correct": 5,
+        "total": 10,
+        "avg_prob": 0.04640737362205982
+      },
+      "held": {
+        "correct": 6,
+        "total": 10,
+        "avg_prob": 0.0537646890617907
+      },
+      "inject": {
+        "correct": 11,
+        "total": 100,
+        "avg_prob": 0.022338944571756655
+      },
+      "ppl": 8.053211970561119
+    },
+    "final": {
+      "known": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8828413665294648
+      },
+      "held": {
+        "correct": 10,
+        "total": 10,
+        "avg_prob": 0.8052002608776092
+      },
+      "inject": {
+        "correct": 88,
+        "total": 100,
+        "avg_prob": 0.5399892738251947
+      },
+      "ppl": 9.312149117400278
+    },
+    "lora_params": 11520,
+    "params_per_fact": 115.2,
+    "recall": 0.88,
+    "train_time": 55.79470109939575
+  }
+]

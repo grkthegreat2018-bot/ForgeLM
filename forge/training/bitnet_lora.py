@@ -296,12 +296,22 @@ def add_lora_adapters(
                     lora_dtype = torch.bfloat16 if is_quant else (
                         child.weight.dtype if child.weight.dtype != torch.float32 else torch.bfloat16)
                     # ForgeQuantLinear uses dense_packed, others use weight_packed
+                    # (Quamba2Linear stores weight_int4_packed; last resort is
+                    # any parameter or buffer on the module).
                     if is_quant:
                         qdev = getattr(child, 'weight_packed', None)
                         if qdev is None:
                             qdev = getattr(child, 'dense_packed', None)
                         if qdev is None:
-                            qdev = child.weight
+                            qdev = getattr(child, 'weight_int4_packed', None)
+                        if qdev is None:
+                            qdev = getattr(child, 'weight', None)
+                        if qdev is None:
+                            qdev = next(child.parameters(), None)
+                        if qdev is None:
+                            qdev = next(child.buffers(), None)
+                        if qdev is None:
+                            continue  # no tensor to infer device from — skip
                         lora = lora.to(qdev.device)
                     else:
                         lora = lora.to(child.weight.device)

@@ -160,7 +160,7 @@ def forge_engine_fixture():
     from forge.model_loader import ConfigurableResearchLLM
     from forge.engine.forge_engine import ForgeEngine
 
-    cfg = get_config("lfm25_tiny")
+    cfg = get_config("forgelm_tiny")
     cfg.vocab_size = 256
     cfg.device = "cpu"
     cfg.dtype = "float32"
