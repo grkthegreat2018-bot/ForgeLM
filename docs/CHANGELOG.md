@@ -293,3 +293,92 @@ fell into AirLLM meta-device streaming. Fixes:
   default; Engine checkbox tooltip names the blocker.
 
 
+
+#### R&D round 50 (2026-09-19): Missing-feature batch — DRY, DoLa, filler-KV, PRM, depth upscale + R49-2 KDA key
+Survey of `indie_llm_research_scratchpad.md` vs the codebase found five gaps
+worth implementing; all shipped CPU-tested this round plus the R49-2 KDA key:
+
+- **R50-1 DRY repetition penalty** (`engine_common._dry_penalties`,
+  llama.cpp `sampler_dry` semantics): longest repeated-suffix scan over the
+  trailing `dry_penalty_last_n` tokens; continuations of repeats longer
+  than `dry_allowed_length` get `dry_multiplier * dry_base**excess`
+  subtracted in logit space. Wired end-to-end: `StandardDecoding`,
+  `_sample_from_logits`, `_sample_next_token`, `_decode_with_kv`,
+  `generate_raw`, `generate_stream`, `_finish_to_stop`, prefix-cache decode,
+  `_validate_generation_params`, `forge_server` request models +
+  `model_registry` propagation. Default `dry_multiplier=0` ? disabled,
+  fully backward compatible.
+- **R50-2 DoLa self-contrastive decoding** (`DoLaDecoding` in
+  `decoding.py`, `build_decoding("dola")`): `log_softmax(final) -
+  log_softmax(early)` restricted to the final distribution's
+  `candidate_top_k` set; dynamic premature-layer selection by max JSD over
+  `{n/4, n/2, 3n/4}` (or fixed `early_layer`). Uses the existing
+  `return_hidden_states` path — no auxiliary model, no training. On the
+  hybrid, contrasting a Mamba block also isolates the attention layers'
+  recall contribution.
+- **R50-3 stepwise Process Reward Model** (`ProcessRewardHead` +
+  `fit_prm`/`score_steps` in `decision_head.py`): sigmoid step verifier on
+  step-end hidden states; BCE on per-step labels or outcome-broadcast
+  (Math-Shepherd weak supervision); base model frozen — external probe,
+  ~10KB weights, `save`/`load` with version guard. Metrics: val accuracy
+  + ECE. Feeds future GRPO advantage shaping / ForgeGate step routing.
+- **R50-4 filler-token KV eviction** (`engine/kv/filler_kv.py` +
+  `FillerKVCacheStrategy`, `build_kv_cache("filler")`, engine_activation
+  fallback map): function words/punctuation flagged via `filler_ids`
+  (`filler_token_ids(tokenizer)` builds the default English set) or
+  `filler_pred`; evicts unprotected fillers first, then falls back to
+  SnapKV-style attention-score eviction; sink prefix + observation window
+  always kept; `filler_keep_ratio` retains top-scored fillers. Callers
+  that never pass token_ids degrade to pure score eviction.
+- **R50-5 depth upscaling / passthrough merge** (`research/merge_models.py`
+  `depth_upscale` + `parse_layer_map` + `depth_layer_types`, CLI
+  `--method depth --layers "0-15,8-23"`): renumbers `blocks.{i}.*` per a
+  layer map, preserves non-block tensors, writes a `.depth.json` sidecar
+  (layer_map + layer_types) for the loader. NOT lossless — duplicated
+  Mamba/attention blocks change the function; warm start for continued
+  training (SOLAR/mergekit semantics). Typed-layer caveat documented:
+  the map only makes sense when duplicated source blocks share the type
+  expected at their destination slot.
+- **R49-2 KDA key** (`forge/keys/attention/kda_key.py` — Kimi Delta
+  Attention / Gated DeltaNet, arXiv:2510.26692): `KDALayer` side-path with
+  per-key-dim decay `S_t = Diag(a)S + ßk(v - (Diag(a)S)?k)?`, GDN-style
+  init (A_log=log U(0.01,16), dt_bias=softplus?¹ U(1e-3,0.1), depthwise
+  causal conv k=4), fp32 sequential scan, sigmoid output gate, scalar
+  `gate=0` ? bit-exact vs baseline. `KDAKey` (KeyClass.BI): deterministic
+  seeded port adds `kda.*` per layer, reverse strips (lossless iff
+  gate˜0), `convert_model_state` for whole checkpoints. Config:
+  `use_kda`, `kda_n_heads`, `kda_head_dim`, `kda_beta_gt1` (N3, off —
+  destabilization risk), `kda_decay_floor`. Recurrent state +
+  conv-boundary snapshots wired into the new-sequence reset, prefill
+  snapshot, and prefix-cache save/restore paths — prefix hits continue
+  the recurrence instead of restarting at zero state. VRAM: ~25M
+  params/layer at 2560/20H (bf16 ~50MB/layer); fixed (H×d_k×d_v) state
+  ~1.3MB fp32, NO KV cache — the future 3:1 hybrid cuts KV ~75%.
+  Chunked-scan kernel remains a follow-up (naive scan is CPU-test speed).
+
+Bug fixes confirmed+fixed in-session (see BUG_LOG):
+- `SnapKVCache._evict`/`FillerKVCache._evict` bool-mask overflow: keep
+  mask sized `total` was applied to the overgrown buffer axis — masked to
+  `:total` slots in both.
+- `_min_k_filter`/`_min_k_filter_logits`: dead `weighted_diffs >
+  sensitivity*max_decay` expression — sensitivity ignored; now truncates
+  at the rightmost exceeding cliff (argmax fallback).
+- `fit_prm`: harvested features/labels were inference-mode tensors ?
+  BCE loss couldn't backprop; post-harvest re-clone (fit_decision_scorer
+  convention).
+
+Tests: `tests/unit/test_r49_kda.py` (17) + `tests/unit/test_r50_rd_features.py`
+(24) — hand-computed delta-rule check, prefill/decode parity, prefix-restore
+consistency, block-level `torch.equal` bit-exactness, DRY suffix math,
+DoLa JSD/contrast/top-k mask, filler eviction ordering, depth map parsing +
+duplication + typed-layer validation, PRM learnability/ECE/save-load.
+Full unit suite: **2607 passed**.
+  - Smoke-verified all R50 features on the real ForgeLM V2 checkpoint
+    (3.2B bf16 CUDA, `scripts/smoke_r50_gpu.py`, 9/9): DRY breaks a real
+    repetition loop; DoLa generates richer continuations (after fixing an
+    inference-tensor autograd crash in `_contrast_logits` — now
+    `@torch.no_grad()`, BUG_LOG'd); KDA `convert_model_state` ports all
+    28 blocks with strict=True load and max|dlogit| = 0.0 vs baseline.
+    CPU smoke `scripts/smoke_r50_features.py` 23/23 on real tokenizer +
+    tiny model (filler eviction 38?23 tokens, PRM step scores, depth
+    upscale strict load + typed-layer negative check).

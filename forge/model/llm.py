@@ -521,6 +521,14 @@ class ConfigurableResearchLLM(nn.Module):
                 if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state_real'):
                     block.attn._ssm_state_real = None
                     block.attn._ssm_state_imag = None
+                # R49-2 KDA + ForgeHybrid side-paths: same new-sequence reset
+                if getattr(block, '_kda', None) is not None:
+                    block._kda._state_reset = True
+                if getattr(block, '_forge_hybrid_ssm', None) is not None:
+                    if hasattr(block._forge_hybrid_ssm, '_ssm_state'):
+                        block._forge_hybrid_ssm._ssm_state = None
+                    if hasattr(block._forge_hybrid_ssm, '_conv_state'):
+                        block._forge_hybrid_ssm._conv_state_reset = True
         # SIGReg: collect per-layer hidden states for spectral regularization.
         hidden_states_list: list[torch.Tensor] = [] if return_hidden_states else None
         for i, block in enumerate(self.blocks):
@@ -579,6 +587,11 @@ class ConfigurableResearchLLM(nn.Module):
                     st['conv'] = attn._conv_state.clone()
                 if getattr(attn, '_ssm_state', None) is not None:
                     st['ssm'] = attn._ssm_state.clone()
+                kda = getattr(block, '_kda', None)
+                if kda is not None:
+                    kda_snap = kda.snapshot_state()
+                    if any(v is not None for v in kda_snap.values()):
+                        st['kda'] = kda_snap
                 if st:
                     snap[i] = st
             self._last_prefill_recurrent = snap

@@ -109,16 +109,20 @@ def capture_recurrent_state(model) -> dict:
     """
     snap = {}
     for i, block in enumerate(getattr(model, "blocks", []) or []):
-        attn = getattr(block, "attn", None)
-        if attn is None:
-            continue
         st = {}
-        for attr, key in (("_conv_state", "conv"), ("_ssm_state", "ssm"),
-                          ("_ssm_state_real", "ssm_r"),
-                          ("_ssm_state_imag", "ssm_i")):
-            v = getattr(attn, attr, None)
-            if v is not None:
-                st[key] = v.clone()
+        attn = getattr(block, "attn", None)
+        if attn is not None:
+            for attr, key in (("_conv_state", "conv"), ("_ssm_state", "ssm"),
+                              ("_ssm_state_real", "ssm_r"),
+                              ("_ssm_state_imag", "ssm_i")):
+                v = getattr(attn, attr, None)
+                if v is not None:
+                    st[key] = v.clone()
+        kda = getattr(block, "_kda", None)
+        if kda is not None:
+            kda_snap = kda.snapshot_state()
+            if any(v is not None for v in kda_snap.values()):
+                st["kda"] = kda_snap
         if st:
             snap[i] = st
     return snap
@@ -139,9 +143,13 @@ def apply_recurrent_state_prefix(model, snap) -> None:
     for i, st in snap.items():
         if i >= len(blocks):
             break
-        attn = getattr(blocks[i], "attn", None)
+        block = blocks[i]
+        attn = getattr(block, "attn", None)
         if attn is not None and "conv" in st and hasattr(attn, "_conv_state"):
             attn._conv_state_prefix = st["conv"]
+        kda = getattr(block, "_kda", None)
+        if kda is not None and "kda" in st:
+            kda.set_state_prefix(st["kda"])
 
 
 def cache_prompt_prefix(engine, ids: torch.Tensor) -> None:

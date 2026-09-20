@@ -43,13 +43,119 @@ def _min_k_filter_logits(logits: torch.Tensor, sensitivity: float) -> torch.Tens
     n = diffs.shape[-1]
     weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
     weighted_diffs = diffs * weights
-    weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
-    cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)
+    max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+    cliff_mask = weighted_diffs > sensitivity * max_decay
+    # Truncate at the rightmost sharp transition (keep tokens up to and
+    # including it); fallback to the single sharpest cliff when none
+    # exceed the sensitivity threshold.
+    idx = torch.arange(n, device=logits.device).expand_as(cliff_mask)
+    last_cliff = torch.where(
+        cliff_mask, idx, torch.full_like(idx, -1)).amax(dim=-1, keepdim=True)
+    cliff_pos = torch.where(
+        last_cliff >= 0, last_cliff,
+        weighted_diffs.argmax(dim=-1, keepdim=True))
     positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
     keep = positions <= cliff_pos
     mask = torch.zeros_like(logits, dtype=torch.bool)
     mask.scatter_(-1, sorted_indices, ~keep)
     return logits.masked_fill(mask, float("-inf"))
+
+
+def _dry_penalties(
+    context_ids: list[int],
+    last_n: int,
+    allowed_length: int,
+    multiplier: float,
+    base: float,
+) -> dict[int, float]:
+    """DRY repetition penalty (llama.cpp ``sampler_dry``, p-e-w).
+
+    Local copy of ``engine_common._dry_penalties`` — this module is kept
+    import-light and cannot import engine_common without a cycle.
+    Returns ``{token_id: penalty}`` for logit-space subtraction.
+    """
+    n = len(context_ids)
+    if multiplier <= 0 or n < 2 or last_n <= 0:
+        return {}
+    last_idx = n - 1
+    start = max(0, last_idx - last_n)
+    match_len: dict[int, int] = {}
+    for i in range(start, last_idx):
+        if context_ids[i] != context_ids[last_idx]:
+            continue
+        r = 1
+        while i - r >= 0 and context_ids[i - r] == context_ids[last_idx - r]:
+            r += 1
+        if r > allowed_length:
+            nxt = context_ids[i + 1]
+            if r > match_len.get(nxt, 0):
+                match_len[nxt] = r
+    return {
+        tok: multiplier * (base ** (r - allowed_length))
+        for tok, r in match_len.items()
+    }
+
+
+def _apply_dry(
+    next_logits: torch.Tensor, penalties: dict[int, float]
+) -> torch.Tensor:
+    """Subtract DRY penalties from a (vocab,) or (B, vocab) logit slice."""
+    if not penalties:
+        return next_logits
+    toks = torch.tensor(list(penalties.keys()), device=next_logits.device)
+    pens = torch.tensor(
+        list(penalties.values()), device=next_logits.device, dtype=next_logits.dtype
+    )
+    next_logits.index_copy_(-1, toks, next_logits.index_select(-1, toks) - pens)
+    return next_logits
+
+
+def _sample_from_logits(
+    next_logits: torch.Tensor,
+    *,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+    generated_ids: list[int],
+    min_p: float,
+    min_k: float,
+    dry_penalties: dict[int, float] | None,
+    top_p_fn,
+) -> torch.Tensor:
+    """Shared sampling chain: temp → rep-penalty → DRY → min-p →
+    min-k → top-k → top-p → multinomial (argmax at temperature==0).
+
+    Bit-identical to the inline chain previously duplicated across
+    StandardDecoding; ``top_p_fn`` is the strategy's nucleus filter
+    (StandardDecoding._top_p → research.sampling_utils.top_p_filter_logits).
+    """
+    next_logits = next_logits / max(temperature, 1e-5)
+    if temperature == 0:
+        return next_logits.argmax(-1, keepdim=True)
+    if generated_ids:
+        for tid in set(generated_ids[-64:]):
+            next_logits[:, tid] /= repetition_penalty
+    if dry_penalties:
+        next_logits = _apply_dry(next_logits, dry_penalties)
+    if min_p > 0.0:
+        probs = F.softmax(next_logits, dim=-1)
+        max_prob = probs.max(dim=-1, keepdim=True).values
+        threshold = min_p * max_prob
+        next_logits = torch.where(
+            probs < threshold,
+            torch.full_like(next_logits, float('-inf')),
+            next_logits,
+        )
+    if min_k > 0.0:
+        next_logits = _min_k_filter_logits(next_logits, min_k)
+    if top_k > 0:
+        indices_to_remove = next_logits < torch.topk(
+            next_logits, top_k)[0][..., -1, None]
+        next_logits.masked_fill_(indices_to_remove, float('-inf'))
+    if top_p < 1.0:
+        next_logits = top_p_fn(next_logits, top_p)
+    return torch.multinomial(F.softmax(next_logits, dim=-1), num_samples=1)
 
 
 class DecodingStrategy(ABC):
@@ -84,7 +190,9 @@ class StandardDecoding(DecodingStrategy):
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
                  top_k=80, repetition_penalty=1.05,
-                 min_p: float = 0.0, min_k: float = 0.0):
+                 min_p: float = 0.0, min_k: float = 0.0,
+                 dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512):
         ids = input_ids.clone()
         device = input_ids.device
         # EOS detection: check model attr, config, then known defaults
@@ -99,7 +207,9 @@ class StandardDecoding(DecodingStrategy):
             eos_set.update(eos)
         elif eos is not None:
             eos_set.add(eos)
-        # Track generated token ids for repetition penalty + degeneration
+        # Track generated token ids for repetition penalty + degeneration.
+        # DRY operates on prompt + generated context (llama.cpp semantics).
+        prompt_ids = input_ids[0].tolist()
         generated_ids: list[int] = []
         # Collect generated token tensors for a single final cat (O(n) vs O(n²))
         _generated_tokens: list[torch.Tensor] = []
@@ -112,39 +222,26 @@ class StandardDecoding(DecodingStrategy):
             logits, past_kv = unpack_output_with_kv(out)
 
         for _ in range(max_new_tokens):
-            next_logits = logits[:, -1, :] / max(temperature, 1e-5)
-            if temperature == 0:
-                next_token = next_logits.argmax(-1, keepdim=True)
-            else:
-                # Repetition penalty: penalize tokens already generated
-                # (look at last 64 tokens to limit compute)
-                if generated_ids:
-                    for tid in set(generated_ids[-64:]):
-                        next_logits[:, tid] /= repetition_penalty
-                # Min-p sampling: filter tokens below min_p * max_prob.
-                # Temperature-invariant dynamic truncation.
-                if min_p > 0.0:
-                    probs = F.softmax(next_logits, dim=-1)
-                    max_prob = probs.max(dim=-1, keepdim=True).values
-                    threshold = min_p * max_prob
-                    next_logits = torch.where(
-                        probs < threshold,
-                        torch.full_like(next_logits, float('-inf')),
-                        next_logits,
-                    )
-                # Min-k sampling: semantic-cliff detection (ACL 2026).
-                # Temperature-invariant dynamic truncation via logit dynamics.
-                if min_k > 0.0:
-                    next_logits = _min_k_filter_logits(next_logits, min_k)
-                # Top-k filtering: keep only top_k logits before softmax
-                if top_k > 0:
-                    indices_to_remove = next_logits < torch.topk(
-                        next_logits, top_k)[0][..., -1, None]
-                    next_logits.masked_fill_(indices_to_remove, float('-inf'))
-                if top_p < 1.0:
-                    next_logits = self._top_p(next_logits, top_p)
-                next_token = torch.multinomial(
-                    F.softmax(next_logits, dim=-1), num_samples=1)
+            # DRY penalty: suppress tokens that continue a repeated
+            # n-gram suffix anywhere in prompt+generated context.
+            dry_pen = (
+                _dry_penalties(
+                    prompt_ids + generated_ids,
+                    dry_penalty_last_n,
+                    dry_allowed_length,
+                    dry_multiplier,
+                    dry_base,
+                )
+                if dry_multiplier > 0.0 else None
+            )
+            next_token = _sample_from_logits(
+                logits[:, -1, :],
+                temperature=temperature, top_p=top_p, top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                generated_ids=generated_ids,
+                min_p=min_p, min_k=min_k,
+                dry_penalties=dry_pen,
+                top_p_fn=self._top_p)
 
             # Single GPU->CPU sync per token: .item() brings the id over,
             # then the EOS check runs on the CPU scalar (no second sync).
@@ -836,6 +933,180 @@ class SelfSpeculativeSparse(DecodingStrategy):
         return ids
 
 
+class DoLaDecoding(DecodingStrategy):
+    """DoLa self-contrastive decoding (Chuang et al., ICLR 2024).
+
+    Decoding by Contrasting Layers: the next-token distribution is
+    ``softmax(log_softmax(final) − log_softmax(early))`` restricted to the
+    final distribution's top-``candidate_top_k`` tokens. Amplifies the
+    factual signal concentrated in late layers against shallow-layer
+    surface priors — no auxiliary model or training required.
+
+    On the ForgeLM hybrid, contrasting a Mamba block's hidden state
+    against the final logits also isolates the attention layers' recall
+    contribution (``early_layer`` accepts any block index; the block
+    outputs are uniform hidden states regardless of block type).
+
+    Args:
+        early_layer: fixed early-layer block index, or ``None`` for
+            per-step auto-selection (max JSD vs final distribution — the
+            paper's "dynamic premature layer" choice) over
+            ``early_candidates``.
+        early_candidates: layer indices for auto-selection; default
+            ``{n/4, n/2, 3n/4}`` clamped to valid block indices.
+        candidate_top_k: restrict the contrasted distribution to the
+            top-k tokens by final-layer probability (paper's candidate
+            set; 0 = score the whole vocab).
+    """
+
+    def __init__(self, early_layer: int | None = None,
+                 early_candidates: list[int] | None = None,
+                 candidate_top_k: int = 64):
+        self.early_layer = early_layer
+        self.early_candidates = early_candidates
+        self.candidate_top_k = candidate_top_k
+
+    @staticmethod
+    def _early_logits(model, hidden: torch.Tensor) -> torch.Tensor:
+        """Project a block-output hidden state through ln_f + lm head."""
+        h = hidden[:, -1, :]
+        ln_f = getattr(model, "ln_f", None)
+        if ln_f is not None:
+            h = ln_f(h)
+        return model.head(h)
+
+    @staticmethod
+    def _jsd(p: torch.Tensor, q: torch.Tensor) -> float:
+        """Jensen-Shannon divergence between two probability rows."""
+        m = 0.5 * (p + q)
+        log_m = m.clamp_min(1e-12).log()
+        kl_pm = (p * (p.clamp_min(1e-12).log() - log_m)).sum(-1)
+        kl_qm = (q * (q.clamp_min(1e-12).log() - log_m)).sum(-1)
+        return float((0.5 * (kl_pm + kl_qm)).mean().item())
+
+    @torch.no_grad()
+    def _contrast_logits(self, model, final_logits, hidden_list,
+                         candidates) -> torch.Tensor:
+        """DoLa contrasted logits for the last position (fp32).
+
+        Runs under no_grad (NOT inference_mode): the hidden_list inputs
+        are inference tensors produced during the cached forwards — model
+        params (requires_grad=True) would save them for backward outside
+        a no-grad scope. Outputs stay normal tensors so the caller's
+        in-place sampling ops still work.
+        """
+        p_final = F.softmax(final_logits.float(), dim=-1)
+        if len(candidates) > 1:
+            # Dynamic premature-layer selection: argmax JSD vs final.
+            early_logits, best_jsd = None, -1.0
+            for layer_idx in candidates:
+                e_logits = self._early_logits(model, hidden_list[layer_idx])
+                jsd = self._jsd(p_final, F.softmax(e_logits.float(), dim=-1))
+                if jsd > best_jsd:
+                    best_jsd, early_logits = jsd, e_logits
+        else:
+            early_logits = self._early_logits(
+                model, hidden_list[candidates[0]])
+
+        contrasted = (F.log_softmax(final_logits.float(), dim=-1)
+                      - F.log_softmax(early_logits.float(), dim=-1))
+        if self.candidate_top_k > 0:
+            k = min(self.candidate_top_k, contrasted.shape[-1])
+            top_idx = p_final.topk(k, dim=-1).indices
+            mask = torch.ones_like(contrasted, dtype=torch.bool)
+            mask.scatter_(-1, top_idx, False)
+            contrasted = contrasted.masked_fill(mask, float("-inf"))
+        return contrasted
+
+    def generate(self, model, input_ids, max_new_tokens=100,
+                 temperature=0.0, top_p=1.0, top_k=80,
+                 repetition_penalty=1.05,
+                 min_p: float = 0.0, min_k: float = 0.0,
+                 dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512):
+        ids = input_ids.clone()
+        eos = getattr(model, "eos_token_id", None)
+        if eos is None:
+            cfg = getattr(model, "config", None)
+            eos = getattr(cfg, "eos_token_id", None) if cfg else None
+        eos_set = {2, 7, 519, 151643, 151645}
+        if isinstance(eos, (list, tuple, set, frozenset)):
+            eos_set.update(eos)
+        elif eos is not None:
+            eos_set.add(eos)
+
+        prompt_ids = input_ids[0].tolist()
+        generated_ids: list[int] = []
+        _generated_tokens: list[torch.Tensor] = []
+        MAX_REPEAT = 8
+
+        n_layers = len(getattr(model, "blocks", [])) or getattr(
+            getattr(model, "config", None), "n_layers", 0)
+        if self.early_layer is not None:
+            candidates = [max(0, min(int(self.early_layer), n_layers - 1))]
+        else:
+            if self.early_candidates is not None:
+                candidates = list(self.early_candidates)
+            else:
+                candidates = sorted({
+                    max(0, min(int(f), n_layers - 1))
+                    for f in (n_layers // 4, n_layers // 2,
+                              3 * n_layers // 4)})
+            candidates = [c for c in candidates if 0 <= c < n_layers] or [0]
+
+        # Prefill — return_hidden_states yields (logits, loss, kv, hs_list).
+        with torch.inference_mode():
+            out = model(ids, use_cache=True, return_hidden_states=True)
+            logits, past_kv = unpack_output_with_kv(out)
+            hidden_list = out[3]
+
+        for _ in range(max_new_tokens):
+            next_logits = self._contrast_logits(
+                model, logits[:, -1, :], hidden_list, candidates)
+            dry_pen = (
+                _dry_penalties(
+                    prompt_ids + generated_ids, dry_penalty_last_n,
+                    dry_allowed_length, dry_multiplier, dry_base)
+                if dry_multiplier > 0.0 else None
+            )
+            next_token = _sample_from_logits(
+                next_logits,
+                temperature=temperature, top_p=top_p, top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                generated_ids=generated_ids,
+                min_p=min_p, min_k=min_k,
+                dry_penalties=dry_pen,
+                top_p_fn=self._top_p)
+
+            tok_id = next_token.item()
+            generated_ids.append(tok_id)
+            if tok_id in eos_set:
+                break
+            if len(generated_ids) >= MAX_REPEAT:
+                if all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                    break
+            if len(generated_ids) >= 20:
+                recent = generated_ids[-20:]
+                if len(set(recent)) / len(recent) < 0.4:
+                    break
+
+            _generated_tokens.append(next_token)
+            with torch.inference_mode():
+                out = model(next_token, past_key_values=past_kv,
+                            use_cache=True, return_hidden_states=True)
+                logits, past_kv = unpack_output_with_kv(out)
+                hidden_list = out[3]
+
+        model._forge_last_kv = past_kv
+        if _generated_tokens:
+            ids = torch.cat([ids] + _generated_tokens, dim=-1)
+        return ids
+
+    def _top_p(self, logits, top_p):
+        from research.sampling_utils import top_p_filter_logits
+        return top_p_filter_logits(logits, top_p)
+
+
 def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
     """Factory: build decoding strategy by name."""
     strategies = {
@@ -848,6 +1119,7 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
         "eagle3": Eagle3Decoding,
         "mtp_selfspec": MTPSelfSpecDecoding,
         "self_speculative_sparse": SelfSpeculativeSparse,
+        "dola": DoLaDecoding,
         "batched": None,  # set below to avoid circular import
     }
     if strategy == "batched":

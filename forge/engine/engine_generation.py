@@ -15,6 +15,8 @@ from .engine_common import (  # noqa: F401
     _checkpoint_metadata_cache,
     _checkpoint_size_cache,
     _ckpt_cache_lock,
+    _apply_dry,
+    _dry_penalties,
     _map_gguf_to_forge,
     _min_k_filter,
     _ScalingModelAdapter,
@@ -46,6 +48,8 @@ class _GenerationMixin:
                  context_limit: int | None = None,
                  skip_special_tokens: bool = True,
                  min_p: float = 0.0, min_k: float = 0.0,
+                 dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
                  json_schema: dict | None = None,
                  stop: list[str] | None = None,
                  logprobs: int | None = None,
@@ -72,6 +76,12 @@ class _GenerationMixin:
             min_k: Min-k semantic-cliff sampling sensitivity (0 = disabled).
                 Detects sharp logit transitions for dynamic truncation.
                 Temperature-invariant (ACL 2026).
+            dry_multiplier: DRY n-gram repetition penalty (0 = disabled,
+                llama.cpp ``dry_multiplier``). Penalizes tokens that would
+                continue a repeated suffix longer than
+                ``dry_allowed_length``; penalty grows as
+                ``dry_base ** excess``. Scans prompt + generated context
+                over the trailing ``dry_penalty_last_n`` tokens.
             json_schema: Optional JSON schema dict for constrained decoding.
                 When provided, an XGrammarConstrainer is built and used as a
                 logits processor to mask tokens that would produce
@@ -83,6 +93,9 @@ class _GenerationMixin:
                 self._generate_impl, prompt, max_new_tokens, temperature,
                 top_p, top_k, repetition_penalty, finish_sentence,
                 context_limit, skip_special_tokens, min_p, min_k,
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
                 json_schema=json_schema, stop=stop,
                 logprobs=logprobs, prompt_logprobs=prompt_logprobs,
                 return_logprobs=return_logprobs)
@@ -91,6 +104,9 @@ class _GenerationMixin:
                        top_k, repetition_penalty, finish_sentence,
                        context_limit, skip_special_tokens,
                        min_p: float = 0.0, min_k: float = 0.0,
+                       dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                       dry_allowed_length: int = 2,
+                       dry_penalty_last_n: int = 512,
                        json_schema: dict | None = None,
                        stop: list[str] | None = None,
                        logprobs: int | None = None,
@@ -100,7 +116,7 @@ class _GenerationMixin:
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty, min_p, min_k)
+            repetition_penalty, min_p, min_k, dry_multiplier)
         self._check_vram_and_offload_if_needed()
 
         # Apply pending hot-swap changes before generation
@@ -136,6 +152,10 @@ class _GenerationMixin:
                 logits, past_kv, max_new_tokens, temperature, top_p,
                 top_k, repetition_penalty, eos_set, generated_ids,
                 processor, min_p, min_k,
+                context_ids=ids[0].tolist(),
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
             ):
                 gen_tokens.append(next_token)
             if gen_tokens:
@@ -164,7 +184,11 @@ class _GenerationMixin:
                         output_ids = self._decode_with_kv(
                             ids, logits, past_kv, max_new_tokens, temperature,
                             top_p, top_k=top_k,
-                            repetition_penalty=repetition_penalty)
+                            repetition_penalty=repetition_penalty,
+                            min_p=min_p, min_k=min_k,
+                            dry_multiplier=dry_multiplier, dry_base=dry_base,
+                            dry_allowed_length=dry_allowed_length,
+                            dry_penalty_last_n=dry_penalty_last_n)
                         self._log(f"CacheBlend HIT (reused {covered_len} "
                                   f"tokens, suffix {suffix.shape[1]} to "
                                   f"prefill)")
@@ -181,7 +205,10 @@ class _GenerationMixin:
                 output_ids = self.decoding.generate(
                     self.model, ids, max_new_tokens, temperature, top_p,
                     top_k=top_k, repetition_penalty=repetition_penalty,
-                    min_p=min_p, min_k=min_k)
+                    min_p=min_p, min_k=min_k,
+                    dry_multiplier=dry_multiplier, dry_base=dry_base,
+                    dry_allowed_length=dry_allowed_length,
+                    dry_penalty_last_n=dry_penalty_last_n)
 
         # Capture KV cache from decoding step for fast finish-to-stop path
         captured_kv = getattr(self.model, '_forge_last_kv', None)
@@ -192,7 +219,11 @@ class _GenerationMixin:
             output_ids = self._finish_to_stop(
                 output_ids, ids.shape[1], temperature, top_p,
                 extra_budget=32, past_kv=captured_kv,
-                top_k=top_k, repetition_penalty=repetition_penalty)
+                top_k=top_k, repetition_penalty=repetition_penalty,
+                min_p=min_p, min_k=min_k,
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n)
 
         # Store prefix KV cache for future reuse — reuse the KV captured
         # during decoding instead of paying a second full prefill.
@@ -677,7 +708,9 @@ class _GenerationMixin:
                            repetition_penalty: float,
                            generated_ids: list[int],
                            min_p: float = 0.0,
-                           min_k: float = 0.0) -> torch.Tensor:
+                           min_k: float = 0.0,
+                           dry_penalties: dict[int, float] | None = None
+                           ) -> torch.Tensor:
         """Sample the next token from logits with top-k / top-p / rep-penalty.
 
         Centralised sampling used by generate_raw, generate_stream,
@@ -715,6 +748,11 @@ class _GenerationMixin:
             repeated = torch.tensor(
                 tuple(set(generated_ids[-64:])), device=logits.device)
             next_logits[:, repeated] /= repetition_penalty
+
+        # DRY penalty: precomputed {token_id: penalty} logit subtraction
+        # for tokens that would continue a repeated n-gram suffix.
+        if dry_penalties:
+            next_logits = _apply_dry(next_logits, dry_penalties)
 
         # Min-p sampling: filter tokens below min_p * max_prob.
         # Temperature-invariant because it's applied in probability space
@@ -779,8 +817,13 @@ class _GenerationMixin:
         self, logits, past_kv, max_new_tokens, temperature, top_p, top_k,
         repetition_penalty, stop_token_ids, generated_ids=None,
         logits_processor=None, min_p: float = 0.0, min_k: float = 0.0,
+        context_ids: list[int] | None = None,
+        dry_multiplier: float = 0.0, dry_base: float = 1.75,
+        dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
+        hidden_observer=None,
     ):
         generated_ids = generated_ids if generated_ids is not None else []
+        dry_ctx = context_ids if context_ids is not None else []
         try:
             for _ in range(max_new_tokens):
                 next_logits = logits[:, -1, :]
@@ -789,9 +832,16 @@ class _GenerationMixin:
                 if logits_processor is not None:
                     next_logits = logits_processor(next_logits, generated_ids)
 
+                dry_pen = (
+                    _dry_penalties(
+                        dry_ctx + generated_ids, dry_penalty_last_n,
+                        dry_allowed_length, dry_multiplier, dry_base)
+                    if dry_multiplier > 0.0 else None
+                )
                 next_token = self._sample_next_token(
                     next_logits, temperature, top_k, top_p,
-                    repetition_penalty, generated_ids, min_p, min_k)
+                    repetition_penalty, generated_ids, min_p, min_k,
+                    dry_penalties=dry_pen)
                 token_id = next_token.item()
                 generated_ids.append(token_id)
                 should_stop = token_id in stop_token_ids
@@ -809,9 +859,17 @@ class _GenerationMixin:
                     self._recovery.snapshot_kv_cache(n_gen)
 
                 with torch.inference_mode():
-                    out = self.model(
-                        next_token, past_key_values=past_kv, use_cache=True)
+                    kw = {"past_key_values": past_kv, "use_cache": True}
+                    if hidden_observer is not None:
+                        kw["return_hidden"] = True
+                    out = self.model(next_token, **kw)
                     logits, past_kv = unpack_output_with_kv(out)
+                    if hidden_observer is not None:
+                        # hidden of the just-consumed token (the state that
+                        # will produce the next logits); generated_ids
+                        # already includes it — ForgeGate conv/doom probes
+                        # score exactly this per-step hidden.
+                        hidden_observer(out[-1][0, -1], generated_ids)
         finally:
             if self.model is not None:
                 self.model._forge_last_kv = past_kv
@@ -999,6 +1057,10 @@ class _GenerationMixin:
         skip_special_tokens: bool = False,
         min_p: float = 0.0,
         min_k: float = 0.0,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 1.75,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n: int = 512,
         json_schema: dict | None = None,
     ) -> str:
         """Generate text with raw control — for self-play / agentic loops.
@@ -1041,7 +1103,7 @@ class _GenerationMixin:
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty, min_p, min_k)
+            repetition_penalty, min_p, min_k, dry_multiplier)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
 
@@ -1060,6 +1122,10 @@ class _GenerationMixin:
                 logits, past_kv, max_new_tokens, temperature, top_p, top_k,
                 repetition_penalty, eos_set, generated_ids, logits_processor,
                 min_p, min_k,
+                context_ids=ids[0].tolist(),
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
             ):
                 pass
 
@@ -1083,6 +1149,11 @@ class _GenerationMixin:
         eos_token_ids: list[int] | None = None,
         min_p: float = 0.0,
         min_k: float = 0.0,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 1.75,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n: int = 512,
+        hidden_observer=None,
     ) -> Iterator[str]:
         """Token-by-token streaming generator.
 
@@ -1100,11 +1171,12 @@ class _GenerationMixin:
                 {7, 151643, 151645} (LFM2.5 + Qwen2.5 defaults).
             min_p: Min-p sampling threshold (0 = disabled).
             min_k: Min-k semantic-cliff sampling (0 = disabled).
+            dry_multiplier: DRY n-gram repetition penalty (0 = disabled).
         """
         self._require_awake()
         self._validate_generation_params(
             prompt, max_new_tokens, temperature, top_p, top_k,
-            repetition_penalty, min_p, min_k)
+            repetition_penalty, min_p, min_k, dry_multiplier)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
 
@@ -1127,6 +1199,11 @@ class _GenerationMixin:
                 logits, past_kv, max_new_tokens, temperature, top_p, top_k,
                 repetition_penalty, eos_set, generated_ids, logits_processor,
                 min_p, min_k,
+                context_ids=ids[0].tolist(),
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
+                hidden_observer=hidden_observer,
             ):
                 chunk = self._safe_decode_ids([next_token.item()],
                                               skip_special_tokens)
@@ -1154,7 +1231,8 @@ class _GenerationMixin:
     def _validate_generation_params(self, prompt: str, max_new_tokens: int,
                                     temperature: float, top_p: float,
                                     top_k: int, repetition_penalty: float,
-                                    min_p: float = 0.0, min_k: float = 0.0):
+                                    min_p: float = 0.0, min_k: float = 0.0,
+                                    dry_multiplier: float = 0.0):
         """Validate generation parameters before starting.
 
         Raises ``ConfigurationError`` or ``GenerationError`` on invalid input.
@@ -1186,6 +1264,9 @@ class _GenerationMixin:
         if not (0 <= min_k <= 1.0):
             raise ConfigurationError(
                 f"min_k must be in [0, 1.0], got {min_k}")
+        if dry_multiplier < 0:
+            raise ConfigurationError(
+                f"dry_multiplier must be >= 0, got {dry_multiplier}")
 
         # Check prompt length vs model max_seq_len (warn, don't block —
         # tokenizer may handle truncation, and estimate is rough)
@@ -1331,7 +1412,11 @@ class _GenerationMixin:
 
     def _decode_with_kv(self, ids, logits, past_kv,
                         max_new_tokens, temperature, top_p,
-                        top_k: int = 80, repetition_penalty: float = 1.05):
+                        top_k: int = 80, repetition_penalty: float = 1.05,
+                        min_p: float = 0.0, min_k: float = 0.0,
+                        dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                        dry_allowed_length: int = 2,
+                        dry_penalty_last_n: int = 512):
         """Standard autoregressive decode from existing KV cache state.
 
         Used by prefix cache fast path: prefill already done, just decode.
@@ -1343,6 +1428,11 @@ class _GenerationMixin:
         for next_token, is_eos in self._decode_tokens(
             logits, past_kv, max_new_tokens, temperature, top_p, top_k,
             repetition_penalty, eos_set, generated_ids,
+            min_p=min_p, min_k=min_k,
+            context_ids=ids[0].tolist(),
+            dry_multiplier=dry_multiplier, dry_base=dry_base,
+            dry_allowed_length=dry_allowed_length,
+            dry_penalty_last_n=dry_penalty_last_n,
         ):
             if not is_eos:
                 generated_tokens.append(next_token)
@@ -1447,7 +1537,11 @@ class _GenerationMixin:
     def _finish_to_stop(self, output_ids, prompt_len,
                         temperature, top_p, extra_budget=32,
                         past_kv=None, top_k: int = 80,
-                        repetition_penalty: float = 1.05):
+                        repetition_penalty: float = 1.05,
+                        min_p: float = 0.0, min_k: float = 0.0,
+                        dry_multiplier: float = 0.0, dry_base: float = 1.75,
+                        dry_allowed_length: int = 2,
+                        dry_penalty_last_n: int = 512):
         """Continue generation until a natural stopping point or extra_budget.
 
         If past_kv is provided (captured from the decoding step), skips the
@@ -1470,6 +1564,11 @@ class _GenerationMixin:
             for next_token, _ in self._decode_tokens(
                 logits, past_kv, extra_budget, temperature, top_p, top_k,
                 repetition_penalty, stop_tokens, generated_ids,
+                min_p=min_p, min_k=min_k,
+                context_ids=output_ids[0, :prompt_len].tolist(),
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
             )
         ]
         if not generated_tokens:

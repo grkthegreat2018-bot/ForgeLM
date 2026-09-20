@@ -45,11 +45,15 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DecisionScorer",
+    "ProcessRewardHead",
     "fit_decision_scorer",
+    "fit_prm",
+    "score_steps",
     "expected_calibration_error",
 ]
 
 SCORE_HEAD_VERSION = 1
+PRM_HEAD_VERSION = 1
 
 
 def expected_calibration_error(probs: torch.Tensor,
@@ -278,3 +282,232 @@ def fit_decision_scorer(
     if progress:
         logger.info("[DecisionScorer] trained: %s", metrics)
     return scorer.to(device).eval(), metrics
+
+
+# ── Process Reward Model (R50-3) ───────────────────────────────────────
+#
+# Stepwise verification: a sigmoid head on the hidden state at each
+# reasoning step's final token gives P(step is correct/on-track). Feeds
+# GRPO advantage shaping and ForgeGate step audits. Same SIREN
+# convention as DecisionScorer — ~10 KB, no checkpoint changes.
+#
+# Labels come from verifiable self-play trajectories: per-step labels
+# when the harness can check intermediate results, or outcome-broadcast
+# (Math-Shepherd style) when only the final answer is verified.
+
+
+class ProcessRewardHead(nn.Module):
+    """Sigmoid step verifier on last-token-of-step hidden states.
+
+    ``score(hidden) -> (B,)`` raw logits; ``prob`` applies the sigmoid.
+    Trained with BCE against per-step (or outcome-broadcast) labels.
+    """
+
+    def __init__(self, d_model: int, hidden_dim: int = 0):
+        super().__init__()
+        self.d_model = d_model
+        if hidden_dim and hidden_dim > 0:
+            self.net = nn.Sequential(
+                nn.Linear(d_model, hidden_dim), nn.GELU(),
+                nn.Linear(hidden_dim, 1))
+        else:
+            self.net = nn.Linear(d_model, 1)
+
+    def score(self, hidden: torch.Tensor) -> torch.Tensor:
+        """(B, d_model) -> (B,) raw step-correctness logits."""
+        return self.net(hidden.float()).squeeze(-1)
+
+    def prob(self, hidden: torch.Tensor) -> torch.Tensor:
+        """(B, d_model) -> (B,) P(step correct)."""
+        return torch.sigmoid(self.score(hidden))
+
+    # ── persistence ────────────────────────────────────────────────────
+
+    def save(self, path: str, meta: dict | None = None) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        torch.save({
+            "version": PRM_HEAD_VERSION,
+            "d_model": self.d_model,
+            "state_dict": self.state_dict(),
+            "meta": meta or {},
+        }, path)
+
+    @classmethod
+    def load(cls, path: str, device: str | torch.device = "cpu"
+             ) -> "ProcessRewardHead":
+        blob = torch.load(path, map_location="cpu", weights_only=True)
+        version = blob.get("version", 0)
+        if version > PRM_HEAD_VERSION:
+            raise ValueError(
+                f"PRM head version {version} > supported "
+                f"{PRM_HEAD_VERSION}: {path}")
+        hidden_dim = 0
+        w0 = blob["state_dict"].get("net.0.weight")
+        if w0 is not None and w0.shape[0] != 1:
+            hidden_dim = w0.shape[0]
+        head = cls(d_model=blob["d_model"], hidden_dim=hidden_dim)
+        head.load_state_dict(blob["state_dict"])
+        return head.to(device).eval()
+
+
+def _encode_ids(tokenizer, text: str, special: bool) -> list[int]:
+    ids = tokenizer.encode(text, add_special_tokens=special)
+    return list(ids)
+
+
+def _step_end_positions(tokenizer, prompt: str, steps: Sequence[str],
+                        delimiter: str) -> tuple[list[int], list[int]]:
+    """Token ids for ``prompt + steps`` plus each step's end position.
+
+    Steps are encoded incrementally (prefix + step + delimiter) so the
+    recorded positions are exact boundaries — the same scheme
+    :func:`fit_prm` uses, keeping train/inference consistent.
+    """
+    ids = _encode_ids(tokenizer, prompt, special=True)
+    positions: list[int] = []
+    for step in steps:
+        step_ids = _encode_ids(tokenizer, step + delimiter, special=False)
+        ids.extend(step_ids)
+        positions.append(len(ids) - 1)
+    return ids, positions
+
+
+def _hidden_at_positions(model, ids: list[int], positions: list[int],
+                         device) -> torch.Tensor:
+    """(n_positions, d_model) fp32 hidden states at step-end positions."""
+    idx = torch.tensor([ids], device=device)
+    out = model(idx, return_hidden=True)
+    hidden = out[2] if isinstance(out, tuple) and len(out) > 2 else out[1]
+    if hidden is None:
+        raise RuntimeError("model did not return hidden states")
+    h = hidden[0].float()
+    return h[torch.tensor(positions, device=device)]
+
+
+def score_steps(prm: ProcessRewardHead, model, tokenizer,
+                prompt: str, steps: Sequence[str], device,
+                delimiter: str = "\n") -> list[float]:
+    """Score each reasoning step: P(step correct) in [0, 1].
+
+    Args:
+        prm: trained :class:`ProcessRewardHead` (or None for the raw-LM
+            passthrough — returns 0.5, i.e. uninformative).
+        prompt: the prompt/question the steps answer.
+        steps: reasoning segments (CoT lines, tool-call turns, etc.).
+        delimiter: separator appended after each step during encoding;
+            must match the delimiter used at training time.
+
+    Returns:
+        One probability per step, same order as ``steps``.
+    """
+    if not steps:
+        return []
+    ids, positions = _step_end_positions(tokenizer, prompt, steps, delimiter)
+    with torch.inference_mode():
+        h = _hidden_at_positions(model, ids, positions, device)
+        if prm is None:
+            return [0.5] * len(steps)
+        return prm.prob(h).tolist()
+
+
+def fit_prm(model, tokenizer, device, dataset: Sequence[tuple],
+            *,
+            delimiter: str = "\n",
+            max_steps_per_example: int = 64,
+            epochs: int = 4,
+            lr: float = 3e-3,
+            weight_decay: float = 1e-4,
+            val_frac: float = 0.15,
+            hidden_dim: int = 0,
+            seed: int = 0,
+            progress: bool = True) -> tuple[ProcessRewardHead, dict]:
+    """Train a ProcessRewardHead on stepwise-labelled trajectories.
+
+    Dataset rows: ``(prompt, steps, labels)`` where ``steps`` is a list
+    of reasoning segments and ``labels`` is either
+
+    * a list of per-step floats in {0,1} (preferred — e.g. the harness
+      verified each step's intermediate result), or
+    * a scalar outcome in {0,1}, broadcast to every step
+      (Math-Shepherd-style weak supervision).
+
+    Loss: BCE over all harvested step positions. Returns (head, metrics)
+    with val accuracy at the 0.5 threshold plus ECE.
+    """
+    torch.manual_seed(seed)
+    device = torch.device(device)
+
+    # ── 1. harvest step-end hidden states ──────────────────────────────
+    t0 = time.time()
+    feats: list[torch.Tensor] = []   # (n_steps_i, d)
+    labels: list[torch.Tensor] = []  # (n_steps_i,)
+    n_fwd = 0
+    with torch.inference_mode():
+        for prompt, steps, lab in dataset:
+            steps = list(steps)[:max_steps_per_example]
+            if not steps:
+                continue
+            ids, positions = _step_end_positions(
+                tokenizer, prompt, steps, delimiter)
+            h = _hidden_at_positions(model, ids, positions, device)
+            feats.append(h.float().cpu().clone())
+            if isinstance(lab, (int, float)):
+                lab = [float(lab)] * len(steps)
+            labels.append(torch.tensor(
+                [float(x) for x in lab], dtype=torch.float32))
+            n_fwd += len(steps)
+    harvest_s = time.time() - t0
+    # inference tensors cannot backprop — clone into normal tensors
+    feats = [f.clone() for f in feats]
+    labels = [y.clone() for y in labels]
+
+    if not feats:
+        raise ValueError("fit_prm: empty dataset after filtering")
+
+    d_model = feats[0].shape[1]
+    n = len(feats)
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(n, generator=g).tolist()
+    n_val = max(1, int(n * val_frac)) if n > 4 else 0
+    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    Xtr = [feats[i].to(device) for i in tr_idx]
+    ytr = [labels[i].to(device) for i in tr_idx]
+    Xva = [feats[i].to(device) for i in val_idx]
+    yva = [labels[i].to(device) for i in val_idx]
+
+    head = ProcessRewardHead(d_model, hidden_dim=hidden_dim).to(device)
+    opt = torch.optim.AdamW(head.parameters(), lr=lr,
+                            weight_decay=weight_decay)
+
+    t1 = time.time()
+    for _ep in range(epochs):
+        ep_perm = torch.randperm(len(Xtr), generator=g).tolist()
+        for i in ep_perm:
+            opt.zero_grad()
+            logits = head.score(Xtr[i])
+            loss = F.binary_cross_entropy_with_logits(logits, ytr[i])
+            loss.backward()
+            opt.step()
+    train_s = time.time() - t1
+
+    metrics: dict = {"harvest_s": round(harvest_s, 2),
+                     "train_s": round(train_s, 2),
+                     "n_examples": n, "n_val": n_val,
+                     "steps": int(sum(f.shape[0] for f in feats))}
+    if Xva:
+        all_p, all_y = [], []
+        correct = 0.0
+        total = 0
+        with torch.inference_mode():
+            for x, y in zip(Xva, yva):
+                p = head.prob(x)
+                all_p.extend(p.tolist())
+                all_y.extend(y.tolist())
+                correct += ((p > 0.5).float() == y).float().sum().item()
+                total += y.numel()
+        metrics["val_acc"] = round(correct / max(total, 1), 4)
+        metrics["val_ece"] = round(expected_calibration_error(
+            torch.tensor(all_p), torch.tensor(all_y)), 4)
+    if progress:
+        logger.info("[ProcessRewardHead] trained: %s", metrics)
+    return head.to(device).eval(), metrics

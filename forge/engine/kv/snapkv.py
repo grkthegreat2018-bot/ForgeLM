@@ -134,10 +134,13 @@ class SnapKVCache:
         keep[obs_start:] = True  # always keep observation window
 
         # Compact buffer: copy kept entries to front (no reallocation)
+        # Buffers may be larger than `total` (growth slack) — mask only the
+        # first `total` slots or the boolean index will not broadcast.
         new_seq_len = keep.sum().item()
-        self.k_cache[:, :, :new_seq_len] = self.k_cache[:, :, keep]
-        self.v_cache[:, :, :new_seq_len] = self.v_cache[:, :, keep]
-        self.attention_scores[:, :, :new_seq_len] = self.attention_scores[:, :, keep]
+        self.k_cache[:, :, :new_seq_len] = self.k_cache[:, :, :total][:, :, keep]
+        self.v_cache[:, :, :new_seq_len] = self.v_cache[:, :, :total][:, :, keep]
+        self.attention_scores[:, :, :new_seq_len] = \
+            self.attention_scores[:, :, :total][:, :, keep]
         self.seq_len = new_seq_len
 
     def get(self) -> tuple[torch.Tensor, torch.Tensor]:

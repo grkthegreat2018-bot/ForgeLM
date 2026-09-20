@@ -18,7 +18,7 @@ ecosystem (QK-Clip/Dion/NorMuon), MoDA arXiv:2603.15619.
 | CISPO + ETR | DONE | `forge/self_play/grpo_trainer.py` (`rl_algorithm="cispo"`, `use_etr_reward`) + fixed pre-existing `kl` UnboundLocalError in GTPO path |
 | R49-1 Uno decoding | DONE | `forge/decoding/uno.py` (new: NgramProposer + UnoDecoding Psi-Spec), `engine/decoding.py` factory, `forge_engine._activate_decoding`, GUI activation catalog |
 | QK-Clip GUI | DONE | `forge_gui/pages/finetune.py` (QK-Clip tau spinbox → `--qk-clip-tau`) |
-| R49-2 KDA key | TODO (Phase 2) | `forge/keys/attention/kda_key.py` (planned) |
+| R49-2 KDA key | DONE (Phase 2) | `forge/keys/attention/kda_key.py` (KDALayer + KDAKey BI port, gate=0 bit-exact; config `use_kda`; recurrent+conv state wired into reset/prefill-snapshot/prefix-cache paths; naive fp32 scan — chunked kernel is a follow-up) |
 | R49-3 MoVA key | TODO (Phase 3) | `forge/keys/attention/mova_key.py` (planned) |
 | R49-4 DSA indexer | TODO (Phase 4) | `forge/engine/attention/lightning_indexer.py` (planned) |
 | zc-RMSNorm / attn output gate flags | TODO (Phase 0 remainder) | model_loader + config |

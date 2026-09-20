@@ -758,3 +758,280 @@ Known limitation: direct mode emits ~96tok derivations despite </think> priming
 (terse priming bakeoff: acc .30 tok 92 vs .23/95 — marginal). Next pools:
 Gate C convergence early-exit (DEER-validated, biggest token pool),
 terse-direct decoding, production wiring as generate(mode="auto").
+
+## R50 missing-feature batch + R49-2 KDA (2026-09-19)
+
+Shipped (survey -> implement -> CPU-tested; suite 2607 green):
+- R50-1 DRY penalty: `_dry_penalties`/`_apply_dry` in engine_common (+ local
+  copies in decoding.py to avoid import cycle); llama.cpp semantics —
+  longest-repeated-suffix scan over last_n, penalty = mult*base^(r-allowed)
+  subtracted in logit space. Wired through ALL gen paths + server models +
+  model_registry. NOTE: temp==0 short-circuits before penalties (matches
+  existing rep-penalty convention — DRY only applies when sampling).
+- R50-2 DoLa: `DoLaDecoding`, `build_decoding("dola")`; dynamic premature-
+  layer pick = argmax JSD over {n/4,n/2,3n/4}; needs return_hidden_states
+  (already exposed for EAGLE). Novel angle: Mamba-vs-attn layer contrast
+  on the hybrid — untested on real checkpoint yet.
+- R50-3 PRM: `ProcessRewardHead` + `fit_prm`/`score_steps` in decision_head.py.
+  Step-end positions via incremental encode (prefix+step+delim). Supports
+  per-step labels OR scalar outcome broadcast (Math-Shepherd weak sup).
+- R50-4 filler KV: `engine/kv/filler_kv.py` standalone cache + strategy
+  wrapper + `build_kv_cache("filler")` + activation fallback map.
+  `filler_token_ids(tokenizer)` derives English function-word/punct set.
+- R50-5 depth upscale: `merge_models.py depth_upscale/parse_layer_map/
+  depth_layer_types` + `--method depth` CLI; writes `.depth.json` sidecar.
+  NOT lossless (documented — warm start for continued training).
+- R49-2 KDA: `forge/keys/attention/kda_key.py` — KDALayer (per-key-dim
+  decay, GDN init, conv k=4, fp32 naive scan, sigmoid out-gate, scalar
+  gate=0) + KDAKey (BI; seeded deterministic port; convert_model_state
+  whole-ckpt wrapper). Config flags: use_kda, kda_n_heads, kda_head_dim,
+  kda_beta_gt1 (N3, off), kda_decay_floor. Wired: layers.py side-path on
+  x0 (cached gate==0 skip), llm.py new-seq reset + prefill snapshot,
+  prefix_cache capture/apply (KDA state continues across prefix hits —
+  conv prefix + S state both restored). VRAM ~25M params/layer @2560/20H;
+  state ~1.3MB fp32/layer; NO KV on KDA layers.
+
+Bugs found+fixed (BUG_LOG 2026-09-19):
+- snapkv/filler _evict bool-mask vs overgrown buffer (mask :total).
+- _min_k_filter dead sensitivity mask — now rightmost-exceeding cliff
+  (argmax fallback at sens=1). decoding.py copy had same bug.
+- fit_prm inference-mode features/labels ? post-harvest re-clone.
+- merge_models help-string unterminated quote (session-introduced).
+
+Still open (next round candidates):
+- KDA chunked-scan kernel (naive scan is O(T) python loop — fine for CPU
+  tests/short seqs, needs WY-representation chunked path for GPU speed).
+- KDA on real V2 checkpoint: bit-exact preset-lineage check vs V12.
+- V13 preset (Rule A): V12 + use_uno/use_kda/use_mova/use_lightning_index
+  /use_attn_output_gate/use_zc_rmsnorm — not created yet.
+- MoVA key, DSA lightning indexer (R49-3/4), CALM cross-attn adapters,
+  abliteration (guardrail eval needed — math-reasoning risk noted).
+- DoLa/DRY/PRM on real checkpoint (all tested on stubs only so far).
+- _forward_mod_skip path skips TITAN/MHC/KDA tail — check if KDA should
+  apply there too (skipped tokens bypass block entirely by design — OK).
+
+## R50 verification results (2026-09-19, smoke_r50_gpu.py on real V2)
+
+- DRY on real checkpoint: repeated-suffix prompt ? token ' on' penalized
+  -2526 logits; sampled continuation BROKE the repetition loop
+  ("on the mat. The cat sat on the mat..." ? "with the mat... sat with
+  the cat... on a mat... sat in"). DRY visibly changes behavior, not just
+  plumbing.
+- DoLa on V2: works after @torch.no_grad() fix on _contrast_logits
+  (inference-tensor inputs + requires_grad params crashed; BUG_LOG'd +
+  regression test). Output vs greedy: "Paris and the currency the euro.
+  Population is ~67" vs "Paris. The capital of Germany is Berlin."
+- KDA real-checkpoint port: convert_model_state on V2 sd ? 28 blocks ?
+  strict=True load ? max|dlogit| = 0.0 vs baseline at 3.2B. Port-first
+  verified at real scale, not just tiny.
+- CPU smoke (smoke_r50_features.py): 23/23 — filler KV on real tokenizer
+  (134 filler ids, 38?23 with 15 filler-first evictions), PRM harvest on
+  real tokenizer + 65k-vocab tiny, depth upscale strict load + typed-
+  layer negative check, KDA bit-exact + stateful decode on tiny.
+
+## R50 feature benchmark (bench_r50_features.py, V2 bf16, RTX 5070, greedy decode)
+
+| config | tok/s | peak GiB |
+|---|---|---|
+| baseline | 43.6 | 6.03 |
+| +DRY | 44.6 | 6.03 |
+| +DoLa fixed L8 | 43.1 | 6.03 |
+| +DoLa dynamic (JSD all layers) | 37.4 | 6.03 |
+| +KDA gate=0 | 39.8* | 7.75 (+1.72 weights) |
+| +KDA gate=1 | 39.2* | 7.75 |
+
+*KDA model loaded via plain ConfigurableResearchLLM, not FastBuild —
+part of the ~4 tok/s gap vs baseline may be loader path; gate0 vs gate1
+shows the delta-step itself is ~free at decode T=1. Naive-scan cost
+shows at prefill (chunked path still pending).
+
+- rep-3 on repetition prompt: 0.588 -> 0.000 with DRY (multiplier 1.0,
+  base 1.75, allowed 2, last_n 512).
+- DoLa dynamic -14% throughput = ~27 extra head projections/token.
+- Filler-KV @4096 ctx, budget 1024: V2 MQA 4->1 MiB (marginal);
+  qwen3_4b 36L/8KV 576->162 MiB (-414 MiB, -72%).
+- KDA params: +922M (+28.8% params) for a KDA side path on all 28
+  blocks — the future 3:1 hybrid preset would REPLACE layers, not add
+  side paths; current port is per-block warm-start.
+
+## R&D: checkpoint load speedup (2026-09-20) - SHIPPED
+
+Goal: faster model load in GUI + ForgeEngine on RTX 5070 / ForgeLM_V2
+6.39GB safetensors.
+
+### Baseline profile (bench_load_time.py)
+- total 5.22s: import 0.77, tokenizer 0.45, weight I/O **3.37s (dominant,
+  ~1.9 GB/s)**, KV alloc 0.07, registry 0.22, warmup 0.94.
+
+### Key finding
+- `fastsafetensors` is installed but BROKEN on this box: "GPU runtime
+  library not found (expected libcudart.so, libamdhip64.so, cudart64_XX.dll)"
+  - silently swallowed by try/except fallbacks, so real loads used
+  safetensors per-tensor pageable copies. Do NOT rely on that package here.
+- Disk floor (warm page cache): ~1.96-1.99s for 6.39GB.
+
+### Fix: `load_safetensors_pipelined` in forge/checkpoint_io.py
+- Parse header (struct+json), one `torch.empty` CUDA alloc per tensor
+  (same semantics as `get_tensor` - downstream weight surgery frees
+  storage identically), N reader threads each with a 128MB pinned
+  staging buffer, `readinto` file reads + per-tensor `copy_(
+  non_blocking=True)` slices on a shared side stream; per-thread CUDA
+  event guards staging-buffer reuse. Tensors never span groups.
+- Wired in: `ModelLoader._load_safetensors_mmap` + `_load_sharded_
+  safetensors` (between fastsafetensors attempt and safetensors fallback)
+  and `load_checkpoint` CUDA path. All keep the safetensors fallback on
+  exception. All `build_model_fast` callers benefit (GUI, sft_train,
+  hotswap, lifecycle wake, self-play).
+- `from_checkpoint` also starts `get_tokenizer` on a daemon thread and
+  joins lazily - tokenizer (~0.45s) overlaps weight I/O.
+
+### Measured (bench_weight_io.py / bench_load_time.py)
+- safetensors per-tensor CUDA: 3.29s (1.94 GB/s)
+- pipelined (8T/128MB pinned): **0.49-0.55s (~12-13 GB/s), 6.2x**
+- 21/21 + 40/40 sampled tensors bit-identical; peak VRAM = model size.
+- End-to-end `from_checkpoint`: **5.22s -> 2.42s** (weights 0.67s,
+  warmup 0.92s and import 0.77s now dominate).
+- GUI server preload (full HTTP path incl. uvicorn startup): ~3.4s to
+  ready:true.
+
+### GUI EngineService changes (engine_rt.py + deps.py)
+- Preload resident model in background at `services.start()`:
+  `FORGE_GUI_NO_PRELOAD=1` disables; `FORGE_GUI_PRELOAD` /
+  `FORGE_GUI_PRELOAD_CONFIG` override checkpoint/config. Skips cleanly
+  when checkpoint absent.
+- `load()` during loading: identical req -> no-op; different req ->
+  queued in `_queued_load`, runs via `_drain_queue` after settle.
+- Bare `load()` for the already-resident model -> no-op (no wasteful
+  unload+reload cycle).
+- `unload()` during in-flight load: `_load_seq` bump invalidates the
+  pending result; the superseded engine is freed via `_discard_engine`
+  (sleep level=2 + empty_cache) instead of being installed.
+- `unload()` uses `sleep(level=2)` - skips level-1's ~6.4GB GPU->CPU
+  copy (~2s) since the engine is deleted anyway.
+
+### Remaining load latency (not addressed)
+- warmup ~0.92s, forge import ~0.77s (import-lazying or a warm daemon
+  process would be the next levers), activation registry 0.22s.
+
+## BUG-FIX: chat route probe vs tools block (2026-09-20)
+Symptom: "Hello" in GUI chat -> ~150tok think parroting the master-prompt
+guidelines, then a bland "Answer:". Root cause found + fixed same session.
+
+Root cause (measured, ForgeLM V2 + gate_probes.pt):
+- chat_loop scored _route_p_easy on the PRODUCTION render incl. the
+  ~17-schema <tools> system block. Probe was trained tools-free; the
+  ~1k-token schema block collapses h_mean -> p_easy drops ~0.25:
+    q          tools   no-tools
+    Hello      0.098   0.355
+    hello      0.103   0.325
+    hi         0.090   0.288
+    hey        0.037   0.113
+    thanks!    0.029   0.224
+    2+2        0.234   0.549
+    prime fn   0.007   0.069
+- Threshold 0.2 was calibrated on tools=None renders -> every greeting
+  fell under it in production. p_notools ~= p_qonly -> the system prompt
+  contributes ~nothing; the tools block was the sole distractor.
+
+Fix (chat_loop.py):
+1. Probe input = tools-free render (same conv, tools=None). Matches the
+   trained distribution, keeps system+history signal, immune to tool-set
+   size. Generation still uses the tools render.
+2. _is_trivial_turn: whole-message greeting/ack/closing regex (<=48 chars)
+   short-circuits to direct BEFORE the probe — covers chit-chat the probe
+   can't see (gate_r has no chit-chat class: hey=0.113, yes=0.135 even
+   tools-free). Emits gate event p_easy=1.0.
+3. tests/unit/test_gated.py::TestTrivialTurn (26 cases). bench docstring
+   updated. 52/52 unit tests pass.
+
+Residual / next-round candidates:
+- Probe still blind to non-regex chit-chat ("got a sec?") -> gate_r
+  retrain with a chit-chat class on the real render (30min pipeline,
+  scripts in Temp may be gone — check).
+- Think CONTENT quality is an SFT artifact: model parrots system-prompt
+  guidelines in "we" voice, misassigns "You are ForgeLM V2" to the user.
+  Mitigations: shorten/reword master prompt; ablate THINKING_PREFIX;
+  hybrid SFT (think/no-think from DIFFERENT questions — Demystifying
+  Hybrid Thinking 2510.12680) or DAST/AdaptThink (2503.04472/2505.13417).
+- Fixed 160-tok cap -> DEER-style trial-answer confidence exit
+  (2504.15895) or Dynasor certaindex (2412.20993), training-free.
+- Expose per-request think_budget (Gemini thinkingBudget convention).
+
+UPDATE (same session) — full fix set shipped + GPU-verified e2e:
+- _conv_exit_observer: Gate C conv probe now wired into chat think path.
+  generate_stream/hidden_observer plumbs per-step last-token hidden from
+  _decode_tokens (return_hidden=True only when observer set). K=2
+  consecutive conv>0.75 past 32 tok -> force-answer inject via
+  _think_cap_processor(exit_flag=). Emits gate SSE {mode:"conv-exit"}.
+  Fixed budget is now just the backstop.
+- think_budget per-request: ChatSendRequest.think_budget -> run_chat ->
+  cap (0 = no forced exit; clamps 8..4096). Chat settings "Think budget"
+  NumInput (default 160, persisted in forge.chat.settings.v2).
+- E2E (real engine + probes, run_chat directly):
+    "Hello"     -> gate direct p=1.0 (trivial rule), clean greeting
+    "hey"       -> direct (model still emits stray </think> mid-answer —
+                   cosmetic; known direct-mode musing limitation)
+    "what's 2+2"-> gate direct p=0.549 (probe on tools-free render)
+    sqrt(2)     -> gate think p=0.02 -> conv-exit p=0.991 at ~35 think
+                   tok -> full correct proof. Conv probe works live.
+- 58 unit tests in test_gated.py (TestTrivialTurn + TestConvExitObserver
+  + exit_flag case); 128 touched-area tests green; tsc clean.
+
+UPDATE 2 — web-tool chat loop (e2e with real ToolHarness + DDG):
+Symptoms reported: model "cannot use web tools" + think-voice text
+leaking into the regular reply.
+
+Findings (measured):
+- web tools DO work end-to-end (defs in chat_tool_defs, dispatch at
+  tool_harness.py:356, DDG returned results). The breakage was the LOOP:
+- conv-exit fired on tool-CONTINUATION rounds (probe OOD there) ->
+  forced "Answer:" made model restate its plan -> re-emitted the SAME
+  web_search 5x, never synthesized.
+- "check the news"/"search the web..." score p_easy~0.31 -> DIRECT path
+  -> model writes musing in plain text then <tool_call> (direct mode
+  still emits calls fine) -> musing persisted as the visible "reply".
+
+Fixes shipped:
+- fresh_turn gate: routing + conv observer only when conv[-1] is user;
+  continuation rounds -> think + budget backstop only.
+- _call_sig repeat guard: identical name+args repeat -> defs=None next
+  round (forced synthesis); stray calls with defs=None are nulled.
+- direct+tool_calls -> pre-call musing dropped from stored msg;
+  _strip_direct_musing for text turns (answer = post-</think> tail).
+- master_prompt capabilities line now mentions web tools.
+
+Verified e2e: "check the news" -> direct -> web_search -> results ->
+continuation synthesized a real headlines list. No loops, no gate spam.
+
+Residual: DDG html parse returns ad-redirect URLs (y.js?ad_domain=...)
+as results — filter ad/redirect links in forge/web_primitives.py later.
+
+UPDATE 3 - news search fixed (the "agent cannot find today's news" pass):
+Root cause: not a restriction problem - web tools were already
+unrestricted (no safety gate, no approval gate, in chat_tool_defs +
+agent harness; enabledTools UI filter is opt-in). The DATA was junk:
+DDG html returned portal homepages (cnn.com/, nbcnews.com/) + y.js ad
+redirectors for news queries - zero real headlines.
+
+Fixes shipped (forge/web_primitives.py + web_tools.py):
+- new news_search tool -> Google News RSS
+  (news.google.com/rss/search?q=..&hl=en-US&gl=US&ceid=US:en; empty q
+  -> top-headlines feed). Returns real {title,url,published,source,
+  snippet}. Keyless. In chat_tool_defs + WebTools.NAMES automatically.
+- parse_ddg_html now skips duckduckgo.com/ + ad_domain= links (y.js
+  ads use u3= base64, not uddg= -> unwrap impossible -> drop).
+- ddg_search falls back to google_news_search when 0 parseable results.
+- agent_loop fallback ToolHarness now wires WebTools(enabled=True) so
+  web tools survive even if deps.make_harness factory fails.
+- agent DEFAULT_SYSTEM + master_prompt mention news_search.
+- web_search description now says "for current news prefer news_search".
+
+Regression found+fixed: _decode_tokens passed return_hidden=... to
+model.forward unconditionally -> broke _EngineModel mocks in
+test_recommended_improvements.py. Now only sends kwarg when
+hidden_observer is set.
+
+Verified LIVE e2e (real ForgeLM V2 + real ToolHarness, no mocks):
+"check the news" -> gate direct (0.588) -> news_search({"query":"news"})
+-> 5 real dated headlines (BBC/NBC/CNN/Fox, today) -> continuation
+synthesized formatted headlines list w/ sources. 133 tests green.

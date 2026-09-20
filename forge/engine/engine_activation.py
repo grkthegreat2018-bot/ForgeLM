@@ -127,7 +127,7 @@ class _ActivationMixin:
 
         Common args:
             kv_cache: "standard", "paged", "rotorquant", "hadamard_int4", "compressed",
-                      "streaming", "snapkv", "snapkv_4bit", "paged_eviction", "xquant",
+                      "streaming", "snapkv", "filler", "snapkv_4bit", "paged_eviction", "xquant",
                       "cpu_offload", "s4r", "hqe_kv", "hyquant",
                       "evo_sparse", "vegas", "hisparse", "capture",
                       "vtoken", "auto_context"
@@ -252,6 +252,7 @@ class _ActivationMixin:
         "paged": ["s4r", "standard", "cpu_offload"],
         "compressed": ["s4r", "standard", "cpu_offload"],
         "snapkv": ["s4r", "standard", "cpu_offload"],
+        "filler": ["snapkv", "s4r", "standard", "cpu_offload"],
         "snapkv_4bit": ["s4r", "standard", "cpu_offload"],
         "paged_eviction": ["s4r", "standard", "cpu_offload"],
         "xquant": ["s4r", "standard", "cpu_offload"],
@@ -315,6 +316,13 @@ class _ActivationMixin:
                 cache.init(n_heads, head_dim, n_kv, max_seq,
                            str(self.device), self.dtype)
                 self.kv_cache = cache
+                # R50-4: filler eviction needs the tokenizer's filler id set.
+                if try_cache == "filler" and hasattr(cache, "set_filler_ids"):
+                    try:
+                        from forge.engine.kv.filler_kv import filler_token_ids
+                        cache.set_filler_ids(filler_token_ids(self.tokenizer))
+                    except Exception as e:
+                        self._log(f"Filler id set skipped: {e}", level="warn")
                 # Track active KV bits for OOM-recovery fallback (s4r 4-bit, etc.)
                 self._active_kv_bits = getattr(cache, "bits", 8)
                 self._active_kv_cache_name = try_cache
@@ -372,6 +380,14 @@ class _ActivationMixin:
             #                            entropy_stop=0.1).
             decode_kwargs.setdefault("block_size", 4)
             decode_kwargs.setdefault("entropy_stop", None)
+        elif decoding == "dola":
+            # R50-2: DoLa self-contrastive decoding (ICLR 2024). Per-step
+            # auto layer selection by default; pin with
+            # engine.activate(decoding="dola", early_layer=7) or a custom
+            # candidate list via early_candidates=[...].
+            decode_kwargs.setdefault("early_layer", None)
+            decode_kwargs.setdefault("early_candidates", None)
+            decode_kwargs.setdefault("candidate_top_k", 64)
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 

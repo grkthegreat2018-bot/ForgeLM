@@ -661,6 +661,21 @@ class ModularBlock(nn.Module):
             self._forge_hybrid_sink_threshold = getattr(
                 config, 'forge_hybrid_sink_threshold', float('inf'))
 
+        # R49-2 KDA: gated delta-attention side-path (gate=0 → lossless at
+        # start). Applies to every block type — attention, mamba, and conv —
+        # as an additive branch on the pre-block residual.
+        self._kda = None
+        self._kda_gate_zero: bool | None = None  # cached eval gate state
+        if getattr(config, 'use_kda', False):
+            from forge.keys.attention.kda_key import KDALayer
+            kda_heads = getattr(config, 'kda_n_heads', 0) or config.n_heads
+            self._kda = KDALayer(
+                config.d_model, kda_heads,
+                head_dim=getattr(config, 'kda_head_dim', 0) or None,
+                beta_gt1=getattr(config, 'kda_beta_gt1', False),
+                decay_floor=getattr(config, 'kda_decay_floor', 0.0),
+                layer_idx=layer_idx)
+
         # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
         # only FFN — biggest activation consumer, ~2-4x VRAM savings on
         # intermediates with minimal compute penalty), "attn" (recompute only
@@ -935,6 +950,16 @@ class ModularBlock(nn.Module):
             if isinstance(ssm_out, tuple):
                 ssm_out = ssm_out[0]
             x = x + ssm_out
+
+        # R49-2 KDA: gated delta-attention branch on the pre-block residual.
+        # gate=0 → skip entirely (bit-exact vs. baseline + no decode overhead).
+        # The gate is a scalar parameter that only changes via optimizer steps,
+        # so its zero-check is cached after the first .item() sync.
+        if self._kda is not None:
+            if self._kda_gate_zero is None:
+                self._kda_gate_zero = (self._kda.gate.item() == 0.0)
+            if not self._kda_gate_zero:
+                x = x + self._kda(x0, use_cache=use_cache)
 
         return x, present
 

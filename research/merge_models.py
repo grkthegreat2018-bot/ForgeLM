@@ -1116,6 +1116,117 @@ def evolve(
 
 
 # ---------------------------------------------------------------------------
+# Depth upscaling (R50-5) — mergekit "passthrough" layer duplication
+# ---------------------------------------------------------------------------
+# Grows a checkpoint's depth with zero training: each output block i
+# copies the weights of source block ``layer_map[i]``. Duplicated layers
+# are NOT lossless (a duplicated Mamba/attention block changes the
+# function), so this is a warm start for continued training, not a
+# finished model — the copied blocks act as strong priors that typically
+# recover within a few hundred steps (SOLAR/mergekit depth-upscaling).
+#
+# ForgeAI caveat: blocks are TYPED (Mamba-2 vs GQA attention). The layer
+# map therefore only makes sense when duplicated source blocks share the
+# type expected at their destination slot; the caller supplies the new
+# ``layer_types`` ordering via --layer-types when the target config
+# needs it.
+
+def parse_layer_map(spec: str) -> list[int]:
+    """Parse a layer-map spec like ``"0-15,8,9,10,16-23"`` → list[int].
+
+    Ranges are inclusive on both ends (``0-3`` = [0,1,2,3]). Commas
+    separate individual indices and ranges; whitespace is ignored.
+    """
+    out: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            lo, hi = int(a), int(b)
+            if hi < lo:
+                raise ValueError(f"descending range {part!r} in layer map")
+            out.extend(range(lo, hi + 1))
+        else:
+            out.append(int(part))
+    if not out:
+        raise ValueError("empty layer map")
+    return out
+
+
+def depth_upscale(state: dict[str, torch.Tensor],
+                  layer_map: list[int],
+                  layer_types: list[str] | None = None,
+                  ) -> tuple[dict[str, torch.Tensor], dict]:
+    """Duplicate/reorder blocks per ``layer_map`` — returns (state, meta).
+
+    Args:
+        state: source state dict with ``blocks.{i}.``-prefixed keys.
+        layer_map: source block index for each output block. Length =
+            new depth; every entry must be < source depth.
+        layer_types: optional per-output-block type labels ("mamba",
+            "attention", ...). When omitted, derived by mapping each
+            output slot to its source block index — the caller should
+            still verify type consistency against the target config.
+
+    Returns:
+        (new_state, meta) where meta = {"layer_map", "n_layers",
+        "layer_types"} — write it as a sidecar so the loader can
+        rebuild the per-layer type schedule.
+    """
+    n_src = _n_blocks(state)
+    if n_src == 0:
+        raise ValueError("state dict has no blocks.* keys")
+    for src in layer_map:
+        if not (0 <= src < n_src):
+            raise ValueError(
+                f"layer_map entry {src} out of range for {n_src} blocks")
+
+    # Partition keys into block-indexed and passthrough (non-block) sets.
+    block_keys: dict[int, list[str]] = {i: [] for i in range(n_src)}
+    passthrough: dict[str, torch.Tensor] = {}
+    for k, v in state.items():
+        idx = _block_index(k)
+        if idx is None:
+            passthrough[k] = v
+        else:
+            block_keys[idx].append(k)
+
+    out = dict(passthrough)
+    for new_idx, src in enumerate(layer_map):
+        for k in block_keys[src]:
+            suffix = k.split(".", 2)[2]  # strip "blocks.{i}."
+            out[f"blocks.{new_idx}.{suffix}"] = state[k].clone()
+
+    derived_types = (
+        list(layer_types) if layer_types is not None else None)
+    if derived_types is not None and len(derived_types) != len(layer_map):
+        raise ValueError(
+            f"layer_types length {len(derived_types)} != "
+            f"new depth {len(layer_map)}")
+
+    meta = {
+        "layer_map": list(layer_map),
+        "n_layers": len(layer_map),
+        "layer_types": derived_types,
+        "source_n_layers": n_src,
+    }
+    return out, meta
+
+
+def depth_layer_types(state: dict[str, torch.Tensor],
+                      layer_map: list[int],
+                      source_types: list[str]) -> list[str]:
+    """Derive new per-layer types from the source schedule + layer map."""
+    if len(source_types) != _n_blocks(state):
+        raise ValueError(
+            f"source_types length {len(source_types)} != "
+            f"source depth {_n_blocks(state)}")
+    return [source_types[src] for src in layer_map]
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1125,7 +1236,8 @@ def main():
                    choices=["linear", "task_arith", "slerp", "ties", "dare", "svd",
                             "crossover_blockwise", "crossover_block_random",
                             "crossover_uniform", "mutate_gaussian",
-                            "mutate_quant_perturb", "mutate_block_swap", "evolve"])
+                            "mutate_quant_perturb", "mutate_block_swap", "evolve",
+                            "depth"])
     p.add_argument("--base", default=None,
                    help="Base model checkpoint (required for task_arith/ties/dare/svd)")
     p.add_argument("--model-a", default=None, help="First model (slerp/linear 2-model)")
@@ -1180,6 +1292,14 @@ def main():
                    help="evolve: hall of fame size (0=disabled)")
     p.add_argument("--convergence-patience", type=int, default=0,
                    help="evolve: stop if no improvement for N gens (0=disabled)")
+    p.add_argument("--layers", default=None,
+                   help='depth: layer map spec, e.g. "0-15,8-23" (ranges '
+                        'inclusive). Duplicated blocks warm-start deeper '
+                        'models; write a .depth.json sidecar with the map.')
+    p.add_argument("--layer-types", default=None,
+                   help="depth: comma-separated per-output-block types "
+                        "(mamba,...,attention); optional — defaults to "
+                        "the source type schedule remapped by --layers.")
     args = p.parse_args()
 
     out_path = args.out
@@ -1235,6 +1355,26 @@ def main():
         a = _load_state_dict(args.model_a)
         print(f"Quant-scale perturbation: sigma={args.sigma}")
         merged = mutate_quant_perturb(a, sigma=args.sigma, seed=args.seed)
+
+    elif args.method == "depth":
+        if not args.model_a:
+            p.error("--model-a required for depth (the source checkpoint)")
+        if not args.layers:
+            p.error('--layers required for depth, e.g. "0-15,8-23"')
+        a = _load_state_dict(args.model_a)
+        layer_map = parse_layer_map(args.layers)
+        layer_types = (
+            [t.strip() for t in args.layer_types.split(",")]
+            if args.layer_types else None)
+        print(f"Depth upscale: {args.model_a} "
+              f"{_n_blocks(a)} -> {len(layer_map)} blocks, map={args.layers}")
+        merged, meta = depth_upscale(a, layer_map, layer_types=layer_types)
+        # Sidecar with the layer map for loader/config reconstruction.
+        import json as _json
+        sidecar = str(Path(out_path).with_suffix(".depth.json"))
+        with open(sidecar, "w") as f:
+            _json.dump(meta, f, indent=2)
+        print(f"  layer map sidecar: {sidecar}")
 
     elif args.method == "mutate_block_swap":
         if not args.model_a or not args.model_b:

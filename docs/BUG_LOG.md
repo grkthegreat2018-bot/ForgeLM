@@ -414,3 +414,60 @@ Restored per-mixin imports for every symbol each file actually uses:
   sentiment/hype scores land on the right level, noul directions all
   correct (0.65-0.79 true / 0.13-0.15 false â€” direction right,
   calibration soft as expected pre-Tier-1). 31 decide tests pass.
+
+## 2026-09-19 — KV-cache eviction mask overflow + min-k dead sensitivity
+
+### Symptom
+1. `SnapKVCache._evict` (and the new `FillerKVCache._evict` modeled on it)
+   crashed with `IndexError: The shape of the mask [total] does not match
+   the indexed tensor` whenever the K/V buffer had grown beyond the live
+   sequence length — i.e. any single append with `T > 1` crossing the
+   capacity boundary, or after a buffer-doubling growth.
+2. `_min_k_filter` (`engine_common.py`) and `_min_k_filter_logits`
+   (`decoding.py`) computed `weighted_diffs > sensitivity * max_decay` and
+   discarded the result; the `sensitivity` argument had no effect — every
+   call truncated at the global argmax regardless of the configured value.
+
+### Root Cause
+1. The eviction `keep` mask is sized `total` (= live seq_len) but was
+   applied to the full buffer axis (capacity > total after growth slack).
+   Trigger: `cache.append(k, v)` with T=20 on a 12-capacity cache
+   allocated 32 slots; `k_cache[:, :, keep]` then fails to broadcast.
+2. Dead expression — the boolean cliff-mask was computed and thrown away;
+   `cliff_pos = weighted_diffs.argmax(...)` ignored the threshold.
+
+### Resolution
+1. Mask only the first `total` buffer slots:
+   `k_cache[:, :, :total][:, :, keep]` (same for v/scores/filler flags) in
+   both `snapkv.py::_evict` and `filler_kv.py::_evict`.
+2. Truncate at the *rightmost* position whose weighted decay exceeds
+   `sensitivity * max_decay` (higher sensitivity ? higher threshold ?
+   earlier rightmost cliff ? more aggressive truncation, matching the
+   docstring); fall back to the argmax when no position exceeds
+   (sensitivity=1 edge). Applied identically in both copies.
+
+### Verification
+`test_snapkv_multi_token_overflow_regression` (T=20 single-shot append ?
+seq_len==12, no crash) and `test_min_k_sensitivity_controls_truncation`
+(sens 0.1 keeps 5 tokens vs sens 0.9 keeps 1 on a two-cliff distribution).
+Pre-existing `test_min_k_*` cases still pass (single-cliff inputs give
+identical results). Full unit suite: 2607 passed.
+
+### Follow-up (R50 feature smoke): DoLa inference-tensor crash
+
+- **Symptom:** `DoLaDecoding.generate` crashed on the first sampled step
+  with `RuntimeError: Inference tensors cannot be saved for backward`
+  inside `ln_f`/`head` — only on real models, not in unit tests (stubs
+  had requires_grad=False params).
+- **Root cause:** `_contrast_logits`/`_early_logits` ran outside any
+  no-grad scope while their `hidden_list` inputs were inference tensors
+  produced by the cached prefill/decode forwards. Model params
+  (`requires_grad=True`) tried to save them for backward.
+- **Resolution:** `@torch.no_grad()` on `_contrast_logits` — `no_grad`
+  (not `inference_mode`) so the returned logits stay normal tensors the
+  sampling chain can mutate in place.
+- **Verification:** `test_dola_contrast_accepts_inference_tensors`
+  (inference-mode inputs + requires_grad params + in-place mutation on
+  the output); GPU smoke `scripts/smoke_r50_gpu.py` — DoLa generates on
+  real ForgeLM V2 ("Paris and the currency the euro" vs greedy
+  "Paris. The capital of Germany is Berlin").

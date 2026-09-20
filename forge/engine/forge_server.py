@@ -115,6 +115,11 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     stop: list[str] | None = None
     repetition_penalty: float = 1.05
+    min_p: float = 0.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 512
     seed: int | None = None
     logprobs: bool | None = None
     top_logprobs: int | None = None
@@ -149,6 +154,11 @@ class CompletionRequest(BaseModel):
     stream: bool = False
     stop: list[str] | None = None
     repetition_penalty: float = 1.05
+    min_p: float = 0.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 512
     seed: int | None = None
     logprobs: int | None = None
     prompt_logprobs: int | None = None
@@ -798,6 +808,11 @@ class ForgeServer:
                 top_p=req.top_p,
                 top_k=req.top_k,
                 repetition_penalty=req.repetition_penalty,
+                min_p=req.min_p,
+                dry_multiplier=req.dry_multiplier,
+                dry_base=req.dry_base,
+                dry_allowed_length=req.dry_allowed_length,
+                dry_penalty_last_n=req.dry_penalty_last_n,
                 stop=req.stop,
                 seed=req.seed,
                 logprobs=req.top_logprobs if req.logprobs else None,
@@ -886,6 +901,11 @@ class ForgeServer:
                 top_p=req.top_p,
                 top_k=req.top_k,
                 repetition_penalty=req.repetition_penalty,
+                min_p=req.min_p,
+                dry_multiplier=req.dry_multiplier,
+                dry_base=req.dry_base,
+                dry_allowed_length=req.dry_allowed_length,
+                dry_penalty_last_n=req.dry_penalty_last_n,
                 stop=req.stop,
                 seed=req.seed,
             )
@@ -1820,6 +1840,11 @@ class ForgeServer:
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
+                min_p=req.min_p,
+                dry_multiplier=req.dry_multiplier,
+                dry_base=req.dry_base,
+                dry_allowed_length=req.dry_allowed_length,
+                dry_penalty_last_n=req.dry_penalty_last_n,
             ):
                 accumulated += text_chunk
                 # Incremental marker state machine — handles markers split
@@ -1927,6 +1952,11 @@ class ForgeServer:
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
+                min_p=req.min_p,
+                dry_multiplier=req.dry_multiplier,
+                dry_base=req.dry_base,
+                dry_allowed_length=req.dry_allowed_length,
+                dry_penalty_last_n=req.dry_penalty_last_n,
             ):
                 clean = _strip_markers(text_chunk)
                 if clean:

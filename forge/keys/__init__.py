@@ -9,7 +9,7 @@ Canonical keys (imported by forge/model_loader.py):
   architecture: attn_residual, factorized_embed, gated_residual, hyperloop,
                 kronecker_embed, mamba3, mamba_probe, mhc, mod_router,
                 titan_memory
-  attention:    csa, differential_attn, gla, gta, lisa, outro, qsa
+  attention:    csa, differential_attn, gla, gta, kda, lisa, outro, qsa
   compression:  kron_ffn, monarch_ffn, nlrq_ffn, tt_ffn
   knowledge:    ngram_embedding
   misc:         pit

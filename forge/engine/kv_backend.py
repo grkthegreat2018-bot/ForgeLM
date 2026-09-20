@@ -417,6 +417,8 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     if strategy == "matryoshka":
         from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
         return MatryoshkaKVCache()
+    if strategy == "filler":
+        return FillerKVCacheStrategy()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()
@@ -472,6 +474,50 @@ class SnapKVCacheStrategy(KVCacheStrategy):
 
     def append(self, k, v, position, attention_weights=None):
         self.cache.append(k, v, position, attention_weights=attention_weights)
+        self.seq_len = self.cache.seq_len
+
+    def get(self, positions):
+        return self.cache.get()
+
+    def get_past_kv(self):
+        return self.cache.get_past_kv()
+
+    def clear(self):
+        self.cache.clear()
+        self.seq_len = 0
+
+    def info(self):
+        return self.cache.info()
+
+
+class FillerKVCacheStrategy(KVCacheStrategy):
+    """Filler-token-first KV eviction — wraps kv/filler_kv.py.
+
+    Semantic token-type-aware eviction (R50-4): function words and
+    punctuation are evicted before attention-score losers. The filler set
+    comes from ``filler_ids`` (or ``filler_pred``); when no token ids are
+    passed to ``append`` it degrades to SnapKV-style score eviction.
+    """
+
+    def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
+        from forge.engine.kv.filler_kv import FillerKVCache
+        obs_window = 128
+        budget = min(512, max_seq_len)
+        self.cache = FillerKVCache(
+            observation_window=obs_window, budget=budget,
+            n_kv_heads=n_kv_heads, head_dim=head_dim,
+            device=device, dtype=dtype,
+        )
+        self.seq_len = 0
+
+    def set_filler_ids(self, ids):
+        """Attach a tokenizer-derived filler id set post-init."""
+        self.cache.filler_ids = set(ids)
+
+    def append(self, k, v, position, attention_weights=None, token_ids=None):
+        self.cache.append(k, v, position,
+                          attention_weights=attention_weights,
+                          token_ids=token_ids)
         self.seq_len = self.cache.seq_len
 
     def get(self, positions):

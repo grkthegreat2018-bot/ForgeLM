@@ -69,12 +69,19 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
     # Find the sharpest transition (semantic cliff).
     # The cliff is where the weighted decay rate exceeds sensitivity * max_decay.
     max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=eps)
-    weighted_diffs > sensitivity * max_decay  # (batch, n)
+    cliff_mask = weighted_diffs > sensitivity * max_decay  # (batch, n)
     # Find the first cliff position (rightmost cliff that separates core from tail).
     # We want to keep all tokens up to and including the last cliff.
     # cliff_mask is True at positions where there's a sharp transition.
     # The truncation point is the position of the sharpest cliff.
-    cliff_pos = weighted_diffs.argmax(dim=-1, keepdim=True)  # (batch, 1)
+    idx = torch.arange(n, device=logits.device).expand_as(cliff_mask)
+    last_cliff = torch.where(
+        cliff_mask, idx, torch.full_like(idx, -1)).amax(dim=-1, keepdim=True)
+    # Fallback: no position exceeds the threshold (e.g. sensitivity=1)
+    # — truncate at the single sharpest transition.
+    cliff_pos = torch.where(
+        last_cliff >= 0, last_cliff,
+        weighted_diffs.argmax(dim=-1, keepdim=True))  # (batch, 1)
     # Keep tokens [0, cliff_pos], mask the rest.
     positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
     keep = positions <= cliff_pos  # (batch, vocab)
@@ -85,6 +92,70 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
     mask = torch.zeros_like(logits, dtype=torch.bool)
     mask.scatter_(-1, sorted_indices, ~keep)
     return logits.masked_fill(mask, float("-inf"))
+
+
+def _dry_penalties(
+    context_ids: list[int],
+    last_n: int,
+    allowed_length: int,
+    multiplier: float,
+    base: float,
+) -> dict[int, float]:
+    """DRY repetition penalty (llama.cpp ``sampler_dry``, p-e-w).
+
+    Finds the longest suffix of ``context_ids`` that also ends at each
+    earlier position ``i``; the token that would continue such a repeat
+    (``context_ids[i+1]``) receives penalty
+    ``multiplier * base ** (match_len - allowed_length)`` (logit-space
+    subtraction, i.e. multiplicative in probability space).
+
+    Args:
+        context_ids: full token sequence so far (prompt + generated).
+        last_n: only the trailing ``last_n`` positions are scanned as
+            candidate match end-points (llama.cpp ``dry_penalty_last_n``).
+        allowed_length: repeats of at most this length are free
+            (llama.cpp default 2).
+        multiplier: penalty scale; 0 disables the check.
+        base: exponential growth per excess repeated token
+            (llama.cpp default 1.75).
+
+    Returns:
+        ``{token_id: penalty}`` — apply ``logits[..., tok] -= penalty``.
+    """
+    n = len(context_ids)
+    if multiplier <= 0 or n < 2 or last_n <= 0:
+        return {}
+    last_idx = n - 1
+    start = max(0, last_idx - last_n)
+    match_len: dict[int, int] = {}
+    for i in range(start, last_idx):
+        if context_ids[i] != context_ids[last_idx]:
+            continue
+        r = 1
+        while i - r >= 0 and context_ids[i - r] == context_ids[last_idx - r]:
+            r += 1
+        if r > allowed_length:
+            nxt = context_ids[i + 1]
+            if r > match_len.get(nxt, 0):
+                match_len[nxt] = r
+    return {
+        tok: multiplier * (base ** (r - allowed_length))
+        for tok, r in match_len.items()
+    }
+
+
+def _apply_dry(
+    next_logits: torch.Tensor, penalties: dict[int, float]
+) -> torch.Tensor:
+    """Subtract DRY penalties from a (vocab,) or (B, vocab) logit slice."""
+    if not penalties:
+        return next_logits
+    toks = torch.tensor(list(penalties.keys()), device=next_logits.device)
+    pens = torch.tensor(
+        list(penalties.values()), device=next_logits.device, dtype=next_logits.dtype
+    )
+    next_logits.index_copy_(-1, toks, next_logits.index_select(-1, toks) - pens)
+    return next_logits
 
 
 # Module-level caches to avoid repeated disk I/O for checkpoint metadata and sizes.

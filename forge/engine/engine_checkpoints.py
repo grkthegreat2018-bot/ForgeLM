@@ -61,12 +61,29 @@ class _CheckpointLoadingMixin:
         # on the config's vocab so HF-style checkpoints get a matching
         # tokenizer (explicit tokenizer_path always wins).
         tok_path = tokenizer_path or _tokenizer_for_vocab(cfg.vocab_size)
-        tokenizer = get_tokenizer(tok_path)
+        # Resolve the tokenizer lazily on a daemon thread — the ~0.4s fast-path
+        # load overlaps with weight I/O instead of serializing before it.
+        _tok_box: dict = {}
+
+        def _load_tok():
+            try:
+                _tok_box["t"] = get_tokenizer(tok_path)
+            except Exception as e:
+                _tok_box["e"] = e
+
+        _tok_thread = threading.Thread(target=_load_tok, daemon=True)
+        _tok_thread.start()
+
+        def _tokenizer():
+            _tok_thread.join()
+            if "e" in _tok_box:
+                raise _tok_box["e"]
+            return _tok_box["t"]
 
         # GGUF checkpoint detection — route to ForgeLoader for dequant + load
         if str(checkpoint).lower().endswith(".gguf"):
             return cls._load_gguf_checkpoint(
-                checkpoint, tokenizer, device, auto_activate, **kwargs)
+                checkpoint, _tokenizer(), device, auto_activate, **kwargs)
 
         ckpt_size = _checkpoint_size_cache.get(checkpoint)
         if ckpt_size is None:
@@ -114,14 +131,14 @@ class _CheckpointLoadingMixin:
         try:
             if is_prequant:
                 engine = cls._load_prequant(
-                    cfg, checkpoint, tokenizer, device, metadata, **kwargs)
+                    cfg, checkpoint, _tokenizer(), device, metadata, **kwargs)
             elif fits:
                 engine = cls._load_standard(
-                    cfg, checkpoint, tokenizer, device, **kwargs)
+                    cfg, checkpoint, _tokenizer(), device, **kwargs)
             else:
                 # Check if hybrid offload can bridge the gap
                 engine = cls._load_with_fallback(
-                    cfg, checkpoint, tokenizer, device,
+                    cfg, checkpoint, _tokenizer(), device,
                     ckpt_size, vram_free, **kwargs)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if "size mismatch" in str(e).lower():
@@ -140,7 +157,7 @@ class _CheckpointLoadingMixin:
                 "Load path failed (%s), falling back to AirLLM streaming...", e)
             cls._clear_cuda_cache_static(dev)
             engine = cls._load_streaming(
-                cfg, checkpoint, tokenizer, device,
+                cfg, checkpoint, _tokenizer(), device,
                 ckpt_size, vram_free, **kwargs)
 
         if auto_activate and engine is not None:

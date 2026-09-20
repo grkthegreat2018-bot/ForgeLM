@@ -469,6 +469,18 @@ class ModelConfig:
     forge_hybrid_sink_threshold: float = float("inf")  # routing threshold (inf = all attention at warm start)
     forge_hybrid_n_ssm_layers: int | None = None  # None = all layers, int = subset for gradual rollout
 
+    # === R49-2: KDA — Kimi Delta Attention (Gated DeltaNet) side-path ===
+    # Adds a linear-attention branch to every block, gated to zero at init
+    # (bit-exact warm start; training opens the gate). KDA layers hold a
+    # fixed (H x d_k x d_v) recurrent state and NO KV cache — a future
+    # 3:1 KDA:full-attention hybrid cuts KV ~75%. VRAM: ~25M params/layer
+    # at d_model=2560,H=20 (bf16 ~50MB/layer); state ~1.3MB fp32/layer.
+    use_kda: bool = False
+    kda_n_heads: int = 0            # 0 = inherit n_heads
+    kda_head_dim: int = 0           # 0 = inherit d_model // n_heads
+    kda_beta_gt1: bool = False      # N3: allow beta in (0,2) — off (destabilization risk)
+    kda_decay_floor: float = 0.0    # optional lower bound on per-key-dim decay
+
     # === Preset lineage (critique F2 — machine-enforced lineage) ===
     # parent: name of the parent preset this one is derived from (or None for
     #   root presets). When set, get_config() validates that every field in
