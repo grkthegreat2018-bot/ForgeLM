@@ -674,12 +674,12 @@ class _ActivationMixin:
         # Get or load original model
         if model_orig is None:
             # Reload from checkpoint if available
-            ckpt_path = getattr(self, '_checkpoint_path', None)
-            if ckpt_path is not None:
-                from forge.engine.model_loader import ModelLoader
-                loader = ModelLoader()
-                model_orig, _ = loader.load_default_model(
-                    str(ckpt_path), device=str(self.device))
+            ckpt_path = getattr(self, 'checkpoint_path', None)
+            cfg = getattr(self, 'config', None)
+            if ckpt_path is not None and cfg is not None:
+                from forge.model_loader import ModelLoader
+                model_orig = ModelLoader.build_model_fast(
+                    cfg, checkpoint_path=str(ckpt_path))
             else:
                 self._log("block_reconstruct: no original model available "
                           "(need model_orig or checkpoint_path)", level="warn")

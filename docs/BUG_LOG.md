@@ -112,9 +112,9 @@ ForgeEvolve `boot` run showed two suspicious results:
 
 1. **CrossLayerKV recon_err (kv_domains.py L485)**: The reconstruction
    error formula was:
-   ```python
+   ``python
    (group[-n:] - shared.expand(...).norm()).mean()
-   ```
+   ``
    `.norm()` was applied to `shared.expand(...)` (a scalar), not to the
    difference `(group - shared)`. This subtracted a large scalar from each
    group element, producing large negative values. The score formula
@@ -131,10 +131,10 @@ ForgeEvolve `boot` run showed two suspicious results:
 
 1. **CrossLayerKV**: Replaced the broken formula with proper relative L2
    reconstruction error:
-   ```python
+   ``python
    diff = target - recon
    recon_err += float(diff.norm().item() / (target.norm().item() + 1e-8))
-   ```
+   ``
    This is always non-negative and in [0, ~2] range.
 
 2. **Engine**: Added `metadata_list` alongside the existing `scores` and
@@ -415,17 +415,17 @@ Restored per-mixin imports for every symbol each file actually uses:
   correct (0.65-0.79 true / 0.13-0.15 false â€” direction right,
   calibration soft as expected pre-Tier-1). 31 decide tests pass.
 
-## 2026-09-19 — KV-cache eviction mask overflow + min-k dead sensitivity
+## 2026-09-19 ï¿½ KV-cache eviction mask overflow + min-k dead sensitivity
 
 ### Symptom
 1. `SnapKVCache._evict` (and the new `FillerKVCache._evict` modeled on it)
    crashed with `IndexError: The shape of the mask [total] does not match
    the indexed tensor` whenever the K/V buffer had grown beyond the live
-   sequence length — i.e. any single append with `T > 1` crossing the
+   sequence length ï¿½ i.e. any single append with `T > 1` crossing the
    capacity boundary, or after a buffer-doubling growth.
 2. `_min_k_filter` (`engine_common.py`) and `_min_k_filter_logits`
    (`decoding.py`) computed `weighted_diffs > sensitivity * max_decay` and
-   discarded the result; the `sensitivity` argument had no effect — every
+   discarded the result; the `sensitivity` argument had no effect ï¿½ every
    call truncated at the global argmax regardless of the configured value.
 
 ### Root Cause
@@ -433,7 +433,7 @@ Restored per-mixin imports for every symbol each file actually uses:
    applied to the full buffer axis (capacity > total after growth slack).
    Trigger: `cache.append(k, v)` with T=20 on a 12-capacity cache
    allocated 32 slots; `k_cache[:, :, keep]` then fails to broadcast.
-2. Dead expression — the boolean cliff-mask was computed and thrown away;
+2. Dead expression ï¿½ the boolean cliff-mask was computed and thrown away;
    `cliff_pos = weighted_diffs.argmax(...)` ignored the threshold.
 
 ### Resolution
@@ -457,17 +457,62 @@ identical results). Full unit suite: 2607 passed.
 
 - **Symptom:** `DoLaDecoding.generate` crashed on the first sampled step
   with `RuntimeError: Inference tensors cannot be saved for backward`
-  inside `ln_f`/`head` — only on real models, not in unit tests (stubs
+  inside `ln_f`/`head` ï¿½ only on real models, not in unit tests (stubs
   had requires_grad=False params).
 - **Root cause:** `_contrast_logits`/`_early_logits` ran outside any
   no-grad scope while their `hidden_list` inputs were inference tensors
   produced by the cached prefill/decode forwards. Model params
   (`requires_grad=True`) tried to save them for backward.
-- **Resolution:** `@torch.no_grad()` on `_contrast_logits` — `no_grad`
+- **Resolution:** `@torch.no_grad()` on `_contrast_logits` ï¿½ `no_grad`
   (not `inference_mode`) so the returned logits stay normal tensors the
   sampling chain can mutate in place.
 - **Verification:** `test_dola_contrast_accepts_inference_tensors`
   (inference-mode inputs + requires_grad params + in-place mutation on
-  the output); GPU smoke `scripts/smoke_r50_gpu.py` — DoLa generates on
+  the output); GPU smoke `scripts/smoke_r50_gpu.py` ï¿½ DoLa generates on
   real ForgeLM V2 ("Paris and the currency the euro" vs greedy
   "Paris. The capital of Germany is Berlin").
+
+
+## 2026-09-20 - Cleanup sweep: three broken import paths found + fixed
+
+### Symptom
+1. `engine_activation.block_reconstruct` checkpoint-reload branch was
+   unreachable-by-accident: read `self._checkpoint_path` (never set -
+   the real attr is `self.checkpoint_path`) AND imported
+   `forge.engine.model_loader` (module does not exist) AND called
+   `load_default_model` as a `ModelLoader` method (it is a module
+   function in the `forge.model_loader` facade).
+2. `build_decoding('speculative')` mapped to `SpeculativeDecoding`,
+   whose `generate()` imported `research.speculative_decode` - deleted
+   in the research->forge migration, so the strategy crashed on first call.
+3. Four production keys (`pit_key`, `lerope_key`, `attn_residual_key`,
+   `mhc_key`) import `forge.keys.safety.safe_apply` for their
+   `safe=True` path, but `safety.py` had been moved to
+   `tests/fixtures/keys/` - the safe path raised ImportError.
+
+### Root Cause
+Refactor leftovers: file moves (safety.py -> fixtures, sandbox ->
+training/runners, research/ -> forge/) updated the movers but not all
+import sites; dormant paths had no test coverage so the breakage stayed
+latent.
+
+### Resolution
+1. `block_reconstruct` now uses `self.checkpoint_path` +
+   `self.config` and calls the canonical
+   `ModelLoader.build_model_fast(cfg, checkpoint_path=...)`.
+2. Removed `SpeculativeDecoding`; `build_decoding('speculative')`
+   now maps to `ExternalDraftSpeculativeDecoding` (same draft_model
+   interface) - the strategy name works again instead of crashing.
+3. `safety.py` moved back to `forge/keys/safety.py` (production code
+   imported by production keys); the 4 `_load_module` test paths in
+   `test_key_transforms.py` updated.
+4. Deleted unwired `airllm_streamer.py` (its one dependency,
+   `forge.keys.moe.airllm_key.AirLLMKey`, no longer exists; the real
+   streaming fallback is `engine_checkpoints._load_streaming`) and
+   pruned 19 stale entries from `vast_connector.CRITICAL_SOURCE_FILES`
+   / `CRITICAL_INIT_FILES`.
+
+### Verification
+`git grep` confirms zero references to removed modules;
+`vast_connector` manifest now resolves 73/73 paths; unit suite run in
+the same cleanup commit (see git log).

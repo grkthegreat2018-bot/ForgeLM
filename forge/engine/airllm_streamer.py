@@ -97,14 +97,34 @@ class AirLLMStreamer:
         shard_dir = Path(engine.checkpoint_path).parent / "xp_shards"
         if not shard_dir.exists() or not any(shard_dir.glob("shard_*.safetensors")):
             logger.info("AirLLM-Smart: splitting checkpoint into shards...")
-            from forge.keys.moe.airllm_key import AirLLMKey
-            key = AirLLMKey()
-            key.forward({
-                "checkpoint_path": engine.checkpoint_path,
-                "output_dir": str(shard_dir),
-                "compression": None,
-                "layer_prefix": "blocks",
-            })
+            from safetensors.torch import load_file, save_file
+
+            ckpt = Path(engine.checkpoint_path)
+            if ckpt.is_dir():
+                state = {}
+                for part in sorted(ckpt.glob("*.safetensors")):
+                    state.update(load_file(str(part)))
+            else:
+                state = load_file(str(ckpt))
+            shard_dir.mkdir(parents=True, exist_ok=True)
+            # blocks.{i}.* -> shard_{i+1}; embed/head/norm and other
+            # non-block weights stay resident in shard_0.
+            groups: dict[int, dict[str, torch.Tensor]] = {}
+            resident: dict[str, torch.Tensor] = {}
+            for name, tensor in state.items():
+                parts = name.split(".")
+                if len(parts) > 2 and parts[0] == "blocks" and parts[1].isdigit():
+                    groups.setdefault(int(parts[1]), {})[name] = tensor
+                else:
+                    resident[name] = tensor
+            save_file(resident, str(shard_dir / "shard_0.safetensors"))
+            n_layers = len(groups)
+            for idx in sorted(groups):
+                save_file(groups[idx],
+                          str(shard_dir / f"shard_{idx + 1}.safetensors"))
+            del state, groups, resident
+            logger.info("AirLLM-Smart: wrote %d layer shards to %s",
+                        n_layers, shard_dir)
 
     @staticmethod
     def _load_resident_shard(engine) -> None:

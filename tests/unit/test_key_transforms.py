@@ -228,7 +228,7 @@ class TestSafetyFramework:
 
     def test_safe_apply_catches_nan(self):
         """safe_apply should catch NaN corruption and rollback."""
-        safety = _load_module("safety_test", r"D:\windsurf\ForgeAI\tests\fixtures\keys\safety.py")
+        safety = _load_module("safety_test", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -253,7 +253,7 @@ class TestSafetyFramework:
 
     def test_safe_apply_catches_identity_violation(self):
         """safe_apply should catch identity-init violations."""
-        safety = _load_module("safety_test2", r"D:\windsurf\ForgeAI\tests\fixtures\keys\safety.py")
+        safety = _load_module("safety_test2", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -275,7 +275,7 @@ class TestSafetyFramework:
 
     def test_verify_model_integrity_healthy(self):
         """verify_model_integrity should pass for a healthy model."""
-        safety = _load_module("safety_test3", r"D:\windsurf\ForgeAI\tests\fixtures\keys\safety.py")
+        safety = _load_module("safety_test3", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):
@@ -291,7 +291,7 @@ class TestSafetyFramework:
 
     def test_verify_model_integrity_corrupted(self):
         """verify_model_integrity should detect NaN corruption."""
-        safety = _load_module("safety_test4", r"D:\windsurf\ForgeAI\tests\fixtures\keys\safety.py")
+        safety = _load_module("safety_test4", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
 
         class M(nn.Module):
             def __init__(self):

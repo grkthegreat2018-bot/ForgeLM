@@ -2,7 +2,7 @@
 
 Pluggable decoding strategies selectable at runtime:
   - StandardDecoding: autoregressive token-by-token (baseline)
-  - SpeculativeDecoding: draft model + verify (wraps speculative_decode.py)
+  - ExternalDraftSpeculativeDecoding: draft model + verify ("speculative" alias)
   - MedusaDecoding: parallel prediction heads (wraps medusa.py)
   - DSparkDecoding: semi-autoregressive + confidence scheduling (wraps dspark.py)
   - MTPSelfSpecDecoding: use MTP heads from checkpoint for self-speculative decoding
@@ -276,25 +276,6 @@ class StandardDecoding(DecodingStrategy):
     def _top_p(self, logits, top_p):
         from research.sampling_utils import top_p_filter_logits
         return top_p_filter_logits(logits, top_p)
-
-
-class SpeculativeDecoding(DecodingStrategy):
-    """Speculative decoding with separate draft model."""
-
-    def __init__(self, draft_model, k=4):
-        self.draft_model = draft_model
-        self.k = k
-
-    def generate(self, model, input_ids, max_new_tokens=100,
-                 temperature=0.0, top_p=1.0,
-                 top_k=80, repetition_penalty=1.05,
-                 **kwargs):
-        from research.speculative_decode import speculative_generate
-        return speculative_generate(
-            model, self.draft_model, input_ids,
-            max_new_tokens=max_new_tokens, k=self.k,
-            temperature=temperature, device=str(input_ids.device),
-        )
 
 
 class NGramSpeculativeDecoding(DecodingStrategy):
@@ -1111,7 +1092,7 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
     """Factory: build decoding strategy by name."""
     strategies = {
         "standard": StandardDecoding,
-        "speculative": SpeculativeDecoding,
+        "speculative": ExternalDraftSpeculativeDecoding,
         "ngram_speculative": NGramSpeculativeDecoding,
         "external_draft_speculative": ExternalDraftSpeculativeDecoding,
         "medusa": MedusaDecoding,
