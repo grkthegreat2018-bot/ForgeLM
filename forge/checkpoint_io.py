@@ -37,6 +37,155 @@ def _is_safetensors_path(path: str) -> bool:
     return str(path).endswith(".safetensors")
 
 
+# ── Pipelined safetensors → CUDA loader ──────────────────────────────────
+# safetensors dtype name -> torch dtype attribute name.
+_ST_TORCH_DTYPES = {
+    "BOOL": "bool", "U8": "uint8", "I8": "int8", "I16": "int16",
+    "U16": "uint16", "I32": "int32", "U32": "uint32", "I64": "int64",
+    "U64": "uint64", "F16": "float16", "BF16": "bfloat16",
+    "F32": "float32", "F64": "float64",
+    "F8_E4M3": "float8_e4m3fn", "F8_E5M2": "float8_e5m2",
+}
+
+
+def _read_safetensors_entries(path: str):
+    """Parse a safetensors header without loading tensor data.
+
+    Returns ``(entries, data_start)`` where entries is a list of
+    ``(key, torch_dtype, shape, begin, end)`` sorted by begin, offsets
+    relative to the data blob, and data_start is the absolute file offset
+    of the blob.  Raises ValueError on malformed headers or dtypes this
+    torch build cannot represent.
+    """
+    import struct
+    with open(path, "rb") as f:
+        (hdr_len,) = struct.unpack("<Q", f.read(8))
+        header = json.loads(f.read(hdr_len))
+    entries = []
+    for key, meta in header.items():
+        if key == "__metadata__":
+            continue
+        dt_name = _ST_TORCH_DTYPES.get(meta.get("dtype"))
+        dt = getattr(torch, dt_name, None) if dt_name else None
+        if dt is None:
+            raise ValueError(
+                f"unsupported safetensors dtype {meta.get('dtype')!r}")
+        s, e = meta["data_offsets"]
+        if e < s:
+            raise ValueError(f"bad data_offsets for {key!r}")
+        entries.append((key, dt, meta["shape"], s, e))
+    entries.sort(key=lambda t: t[3])
+    return entries, 8 + hdr_len
+
+
+def load_safetensors_pipelined(path: str, device,
+                               num_threads: int | None = None,
+                               chunk_mb: int = 128) -> dict[str, torch.Tensor]:
+    """Load a safetensors file to a CUDA device via a pipelined reader.
+
+    Rationale: safetensors' ``get_tensor(device="cuda")`` copies one tensor
+    at a time through pageable memory (~2 GB/s here), and fastsafetensors
+    needs a CUDA runtime DLL that is missing on this Windows install.  This
+    loader instead runs N file reads in parallel into per-thread pinned
+    staging buffers while async H2D copies drain on a side stream —
+    measured 12.9 GB/s vs 1.9 GB/s on ForgeLM V2 (0.49s vs 3.30s for the
+    6.4GB checkpoint, warm page cache; cold is disk-bound either way).
+
+    Each tensor gets its own GPU allocation (identical semantics to
+    ``safe_open(...).get_tensor(k)``), so downstream quantization/weight
+    surgery frees storage exactly like the per-tensor path.
+
+    Args:
+        path: .safetensors file path.
+        device: CUDA device (torch.device or str). CPU callers get a
+            ValueError — use safetensors mmap for zero-copy CPU loads.
+        num_threads: reader threads (default: min(8, cpu_count//2)).
+        chunk_mb: per-thread pinned staging size in MiB.
+
+    Raises:
+        ValueError: non-CUDA device, malformed header, unsupported dtype.
+        OSError: short/corrupt file reads.
+        Any CUDA/pinning error propagates so callers can fall back.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        raise ValueError("load_safetensors_pipelined requires a CUDA device")
+
+    entries, data_start = _read_safetensors_entries(path)
+    if not entries:
+        return {}
+    blob_len = max(e for _, _, _, _, e in entries)
+
+    # One GPU allocation per tensor (pre-allocating all is cheap — the
+    # caching allocator services these without hitting the driver).
+    state = {
+        k: torch.empty(shape, dtype=dt, device=dev)
+        for k, dt, shape, _, _ in entries
+    }
+
+    chunk = max(1, int(chunk_mb)) * 1024 * 1024
+    nt = num_threads or min(8, max(2, (os.cpu_count() or 4) // 2))
+    nt = max(1, min(nt, (blob_len + chunk - 1) // chunk))
+
+    # Group entries into <=nt contiguous byte ranges of ~equal size.
+    per = (blob_len + nt - 1) // nt
+    groups: list[list] = []
+    cur: list = []
+    cur_bytes = 0
+    for ent in entries:
+        if cur and cur_bytes >= per:
+            groups.append(cur)
+            cur, cur_bytes = [], 0
+        cur.append(ent)
+        cur_bytes += ent[4] - ent[3]
+    if cur:
+        groups.append(cur)
+
+    stream = torch.cuda.Stream()
+
+    def _work(group):
+        pinned = torch.empty(chunk, dtype=torch.uint8, pin_memory=True)
+        np_pin = pinned.numpy()
+        last_ev = None
+        span_s, span_e = group[0][3], group[-1][4]
+        off = span_s
+        with open(path, "rb", buffering=0) as f:
+            while off < span_e:
+                n = min(chunk, span_e - off)
+                if last_ev is not None:
+                    # staging buffer free to overwrite once its H2D drained
+                    last_ev.synchronize()
+                f.seek(data_start + off)
+                got = f.readinto(memoryview(np_pin)[:n])
+                if got != n:
+                    raise OSError(
+                        f"short read in {path}: {got}/{n} bytes at {off}")
+                with torch.cuda.stream(stream):
+                    for k, dt, _shape, s, e in group:
+                        cs, ce = max(s, off), min(e, off + n)
+                        if cs >= ce:
+                            continue
+                        flat = state[k].view(torch.uint8).view(-1)
+                        flat[cs - s:ce - s].copy_(
+                            pinned[cs - off:ce - off], non_blocking=True)
+                    ev = torch.cuda.Event()
+                    ev.record(stream)
+                last_ev = ev
+                off += n
+
+    if len(groups) == 1:
+        _work(groups[0])
+    else:
+        with ThreadPoolExecutor(len(groups),
+                                thread_name_prefix="ckpt_io") as ex:
+            for fut in [ex.submit(_work, g) for g in groups]:
+                fut.result()
+    stream.synchronize()
+    return state
+
+
 def cleanup_orphaned_tmp(checkpoint_dir: str = None) -> int:
     """Remove orphaned .tmp files left by crashed checkpoint saves.
 
@@ -204,15 +353,21 @@ def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) ->
                 print(f"  (fastsafetensors failed: {e}, falling back to standard)")
 
         # CPU-only loads stay memory-mapped for zero-copy lazy access.
-        # Direct-to-GPU (CUDA) uses safetensors load_file for fast placement.
+        # Direct-to-GPU (CUDA) goes through the pipelined reader (parallel
+        # file reads -> pinned staging -> async H2D) with per-tensor
+        # safetensors load_file as the fallback.
         if device_str in ("cpu", "meta"):
             from safetensors import safe_open
             with safe_open(path, framework="pt", device="cpu") as f:
                 result: dict[str, Any] = {k: f.get_tensor(k) for k in f.keys()}
         else:
-            tensors = load_file(path, device=device_str)
-            # Convert to torch.Tensor (safetensors returns torch tensors already on torch>=2).
-            result: dict[str, Any] = {k: v for k, v in tensors.items()}
+            try:
+                tensors = load_safetensors_pipelined(path, device_str)
+            except Exception as e:
+                print(f"  (pipelined load failed: {e}, "
+                      f"falling back to safetensors)")
+                tensors = load_file(path, device=device_str)
+            result = {k: v for k, v in tensors.items()}
         n_tensors = len(result)
         meta_path = path + ".meta.json"
         if os.path.exists(meta_path):
