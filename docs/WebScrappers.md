@@ -26,7 +26,7 @@ Add Tavily to your coding agent's MCP config. This form works with most MCP clie
   "mcpServers": {
     "tavily": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.tavily.com/mcp/?tavilyApiKey=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"]
+      "args": ["-y", "mcp-remote", "https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_TAVILY_API_KEY"]
     }
   }
 }
@@ -36,19 +36,19 @@ Restart your coding agent, then reply once the `tavily_*` tools show up ✅.
 
 If the `tavily_*` tools don't appear, call Tavily directly (also confirms the key):
 ```bash
-curl -s https://api.tavily.com/search -H "Authorization: Bearer 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" -H "Content-Type: application/json" -d '{"query":"latest AI news"}'
+curl -s https://api.tavily.com/search -H "Authorization: Bearer YOUR_TAVILY_API_KEY" -H "Content-Type: application/json" -d '{"query":"latest AI news"}'
 ```
 ```python
-from tavily import TavilyClient; print(TavilyClient("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").search(query="latest AI news"))
+from tavily import TavilyClient; print(TavilyClient("YOUR_TAVILY_API_KEY").search(query="latest AI news"))
 ```
 ```typescript
-import { tavily } from "@tavily/core"; console.log(await tavily({ apiKey: "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" }).search("latest AI news"));
+import { tavily } from "@tavily/core"; console.log(await tavily({ apiKey: "YOUR_TAVILY_API_KEY" }).search("latest AI news"));
 ```
 
 Install the Tavily CLI (search, extract, crawl, map, research from the terminal):
 ```bash
 curl -fsSL https://cli.tavily.com/install.sh | bash
-tvly login --api-key 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
+tvly login --api-key YOUR_TAVILY_API_KEY
 ```
 
 Add Tavily's Agent Skills (best-practice patterns), then restart:
@@ -59,7 +59,7 @@ npx skills add tavily-ai/skills --all
 More: https://docs.tavily.com/agents.md (setup + defaults), https://docs.tavily.com/llms.txt (index; append `.md` to any docs URL).
 # To install: pip install tavily-python
 from tavily import TavilyClient
-client = TavilyClient("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")
+client = TavilyClient("YOUR_TAVILY_API_KEY")
 response = client.search(
     query="",
     search_depth="advanced"
@@ -485,7 +485,7 @@ for result in results.results:
 - Docs: https://exa.ai/docs
 - Dashboard: https://dashboard.exa.ai
 - API Status: https://status.exa.ai
-- API key: 33d6c6e0-7f69-4da3-a96c-a63cb3c0348f
+- API key: YOUR_EXA_API_KEY
 
 
-firecrawl; fc-1f766c3e4367479ab8c01ba0e2cb573e
+firecrawl; YOUR_FIRECRAWL_API_KEY
