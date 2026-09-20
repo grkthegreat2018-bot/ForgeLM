@@ -237,11 +237,16 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   raw at equal accuracy — calibrated-style, not production-calibrated;
   validate on non-templated data before confidence gating.
 - `forge/keys/` — KeyStack architecture keys (25 canonical + `kda` R49-2
-  side-path: `use_kda` config flag, gate=0 bit-exact, KDAKey BI port)
+  side-path: `use_kda` config flag, gate=0 bit-exact, KDAKey BI port).
+  `forge/keys/safety.py` is the production `safe_apply`/rollback harness
+  (used by pit/lerope/attn_residual/mhc keys `safe=True` paths).
 - `forge/quant/` — Quantization implementations
 - `forge/decoding/` — Decoding implementations
-- `forge/training/` — Training runners + optimizers
-- `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains)
+- `forge/training/` — Training runners + optimizers; `training/data/`
+  holds the dataset pipeline modules (`efficient_pipeline`,
+  `parquet_dataset`, `curriculum_augment`, data-prep one-shots) — it is
+  tracked source, exempted from the `data/` gitignore rule.
+- `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains). Domain specs + run/focus profiles live in `forge/evolution/configs/` (canonical; the legacy `tests/evolution/configs/` copy was removed — the tests/evolution harness scripts now point at the canonical dir).
 - `forge/self_play/` — Self-play + discovery (`infinite_loop.py` is the RSI
   loop; `live_status.py` writes live telemetry — status.json, heartbeat.json
   with progress-coupled stall detection, events.jsonl — to
