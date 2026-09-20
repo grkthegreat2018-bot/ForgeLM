@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -78,6 +79,12 @@ def parse_ddg_html(html: str, n: int = DEFAULT_N) -> list[dict[str, str]]:
             break
         href = unescape(m.group(1))
         href = strip_ddg_redirect(href)
+        # Skip ad/tracker links DDG injects as results (y.js redirectors
+        # carry the destination base64 in u3=, not uddg=, so they cannot
+        # be unwrapped) and anything still pointing at duckduckgo.com.
+        if ("duckduckgo.com" in href or "ad_domain=" in href
+                or not is_safe_url(href)):
+            continue
         title = unescape(RE_TAG.sub("", m.group(2))).strip()
         snippet = unescape(RE_TAG.sub("", m.group(3))).strip()
         results.append({
@@ -98,7 +105,45 @@ def ddg_search(query: str, n: int = DEFAULT_N) -> dict[str, Any]:
     except Exception as e:
         return {"results": [], "error": f"fetch failed: {e}"}
     results = parse_ddg_html(html, n=n)
-    return {"results": results, "error": None if results else "no results parsed"}
+    if not results:
+        # DDG's HTML endpoint frequently returns nothing parseable (or
+        # only portal homepages) for news/current-events queries — fall
+        # back to the Google News RSS feed so the caller still gets real,
+        # dated items instead of an error.
+        return google_news_search(query, n=n)
+    return {"results": results, "error": None}
+
+
+def google_news_search(query: str, n: int = DEFAULT_N) -> dict[str, Any]:
+    """Google News RSS search — real headlines, no API key.
+
+    DDG's HTML endpoint returns portal homepages and ad redirectors for
+    news-style queries; the Google News RSS feed returns actual articles
+    with title/link/pubDate/source. An empty query returns today's top
+    headlines feed.
+    """
+    try:
+        base = ("https://news.google.com/rss/search?q="
+                f"{quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+                if query.strip() else
+                "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en")
+        root = ET.fromstring(http_get(base, timeout=15))
+        results = []
+        for item in root.iter("item"):
+            if len(results) >= n:
+                break
+            src = item.find("source")
+            results.append({
+                "title": (item.findtext("title") or "").strip()[:MAX_TITLE],
+                "url": (item.findtext("link") or "").strip(),
+                "published": (item.findtext("pubDate") or "").strip(),
+                "source": (src.text or "").strip() if src is not None else "",
+                "snippet": html_to_text(
+                    item.findtext("description") or "")[:MAX_SNIPPET],
+            })
+        return {"results": results, "error": None if results else "no results"}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
 
 
 def wikipedia_search(query: str, n: int = 3) -> dict[str, Any]:

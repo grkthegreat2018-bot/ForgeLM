@@ -111,6 +111,68 @@ export function Select({ className, children, ...rest }:
   )
 }
 
+/** Labeled slider + numeric readout — for sampling params. */
+export function Slider({ label, value, onChange, min, max, step, fmt, hint }: {
+  label: string
+  value: number
+  onChange: (v: number) => void
+  min: number
+  max: number
+  step: number
+  fmt?: (v: number) => string
+  hint?: string
+}) {
+  return (
+    <div className="select-none" title={hint}>
+      <div className="flex items-baseline justify-between mb-0.5">
+        <span className="text-[11.5px] text-text-dim">{label}</span>
+        <span className="text-[11.5px] font-mono text-text tabular-nums">
+          {fmt ? fmt(value) : value}
+        </span>
+      </div>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full h-1 rounded-full bg-panel-alt appearance-none cursor-pointer accent-[#8aa3ff]" />
+    </div>
+  )
+}
+
+/** Vertical label + control wrapper for settings panels. */
+export function Field({ label, hint, children }: {
+  label: string
+  hint?: string
+  children: ReactNode
+}) {
+  return (
+    <div>
+      <div className="text-[11.5px] text-text-dim mb-1" title={hint}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
+/** Toggle chip — composer quick toggles (Tools / Thinking / …). */
+export function Chip({ on, onClick, title, children }: {
+  on: boolean
+  onClick: () => void
+  title?: string
+  children: ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={clsx(
+        'inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer select-none',
+        on
+          ? 'bg-accent/15 text-accent-hi border-accent/30'
+          : 'text-text-faint border-transparent hover:text-text-dim hover:bg-panel-alt')}>
+      {children}
+    </button>
+  )
+}
+
 export function NumInput({ label, value, onChange, min, max, step, className }: {
   label?: string
   value: number
@@ -131,14 +193,16 @@ export function NumInput({ label, value, onChange, min, max, step, className }: 
   )
 }
 
-export function Check({ label, checked, onChange, className }: {
+export function Check({ label, checked, onChange, className, title }: {
   label: ReactNode
   checked: boolean
   onChange: (v: boolean) => void
   className?: string
+  title?: string
 }) {
   return (
-    <label className={clsx('flex items-center gap-2 text-[12.5px] text-text-dim cursor-pointer select-none', className)}>
+    <label title={title}
+      className={clsx('flex items-center gap-2 text-[12.5px] text-text-dim cursor-pointer select-none', className)}>
       <input
         type="checkbox" checked={checked}
         onChange={(e) => onChange(e.target.checked)}

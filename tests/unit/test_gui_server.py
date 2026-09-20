@@ -112,7 +112,9 @@ def test_engine_load_unload_cycle(monkeypatch):
         loop = asyncio.get_running_loop()
         svc.bind_loop(loop)
         svc._set_state("loading")
-        await svc._load_async(loop, "ckpt", "fake", None, None, None)
+        svc._load_seq += 1
+        await svc._load_async(svc._load_seq, loop, "ckpt", "fake",
+                              None, None, None)
         assert svc.is_ready()
         assert svc.info["config_name"] == "fake"
         assert svc.snapshot()["state"] == "ready"
@@ -135,11 +137,126 @@ def test_engine_load_failure_sets_error(monkeypatch):
         loop = asyncio.get_running_loop()
         svc.bind_loop(loop)
         svc._set_state("loading")
-        await svc._load_async(loop, "ckpt", "fake", None, None, None)
+        svc._load_seq += 1
+        await svc._load_async(svc._load_seq, loop, "ckpt", "fake",
+                              None, None, None)
         assert svc.state == "error"
         assert "checkpoint not found" in svc.error
 
     asyncio.run(run())
+
+
+def test_engine_load_queues_different_model(monkeypatch):
+    """A different-model request during an in-flight load is queued, not
+    dropped; it runs after the first load settles."""
+    svc = EngineService(EventHub())
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def slow_load(ckpt, config_name, *a, **k):
+        calls.append(config_name)
+        started.set()
+        release.wait(timeout=10)
+        return _FakeEngine(), {"config_name": config_name,
+                               "checkpoint": ckpt}
+
+    monkeypatch.setattr(svc, "_load_blocking", slow_load)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        svc.bind_loop(loop)
+        svc.load("a.safetensors", "model_a")
+        await asyncio.sleep(0.05)
+        assert svc.state == "loading"
+        assert started.wait(timeout=5)
+        # Different model mid-load -> queued, not dropped
+        svc.load("b.safetensors", "model_b")
+        assert svc._queued_load is not None
+        release.set()
+        # wait for both loads to settle
+        for _ in range(100):
+            if svc.is_ready() and svc.info.get("config_name") == "model_b":
+                break
+            await asyncio.sleep(0.05)
+        assert calls == ["model_a", "model_b"]
+        assert svc.info["config_name"] == "model_b"
+
+    asyncio.run(run())
+
+
+def test_engine_load_same_model_inflight_dedup(monkeypatch):
+    """Identical request during an in-flight load is deduped."""
+    svc = EngineService(EventHub())
+    release = threading.Event()
+    calls: list[str] = []
+
+    def slow_load(ckpt, config_name, *a, **k):
+        calls.append(config_name)
+        release.wait(timeout=10)
+        return _FakeEngine(), {"config_name": config_name,
+                               "checkpoint": ckpt}
+
+    monkeypatch.setattr(svc, "_load_blocking", slow_load)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        svc.bind_loop(loop)
+        svc.load("a.safetensors", "model_a")
+        await asyncio.sleep(0.05)
+        svc.load("a.safetensors", "model_a")  # dup — ignored
+        svc.load("a.safetensors", "model_a")  # dup — ignored
+        release.set()
+        for _ in range(100):
+            if svc.is_ready():
+                break
+            await asyncio.sleep(0.05)
+        assert calls == ["model_a"]
+        assert svc._queued_load is None
+
+    asyncio.run(run())
+
+
+def test_engine_unload_during_load_discards(monkeypatch):
+    """unload() while a load is in flight must not leave a zombie engine."""
+    svc = EngineService(EventHub())
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_load(*a, **k):
+        started.set()
+        release.wait(timeout=10)
+        return _FakeEngine(), {"config_name": "late"}
+
+    monkeypatch.setattr(svc, "_load_blocking", slow_load)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        svc.bind_loop(loop)
+        svc.load("a.safetensors", "model_a")
+        await asyncio.sleep(0.05)
+        assert started.wait(timeout=5)
+        svc.unload()
+        release.set()
+        await asyncio.sleep(0.3)
+        assert svc.state == "idle"
+        assert svc._engine is None
+        assert not svc.is_ready()
+
+    asyncio.run(run())
+
+
+def test_engine_reload_same_model_noop(monkeypatch):
+    """Bare re-request for the resident model is a no-op."""
+    svc = _ready_service()
+    ckpt = svc._resolve_ckpt("a.safetensors")
+    svc._info = {"checkpoint": ckpt, "config_name": "test"}
+    calls: list = []
+    monkeypatch.setattr(svc, "_load_blocking",
+                        lambda *a, **k: calls.append(1) or (_FakeEngine(), {}))
+    svc.load("a.safetensors", "test")
+    assert calls == []
+    assert svc.state == "ready"
 
 
 def test_reactivate_requires_ready():

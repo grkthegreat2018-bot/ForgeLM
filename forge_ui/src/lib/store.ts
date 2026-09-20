@@ -44,6 +44,7 @@ interface ForgeState {
   respondApproval: (id: string, granted: boolean) => Promise<void>
   agentRespond: (runId: string, granted: boolean) => Promise<void>
   agentMessage: (runId: string, message: string) => Promise<void>
+  deleteAgentRun: (runId: string) => Promise<void>
   selectAgentRun: (id: string | null) => void
   hydrateAgentRun: (id: string) => Promise<void>
   clearRunEvents: (runId: string) => void
@@ -95,6 +96,20 @@ export const useForge = create<ForgeState>((set) => ({
 
   agentMessage: async (runId, message) => {
     await api.post(`/api/agent/runs/${runId}/message`, { message })
+  },
+
+  deleteAgentRun: async (runId) => {
+    await api.del(`/api/agent/runs/${runId}`).catch(() => undefined)
+    set((st) => {
+      const events = { ...st.agentRunEvents }
+      delete events[runId]
+      return {
+        agentRuns: st.agentRuns.filter((r) => r.run_id !== runId),
+        agentRunEvents: events,
+        selectedAgentRun:
+          st.selectedAgentRun === runId ? null : st.selectedAgentRun,
+      }
+    })
   },
 
   selectAgentRun: (id) => {

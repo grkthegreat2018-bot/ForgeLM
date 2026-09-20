@@ -150,6 +150,16 @@ class ChatStore:
         self.save()
         return len(conv["messages"]) - 1
 
+    def truncate_messages(self, conv_id: str, index: int) -> dict | None:
+        """Drop messages[index:] — backs regenerate/edit-and-resubmit."""
+        conv = self.get(conv_id)
+        if conv is None or not (0 <= index <= len(conv["messages"])):
+            return None
+        conv["messages"] = conv["messages"][:index]
+        conv["updated_at"] = _now()
+        self.save()
+        return conv
+
     def rate_message(self, conv_id: str, msg_idx: int,
                      rating: str | None) -> str | None:
         """Set/clear a message rating ('good' | 'bad' | None). Toggles."""
@@ -243,3 +253,120 @@ class ChatStore:
         good, bad = ChatStore.count_ratings(conv)
         n = len(conv["messages"])
         return f"{conv['title']}  ·  {n} msg" + (f"  ·  ★{good}" if good else "")
+
+
+# ── transcript import ─────────────────────────────────────────────
+# Paste-import for the Chat page: parse a copied conversation back into
+# [{role, content}] turns.
+
+_IM_START_RE = re.compile(
+    r"<\|im_start\|>\s*(\w+)\s*\n(.*?)<\|im_end\|>", re.DOTALL)
+
+_ROLE_ALIASES = {
+    "system": "system", "tool": "tool",
+    "user": "user", "human": "user", "you": "user", "me": "user",
+    "question": "user", "q": "user", "prompt": "user",
+    "assistant": "assistant", "ai": "assistant", "model": "assistant",
+    "chatgpt": "assistant", "claude": "assistant", "gemini": "assistant",
+    "a": "assistant", "answer": "assistant", "forgelm": "assistant",
+}
+
+# Marker-only line: "**User:**", "ChatGPT said:", "## Assistant", "[You]"
+_MARKER_LINE_RE = re.compile(
+    r"^\s*[#*>\[\(\-]*\s*"
+    r"(system|tool|user|human|you|me|question|q|prompt|assistant|ai|"
+    r"model|chatgpt|claude|gemini|a|answer|forgelm)"
+    r"\s*(?:said|says)?\s*[:\]\)\*#]*\s*$", re.IGNORECASE)
+
+# Inline marker: "User: hello" — requires a colon so prose lines that
+# merely start with a role word don't false-trigger.
+_INLINE_RE = re.compile(
+    r"^\s*[#*>\[\(\-]*\s*"
+    r"(system|tool|user|human|question|q|prompt|assistant|ai|model|"
+    r"chatgpt|claude|gemini|a|answer|forgelm)"
+    r"\s*:\s*(.*\S.*)$", re.IGNORECASE)
+
+
+def parse_transcript(text: str) -> list[dict[str, str]]:
+    """Parse a pasted chat transcript into ``[{role, content}]`` turns.
+
+    Formats tried in order:
+      1. JSON — ``[{"role": ..., "content": ...}]`` or ``{"messages": []}``
+      2. ChatML — ``<|im_start|>role`` ... ``<|im_end|>`` blocks
+      3. Role markers — "User:", "**Assistant:**", "ChatGPT said:", ...
+         (marker-only lines, or inline "role: content")
+      4. Blank-line paragraphs — alternating user/assistant, starting user
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    msgs = (_parse_json_transcript(text) or _parse_chatml(text)
+            or _parse_role_marked(text) or _parse_paragraphs(text))
+    return [{"role": m["role"], "content": m["content"].strip()}
+            for m in msgs if m["content"].strip()]
+
+
+def _parse_json_transcript(text: str) -> list[dict[str, str]]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("messages")
+    if not isinstance(data, list):
+        return []
+    out = []
+    for m in data:
+        if not isinstance(m, dict):
+            return []
+        role = str(m.get("role", "")).lower()
+        content = m.get("content")
+        if isinstance(content, list):      # OpenAI-style content parts
+            content = "".join(str(p.get("text", ""))
+                              for p in content if isinstance(p, dict))
+        if role not in ("system", "user", "assistant", "tool") \
+                or not isinstance(content, str):
+            return []
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _parse_chatml(text: str) -> list[dict[str, str]]:
+    if "<|im_start|>" not in text:
+        return []
+    out = []
+    for m in _IM_START_RE.finditer(text):
+        role = _ROLE_ALIASES.get(m.group(1).lower())
+        if role:
+            out.append({"role": role, "content": m.group(2).strip()})
+    return out
+
+
+def _parse_role_marked(text: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    cur: dict[str, str] | None = None
+    for line in text.splitlines():
+        mm = _MARKER_LINE_RE.match(line)
+        if mm:
+            cur = {"role": _ROLE_ALIASES[mm.group(1).lower()],
+                   "content": ""}
+            out.append(cur)
+            continue
+        im = _INLINE_RE.match(line)
+        if im:
+            cur = {"role": _ROLE_ALIASES[im.group(1).lower()],
+                   "content": im.group(2)}
+            out.append(cur)
+            continue
+        if cur is not None:
+            cur["content"] += "\n" + line
+    # needs at least two turns to count as a transcript — a lone marker
+    # falls through to the paragraph fallback
+    return out if len(out) >= 2 else []
+
+
+def _parse_paragraphs(text: str) -> list[dict[str, str]]:
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    roles = ("user", "assistant")
+    return [{"role": roles[i % 2], "content": p}
+            for i, p in enumerate(paras)]

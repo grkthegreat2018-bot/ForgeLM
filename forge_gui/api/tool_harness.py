@@ -205,7 +205,8 @@ class ToolHarness:
             # library check (read-only)
             "check_library", "list_allowed_libraries",
             # web (read-only GET — safe for chat)
-            "web_search", "web_fetch", "wikipedia_search", "arxiv_search",
+            "web_search", "news_search", "web_fetch",
+        "wikipedia_search", "arxiv_search",
         }
         defs = self.tool_defs()
         return [d for d in defs

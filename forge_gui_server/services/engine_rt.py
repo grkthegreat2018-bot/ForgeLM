@@ -46,6 +46,13 @@ class EngineService:
         self._load_task = None
         self._reactivating = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Load coordination: a generation counter invalidates in-flight
+        # loads superseded by unload()/a newer load(), _loading_req records
+        # the in-flight request, and _queued_load holds a different request
+        # that arrived mid-load (runs when the current one settles).
+        self._load_seq = 0
+        self._loading_req: tuple | None = None
+        self._queued_load: tuple | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -80,41 +87,100 @@ class EngineService:
     def _progress(self, msg: str) -> None:
         self._hub.publish("engine_progress", {"message": msg})
 
+    @staticmethod
+    def _resolve_ckpt(checkpoint: str) -> str:
+        """Resolve a load request to the absolute checkpoint path —
+        mirrors the normalization in _load_blocking."""
+        root = project_root()
+        ckpt = checkpoint or str(root / "research" / "checkpoints" /
+                               "ForgeLM_V2.safetensors")
+        if not os.path.isabs(ckpt):
+            ckpt = str(root / ckpt)
+        return ckpt
+
     # ── load / unload ─────────────────────────────────────────────────
     def load(self, checkpoint: str, config_name: str,
              use_compile: bool | None = None,
              activation: dict | None = None,
              config_overrides: dict | None = None) -> None:
         """Kick off an async load. Progress/result arrives via hub events."""
+        req = (self._resolve_ckpt(checkpoint), config_name)
         if self._state == "loading":
+            if self._loading_req == req:
+                return  # identical load already in flight
+            # Different request mid-load (e.g. user picked another model
+            # during startup preload) — queue it instead of dropping it.
+            self._queued_load = (checkpoint, config_name, use_compile,
+                                 activation, config_overrides)
+            self._progress("load queued behind in-flight load")
             return
         if self.is_ready():
+            # A bare request for the resident model is a no-op — avoids a
+            # pointless unload+reload cycle (e.g. re-clicking Load on the
+            # checkpoint the startup preload just brought up).
+            if (self._info.get("checkpoint"),
+                    self._info.get("config_name")) == req \
+                    and activation is None and use_compile is None \
+                    and not config_overrides:
+                return
             self.unload()
         self._error = ""
+        self._load_seq += 1
+        seq = self._load_seq
+        self._loading_req = req
         self._set_state("loading")
         loop = self._loop or asyncio.get_event_loop()
         coro = self._load_async(
-            loop, checkpoint, config_name, use_compile, activation,
+            seq, loop, checkpoint, config_name, use_compile, activation,
             config_overrides)
         if loop.is_running():
             self._load_task = asyncio.run_coroutine_threadsafe(coro, loop)
         else:
             self._load_task = asyncio.ensure_future(coro)
 
-    async def _load_async(self, loop, checkpoint, config_name, use_compile,
-                          activation, config_overrides) -> None:
+    async def _load_async(self, seq, loop, checkpoint, config_name,
+                          use_compile, activation, config_overrides) -> None:
         try:
             engine, info = await loop.run_in_executor(
                 self._pool, self._load_blocking, checkpoint, config_name,
                 use_compile, activation, config_overrides)
         except Exception as e:
-            self._error = str(e)
-            self._engine = None
-            self._set_state("error")
+            if seq == self._load_seq:
+                self._loading_req = None
+                self._error = str(e)
+                self._engine = None
+                self._set_state("error")
+                self._drain_queue()
             return
+        if seq != self._load_seq:
+            # Superseded by a newer load/unload while in flight — free the
+            # VRAM this engine holds instead of installing it.
+            self._discard_engine(engine)
+            return
+        self._loading_req = None
         self._engine = engine
         self._info = info
         self._set_state("ready")
+        self._drain_queue()
+
+    def _drain_queue(self) -> None:
+        q, self._queued_load = self._queued_load, None
+        if q is not None:
+            self.load(*q)
+
+    @staticmethod
+    def _discard_engine(engine) -> None:
+        """Free a fully-loaded engine whose result was superseded."""
+        try:
+            engine.sleep(level=2)
+        except Exception:
+            logger.debug("superseded engine cleanup failed", exc_info=True)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def _load_blocking(self, checkpoint, config_name, use_compile,
                        activation, config_overrides):
@@ -126,13 +192,7 @@ class EngineService:
             _set_no_compile(use_compile if use_compile is not None else False)
         self._progress("importing torch / ForgeEngine…")
         from forge.engine.forge_engine import ForgeEngine  # type: ignore
-        root = project_root()
-        ckpt = checkpoint
-        if not ckpt:
-            ckpt = str(root / "research" / "checkpoints" /
-                       "ForgeLM_V2.safetensors")
-        elif not os.path.isabs(ckpt):
-            ckpt = str(root / ckpt)
+        ckpt = self._resolve_ckpt(checkpoint)
         if not os.path.isfile(ckpt):
             raise RuntimeError(f"checkpoint not found: {ckpt}")
 
@@ -161,6 +221,15 @@ class EngineService:
                 config_overrides=config_overrides)
             self._progress("activating features (optimal preset)…")
 
+        # ForgeGate probe bundle (~44KB): chat uses the route head to skip
+        # the think pass on easy turns. Missing/stale bundle is non-fatal.
+        probes = project_root() / "research" / "checkpoints" / "gate_probes.pt"
+        if probes.is_file():
+            try:
+                engine.load_gate_probes(str(probes))
+            except Exception:
+                logger.warning("gate probes failed to load", exc_info=True)
+
         active: dict = {}
         try:
             ac = getattr(engine, "active_config", None)
@@ -181,14 +250,23 @@ class EngineService:
         return engine, info
 
     def unload(self) -> None:
+        self._load_seq += 1  # invalidate any in-flight load
+        self._queued_load = None
+        self._loading_req = None
         self._load_task = None
         self._reactivating = False
         engine, self._engine = self._engine, None
         if engine is not None:
             try:
-                engine.sleep()
-            except Exception as e:
-                logger.warning("engine sleep failed during unload: %s", e)
+                # level 2 discards weights — level 1's GPU->CPU copy (~2s
+                # for a 6.4GB model) is wasted on an engine we delete anyway.
+                engine.sleep(level=2)
+            except Exception:
+                try:
+                    engine.sleep()
+                except Exception as e:
+                    logger.warning(
+                        "engine sleep failed during unload: %s", e)
             del engine
             try:
                 import torch

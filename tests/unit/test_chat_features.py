@@ -119,3 +119,76 @@ class TestChatStoreImage:
         idx = store.append_message(conv["id"], "user", "hello")
         msg = store.get(conv["id"])["messages"][idx]
         assert "image" not in msg
+
+
+class TestParseTranscript:
+    """chat_store.parse_transcript — paste-import for the Chat page."""
+
+    def test_empty(self):
+        from forge_gui.api.chat_store import parse_transcript
+        assert parse_transcript("") == []
+        assert parse_transcript("   \n\n ") == []
+
+    def test_json_list(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript(
+            '[{"role": "user", "content": "hi"},'
+            ' {"role": "assistant", "content": "hello"}]')
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("user", "hi"), ("assistant", "hello")]
+
+    def test_json_messages_wrapper_and_parts(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript(
+            '{"messages": [{"role": "user", "content":'
+            ' [{"type": "text", "text": "hi"}]}]}')
+        assert msgs == [{"role": "user", "content": "hi"}]
+
+    def test_chatml(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript(
+            "<|im_start|>user\nhello there<|im_end|>\n"
+            "<|im_start|>assistant\nhi!<|im_end|>\n")
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("user", "hello there"), ("assistant", "hi!")]
+
+    def test_role_prefixed_inline(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript(
+            "User: what's 2+2\nAssistant: 4\nUser: thanks\nAssistant: np")
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("user", "what's 2+2"), ("assistant", "4"),
+            ("user", "thanks"), ("assistant", "np")]
+
+    def test_marker_lines_multiline_and_header_junk(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript(
+            "Exported transcript\n\n"
+            "ChatGPT said:\nfirst line\nsecond line\n\n"
+            "You said:\nnext")
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("assistant", "first line\nsecond line"), ("user", "next")]
+
+    def test_markdown_markers(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript("**User:**\nhi\n\n**Assistant:**\nhello")
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("user", "hi"), ("assistant", "hello")]
+
+    def test_paragraph_fallback(self):
+        from forge_gui.api.chat_store import parse_transcript
+        msgs = parse_transcript("hi\n\nhello there\n\nhow are you")
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+
+    def test_single_blob_is_one_user_msg(self):
+        from forge_gui.api.chat_store import parse_transcript
+        assert parse_transcript("just a single blob") == [
+            {"role": "user", "content": "just a single blob"}]
+
+    def test_prose_role_word_not_triggered(self):
+        from forge_gui.api.chat_store import parse_transcript
+        # "user experience" mid-line must not start a turn; a bare
+        # marker-less blob stays a single user message
+        msgs = parse_transcript("the user experience is good")
+        assert msgs == [
+            {"role": "user", "content": "the user experience is good"}]

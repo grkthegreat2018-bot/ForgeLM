@@ -41,8 +41,9 @@ DEFAULT_SYSTEM = (
     "tools to complete the task — never just write explanations. Call a tool "
     "every turn until done, then give a short summary.\n"
     "For research tasks: start with web_search to find information online, "
-    "then web_fetch to read full pages. Use wikipedia_search for factual "
-    "background and arxiv_search for academic papers.\n"
+    "then web_fetch to read full pages. Use news_search for current "
+    "headlines, wikipedia_search for factual background and arxiv_search "
+    "for academic papers.\n"
     "For coding tasks: start with list_dir and read_file to explore the "
     "workspace, then use write_file or search_replace to make changes.\n"
     "Format: <tool_call>\n{\"name\": \"tool_name\", \"arguments\": "
@@ -212,8 +213,10 @@ class AgentService:
         )
         from forge_gui.api.tool_harness import ToolHarness
 
+        from forge_gui.api.web_tools import WebTools
         harness = run.tool_harness or ToolHarness(
-            run.workspace, enable_safety=True)
+            run.workspace, enable_safety=True,
+            web_tools=WebTools(enabled=True))
         defs = harness.tool_defs()
         if run.enabled_tools is not None:
             allow = set(run.enabled_tools)
@@ -394,6 +397,16 @@ class AgentService:
             run.cancel()
             return True
         return False
+
+    def delete(self, run_id: str) -> bool:
+        """Remove a run — cancels it first if still running."""
+        run = self.runs.pop(run_id, None)
+        if run is None:
+            return False
+        if run.status == "running":
+            run.cancel()
+            run.status = "cancelled"
+        return True
 
     def respond(self, run_id: str, granted: bool) -> bool:
         run = self.runs.get(run_id)

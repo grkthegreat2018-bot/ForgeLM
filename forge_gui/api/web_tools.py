@@ -33,9 +33,11 @@ _WEB_TOOL_DEFS = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the web for real-time info, docs, and news. "
-                "Returns {url, title, snippet} per result. Use web_fetch "
-                "to read a full page from a result url. No API key needed."),
+                "Search the web for real-time info, docs, and general "
+                "results. Returns {url, title, snippet} per result. Use "
+                "web_fetch to read a full page from a result url. For "
+                "current news/headlines prefer news_search. No API key "
+                "needed."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -44,6 +46,29 @@ _WEB_TOOL_DEFS = [
                           "description": "max results (default 5, max 10)"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "news_search",
+            "description": ("Search Google News for current headlines — use "
+                            "this for 'the news', 'today's news', or any "
+                            "current-events request. Returns real article "
+                            "title, url, published date, and source. An "
+                            "empty query returns today's top headlines."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string",
+                              "description": ("News topic to search; leave "
+                                              "empty for today's top "
+                                              "headlines")},
+                    "n": {"type": "integer",
+                          "description": "Max results (1-10, default 5)"},
+                },
+                "required": [],
             },
         },
     },
@@ -142,6 +167,7 @@ class WebTools:
             arxiv_search,
             ddg_search,
             fetch_url,
+            google_news_search,
             wikipedia_search,
         )
         n = int(args.get("n", DEFAULT_N))
@@ -149,6 +175,8 @@ class WebTools:
         n = max(1, min(n, 10))
         if name == "web_search":
             res = ddg_search(args.get("query", ""), n=n)
+        elif name == "news_search":
+            res = google_news_search(args.get("query", ""), n=n)
         elif name == "web_fetch":
             max_chars = int(args.get("max_chars", MAX_FETCH_CHARS))
             max_chars = max(200, min(max_chars, 8000))

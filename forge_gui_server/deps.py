@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from forge_gui.api.chat_store import ChatStore
 from forge_gui.api.events_reader import EventsReader
@@ -134,6 +135,32 @@ class Services:
         self.gpu.start(self.hub)
         self.agent.set_harness_factory(
             lambda workspace=None: self.make_harness(workspace))
+        self._preload_engine()
+
+    def _preload_engine(self) -> None:
+        """Kick off the resident model load in the background at startup.
+
+        The load runs on the engine executor thread (non-blocking), so the
+        UI serves immediately and engine state/progress streams over /ws —
+        by the time the user opens Chat the model is typically ready.
+
+        Env:
+          FORGE_GUI_NO_PRELOAD=1        disable preload
+          FORGE_GUI_PRELOAD=<path>      checkpoint (default: ForgeLM_V2)
+          FORGE_GUI_PRELOAD_CONFIG=<s>  config preset (default: forgelm_v2)
+        """
+        if os.environ.get("FORGE_GUI_NO_PRELOAD", "").strip().lower() in (
+                "1", "true", "yes"):
+            return
+        ckpt = os.environ.get("FORGE_GUI_PRELOAD", "")
+        cfg = os.environ.get("FORGE_GUI_PRELOAD_CONFIG", "forgelm_v2")
+        resolved = self.engine._resolve_ckpt(ckpt)
+        if not os.path.isfile(resolved):
+            logger.info("engine preload skipped: no checkpoint at %s",
+                        resolved)
+            return
+        logger.info("preloading engine: %s (%s)", resolved, cfg)
+        self.engine.load(checkpoint=ckpt, config_name=cfg)
 
     async def stop(self) -> None:
         self.backups.stop()

@@ -119,8 +119,11 @@ def generate_master_prompt(config, config_name: str = "",
         lines.append(
             "- You have access to tools: remember/recall_memory/forget "
             "for long-term memory, load_lora/unload_lora/list_loras for "
-            "skill specialization, and read-only file tools (list_dir, "
-            "read_file, grep_project). Use them when helpful.")
+            "skill specialization, read-only file tools (list_dir, "
+            "read_file, grep_project), and web tools (web_search, "
+            "news_search, web_fetch, wikipedia_search, arxiv_search) "
+            "for real-time "
+            "info, docs, and news. Use them when helpful.")
 
     # Thinking
     if thinking_enabled:

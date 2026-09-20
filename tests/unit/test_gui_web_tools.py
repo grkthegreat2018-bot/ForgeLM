@@ -58,7 +58,8 @@ def _fake_urlopen(data: bytes | str):
 def test_web_tool_defs_shape():
     defs = web_tool_defs()
     names = {d["function"]["name"] for d in defs}
-    assert {"web_search", "web_fetch", "wikipedia_search", "arxiv_search"} == names
+    assert {"web_search", "news_search", "web_fetch",
+            "wikipedia_search", "arxiv_search"} == names
     for d in defs:
         assert d["type"] == "function"
         params = d["function"]["parameters"]
@@ -137,6 +138,68 @@ def test_web_search_no_results():
         res = _web_search("zzz")
     assert res["results"] == []
     assert "no results" in res["error"]
+
+
+def test_web_search_filters_ad_redirects():
+    # DDG injects sponsored links that use a y.js redirector (destination
+    # base64 in u3=, not uddg=) — these must never surface as results.
+    html = """
+<a class="result__a" href="https://duckduckgo.com/y.js?ad_domain=ads.example&u3=AAAA">Sponsored Junk</a>
+<a class="result__snippet">Buy now!</a>
+<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Farticle">Real Article</a>
+<a class="result__snippet">Real snippet.</a>
+<a class="result__a" href="https://duckduckgo.com/l/?no_uddg=1">Still DDG</a>
+<a class="result__snippet">Tracker.</a>
+"""
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
+        res = _web_search("news", n=5)
+    urls = [r["url"] for r in res["results"]]
+    assert urls == ["https://real.com/article"]
+
+
+# ── news_search (Google News RSS) ───────────────────────────────────────
+_GNEWS_XML = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<item>
+  <title>Big story of the day - Example News</title>
+  <link>https://news.google.com/rss/articles/AAAA</link>
+  <pubDate>Tue, 01 Jul 2025 12:00:00 GMT</pubDate>
+  <source url="https://example.com">Example News</source>
+  <description>&lt;a href="..."&gt;Big story&lt;/a&gt; details</description>
+</item>
+<item>
+  <title>Second headline - Other Outlet</title>
+  <link>https://news.google.com/rss/articles/BBBB</link>
+  <pubDate>Tue, 01 Jul 2025 11:30:00 GMT</pubDate>
+  <source url="https://other.com">Other Outlet</source>
+  <description>plain description</description>
+</item>
+</channel></rss>"""
+
+
+def test_news_search_parses_rss():
+    from forge.web_primitives import google_news_search
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_GNEWS_XML)):
+        res = google_news_search("top news", n=5)
+    assert res["error"] is None
+    assert len(res["results"]) == 2
+    r = res["results"][0]
+    assert r["title"].startswith("Big story of the day")
+    assert r["source"] == "Example News"
+    assert r["published"] == "Tue, 01 Jul 2025 12:00:00 GMT"
+    assert "news.google.com" in r["url"]
+    assert "<a" not in r["snippet"]  # description HTML stripped
+
+
+def test_news_search_network_error():
+    from forge.web_primitives import google_news_search
+
+    def boom(*a, **kw):
+        raise OSError("timeout")
+    with patch("forge.web_primitives.urlopen", boom):
+        res = google_news_search("x")
+    assert res["results"] == []
+    assert "timeout" in res["error"]
 
 
 # ── web_fetch ───────────────────────────────────────────────────────────
@@ -291,7 +354,8 @@ def test_webtools_execute_clamps_max_chars():
 def test_harness_includes_web_tools_when_provided(tmp_path):
     h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools())
     names = {d["function"]["name"] for d in h.tool_defs()}
-    assert {"web_search", "web_fetch", "wikipedia_search", "arxiv_search"} <= names
+    assert {"web_search", "news_search", "web_fetch",
+            "wikipedia_search", "arxiv_search"} <= names
 
 
 def test_harness_no_web_tools_when_none(tmp_path):
@@ -319,7 +383,15 @@ def test_harness_web_tool_error_marked_not_ok(tmp_path):
 def test_harness_chat_tool_defs_include_web(tmp_path):
     h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools())
     names = {d["function"]["name"] for d in h.chat_tool_defs()}
-    assert {"web_search", "web_fetch"} <= names
+    assert {"web_search", "news_search", "web_fetch"} <= names
+
+
+def test_webtools_execute_news_dispatch(tmp_path):
+    wt = WebTools()
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(_GNEWS_XML)):
+        res = wt.execute("news_search", {"query": "top news"})
+    assert "error" not in res
+    assert res["results"][0]["source"] == "Example News"
 
 
 def test_harness_read_only_keeps_web_tools(tmp_path):

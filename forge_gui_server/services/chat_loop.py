@@ -9,12 +9,15 @@ continues, mirroring the Qt worker's max_rounds=6 behavior.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator
+
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,66 @@ _TOOL_RESP_START_ID = 539     # <tool_response>
 _TOOL_CALL_START = "<tool_call>"
 _RE_NAME_HINT = re.compile(r'\{"name"\s*:\s*"')
 
+# ForgeGate route threshold — P(direct-safe) >= this routes the turn to a
+# closed-think direct answer instead of an open <think> reasoning pass.
+# Calibrated on chat prompts via scripts/bench_gate_route.py: gate_r's
+# 0.5 almost never fires on real chat turns (easy cluster ~0.22-0.55,
+# reasoning cluster ~0.02-0.12), so 0.2 keeps the feature alive.
+_GATE_T_ROUTE = 0.2
+
+# Whole-message greeting/ack/closing matcher for the pending user turn.
+# These prompts are out-of-distribution for the route probe — the gate_r
+# corpus has no chit-chat class, so "hey"/"thanks!" score under the
+# threshold even on a clean render — and there is objectively nothing to
+# reason about, so they get a deterministic direct route.
+_TRIVIAL_RE = re.compile(
+    r"^(?:hello+|hi+|hey+|yo|hiya|howdy|sup|wassup|what'?s up|"
+    r"good\s+(?:morning|afternoon|evening|night)|greetings|"
+    r"thanks?|thank\s+you|thx|ty|cheers|"
+    r"ok(?:ay)?|k+|sure|yes|yeah|yep|yup|no|nope|"
+    r"bye+|good\s*bye|see\s+(?:ya|you)|later|"
+    r"nice|great|cool|awesome|perfect|got\s+it|understood|"
+    r"lol|haha+|lmao|lmfao)"
+    r"[\s.!?~]*$", re.IGNORECASE)
+
+_TRIVIAL_MAX_CHARS = 48
+
+
+def _is_trivial_turn(conv: list[dict]) -> bool:
+    """True when the pending user turn is a bare greeting/ack/closing."""
+    if not conv or conv[-1].get("role") != "user":
+        return False
+    c = (conv[-1].get("content") or "").strip()
+    return 0 < len(c) <= _TRIVIAL_MAX_CHARS and bool(_TRIVIAL_RE.match(c))
+
+# Appended to a thinking=False render when the gate routes to direct:
+# empty closed think + the "Answer:" anchor — ForgeGate's validated
+# direct-mode tail (gated.py). The anchor matters: a bare </think> leaves
+# the model musing in think-voice instead of answering.
+_DIRECT_SUFFIX = "<think>\n</think>\nAnswer:"
+
+# Token-injected when the think budget fires — gated.py's FORCE_SUFFIX.
+_FORCE_ANSWER_SUFFIX = "\n</think>\nAnswer:"
+
+_THINK_START_ID = 541         # <think>  (Jamba structural token)
+_THINK_END_ID = 542           # </think>
+_THINK_END_STR = "</think>"
+
+# Hard think budget — when the model takes the think path, inject the
+# force-answer suffix after this many generated think tokens so a
+# reasoning pass can't run away on trivial prompts. This is the BACKSTOP;
+# the conv probe below usually exits earlier.
+_THINK_MAX_TOKENS = 160
+
+# Gate C convergence probe — learned early exit for think mode. The conv
+# head scores P(force-answer-now is correct) on per-step hidden states
+# (feature: cat(h_last, min(step/budget, 1)) — same as gated.py's
+# monitored loop). _CONV_K consecutive scores above _CONV_T, no earlier
+# than _CONV_MIN_STEP tokens in, inject the force-answer suffix.
+_CONV_T = 0.75
+_CONV_K = 2
+_CONV_MIN_STEP = 32
+
 # Special tokens that must never be persisted in stored message content —
 # they are structural markers, not user-visible text.
 _SPECIAL_TOKENS = (
@@ -45,6 +108,122 @@ def _clean_content(text: str) -> str:
     for t in _SPECIAL_TOKENS:
         text = text.replace(t, "")
     return text
+
+
+def _route_p_easy(engine, rendered: str) -> float | None:
+    """Score the ForgeGate route probe on a rendered chat prompt.
+
+    One uncached forward over the prompt (hidden states only); returns
+    P(direct-safe), or None when the probe bundle isn't loaded — chat then
+    falls back to the caller's thinking flag unchanged.
+    """
+    probes = getattr(engine, "_gate_probes", None)
+    if probes is None:
+        return None
+    try:
+        ids = engine._tokenize(rendered)
+        with engine._gen_lock, torch.inference_mode():
+            out = engine.model(ids, use_cache=False, return_hidden=True)
+        h = out[-1][0].float()
+        return probes.score("route", torch.cat([h[-1], h.mean(0)]))
+    except Exception:
+        logger.debug("gate route probe failed", exc_info=True)
+        return None
+
+
+def _conv_exit_observer(probes, budget: int, emit=None):
+    """Per-step hidden-state observer driving Gate C early exit in chat.
+
+    Returns ``(observer, fired)``: ``observer(h, generated_ids)`` is fed
+    each decode step's last-token hidden by ``generate_stream`` and flips
+    the shared state once the conv probe clears the threshold _CONV_K
+    times running (past _CONV_MIN_STEP). Stops scoring after ``</think>``
+    appears — post-think tokens are the answer, not reasoning.
+    """
+    state = {"fired": False, "run": 0}
+
+    def observer(h, generated_ids):
+        if state["fired"] or _THINK_END_ID in generated_ids:
+            return
+        step = len(generated_ids)
+        if step < _CONV_MIN_STEP:
+            return
+        feat = torch.cat([h.float(), torch.tensor(
+            [min(step / max(budget, 1), 1.0)], device=h.device)])
+        s = probes.score("conv", feat)
+        state["run"] = state["run"] + 1 if s > _CONV_T else 0
+        if state["run"] >= _CONV_K:
+            state["fired"] = True
+            if emit is not None:
+                emit(("gate", {"p_easy": round(s, 3),
+                               "mode": "conv-exit"}))
+
+    def fired() -> bool:
+        return state["fired"]
+
+    return observer, fired
+
+
+def _call_sig(call: dict) -> tuple:
+    """(name, canonical-args) signature for repeat-call detection."""
+    args = call.get("arguments") or call.get("args") or {}
+    try:
+        return (str(call.get("name", "")),
+                json.dumps(args, sort_keys=True, default=str))
+    except Exception:
+        return (str(call.get("name", "")), str(args))
+
+
+def _strip_direct_musing(content: str) -> str:
+    """Direct-mode (closed-think) answers sometimes still open with
+    think-voice musing terminated by a stray ``</think>`` — the model
+    re-enacts the think block in plain text (the documented "direct mode
+    emits ~96tok derivations" limitation). When the marker is present the
+    real answer is what follows it."""
+    if _THINK_END_STR in content:
+        tail = content.rsplit(_THINK_END_STR, 1)[-1].lstrip("\n")
+        if tail.strip():
+            return tail
+    return content
+
+
+def _think_cap_processor(budget: int | None, suffix_ids: list[int],
+                         exit_flag=None):
+    """Per-step logits guard for chat generation.
+
+    - ``budget`` (think path only): after `budget` generated think tokens
+      without a ``</think>``, inject ``suffix_ids`` — the force-answer
+      tail ``"\\n</think>\\nAnswer:"`` — one forced token per step. The
+      "Answer:" anchor flips the model into answer voice; a bare </think>
+      leaves it musing. ``budget=None`` (direct path — the prompt already
+      carries a closed think) disables the budget check.
+    - ``exit_flag``: optional callable -> bool (the conv-probe observer's
+      ``fired``) that triggers the same suffix injection before the
+      budget — the learned convergence exit.
+    - ``<think>`` (541) is banned in generated text in every mode: the
+      prompt owns the think block, so a generated <think> can only ever
+      *re-open* a reasoning pass — observed on real output: after the cap
+      fired the model emitted `Answer:` then re-opened <think> and
+      started reasoning all over again.
+    """
+    queue: list[int] = []
+
+    def proc(logits, generated_ids):
+        think_open = (budget is not None
+                      and _THINK_END_ID not in generated_ids)
+        forced = ((budget is not None and len(generated_ids) >= budget)
+                  or (exit_flag is not None and exit_flag()))
+        if think_open and not queue and forced:
+            queue.extend(suffix_ids)
+        if queue:
+            tid = queue.pop(0)
+            masked = torch.full_like(logits, float("-inf"))
+            masked[..., tid] = logits[..., tid]
+            return masked
+        masked = logits.clone()
+        masked[..., _THINK_START_ID] = float("-inf")
+        return masked
+    return proc
 
 
 class ChatCancel:
@@ -64,10 +243,14 @@ async def run_chat(runtime, harness, messages: list[dict],
                    temperature: float = 0.7, top_p: float = 0.95,
                    top_k: int = 80, repetition_penalty: float = 1.05,
                    tools_enabled: bool = True, thinking: bool = True,
+                   min_p: float = 0.0, dry_multiplier: float = 0.0,
+                   dry_base: float = 1.75,
                    max_rounds: int = 6,
                    cancel: ChatCancel | None = None,
+                   think_budget: int | None = None,
                    ) -> AsyncIterator[dict]:
-    """Yield chat events: token / tool_call / tool_result / done / error."""
+    """Yield chat events: gate / token / tool_call / tool_result / done /
+    error."""
     q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     cancel = cancel or ChatCancel()
@@ -88,6 +271,7 @@ async def run_chat(runtime, harness, messages: list[dict],
             rounds = max_rounds if tools_enabled else 1
             conv = list(messages)
             new_messages: list[dict] = []
+            seen_sigs: set = set()
 
             for _round in range(rounds):
                 if cancel.cancelled:
@@ -99,13 +283,82 @@ async def run_chat(runtime, harness, messages: list[dict],
                 eos_ids = (_EOS_IDS + [_TOOL_CALL_END_ID, _TOOL_RESP_START_ID]
                            if defs else _EOS_IDS)
                 with runtime.acquire(timeout_s=120.0) as engine:
+                    # Route/exit gating applies to fresh user turns only —
+                    # tool-continuation rounds (conv ends with a tool
+                    # result) go straight to think + budget backstop: both
+                    # probes were trained on user questions and are OOD on
+                    # synthesis turns (observed: conv-exit fired ~35 tok
+                    # in, the forced "Answer:" restated the plan, and the
+                    # model re-called the same tool 5x).
+                    fresh_turn = (bool(conv)
+                                  and conv[-1].get("role") == "user")
+                    think_active = thinking
+                    if thinking and fresh_turn:
+                        # ForgeGate route probe: easy turns get a closed
+                        # <think> block so the model answers directly instead
+                        # of burning tokens on a reasoning pass.
+                        # Score a tools-free render — gate_r was harvested
+                        # without a <tools> block, and the ~20-schema block
+                        # the production render injects collapses h_mean
+                        # and drags borderline prompts under the threshold
+                        # (measured on V2: "Hello" 0.355 tools-free vs
+                        # 0.098 with tools). Generation still uses the
+                        # tools render; only the probe input is stripped.
+                        if _is_trivial_turn(conv):
+                            p_easy, direct = 1.0, True
+                        else:
+                            probe_rendered = rendered if defs is None else \
+                                render_messages_for_config(
+                                    conv, config_name=config_name,
+                                    tools=None, add_generation_prompt=True,
+                                    thinking=True)
+                            p_easy = _route_p_easy(engine, probe_rendered)
+                            direct = (p_easy is not None
+                                      and p_easy >= _GATE_T_ROUTE)
+                        if p_easy is not None:
+                            emit(("gate", {"p_easy": round(p_easy, 3),
+                                           "mode": "direct" if direct
+                                           else "think"}))
+                        if direct:
+                            rendered = render_messages_for_config(
+                                conv, config_name=config_name, tools=defs,
+                                add_generation_prompt=True,
+                                thinking=False)
+                            rendered += _DIRECT_SUFFIX
+                            think_active = False
+                    # budget active only on the open-think path; the
+                    # <think> re-open ban applies to every mode
+                    budget = _THINK_MAX_TOKENS
+                    if think_budget is not None:
+                        # 0 = no forced exit (bounded by max_new_tokens);
+                        # otherwise clamp to a sane range.
+                        budget = (max_new_tokens if think_budget <= 0
+                                  else max(8, min(think_budget, 4096)))
+                    # Gate C: when probes are loaded and we're thinking,
+                    # attach the conv-probe observer — learned early exit,
+                    # with the token budget as backstop.
+                    hidden_obs, exit_flag = None, None
+                    probes = getattr(engine, "_gate_probes", None)
+                    if think_active and fresh_turn and probes is not None:
+                        hidden_obs, exit_flag = _conv_exit_observer(
+                            probes, budget, emit)
+                    cap = _think_cap_processor(
+                        budget if think_active else None,
+                        engine.tokenizer.encode(
+                            _FORCE_ANSWER_SUFFIX,
+                            add_special_tokens=False),
+                        exit_flag=exit_flag)
                     for tok in engine.generate_stream(
                             rendered, max_new_tokens=max_new_tokens,
                             temperature=temperature, top_p=top_p,
                             top_k=top_k,
                             repetition_penalty=repetition_penalty,
                             skip_special_tokens=False,
-                            eos_token_ids=eos_ids):
+                            eos_token_ids=eos_ids,
+                            logits_processor=cap,
+                            min_p=min_p, dry_multiplier=dry_multiplier,
+                            dry_base=dry_base,
+                            hidden_observer=hidden_obs):
                         if cancel.cancelled:
                             break
                         chunks.append(tok)
@@ -122,6 +375,21 @@ async def run_chat(runtime, harness, messages: list[dict],
                         cut = m.start() if m else -1
                     if cut >= 0:
                         content = raw[:cut]
+                if not think_active:
+                    if tool_calls:
+                        # pre-call text on a closed-think turn is
+                        # reasoning voice — the tool call speaks for
+                        # itself, don't persist it as a "reply"
+                        content = ""
+                    else:
+                        # closed-think renders can still open with
+                        # think-voice musing followed by a stray
+                        # </think> — the real answer is the tail.
+                        content = _strip_direct_musing(content or "")
+                elif tool_calls and defs is None:
+                    # tools were dropped by the repeat guard — treat a
+                    # stray call as plain text and end the turn
+                    tool_calls, content = None, content
                 msg = {"role": "assistant", "content": _clean_content(content or ""),
                        "tool_calls": tool_calls or None}
                 conv.append(msg)
@@ -129,6 +397,17 @@ async def run_chat(runtime, harness, messages: list[dict],
 
                 if not tool_calls or not harness:
                     break
+
+                # Repeat-call guard: if every call this round duplicates
+                # one already made (same name + args), the model is looping
+                # on its plan instead of reading results — drop tool defs
+                # so the next round must synthesize an answer.
+                sigs = {_call_sig(c if isinstance(c, dict)
+                                  else {"name": str(c)})
+                        for c in tool_calls}
+                if sigs <= seen_sigs:
+                    defs = None
+                seen_sigs |= sigs
 
                 for tc in tool_calls:
                     if cancel.cancelled:

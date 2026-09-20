@@ -82,7 +82,9 @@ class GateProbes:
                 f"gate probe bundle version {ver} != "
                 f"{GATE_PROBES_VERSION}; re-run the harvest pipeline")
         def tb(t):
-            return t.to(device) if torch.is_tensor(t) else t
+            # detach: probe weights were saved with requires_grad=True —
+            # score() must not build a grad graph on every call.
+            return t.detach().to(device) if torch.is_tensor(t) else t
         return cls(
             tb(ck['route']['w']), tb(ck['route']['b']),
             tb(ck['doom']['w']), tb(ck['doom']['b']),

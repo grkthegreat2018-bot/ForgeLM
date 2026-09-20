@@ -1,30 +1,93 @@
-// Chat Studio — 3-column: conversation list | messages | settings.
-// Streaming SSE, think/tool_call segmentation, ratings, export.
+// Chat Studio — conversations | centered transcript | collapsible settings.
+// SSE streaming with 60ms-batched re-renders, markdown bodies, think/tool
+// segmentation, message ratings, regenerate + edit-and-resubmit (both via
+// server-side truncate), persisted sampler settings.
 
 import { clsx } from 'clsx'
 import {
-  Brain, ChevronRight, Download, MessageSquare, Pencil, Plus, Send,
-  Square, Star, Trash2, Wrench,
+  Brain, Check, ClipboardPaste, MessageSquare, Pencil, Plus, RotateCcw,
+  Send, SlidersHorizontal, Sparkles, ThumbsDown, ThumbsUp,
+  Trash2, Wrench, X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation } from 'react-router-dom'
-import { api, ssePost } from '../lib/api'
 import {
-  parseStream, toolCallName, toolCallSummary, type Segment,
-} from '../lib/streamParse'
+  useEffect, useMemo, useRef, useState,
+} from 'react'
+import { useLocation } from 'react-router-dom'
+import {
+  CopyBtn, SegmentedBody, ThinkCard, ToolActivityCard, UserBubble,
+  type ToolResultView,
+} from '../components/chat/blocks'
+import { Composer } from '../components/chat/Composer'
+import { Markdown } from '../components/chat/Markdown'
+import { ScrollFeed } from '../components/chat/ScrollFeed'
+import {
+  Btn, Card, Chip, Check as CheckBox, EmptyState, IconBtn, Input,
+  NumInput, Slider, Spinner, Tag, Textarea,
+} from '../components/ui'
+import { api, ssePost } from '../lib/api'
+import { dayBucket, fmtClock, relTime } from '../lib/format'
+import { parseStream, toolCallName } from '../lib/streamParse'
 import { useForge } from '../lib/store'
 import type { ChatMessage, ChatSummary, Conversation } from '../lib/types'
-import {
-  Btn, Card, Check, EmptyState, IconBtn, Input,
-  NumInput, Spinner, Tag, Textarea,
-} from '../components/ui'
+
+/* ---------- settings ---------- */
+
+interface ChatSettings {
+  temperature: number
+  topP: number
+  topK: number
+  repPenalty: number
+  maxTokens: number
+  minP: number
+  dryMult: number
+  dryBase: number
+  systemPrompt: string
+  useMaster: boolean
+  toolsEnabled: boolean
+  thinking: boolean
+  thinkBudget: number
+  showThinking: boolean
+  panelOpen: boolean
+}
+
+const DEFAULTS: ChatSettings = {
+  temperature: 0.7, topP: 0.9, topK: 50, repPenalty: 1.05,
+  maxTokens: 2048, minP: 0, dryMult: 0, dryBase: 1.75,
+  systemPrompt: '', useMaster: true, toolsEnabled: true,
+  thinking: true, thinkBudget: 160, showThinking: true, panelOpen: true,
+}
+
+const SETTINGS_KEY = 'forge.chat.settings.v2'
+
+function loadSettings(): ChatSettings {
+  try {
+    const j = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')
+    return { ...DEFAULTS, ...j }
+  } catch { return { ...DEFAULTS } }
+}
+
+const PRESETS: { name: string; apply: Partial<ChatSettings> }[] = [
+  { name: 'Precise', apply: { temperature: 0.2, topP: 0.9, topK: 40, repPenalty: 1.05, minP: 0, dryMult: 0 } },
+  { name: 'Balanced', apply: { temperature: 0.7, topP: 0.9, topK: 50, repPenalty: 1.05, minP: 0, dryMult: 0 } },
+  { name: 'Creative', apply: { temperature: 1.0, topP: 0.95, topK: 80, repPenalty: 1.02, minP: 0.02, dryMult: 0.8 } },
+]
+
+const STARTERS = [
+  'Explain what this project does, at a high level',
+  'List the files in the workspace',
+  'Search the web for Mamba-3 architecture notes',
+  'What time is it? Set a timer for 5 minutes',
+]
 
 interface StreamState {
   raw: string
-  toolResults: { name: string; result: string }[]
+  toolResults: ToolResultView[]
   tokPerSec: number
   pendingCalls: number
+  gate?: { mode: string; p_easy: number }
 }
+
+/* ---------- page ---------- */
 
 export default function Chat() {
   const engine = useForge((s) => s.engine)
@@ -34,35 +97,58 @@ export default function Chat() {
   const [conv, setConv] = useState<Conversation | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [stream, setStream] = useState<StreamState | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
-
-  // settings
-  const [temperature, setTemperature] = useState(0.7)
-  const [topP, setTopP] = useState(0.9)
-  const [topK, setTopK] = useState(50)
-  const [repPenalty, setRepPenalty] = useState(1.05)
-  const [maxTokens, setMaxTokens] = useState(2048)
-  const [systemPrompt, setSystemPrompt] = useState('')
-  const [useMaster, setUseMaster] = useState(true)
-  const [toolsEnabled, setToolsEnabled] = useState(true)
-  const [showThinking, setShowThinking] = useState(true)
+  const [notice, setNotice] = useState('')
   const [draft, setDraft] = useState('')
+  const [stream, setStream] = useState<StreamState | null>(null)
+  const [editing, setEditing] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importErr, setImportErr] = useState('')
 
-  const listRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [cfg, setCfg] = useState<ChatSettings>(loadSettings)
+  const set = <K extends keyof ChatSettings>(k: K, v: ChatSettings[K]) =>
+    setCfg((c) => ({ ...c, [k]: v }))
+
+  useEffect(() => {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(cfg)) }
+    catch { /* quota */ }
+  }, [cfg])
+
+  const abortRef = useRef<AbortController | null>(null)
+  const streamRef = useRef<StreamState | null>(null)
+  const flushTimer = useRef<number | null>(null)
+
+  /* batched stream render — tokens arrive per-token but we paint ≤ ~16/s */
+  const pushStream = (immediate = false) => {
+    const render = () => {
+      flushTimer.current = null
+      const s = streamRef.current
+      setStream(s ? { ...s, toolResults: [...s.toolResults] } : null)
+    }
+    if (immediate) {
+      if (flushTimer.current != null) window.clearTimeout(flushTimer.current)
+      render()
+      return
+    }
+    if (flushTimer.current == null) {
+      flushTimer.current = window.setTimeout(render, 60)
+    }
+  }
 
   const loadList = () =>
     api.get<{ conversations: ChatSummary[] }>('/api/chats')
-      .then((r) => setChats(r.conversations))
+      .then((r) => setChats(
+        [...r.conversations].sort((a, b) => b.updated_at - a.updated_at)))
       .catch(() => undefined)
 
   useEffect(() => { loadList() }, [])
 
-  // deep link from Agent / other pages: /chat?open=<id>
+  // deep link from other pages: /chat?open=<id>
   useEffect(() => {
-    const params = new URLSearchParams(location.search)
-    const open = params.get('open')
+    const open = new URLSearchParams(location.search).get('open')
     if (open) void loadConv(open)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search])
@@ -72,6 +158,7 @@ export default function Chat() {
       const c = await api.get<Conversation & { error?: string }>(`/api/chats/${id}`)
       if (c.error || !c.messages) return
       setConv(c)
+      setEditing(null)
       setError('')
     } catch (e) { setError(String(e)) }
   }
@@ -79,6 +166,7 @@ export default function Chat() {
   const newChat = async () => {
     const c = await api.post<Conversation>('/api/chats', { title: 'New chat' })
     setConv(c)
+    setEditing(null)
     loadList()
   }
 
@@ -88,54 +176,70 @@ export default function Chat() {
     loadList()
   }
 
+  const commitRename = async () => {
+    setRenaming(false)
+    const title = renameDraft.trim()
+    if (!conv || !title || title === conv.title) return
+    await api.post(`/api/chats/${conv.id}/rename`, { title }).catch(() => undefined)
+    setConv({ ...conv, title })
+    loadList()
+  }
+
   const exportRated = async () => {
     try {
       const r = await api.post<{ path: string; examples: number }>('/api/chats/export')
-      setError(`exported ${r.examples} examples → ${r.path}`)
+      setNotice(`exported ${r.examples} examples → ${r.path}`)
     } catch (e) { setError(String(e)) }
   }
 
-  const renameChat = async () => {
-    if (!conv) return
-    const title = window.prompt('Rename conversation', conv.title)
-    if (!title?.trim()) return
-    await api.post(`/api/chats/${conv.id}/rename`, { title: title.trim() })
-    setConv({ ...conv, title: title.trim() })
-    loadList()
+  const doImport = async () => {
+    setImportErr('')
+    try {
+      const r = await api.post<Conversation & { error?: string }>(
+        '/api/chats/import', { text: importText })
+      if (r.error || !r.id) throw new Error(r.error ?? 'import failed')
+      setImportOpen(false)
+      setImportText('')
+      loadList()
+      void loadConv(r.id)
+    } catch (e) { setImportErr(String(e)) }
   }
 
   const rate = async (idx: number, rating: 'good' | 'bad') => {
     if (!conv) return
-    await api.post(`/api/chats/${conv.id}/rate`, { msg_idx: idx, rating })
+    const r = await api.post<{ rating: 'good' | 'bad' | null }>(
+      `/api/chats/${conv.id}/rate`, { msg_idx: idx, rating })
     setConv({
       ...conv,
-      messages: conv.messages.map((m, i) => i === idx ? { ...m, rating } : m),
+      messages: conv.messages.map(
+        (m, i) => (i === idx ? { ...m, rating: r.rating } : m)),
     })
+    loadList()
   }
 
-  const send = async () => {
-    const text = draft.trim()
-    if (!text || busy) return
-    if (engine.state !== 'ready') {
-      setError('Engine not ready — load a model on the Engine or Models page.')
-      return
-    }
+  /* ---------- send / stream ---------- */
+
+  /** Core send — assumes guards passed. Holds abortRef for its duration. */
+  const doSend = async (text: string) => {
     setError('')
+    setNotice('')
     setDraft('')
+    setEditing(null)
     setBusy(true)
     const ctrl = new AbortController()
     abortRef.current = ctrl
 
-    // optimistic user bubble; server persists it too via chat_store
-    const userMsg: ChatMessage = { role: 'user', content: text, ts: Date.now() / 1000 }
-    setConv((c) => c
+    const userMsg: ChatMessage = {
+      role: 'user', content: text, ts: Date.now() / 1000,
+    }
+    setConv((c) => (c
       ? { ...c, messages: [...c.messages, userMsg] }
       : { id: '', title: text.slice(0, 48), model: '', created_at: 0,
-          updated_at: 0, messages: [userMsg] })
+          updated_at: 0, messages: [userMsg] }))
 
-    setStream({ raw: '', toolResults: [], tokPerSec: 0, pendingCalls: 0 })
-    const toolResults: { name: string; result: string }[] = []
-    let raw = ''
+    streamRef.current = { raw: '', toolResults: [], tokPerSec: 0, pendingCalls: 0 }
+    pushStream(true)
+
     let t0 = 0
     let nTok = 0
     let convId = conv?.id ?? ''
@@ -143,32 +247,54 @@ export default function Chat() {
       await ssePost('/api/chat/send', {
         conv_id: convId,
         message: text,
-        system_prompt: systemPrompt || undefined,
-        use_master: useMaster,
+        system_prompt: cfg.systemPrompt || undefined,
+        use_master: cfg.useMaster,
         model: '',
-        max_new_tokens: maxTokens,
-        temperature, top_p: topP, top_k: topK,
-        repetition_penalty: repPenalty,
-        tools_enabled: toolsEnabled,
-        thinking: true,
+        max_new_tokens: cfg.maxTokens,
+        temperature: cfg.temperature,
+        top_p: cfg.topP,
+        top_k: cfg.topK,
+        repetition_penalty: cfg.repPenalty,
+        min_p: cfg.minP,
+        dry_multiplier: cfg.dryMult,
+        dry_base: cfg.dryBase,
+        tools_enabled: cfg.toolsEnabled,
+        thinking: cfg.thinking,
+        think_budget: cfg.thinkBudget,
       }, (evt) => {
+        const s = streamRef.current
+        if (!s) return
         const tps = nTok && t0 ? nTok / ((Date.now() - t0) / 1000) : 0
         if (evt.type === 'conv') {
           convId = (evt.data as { id: string }).id
         } else if (evt.type === 'token') {
           if (!t0) t0 = Date.now()
           nTok++
-          raw += evt.data as string
-          setStream({ raw, toolResults, tokPerSec: tps, pendingCalls: 0 })
+          s.raw += evt.data as string
+          s.tokPerSec = tps
+          s.pendingCalls = 0
+          pushStream()
+        } else if (evt.type === 'gate') {
+          s.gate = evt.data as { mode: string; p_easy: number }
+          pushStream(true)
         } else if (evt.type === 'tool_call') {
-          setStream({ raw, toolResults, tokPerSec: tps, pendingCalls: 1 })
+          s.pendingCalls = 1
+          pushStream(true)
         } else if (evt.type === 'tool_result') {
-          const d = evt.data as { name: string; result: { text?: string } }
-          toolResults.push({
+          const d = evt.data as {
+            name: string
+            ok?: boolean
+            elapsed_s?: number
+            result: { text?: string }
+          }
+          s.toolResults.push({
             name: d.name,
-            result: d.result?.text ?? JSON.stringify(d.result),
+            ok: d.ok,
+            elapsed_s: d.elapsed_s,
+            text: d.result?.text ?? JSON.stringify(d.result),
           })
-          setStream({ raw, toolResults, tokPerSec: tps, pendingCalls: 0 })
+          s.pendingCalls = 0
+          pushStream(true)
         } else if (evt.type === 'saved') {
           convId = (evt.data as { id: string }).id
         } else if (evt.type === 'error') {
@@ -178,74 +304,169 @@ export default function Chat() {
     } catch (e) {
       if (!ctrl.signal.aborted) setError(String(e))
     } finally {
+      if (flushTimer.current != null) {
+        window.clearTimeout(flushTimer.current)
+        flushTimer.current = null
+      }
       setBusy(false)
       abortRef.current = null
-      if (raw) {
-        setConv((c) => c ? { ...c, messages: [...c.messages,
-          { role: 'assistant', content: raw, ts: Date.now() / 1000 }] } : c)
+      const finalRaw = streamRef.current?.raw ?? ''
+      if (finalRaw) {
+        setConv((c) => (c ? {
+          ...c,
+          messages: [...c.messages, {
+            role: 'assistant', content: finalRaw, ts: Date.now() / 1000,
+          }],
+        } : c))
       }
       setStream(null)
+      streamRef.current = null
       if (convId) loadConv(convId).catch(() => undefined)
       loadList()
-      inputRef.current?.focus()
     }
   }
 
-  const cancel = () => abortRef.current?.abort()
+  const send = (text: string) => {
+    text = text.trim()
+    if (!text || busy || abortRef.current) return
+    if (engine.state !== 'ready') {
+      setError('Engine not ready — load a model on the Engine or Models page.')
+      return
+    }
+    void doSend(text)
+  }
 
-  const filteredChats = useMemo(() => {
+  /** Drop messages[idx:] server-side, then resend `text`. Backs both
+   *  regenerate (idx = last user msg) and edit-and-resubmit. Holds the
+   *  guard ref across the truncate POST so a fast Enter can't double-send. */
+  const truncateAndSend = async (index: number, text: string) => {
+    if (!conv?.id || busy || abortRef.current || engine.state !== 'ready') return
+    setBusy(true)
+    abortRef.current = new AbortController()
+    try {
+      const r = await api.post<Conversation & { error?: string }>(
+        `/api/chats/${conv.id}/truncate`, { index })
+      if (r.error || !r.messages) throw new Error(r.error ?? 'truncate failed')
+      setConv(r)
+      abortRef.current = null
+      await doSend(text)
+    } catch (e) {
+      setError(String(e))
+      abortRef.current = null
+      setBusy(false)
+    }
+  }
+
+  const lastUserIdx = useMemo(() => {
+    if (!conv) return -1
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      if (conv.messages[i].role === 'user') return i
+    }
+    return -1
+  }, [conv])
+
+  const regenerate = () => {
+    if (lastUserIdx < 0 || !conv) return
+    void truncateAndSend(lastUserIdx, conv.messages[lastUserIdx].content)
+  }
+
+  /* ---------- display items: pair tool results with their assistant msg -- */
+
+  type Item =
+    | { kind: 'user'; msg: ChatMessage; idx: number }
+    | { kind: 'assistant'; msg: ChatMessage; idx: number; results: ChatMessage[] }
+    | { kind: 'tool'; msg: ChatMessage; idx: number }
+
+  const items = useMemo<Item[]>(() => {
+    const out: Item[] = []
+    const msgs = conv?.messages ?? []
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i]
+      if (m.role === 'assistant') {
+        const at = i
+        const results: ChatMessage[] = []
+        while (i + 1 < msgs.length && msgs[i + 1].role === 'tool') {
+          results.push(msgs[++i])
+        }
+        out.push({ kind: 'assistant', msg: m, idx: at, results })
+      } else if (m.role === 'user') {
+        out.push({ kind: 'user', msg: m, idx: i })
+      } else if (m.role === 'tool') {
+        out.push({ kind: 'tool', msg: m, idx: i })
+      }
+    }
+    return out
+  }, [conv])
+
+  const grouped = useMemo(() => {
     const q = search.toLowerCase()
-    return chats.filter((c) => c.title.toLowerCase().includes(q))
+    const list = chats.filter((c) => c.title.toLowerCase().includes(q))
+    const buckets: { label: string; rows: ChatSummary[] }[] = []
+    for (const c of list) {
+      const b = dayBucket(c.updated_at)
+      const cur = buckets[buckets.length - 1]
+      if (cur?.label === b) cur.rows.push(c)
+      else buckets.push({ label: b, rows: [c] })
+    }
+    return buckets
   }, [chats, search])
 
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
-  }, [conv?.messages.length, stream?.raw])
-
   const ready = engine.state === 'ready'
+  const lastAssistantItem = [...items].reverse().find((i) => i.kind === 'assistant')
 
   return (
     <div className="flex h-full min-h-0">
-      {/* ---- left: conversation list ---- */}
-      <div className="w-[210px] shrink-0 border-r border-border flex flex-col">
+      {/* ---- conversations ---- */}
+      <div className="w-[226px] shrink-0 border-r border-border flex flex-col bg-bg-alt/40">
         <div className="p-2.5 space-y-2">
           <div className="flex gap-1.5">
             <Btn variant="primary" className="flex-1 justify-center" onClick={newChat}>
               <Plus size={14} /> New chat
             </Btn>
-            <IconBtn title="Rename" onClick={renameChat} className="border border-border">
-              <Pencil size={12} />
+            <IconBtn title="Paste a chat transcript as a new conversation"
+              className="!h-auto border border-border"
+              onClick={() => { setImportOpen(true); setImportErr('') }}>
+              <ClipboardPaste size={13} />
             </IconBtn>
           </div>
           <Input value={search} onChange={(e) => setSearch(e.target.value)}
             placeholder="Filter…" className="w-full !py-1" />
         </div>
         <div className="flex-1 overflow-y-auto px-1.5 pb-2">
-          {filteredChats.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => loadConv(c.id)}
-              className={clsx(
-                'w-full text-left px-2.5 py-2 rounded-lg mb-0.5 group cursor-pointer transition-colors',
-                conv?.id === c.id
-                  ? 'bg-accent/15 text-text border border-accent/25'
-                  : 'text-text-dim hover:bg-panel-alt border border-transparent')}>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[12.5px] truncate flex-1">{c.title}</span>
-                <IconBtn className="!w-5 !h-5 opacity-0 group-hover:opacity-100 hover:!text-err"
-                  title="Delete"
-                  onClick={(e) => { e.stopPropagation(); void deleteChat(c.id) }}>
-                  <Trash2 size={11} />
-                </IconBtn>
+          {grouped.map((g) => (
+            <div key={g.label}>
+              <div className="px-2 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-faint">
+                {g.label}
               </div>
-              <div className="text-[10.5px] text-text-faint mt-0.5 flex gap-2">
-                <span>{c.n_messages} msgs</span>
-                {c.good > 0 && <span className="text-ok">+{c.good}</span>}
-                {c.bad > 0 && <span className="text-err">-{c.bad}</span>}
-              </div>
-            </button>
+              {g.rows.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => loadConv(c.id)}
+                  className={clsx(
+                    'w-full text-left px-2.5 py-2 rounded-lg mb-0.5 group cursor-pointer transition-colors',
+                    conv?.id === c.id
+                      ? 'bg-accent/15 text-text border border-accent/25'
+                      : 'text-text-dim hover:bg-panel-alt border border-transparent')}>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[12.5px] truncate flex-1">{c.title}</span>
+                    <IconBtn
+                      className="!w-5 !h-5 opacity-0 group-hover:opacity-100 hover:!text-err"
+                      title="Delete conversation"
+                      onClick={(e) => { e.stopPropagation(); void deleteChat(c.id) }}>
+                      <Trash2 size={11} />
+                    </IconBtn>
+                  </div>
+                  <div className="text-[10.5px] text-text-faint mt-0.5 flex gap-2">
+                    <span>{c.n_messages} msgs</span>
+                    <span>{relTime(c.updated_at)}</span>
+                    {c.good > 0 && <span className="text-ok">+{c.good}</span>}
+                    {c.bad > 0 && <span className="text-err">−{c.bad}</span>}
+                  </div>
+                </button>
+              ))}
+            </div>
           ))}
-          {!filteredChats.length && (
+          {!grouped.length && (
             <div className="text-[11.5px] text-text-faint text-center py-6">
               no conversations
             </div>
@@ -253,293 +474,420 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* ---- center: transcript + composer ---- */}
+      {/* ---- transcript ---- */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <div ref={listRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          {!conv?.messages.length && !stream && (
-            <EmptyState
-              icon={<MessageSquare size={40} strokeWidth={1.2} />}
-              title={ready ? 'Start a conversation' : 'Engine not loaded'}
-              desc={ready
-                ? 'Plain assistant chat — or let the model call tools like read_file, list_dir, run_python.'
-                : 'Load a checkpoint on the Models page to start chatting.'}
-            />
+        {/* chat header */}
+        <div className="flex items-center gap-2 px-5 h-11 border-b border-border shrink-0">
+          {renaming && conv ? (
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void commitRename()
+                if (e.key === 'Escape') setRenaming(false)
+              }}
+              className="bg-input border border-accent/50 rounded-md px-2 py-0.5 text-[13px] text-text focus:outline-none w-72" />
+          ) : (
+            <>
+              <span className="text-[13px] font-medium truncate max-w-[45%]">
+                {conv?.title ?? 'Chat'}
+              </span>
+              {conv?.id && (
+                <IconBtn title="Rename" className="!w-6 !h-6"
+                  onClick={() => { setRenaming(true); setRenameDraft(conv.title) }}>
+                  <Pencil size={11} />
+                </IconBtn>
+              )}
+            </>
           )}
-          {conv?.messages.map((m, i) => (
-            <MessageRow key={i} msg={m} showThinking={showThinking}
-              onRate={m.role === 'assistant' ? (r) => rate(i, r) : undefined} />
-          ))}
-          {stream && (
-            <StreamingRow stream={stream} showThinking={showThinking} />
+          {conv && conv.messages.length > 0 && (
+            <span className="text-[10.5px] text-text-faint shrink-0">
+              {conv.messages.length} msgs
+            </span>
           )}
-          {error && (
-            <div className="text-[12.5px] text-err bg-err/10 border border-err/30 rounded-lg px-3 py-2">
-              {error}
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            {ready && (
+              <Tag kind="idle" className="font-mono !text-[10.5px]">
+                {engine.info.checkpoint?.split(/[\\/]/).pop() ?? 'model'}
+              </Tag>
+            )}
+            <IconBtn
+              title={cfg.panelOpen ? 'Hide settings' : 'Show settings'}
+              className={clsx(cfg.panelOpen && '!text-accent-hi bg-panel-alt')}
+              onClick={() => set('panelOpen', !cfg.panelOpen)}>
+              <SlidersHorizontal size={13} />
+            </IconBtn>
+          </div>
         </div>
+
+        <ScrollFeed watch={`${items.length}:${stream?.raw.length ?? 0}:${stream?.toolResults.length ?? 0}`}
+          className="px-6 py-5">
+          <div className="max-w-[780px] mx-auto space-y-5">
+            {!items.length && !stream && (
+              <EmptyState
+                icon={<MessageSquare size={40} strokeWidth={1.2} />}
+                title={ready ? 'Start a conversation' : 'Engine not loaded'}
+                desc={ready
+                  ? 'Plain assistant chat — or let the model call tools like read_file, list_dir, web_search.'
+                  : 'Load a checkpoint on the Models page to start chatting.'}
+                action={ready ? (
+                  <div className="flex flex-wrap justify-center gap-2 max-w-lg">
+                    {STARTERS.map((s) => (
+                      <button key={s} onClick={() => setDraft(s)}
+                        className="px-3 py-1.5 rounded-full border border-border text-[12px] text-text-dim hover:text-text hover:border-accent/50 hover:bg-panel-alt transition-colors cursor-pointer">
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                ) : undefined}
+              />
+            )}
+            {items.map((it) => (
+              <ChatItem
+                key={it.idx}
+                item={it}
+                showThinking={cfg.showThinking}
+                isLastAssistant={it === lastAssistantItem}
+                busy={busy}
+                editing={editing === it.idx}
+                editDraft={editDraft}
+                onEditDraft={setEditDraft}
+                onStartEdit={(idx, text) => { setEditing(idx); setEditDraft(text) }}
+                onCancelEdit={() => setEditing(null)}
+                onSubmitEdit={(idx, text) => void truncateAndSend(idx, text)}
+                onRate={(idx, r) => void rate(idx, r)}
+                onRegenerate={regenerate} />
+            ))}
+            {stream && (
+              <StreamRow stream={stream} showThinking={cfg.showThinking} />
+            )}
+            {error && (
+              <div className="text-[12.5px] text-err bg-err/10 border border-err/30 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
+            {notice && (
+              <div className="text-[12px] text-ok bg-ok/10 border border-ok/30 rounded-lg px-3 py-2 flex items-center gap-2">
+                <Check size={13} /> {notice}
+              </div>
+            )}
+          </div>
+        </ScrollFeed>
 
         {/* composer */}
-        <div className="px-6 pb-4 pt-1">
-          <div className="bg-panel border border-border rounded-xl shadow-card">
-            <Textarea
-              ref={inputRef}
+        <div className="px-6 pb-4 pt-1.5">
+          <div className="max-w-[780px] mx-auto">
+            <Composer
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  void send()
-                }
-              }}
-              placeholder={ready ? 'Message — Enter to send, Shift+Enter for newline' : 'Load a model first…'}
-              disabled={!ready && !busy}
-              rows={3}
-              className="w-full !border-0 !bg-transparent !rounded-xl resize-none text-[13.5px] focus:!outline-none" />
-            <div className="flex items-center gap-2 px-3 pb-2.5">
-              {busy && <Tag kind="accent"><Spinner /> streaming</Tag>}
-              {stream && stream.tokPerSec > 0 && (
-                <span className="text-[11px] text-text-faint">
+              onChange={setDraft}
+              onSubmit={() => void send(draft)}
+              onStop={() => abortRef.current?.abort()}
+              busy={busy}
+              disabled={!ready}
+              autoFocus
+              placeholder={ready
+                ? 'Message — Enter to send, Shift+Enter for newline'
+                : 'Load a model first…'}
+              chips={<>
+                <Chip on={cfg.toolsEnabled} title="Let the model call read-only tools"
+                  onClick={() => set('toolsEnabled', !cfg.toolsEnabled)}>
+                  <Wrench size={11} /> Tools
+                </Chip>
+                <Chip on={cfg.thinking} title="Request a thinking pass before the reply"
+                  onClick={() => set('thinking', !cfg.thinking)}>
+                  <Brain size={11} /> Think
+                </Chip>
+                <Chip on={cfg.useMaster} title="Use the master system prompt when none is set"
+                  onClick={() => set('useMaster', !cfg.useMaster)}>
+                  <Sparkles size={11} /> Master
+                </Chip>
+              </>}
+              meta={stream && stream.tokPerSec > 0 ? (
+                <span className="text-[11px] text-text-faint tabular-nums">
                   {stream.tokPerSec.toFixed(1)} tok/s
                 </span>
-              )}
-              <div className="ml-auto flex gap-1.5">
-                {busy ? (
-                  <Btn variant="danger" onClick={cancel}>
-                    <Square size={12} /> Stop
-                  </Btn>
-                ) : (
-                  <Btn variant="primary" onClick={send}
-                    disabled={!draft.trim() || !ready}>
-                    <Send size={13} /> Send
-                  </Btn>
-                )}
+              ) : undefined}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ---- settings ---- */}
+      {cfg.panelOpen && (
+        <div className="w-[252px] shrink-0 border-l border-border overflow-y-auto p-3 space-y-3 bg-bg-alt/40">
+          <Card title="Preset">
+            <div className="flex gap-1.5">
+              {PRESETS.map((p) => (
+                <button key={p.name}
+                  onClick={() => setCfg((c) => ({ ...c, ...p.apply }))}
+                  className="flex-1 px-2 py-1.5 rounded-lg border border-border text-[11.5px] text-text-dim hover:text-text hover:border-accent/50 hover:bg-panel-alt transition-colors cursor-pointer">
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </Card>
+          <Card title="Sampling">
+            <div className="space-y-2.5">
+              <Slider label="Temperature" value={cfg.temperature} min={0} max={2} step={0.05}
+                onChange={(v) => set('temperature', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="Top-p" value={cfg.topP} min={0} max={1} step={0.01}
+                onChange={(v) => set('topP', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="Top-k" value={cfg.topK} min={0} max={200} step={1}
+                onChange={(v) => set('topK', v)} />
+              <Slider label="Min-p" value={cfg.minP} min={0} max={0.5} step={0.01}
+                onChange={(v) => set('minP', v)} fmt={(v) => v.toFixed(2)}
+                hint="Min-p sampling — 0 disables" />
+              <Slider label="Rep. penalty" value={cfg.repPenalty} min={1} max={1.5} step={0.01}
+                onChange={(v) => set('repPenalty', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="DRY penalty" value={cfg.dryMult} min={0} max={2} step={0.05}
+                onChange={(v) => set('dryMult', v)} fmt={(v) => v.toFixed(2)}
+                hint="DRY n-gram repetition penalty — 0 disables" />
+              <NumInput label="Max tokens" value={cfg.maxTokens} min={1} max={8192} step={64}
+                onChange={(v) => set('maxTokens', Math.round(v))} />
+            </div>
+          </Card>
+          <Card title="System prompt">
+            <Textarea
+              value={cfg.systemPrompt}
+              onChange={(e) => set('systemPrompt', e.target.value)}
+              placeholder="You are a helpful assistant…"
+              rows={3} className="w-full !text-[12px]" />
+            <div className="mt-2">
+              <CheckBox label="Master prompt when empty" checked={cfg.useMaster}
+                onChange={(v) => set('useMaster', v)} />
+            </div>
+          </Card>
+          <Card title="Session">
+            <div className="space-y-2">
+              <CheckBox label="Request thinking" checked={cfg.thinking}
+                onChange={(v) => set('thinking', v)} />
+              <NumInput label="Think budget" value={cfg.thinkBudget} min={0} max={2048} step={16}
+                onChange={(v) => set('thinkBudget', Math.round(v))} />
+              <CheckBox label="Show thinking" checked={cfg.showThinking}
+                onChange={(v) => set('showThinking', v)} />
+              <CheckBox label="Tools enabled" checked={cfg.toolsEnabled}
+                onChange={(v) => set('toolsEnabled', v)} />
+            </div>
+            <Btn variant="subtle" className="w-full justify-center mt-3"
+              onClick={exportRated}>
+              <Send size={12} className="rotate-90" /> Export rated data
+            </Btn>
+          </Card>
+          <Card title="Model">
+            <div className="text-[12px] text-text-dim font-mono break-all">
+              {ready
+                ? (engine.info.checkpoint?.split(/[\\/]/).pop() ?? '—')
+                : 'none loaded'}
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ---- import transcript modal ---- */}
+      {importOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-start justify-center pt-[12vh] fade-in"
+          onClick={() => setImportOpen(false)}>
+          <div
+            className="w-[560px] max-w-[92vw] bg-panel border border-border-hi rounded-card shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-border text-[13px] font-medium">
+              Import a pasted chat
+            </div>
+            <Textarea
+              autoFocus
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setImportOpen(false)
+              }}
+              rows={14}
+              placeholder={
+                'Paste a transcript — accepts:\n'
+                + '  • "User:" / "Assistant:" markers (also **User:**, ChatGPT said:, ## Assistant)\n'
+                + '  • ChatML  <|im_start|>user … <|im_end|>\n'
+                + '  • JSON  [{"role": "user", "content": "…"}]\n'
+                + '  • plain text — blank-line paragraphs alternate user/assistant'}
+              className="w-full !text-[12px] font-mono resize-y !rounded-none !border-0 focus:!ring-0" />
+            {importErr && (
+              <div className="px-4 py-2 text-[12px] text-err border-t border-err/30 bg-err/10">
+                {importErr}
               </div>
+            )}
+            <div className="flex items-center gap-1.5 p-3 border-t border-border">
+              <span className="text-[10.5px] text-text-faint flex-1">
+                becomes a new conversation you can continue
+              </span>
+              <Btn variant="ghost" onClick={() => setImportOpen(false)}>Cancel</Btn>
+              <Btn variant="primary" disabled={!importText.trim()}
+                onClick={() => void doImport()}>
+                <ClipboardPaste size={12} /> Import
+              </Btn>
             </div>
           </div>
         </div>
-      </div>
-
-      {/* ---- right: settings ---- */}
-      <div className="w-[230px] shrink-0 border-l border-border overflow-y-auto p-3 space-y-3">
-        <Card title="Generation">
-          <div className="space-y-2">
-            <NumInput label="Temp" value={temperature} onChange={setTemperature} min={0} max={2} step={0.05} />
-            <NumInput label="Top-p" value={topP} onChange={setTopP} min={0} max={1} step={0.05} />
-            <NumInput label="Top-k" value={topK} onChange={setTopK} min={0} max={200} step={1} />
-            <NumInput label="Rep. pen." value={repPenalty} onChange={setRepPenalty} min={1} max={1.5} step={0.01} />
-            <NumInput label="Max tok" value={maxTokens} onChange={setMaxTokens} min={1} max={8192} step={64} />
-          </div>
-        </Card>
-        <Card title="System prompt">
-          <Textarea
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="You are a helpful assistant…"
-            rows={3} className="w-full !text-[12px]" />
-        </Card>
-        <Card title="Session">
-          <div className="space-y-2">
-            <Check label="Show thinking" checked={showThinking} onChange={setShowThinking} />
-            <Check label="Tools enabled" checked={toolsEnabled} onChange={setToolsEnabled} />
-            <Check label="Master prompt" checked={useMaster} onChange={setUseMaster} />
-          </div>
-          <Btn variant="subtle" className="w-full justify-center mt-3" onClick={exportRated}>
-            <Download size={12} /> Export rated data
-          </Btn>
-        </Card>
-        <Card title="Active model">
-          <div className="text-[12px] text-text-dim font-mono break-all">
-            {ready ? (engine.info.checkpoint?.split(/[\\/]/).pop() ?? '—') : 'none loaded'}
-          </div>
-        </Card>
-      </div>
+      )}
     </div>
   )
 }
 
-/* ---------- message rows ---------- */
+/* ---------- one transcript item ---------- */
 
-function MessageRow({ msg, showThinking, onRate }: {
-  msg: ChatMessage
+function ChatItem({ item, showThinking, isLastAssistant, busy, editing,
+  editDraft, onEditDraft, onStartEdit, onCancelEdit, onSubmitEdit,
+  onRate, onRegenerate }: {
+  item:
+    | { kind: 'user'; msg: ChatMessage; idx: number }
+    | { kind: 'assistant'; msg: ChatMessage; idx: number; results: ChatMessage[] }
+    | { kind: 'tool'; msg: ChatMessage; idx: number }
   showThinking: boolean
-  onRate?: (r: 'good' | 'bad') => void
+  isLastAssistant: boolean
+  busy: boolean
+  editing: boolean
+  editDraft: string
+  onEditDraft: (v: string) => void
+  onStartEdit: (idx: number, text: string) => void
+  onCancelEdit: () => void
+  onSubmitEdit: (idx: number, text: string) => void
+  onRate: (idx: number, r: 'good' | 'bad') => void
+  onRegenerate: () => void
 }) {
-  if (msg.role === 'system') return null
-  if (msg.role === 'user') {
+  const { msg, idx } = item
+
+  if (item.kind === 'tool') {
+    // orphan tool message (not consumed by an assistant msg)
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[75%] bg-accent/15 border border-accent/25 rounded-2xl rounded-br-md px-4 py-2.5">
-          {msg.image && (
-            <img src={`data:image/png;base64,${msg.image}`} alt="attachment"
-              className="max-h-48 rounded-lg mb-2" />
+      <div className="max-w-[85%]">
+        <ToolActivityCard
+          name={msg.name ?? 'tool'} args=""
+          result={{ text: msg.content, ok: true }} />
+      </div>
+    )
+  }
+
+  if (item.kind === 'user') {
+    if (editing) {
+      return (
+        <div className="flex justify-end">
+          <div className="w-full max-w-[75%] bg-panel border border-accent/40 rounded-xl p-2.5">
+            <Textarea
+              autoFocus
+              value={editDraft}
+              onChange={(e) => onEditDraft(e.target.value)}
+              rows={3}
+              className="w-full !text-[13px] resize-none" />
+            <div className="flex justify-end gap-1.5 mt-2">
+              <Btn variant="ghost" onClick={onCancelEdit}>
+                <X size={12} /> Cancel
+              </Btn>
+              <Btn variant="primary" disabled={!editDraft.trim()}
+                onClick={() => onSubmitEdit(idx, editDraft)}>
+                <Send size={12} /> Save & resend
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )
+    }
+    return (
+      <div className="group flex flex-col items-end">
+        <UserBubble text={msg.content} />
+        <div className="flex items-center gap-0.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <span className="text-[10px] text-text-faint mr-1">{fmtClock(msg.ts)}</span>
+          <CopyBtn text={msg.content} />
+          {!busy && (
+            <IconBtn title="Edit & resend" className="!w-6 !h-6"
+              onClick={() => onStartEdit(idx, msg.content)}>
+              <Pencil size={11} />
+            </IconBtn>
           )}
-          <div className="text-[13.5px] whitespace-pre-wrap">{msg.content}</div>
         </div>
       </div>
     )
   }
-  if (msg.role === 'tool') {
-    return (
-      <div className="flex">
-        <div className="max-w-[80%]">
-          <ToolResultCard name={msg.name ?? 'tool'} text={msg.content} />
-        </div>
-      </div>
-    )
-  }
-  // assistant — segment like the stream parser
-  const segs = parseStream(msg.content)
+
+  // assistant
+  const results: ToolResultView[] = item.results.map((r) => ({
+    ok: true,
+    text: r.content,
+  }))
   return (
-    <div className="flex flex-col gap-1">
-      <div className="max-w-[85%] space-y-2">
-        {segs.map((s, i) => (
-          <SegmentView key={i} seg={s} showThinking={showThinking} />
-        ))}
-        {!segs.length && (
-          <div className="text-[13.5px] whitespace-pre-wrap">{msg.content}</div>
-        )}
+    <div className="group flex flex-col gap-1">
+      <div className="max-w-[92%] min-w-0">
+        <SegmentedBody raw={msg.content} showThinking={showThinking}
+          results={results} />
         {msg.tool_calls?.map((tc, i) => (
-          <ToolCallCard key={`tc${i}`} name={tc.name}
-            detail={JSON.stringify(tc.arguments ?? {}, null, 2)} />
+          <ToolActivityCard key={`tc${i}`} name={tc.name}
+            args={JSON.stringify(tc.arguments ?? {}, null, 2)}
+            result={results[i]} />
         ))}
       </div>
-      {onRate && (
-        <div className="flex gap-1">
-          <IconBtn title="Good"
-            className={clsx('!w-6 !h-6', msg.rating === 'good' && '!text-ok')}
-            onClick={() => onRate('good')}>
-            <Star size={12} fill={msg.rating === 'good' ? 'currentColor' : 'none'} />
+      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+        <span className="text-[10px] text-text-faint mr-1">{fmtClock(msg.ts)}</span>
+        <CopyBtn text={msg.content} />
+        <IconBtn title="Good response"
+          className={clsx('!w-6 !h-6', msg.rating === 'good' && '!text-ok')}
+          onClick={() => onRate(idx, 'good')}>
+          <ThumbsUp size={11} />
+        </IconBtn>
+        <IconBtn title="Bad response"
+          className={clsx('!w-6 !h-6', msg.rating === 'bad' && '!text-err')}
+          onClick={() => onRate(idx, 'bad')}>
+          <ThumbsDown size={11} />
+        </IconBtn>
+        {isLastAssistant && !busy && (
+          <IconBtn title="Regenerate" className="!w-6 !h-6" onClick={onRegenerate}>
+            <RotateCcw size={11} />
           </IconBtn>
-          <IconBtn title="Bad"
-            className={clsx('!w-6 !h-6', msg.rating === 'bad' && '!text-err')}
-            onClick={() => onRate('bad')}>
-            <Trash2 size={12} />
-          </IconBtn>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function SegmentView({ seg, showThinking }: { seg: Segment; showThinking: boolean }) {
-  if (seg.kind === 'think') {
-    if (!showThinking) return null
-    return <ThinkCard seg={seg} />
-  }
-  if (seg.kind === 'tool_call') {
-    return (
-      <ToolCallCard
-        name={seg.closed ? toolCallName(seg.text) : 'calling tool…'}
-        summary={seg.closed ? toolCallSummary(seg.text) : ''}
-        detail={seg.text}
-        running={!seg.closed} />
-    )
-  }
-  return <div className="text-[13.5px] whitespace-pre-wrap">{seg.text}</div>
-}
-
-/* ---------- collapsible blocks ---------- */
-
-function ThinkCard({ seg }: { seg: Segment }) {
-  // expanded while streaming, auto-collapses when the block completes;
-  // a manual click overrides the default
-  const [manual, setManual] = useState<boolean | null>(null)
-  const open = manual ?? !seg.closed
-  const setOpen = (fn: (o: boolean) => boolean) => setManual(fn(open))
-  return (
-    <div className="bg-think/8 border-l-2 border-think rounded-r-lg">
-      <button onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-think cursor-pointer hover:bg-think/10 rounded-r-lg transition-colors">
-        <Brain size={11} />
-        {seg.closed ? 'Thought' : 'Thinking'}
-        {!seg.closed && <Spinner />}
-        <ChevronRight size={11}
-          className={clsx('ml-auto transition-transform', open && 'rotate-90')} />
-      </button>
-      {open && (
-        <div className="px-3 pb-2.5 text-[12px] text-text-dim whitespace-pre-wrap font-mono max-h-64 overflow-y-auto">
-          {seg.text.trim()}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ToolCallCard({ name, summary, detail, running }: {
-  name: string
-  summary?: string
-  detail: string
-  running?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="bg-panel border border-border rounded-lg max-w-full">
-      <button onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-panel-alt rounded-lg transition-colors text-left">
-        <Wrench size={11} className="text-accent shrink-0" />
-        <span className="text-[12px] font-mono shrink-0">{name}</span>
-        {summary && (
-          <span className="text-[10.5px] text-text-faint truncate flex-1 min-w-0">
-            {summary}
-          </span>
         )}
-        {running && <Spinner />}
-        <ChevronRight size={11}
-          className={clsx('ml-auto shrink-0 text-text-faint transition-transform', open && 'rotate-90')} />
-      </button>
-      {open && (
-        <pre className="px-3 pb-2.5 pt-1.5 text-[11.5px] font-mono text-text-dim whitespace-pre-wrap max-h-48 overflow-y-auto border-t border-border">
-          {detail}
-        </pre>
-      )}
+      </div>
     </div>
   )
 }
 
-function ToolResultCard({ name, text }: { name: string; text: string }) {
-  const [open, setOpen] = useState(false)
-  const oneLine = text.replace(/\s+/g, ' ').trim()
-  return (
-    <div className="bg-panel border border-border rounded-lg max-w-full">
-      <button onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-panel-alt rounded-lg transition-colors text-left">
-        <Wrench size={11} className="text-text-faint shrink-0" />
-        <span className="text-[12px] font-mono shrink-0">{name}</span>
-        <span className="text-[10.5px] text-text-faint truncate flex-1 min-w-0">
-          {oneLine.slice(0, 90)}{oneLine.length > 90 ? '…' : ''}
-        </span>
-        <ChevronRight size={11}
-          className={clsx('ml-auto shrink-0 text-text-faint transition-transform', open && 'rotate-90')} />
-      </button>
-      {open && (
-        <pre className="px-3 pb-2.5 pt-1.5 text-[11.5px] font-mono text-text-dim whitespace-pre-wrap max-h-64 overflow-y-auto border-t border-border">
-          {text}
-        </pre>
-      )}
-    </div>
-  )
-}
+/* ---------- live stream row ---------- */
 
-function StreamingRow({ stream, showThinking }: {
+function StreamRow({ stream, showThinking }: {
   stream: StreamState
   showThinking: boolean
 }) {
-  // thinking mode leaves <think> open in the prompt — the stream starts
-  // inside the block, so the leading text is thinking until </think>
-  const segs = parseStream(stream.raw, { implicitThink: true })
+  const segs = useMemo(() => parseStream(stream.raw), [stream.raw])
+  let toolIdx = 0
   return (
-    <div className="max-w-[85%] space-y-2">
-      {segs.map((s, i) => (
-        <SegmentView key={i} seg={s} showThinking={showThinking} />
-      ))}
-      {stream.pendingCalls > 0 && (
-        <Tag kind="accent"><Spinner /> running tool…</Tag>
+    <div className="max-w-[92%] min-w-0 space-y-2">
+      {stream.gate && (
+        <div className="flex items-center gap-1.5 text-[10.5px] text-text-faint">
+          <Brain size={10} />
+          gate → {stream.gate.mode} (p={stream.gate.p_easy.toFixed(2)})
+        </div>
       )}
-      {stream.toolResults.map((tr, i) => (
-        <ToolResultCard key={i} name={tr.name} text={tr.result} />
-      ))}
-      <span className="inline-block w-1.5 h-4 bg-accent animate-pulse rounded-sm align-text-bottom" />
+      {segs.map((s, i) => {
+        if (s.kind === 'think') {
+          if (!showThinking) return null
+          return <ThinkCard key={i} text={s.text} streaming={!s.closed} />
+        }
+        if (s.kind === 'tool_call') {
+          const res = stream.toolResults[toolIdx++]
+          return (
+            <ToolActivityCard key={i}
+              name={s.closed ? toolCallName(s.text) : 'calling tool…'}
+              args={s.text} result={res} running={!s.closed} />
+          )
+        }
+        return <Markdown key={i} text={s.text} />
+      })}
+      {!segs.length && (
+        <div className="flex items-center gap-2 text-text-faint text-[12.5px]">
+          <Spinner /> generating…
+        </div>
+      )}
+      {stream.pendingCalls > 0 && (
+        <div className="flex items-center gap-2 text-text-faint text-[12px]">
+          <Spinner /> executing tool…
+        </div>
+      )}
     </div>
   )
 }

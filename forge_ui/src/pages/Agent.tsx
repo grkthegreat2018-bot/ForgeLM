@@ -1,29 +1,34 @@
-// Agent page — chat-based agentic mode.
-// Left: run list + config. Right: the selected run as a chat thread —
-// the task and mid-run user messages are user bubbles; agent text,
-// thinking and tool activity are assistant-side cards. The composer
-// steers a running agent or starts a new run when idle.
-// Run events persist server-side; switching pages re-hydrates the
-// thread via /api/agent/runs/{id} and live events merge by seq.
+// Agent page — chat-based agentic runs.
+// Left: run list + new-run config (real tool defs from /api/agent/tools).
+// Right: the selected run as a round-grouped chat thread — tool calls and
+// their results render as one merged activity card; approvals pin an
+// interactive card; the composer steers a live run or starts a new one.
 
 import { clsx } from 'clsx'
 import {
-  Bot, Brain, Check, ChevronDown, ChevronRight, FolderOpen,
-  Send, Square, Wrench, X,
+  Bot, Check, ChevronDown, ChevronRight, FolderOpen,
+  Search, Square, Trash2, Wrench, X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  CopyBtn, SegmentedBody, ToolActivityCard, UserBubble,
+} from '../components/chat/blocks'
+import { Composer } from '../components/chat/Composer'
+import { Markdown } from '../components/chat/Markdown'
+import { ScrollFeed } from '../components/chat/ScrollFeed'
+import {
+  Btn, Card, Check as CheckBox, Chip, EmptyState, Field, IconBtn,
+  Input, Select, Spinner, Tag,
+} from '../components/ui'
 import { api } from '../lib/api'
-import { parseStream, toolCallName, toolCallSummary } from '../lib/streamParse'
+import { groupTools, type ToolDef } from '../lib/agentTools'
+import { fmtDur, relTime } from '../lib/format'
 import { useForge } from '../lib/store'
 import type { AgentEvent, AgentRunInfo, ToolResultRec } from '../lib/types'
-import {
-  Btn, Card, Check as CheckBox, EmptyState, Input,
-  Select, Spinner, Tag, Textarea,
-} from '../components/ui'
 
 const APPROVAL_MODES = [
-  { v: 'destructive', label: 'destructive ops' },
-  { v: 'all', label: 'all tools' },
+  { v: 'destructive', label: 'destructive only' },
+  { v: 'all', label: 'all side-effects' },
   { v: 'none', label: 'none (YOLO)' },
 ]
 const ROUND_MODES = [
@@ -33,7 +38,9 @@ const ROUND_MODES = [
   { v: '32', label: '32 rounds' },
   { v: '64', label: '64 rounds' },
 ]
-const AGENT_TOOLS = [
+
+// last-resort list if /api/agent/tools is unreachable
+const FALLBACK_TOOLS = [
   'read_file', 'write_file', 'edit_file', 'search_replace', 'project_search_replace',
   'run_python', 'run_cmd', 'run_tests', 'list_dir', 'find_files', 'git_status',
   'git_diff', 'web_search', 'checkpoint_compare', 'undo_edit', 'delete_file',
@@ -42,6 +49,28 @@ const AGENT_TOOLS = [
   'lora_apply', 'lora_remove', 'lora_merge', 'lora_keep_for_task',
   'lora_edit_training_data', 'start_lora_training', 'check_lora_training_progress',
   'library_list', 'library_install', 'backup_list', 'backup_restore', 'backup_delete',
+].map((name) => ({ name, description: '' }))
+
+const CFG_KEY = 'forge.agent.cfg.v1'
+const NO_EVENTS: AgentEvent[] = []
+
+interface AgentCfg {
+  rounds: string
+  approval: string
+  project: string
+}
+
+function loadCfg(): AgentCfg {
+  try {
+    const j = JSON.parse(localStorage.getItem(CFG_KEY) ?? '{}')
+    return { rounds: 'auto', approval: 'destructive', project: '', ...j }
+  } catch { return { rounds: 'auto', approval: 'destructive', project: '' } }
+}
+
+const STARTERS = [
+  'Research the Mamba-3 architecture and write a summary.md',
+  'Create a Python script that benchmarks JSON vs CSV parsing',
+  'Explore this workspace and explain its structure',
 ]
 
 export default function Agent() {
@@ -52,17 +81,31 @@ export default function Agent() {
   const selectRun = useForge((s) => s.selectAgentRun)
   const respond = useForge((s) => s.agentRespond)
   const sendMessage = useForge((s) => s.agentMessage)
+  const deleteRun = useForge((s) => s.deleteAgentRun)
   const clearRunEvents = useForge((s) => s.clearRunEvents)
 
   const [input, setInput] = useState('')
-  const [rounds, setRounds] = useState('auto')
-  const [approval, setApproval] = useState('destructive')
-  const [project, setProject] = useState('')
+  const [cfg, setCfg] = useState<AgentCfg>(loadCfg)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [toolQuery, setToolQuery] = useState('')
   const [tools, setTools] = useState<Set<string>>(new Set())
+  const [toolDefs, setToolDefs] = useState<ToolDef[]>(FALLBACK_TOOLS)
+  const [verbose, setVerbose] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const feedRef = useRef<HTMLDivElement>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)) }
+    catch { /* quota */ }
+  }, [cfg])
+
+  // real tool catalog from the harness
+  useEffect(() => {
+    api.get<{ tools: ToolDef[] }>('/api/agent/tools')
+      .then((r) => { if (r.tools?.length) setToolDefs(r.tools) })
+      .catch(() => undefined)
+  }, [])
 
   // pick a run to display: explicit selection → active run → newest
   const run = useMemo(() => {
@@ -70,58 +113,72 @@ export default function Agent() {
     return sel ?? agentRuns.find((r) => r.status === 'running') ?? agentRuns[0]
   }, [agentRuns, selectedId])
 
-  const events = run ? runEvents[run.run_id] ?? [] : []
+  const running = run?.status === 'running'
+  const ready = engine.state === 'ready'
+
+  // 1s ticker for the live elapsed readout
+  useEffect(() => {
+    if (!running) return
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [running])
+
+  const events = run ? runEvents[run.run_id] ?? NO_EVENTS : NO_EVENTS
+  const nodes = useMemo(() => buildNodes(events, verbose), [events, verbose])
+  const stats = useMemo(() => runStats(events), [events])
 
   const pendingApproval = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i]
       if (e.kind === 'approval_requested') {
-        const later = events.slice(i + 1).some(
+        const resolved = events.slice(i + 1).some(
           (x) => x.kind === 'tool_result' || x.kind === 'finished' || x.kind === 'failed')
-        if (!later) return e
+        if (!resolved) return e
       }
     }
     return null
   }, [events])
 
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
-  }, [events.length])
-
-  const ready = engine.state === 'ready'
-  const running = run?.status === 'running'
-
   const send = async () => {
     const text = input.trim()
     if (!text || busy) return
     setError('')
+    setInput('')
     setBusy(true)
     try {
       if (running && run) {
-        // steer the running agent — injected as a user turn next round
         await sendMessage(run.run_id, text)
       } else {
         const r = await api.post<{ ok: boolean; run_id?: string; error?: string }>(
           '/api/agent/runs', {
             task: text,
-            project: project || undefined,
-            max_rounds: rounds === 'auto' ? null : Number(rounds),
-            approval_mode: approval,
+            project: cfg.project || undefined,
+            max_rounds: cfg.rounds === 'auto' ? null : Number(cfg.rounds),
+            approval_mode: cfg.approval,
             enabled_tools: tools.size ? [...tools] : undefined,
           })
         if (!r.ok) throw new Error(r.error || 'failed to start')
         if (r.run_id) selectRun(r.run_id)
       }
-      setInput('')
-    } catch (e) { setError(String(e)) }
-    finally { setBusy(false) }
+    } catch (e) {
+      setError(String(e))
+      setInput(text)
+    } finally { setBusy(false) }
   }
 
-  const cancel = async () => {
+  const cancel = () => {
     if (running && run) {
-      await api.post(`/api/agent/runs/${run.run_id}/cancel`).catch(() => undefined)
+      void api.post(`/api/agent/runs/${run.run_id}/cancel`).catch(() => undefined)
     }
   }
+
+  const toolGroups = useMemo(() => {
+    const q = toolQuery.toLowerCase()
+    const defs = q
+      ? toolDefs.filter((t) => t.name.includes(q) || t.description.toLowerCase().includes(q))
+      : toolDefs
+    return groupTools(defs)
+  }, [toolDefs, toolQuery])
 
   const toggleTool = (t: string) => {
     setTools((s) => {
@@ -131,164 +188,225 @@ export default function Agent() {
     })
   }
 
+  const elapsed = run
+    ? (running ? now / 1000 - run.started_at : stats.elapsedS ?? 0)
+    : 0
+
   return (
     <div className="flex h-full min-h-0">
-      {/* left: runs + config */}
-      <div className="w-[280px] shrink-0 border-r border-border overflow-y-auto p-3 space-y-3">
-        <Card title="Runs">
+      {/* ---- left: new run + history ---- */}
+      <div className="w-[292px] shrink-0 border-r border-border overflow-y-auto p-3 space-y-3 bg-bg-alt/40">
+        <Card title="New run">
+          <div className="space-y-2.5">
+            <Field label="Project"
+              hint="Subfolder under ForgeAI_Projects — blank slugs the task">
+              <Input value={cfg.project}
+                onChange={(e) => setCfg((c) => ({ ...c, project: e.target.value }))}
+                placeholder="name → ForgeAI_Projects/<name>" className="w-full" />
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Stop after">
+                <Select value={cfg.rounds} className="w-full"
+                  onChange={(e) => setCfg((c) => ({ ...c, rounds: e.target.value }))}>
+                  {ROUND_MODES.map((m) =>
+                    <option key={m.v} value={m.v}>{m.label}</option>)}
+                </Select>
+              </Field>
+              <Field label="Approvals">
+                <Select value={cfg.approval} className="w-full"
+                  onChange={(e) => setCfg((c) => ({ ...c, approval: e.target.value }))}>
+                  {APPROVAL_MODES.map((m) =>
+                    <option key={m.v} value={m.v}>{m.label}</option>)}
+                </Select>
+              </Field>
+            </div>
+
+            {/* tool picker */}
+            <div className="border border-border rounded-lg overflow-hidden">
+              <button
+                onClick={() => setToolsOpen(!toolsOpen)}
+                className="w-full flex items-center justify-between px-2.5 py-2 text-[12px] text-text-dim hover:text-text cursor-pointer transition-colors">
+                <span className="flex items-center gap-1.5">
+                  <Wrench size={12} />
+                  {tools.size ? `${tools.size} tools enabled` : `all ${toolDefs.length} tools`}
+                </span>
+                {toolsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
+              {toolsOpen && (
+                <div className="border-t border-border p-2">
+                  <div className="relative mb-1.5">
+                    <Search size={11}
+                      className="absolute left-2 top-1/2 -translate-y-1/2 text-text-faint" />
+                    <input
+                      value={toolQuery}
+                      onChange={(e) => setToolQuery(e.target.value)}
+                      placeholder="Filter tools…"
+                      className="w-full bg-input border border-border rounded-md pl-6 pr-2 py-1 text-[11.5px] text-text placeholder:text-text-faint focus:outline-none focus:border-accent/60" />
+                  </div>
+                  <div className="flex gap-2 mb-1.5">
+                    <button onClick={() => setTools(new Set(toolDefs.map((t) => t.name)))}
+                      className="text-[10.5px] text-accent-hi hover:underline cursor-pointer">all</button>
+                    <button onClick={() => setTools(new Set())}
+                      className="text-[10.5px] text-text-faint hover:underline cursor-pointer">reset</button>
+                    <span className="text-[10.5px] text-text-faint ml-auto">
+                      empty = all enabled
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                    {toolGroups.map((g) => (
+                      <div key={g.label}>
+                        <div className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-text-faint pt-1">
+                          {g.label}
+                        </div>
+                        {g.tools.map((t) => (
+                          <CheckBox key={t.name}
+                            label={<span className="font-mono text-[11px]">{t.name}</span>}
+                            checked={tools.size === 0 || tools.has(t.name)}
+                            onChange={() => toggleTool(t.name)}
+                            className="py-0.5"
+                            title={t.description} />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+
+        <Card title={`Runs (${agentRuns.length})`}>
           <div className="space-y-1">
-            {agentRuns.slice(0, 20).map((r) => (
+            {agentRuns.slice(0, 30).map((r) => (
               <RunRow key={r.run_id} run={r}
                 active={r.run_id === run?.run_id}
-                onClick={() => selectRun(r.run_id)} />
+                onClick={() => selectRun(r.run_id)}
+                onDelete={() => void deleteRun(r.run_id)} />
             ))}
             {!agentRuns.length && (
               <div className="text-[11.5px] text-text-faint">no runs yet</div>
             )}
           </div>
         </Card>
-
-        <Card title="Configuration">
-          <div className="space-y-2.5">
-            <div className="text-[12px] text-text-dim space-y-1">
-              <span>Project</span>
-              <Input value={project} onChange={(e) => setProject(e.target.value)}
-                placeholder="name → ForgeAI_Projects/<name>" className="w-full" />
-            </div>
-            <div className="flex items-center justify-between text-[12px] text-text-dim">
-              <span>Stop</span>
-              <Select value={rounds} onChange={(e) => setRounds(e.target.value)}>
-                {ROUND_MODES.map((m) =>
-                  <option key={m.v} value={m.v}>{m.label}</option>)}
-              </Select>
-            </div>
-            <div className="flex items-center justify-between text-[12px] text-text-dim">
-              <span>Approve</span>
-              <Select value={approval} onChange={(e) => setApproval(e.target.value)}>
-                {APPROVAL_MODES.map((m) =>
-                  <option key={m.v} value={m.v}>{m.label}</option>)}
-              </Select>
-            </div>
-          </div>
-        </Card>
-
-        <Card>
-          <button
-            onClick={() => setToolsOpen(!toolsOpen)}
-            className="flex items-center justify-between w-full text-[12px] text-text-dim hover:text-text cursor-pointer">
-            <span className="flex items-center gap-1.5">
-              <Wrench size={12} /> Tools {tools.size > 0 && `(${tools.size} selected)`}
-            </span>
-            {toolsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-          {toolsOpen && (
-            <div className="mt-2 space-y-1 max-h-56 overflow-y-auto">
-              <div className="flex gap-2 mb-1.5">
-                <button onClick={() => setTools(new Set(AGENT_TOOLS))}
-                  className="text-[10.5px] text-accent-hi hover:underline cursor-pointer">all</button>
-                <button onClick={() => setTools(new Set())}
-                  className="text-[10.5px] text-text-faint hover:underline cursor-pointer">none</button>
-              </div>
-              {AGENT_TOOLS.map((t) => (
-                <CheckBox key={t} label={<span className="font-mono text-[11px]">{t}</span>}
-                  checked={tools.size === 0 || tools.has(t)}
-                  onChange={() => toggleTool(t)} />
-              ))}
-            </div>
-          )}
-        </Card>
       </div>
 
-      {/* right: chat thread */}
+      {/* ---- right: run thread ---- */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center gap-2 px-5 py-2 border-b border-border">
+        {/* run header */}
+        <div className="flex items-center gap-2 px-5 h-11 border-b border-border shrink-0">
           {run ? (
             <>
-              <span className="text-[12px] font-medium text-text-dim truncate max-w-[40%]"
+              <StatusDot run={run} />
+              <span className="text-[13px] font-medium truncate max-w-[38%]"
                 title={run.task}>{run.task}</span>
               {run.project && (
                 <span title={run.workspace}>
                   <Tag kind="accent"><FolderOpen size={11} /> {run.project}</Tag>
                 </span>
               )}
-              {run.status === 'running' && <Tag kind="accent"><Spinner /> running</Tag>}
-              {run.status !== 'running' && (
-                <Tag kind={run.status === 'done' ? 'ok' : 'err'}>{run.status}</Tag>
-              )}
-              <span className="text-[10.5px] text-text-faint">
-                {run.rounds > 0 && `${run.rounds} rounds`}
+              <span className="text-[10.5px] text-text-faint tabular-nums shrink-0">
+                {fmtDur(elapsed)}
+                {run.rounds > 0 && ` · ${run.rounds} round${run.rounds === 1 ? '' : 's'}`}
+                {stats.tools > 0 && ` · ${stats.tools} tools`}
+                {stats.failed > 0 && (
+                  <span className="text-err"> ({stats.failed} failed)</span>)}
               </span>
             </>
           ) : (
-            <span className="text-[12px] font-medium text-text-dim">Agent</span>
+            <span className="text-[13px] font-medium text-text-dim">Agent</span>
           )}
-          <div className="ml-auto flex gap-1.5">
+          <div className="ml-auto flex items-center gap-1.5">
+            {run && (
+              <Chip on={verbose} onClick={() => setVerbose(!verbose)}
+                title="Show raw model output + rendered prompts">
+                verbose
+              </Chip>
+            )}
+            {run && (
+              <CopyBtn text={run.workspace} className="!w-7 !h-7" />
+            )}
             {running && (
               <Btn variant="danger" onClick={cancel}>
                 <Square size={12} /> Stop
               </Btn>
             )}
-            <Btn variant="ghost" disabled={!run || !events.length}
-              onClick={() => run && clearRunEvents(run.run_id)}>
-              Clear
-            </Btn>
+            {run && !running && (
+              <IconBtn title="Delete run" className="hover:!text-err"
+                onClick={() => void deleteRun(run.run_id)}>
+                <Trash2 size={13} />
+              </IconBtn>
+            )}
+            {run && events.length > 0 && (
+              <Btn variant="ghost"
+                onClick={() => clearRunEvents(run.run_id)}>
+                Clear
+              </Btn>
+            )}
           </div>
         </div>
 
-        <div ref={feedRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-          {!run && (
-            <EmptyState
-              icon={<Bot size={44} strokeWidth={1.2} />}
-              title="Agent idle"
-              desc="Send a message below. The agent plans, calls tools (files, shell, web, tests), and reports back — the whole thread streams here live. Projects land in ForgeAI_Projects/<name>." />
-          )}
-          {events.map((e) => <EventRow key={e.seq} evt={e} />)}
-          {pendingApproval && run && (
-            <div className="bg-warn/10 border border-warn/40 rounded-card p-4">
-              <div className="flex items-center gap-2 mb-1">
-                <Tag kind="warn">approval required</Tag>
-                <span className="text-[12.5px] font-medium">
-                  {(pendingApproval.data as { tool?: string }).tool ??
-                    (pendingApproval.data as { name?: string }).name}
-                </span>
+        <ScrollFeed watch={`${run?.run_id ?? ''}:${events.length}`}
+          className="px-5 py-4">
+          <div className="max-w-[820px] mx-auto space-y-3">
+            {!run && (
+              <EmptyState
+                icon={<Bot size={44} strokeWidth={1.2} />}
+                title={ready ? 'Agent idle' : 'Engine not loaded'}
+                desc={ready
+                  ? 'Send a task below. The agent plans, calls tools (files, shell, web, tests) and reports back — the whole thread streams here live. Projects land in ForgeAI_Projects/<name>.'
+                  : 'Load a checkpoint on the Models page to run the agent.'}
+                action={ready ? (
+                  <div className="flex flex-wrap justify-center gap-2 max-w-lg">
+                    {STARTERS.map((s) => (
+                      <button key={s} onClick={() => setInput(s)}
+                        className="px-3 py-1.5 rounded-full border border-border text-[12px] text-text-dim hover:text-text hover:border-accent/50 hover:bg-panel-alt transition-colors cursor-pointer">
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                ) : undefined} />
+            )}
+            {nodes.map((n) => (
+              <EventNode key={n.key} node={n}
+                pendingApproval={pendingApproval}
+                onRespond={(g) => run && void respond(run.run_id, g)} />
+            ))}
+            {running && !pendingApproval && (
+              <div className="flex items-center gap-2 text-[12px] text-text-faint">
+                <Spinner /> working{run.rounds > 0 ? ` — round ${run.rounds}` : ''}…
               </div>
-              <pre className="text-[11.5px] text-text-dim font-mono whitespace-pre-wrap max-h-40 overflow-y-auto mb-3">
-                {JSON.stringify((pendingApproval.data as { args?: unknown }).args, null, 2)}
-              </pre>
-              <div className="flex gap-2">
-                <Btn variant="primary" onClick={() => respond(run.run_id, true)}>
-                  <Check size={13} /> Approve
-                </Btn>
-                <Btn variant="danger" onClick={() => respond(run.run_id, false)}>
-                  <X size={13} /> Deny
-                </Btn>
+            )}
+            {error && (
+              <div className="text-[12.5px] text-err bg-err/10 border border-err/30 rounded-lg px-3 py-2">
+                {error}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        </ScrollFeed>
 
         {/* composer — steers a live run or starts a new one */}
-        <div className="border-t border-border px-5 py-3">
-          {error && <div className="text-[11.5px] text-err mb-2">{error}</div>}
-          <div className="flex gap-2 items-end">
-            <Textarea
+        <div className="px-5 pb-4 pt-1.5">
+          <div className="max-w-[820px] mx-auto">
+            <Composer
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-              }}
-              rows={2}
+              onChange={setInput}
+              onSubmit={() => void send()}
+              busy={false}
+              disabled={!ready && !running}
+              autoFocus
+              sendLabel={running ? 'Steer' : 'Run'}
+              submitTitle={running
+                ? 'Inject this message before the next round'
+                : 'Start a new agent run'}
               placeholder={running
                 ? 'Steer the agent — your message joins the next round…'
                 : ready
-                  ? 'Describe the task — a new project folder is created in ForgeAI_Projects…'
+                  ? 'Describe the task — a project folder is created in ForgeAI_Projects…'
                   : 'Load a model first…'}
-              disabled={!ready && !running}
-              className="flex-1 !text-[13px] resize-none" />
-            <Btn variant="primary" onClick={send}
-              disabled={!input.trim() || busy || (!ready && !running)}>
-              {busy ? <Spinner /> : <Send size={13} />}
-            </Btn>
+              meta={running ? (
+                <Tag kind="accent"><Spinner /> live</Tag>
+              ) : undefined}
+            />
           </div>
         </div>
       </div>
@@ -296,169 +414,279 @@ export default function Agent() {
   )
 }
 
-function RunRow({ run, active, onClick }: {
-  run: AgentRunInfo; active: boolean; onClick: () => void
+/* ---------- run list ---------- */
+
+function StatusDot({ run }: { run: AgentRunInfo }) {
+  const cls = run.status === 'running' ? 'bg-accent pulse-dot'
+    : run.status === 'done' ? 'bg-ok'
+    : run.status === 'cancelled' ? 'bg-warn' : 'bg-err'
+  return <span className={clsx('w-2 h-2 rounded-full shrink-0', cls)}
+    title={run.status} />
+}
+
+function RunRow({ run, active, onClick, onDelete }: {
+  run: AgentRunInfo
+  active: boolean
+  onClick: () => void
+  onDelete: () => void
 }) {
-  const kind = run.status === 'running' ? 'accent'
-    : run.status === 'done' ? 'ok' : 'err'
   return (
-    <button onClick={onClick}
+    <div
+      onClick={onClick}
       className={clsx(
-        'w-full flex items-center gap-2 py-1.5 px-2 rounded-lg text-left transition-colors cursor-pointer',
-        active ? 'bg-panel-alt' : 'hover:bg-panel-alt/60')}>
-      <Tag kind={kind} className="shrink-0">{run.status}</Tag>
-      <span className="text-[11.5px] text-text-dim truncate flex-1" title={run.task}>
-        {run.project || run.task}
-      </span>
-    </button>
+        'w-full flex items-center gap-2 py-1.5 px-2 rounded-lg text-left transition-colors cursor-pointer group',
+        active ? 'bg-accent/15 border border-accent/25'
+          : 'hover:bg-panel-alt/60 border border-transparent')}>
+      <StatusDot run={run} />
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] text-text-dim truncate" title={run.task}>
+          {run.project || run.task}
+        </div>
+        <div className="text-[10px] text-text-faint flex gap-1.5">
+          {run.project && <span className="truncate max-w-[110px]">{run.task}</span>}
+          <span>{relTime(run.started_at)}</span>
+          {run.rounds > 0 && <span>· {run.rounds}r</span>}
+        </div>
+      </div>
+      <IconBtn title="Delete run"
+        className="!w-5 !h-5 opacity-0 group-hover:opacity-100 hover:!text-err shrink-0"
+        onClick={(e) => { e.stopPropagation(); onDelete() }}>
+        <X size={11} />
+      </IconBtn>
+    </div>
   )
 }
 
-function EventRow({ evt }: { evt: AgentEvent }) {
-  const d = evt.data as Record<string, unknown>
-  switch (evt.kind) {
-    case 'started':
-      return <UserBubble text={String(d.task ?? '')} />
-    case 'user_message':
-      return <UserBubble text={String(evt.data ?? '')} />
-    case 'round_started':
-      return evt.round != null && evt.round > 0 ? (
-        <div className="flex items-center gap-2 pt-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-text-faint">
-            round {evt.round + 1}
-          </span>
-          <div className="flex-1 h-px bg-border" />
-        </div>
-      ) : null
-    case 'prompt_rendered':
-    case 'raw_output':
-    case 'created':
-      return null
-    case 'text': {
-      const segs = parseStream(String(d.text ?? ''))
+/* ---------- event → display nodes ---------- */
+
+type Node =
+  | { t: 'user'; text: string; key: string }
+  | { t: 'text'; raw: string; key: string }
+  | { t: 'tool'; call: { name: string; args: string }; result?: ToolResultRec; key: string }
+  | { t: 'round'; n: number; key: string }
+  | { t: 'approval'; evt: AgentEvent; key: string }
+  | { t: 'end'; ok: boolean; data: Record<string, unknown>; key: string }
+  | { t: 'raw'; label: string; text: string; key: string }
+
+type ToolNode = Extract<Node, { t: 'tool' }>
+
+function buildNodes(events: AgentEvent[], verbose: boolean): Node[] {
+  const nodes: Node[] = []
+  const pendingTools: ToolNode[] = [] // tool nodes awaiting a result
+  for (const e of events) {
+    const d = (e.data ?? {}) as Record<string, unknown>
+    switch (e.kind) {
+      case 'started':
+        nodes.push({ t: 'user', text: String(d.task ?? ''), key: `e${e.seq}` })
+        break
+      case 'user_message':
+        nodes.push({ t: 'user', text: String(e.data ?? ''), key: `e${e.seq}` })
+        break
+      case 'round_started':
+        if (e.round != null && e.round > 0) {
+          nodes.push({ t: 'round', n: e.round + 1, key: `e${e.seq}` })
+        }
+        break
+      case 'text':
+        if (String(d.text ?? '').trim()) {
+          nodes.push({ t: 'text', raw: String(d.text), key: `e${e.seq}` })
+        }
+        break
+      case 'tool_call': {
+        const n: ToolNode = {
+          t: 'tool',
+          call: {
+            name: String(d.name ?? 'tool'),
+            args: JSON.stringify(d.arguments ?? d.args ?? {}, null, 2),
+          },
+          key: `e${e.seq}`,
+        }
+        pendingTools.push(n)
+        nodes.push(n)
+        break
+      }
+      case 'tool_result': {
+        const rec = d as unknown as ToolResultRec
+        const byName = pendingTools.findIndex((n) => n.call.name === rec.name)
+        const idx = byName >= 0 ? byName : (pendingTools.length ? 0 : -1)
+        if (idx >= 0) {
+          pendingTools[idx].result = rec
+          pendingTools.splice(idx, 1)
+        } else {
+          nodes.push({
+            t: 'tool',
+            call: { name: rec.name, args: '' },
+            result: rec,
+            key: `e${e.seq}`,
+          })
+        }
+        break
+      }
+      case 'approval_requested':
+        nodes.push({ t: 'approval', evt: e, key: `e${e.seq}` })
+        break
+      case 'finished':
+        nodes.push({ t: 'end', ok: true, data: d, key: `e${e.seq}` })
+        break
+      case 'failed':
+        nodes.push({ t: 'end', ok: false, data: d, key: `e${e.seq}` })
+        break
+      case 'raw_output':
+        if (verbose) {
+          nodes.push({ t: 'raw', label: 'raw output', text: String(e.data ?? ''), key: `e${e.seq}` })
+        }
+        break
+      case 'prompt_rendered':
+        if (verbose) {
+          nodes.push({ t: 'raw', label: 'prompt', text: String(e.data ?? ''), key: `e${e.seq}` })
+        }
+        break
+      default:
+        break
+    }
+  }
+  return nodes
+}
+
+function runStats(events: AgentEvent[]) {
+  let tools = 0, failed = 0, elapsedS: number | undefined
+  for (const e of events) {
+    if (e.kind === 'tool_result') {
+      tools++
+      if ((e.data as ToolResultRec).ok === false) failed++
+    } else if (e.kind === 'finished') {
+      const d = e.data as Record<string, unknown>
+      if (typeof d.elapsed_s === 'number') elapsedS = d.elapsed_s
+    }
+  }
+  return { tools, failed, elapsedS }
+}
+
+/* ---------- node rendering ---------- */
+
+function EventNode({ node, pendingApproval, onRespond }: {
+  node: Node
+  pendingApproval: AgentEvent | null
+  onRespond: (granted: boolean) => void
+}) {
+  switch (node.t) {
+    case 'user':
+      return <UserBubble text={node.text} />
+    case 'text':
       return (
-        <div className="space-y-2">
-          {segs.map((s, i) => s.kind === 'think' ? (
-            <ThinkCard key={i} text={s.text} streaming={!s.closed} />
-          ) : s.kind === 'body' ? (
-            <div key={i}
-              className="text-[13px] whitespace-pre-wrap leading-relaxed max-w-[85%]">
-              {s.text}
-            </div>
-          ) : s.kind === 'tool_call' ? (
-            <ToolCallCard key={i} name={toolCallName(s.text)}
-              args={s.text} streaming={!s.closed} />
-          ) : null)}
+        <div className="max-w-[92%] min-w-0">
+          <SegmentedBody raw={node.raw} showThinking />
+        </div>
+      )
+    case 'tool': {
+      const rec = node.result
+      return (
+        <div className="max-w-[92%]">
+          <ToolActivityCard
+            name={node.call.name}
+            args={node.call.args}
+            running={!rec}
+            result={rec && {
+              ok: rec.ok,
+              elapsed_s: rec.elapsed_s,
+              text: String(rec.result?.text ?? JSON.stringify(rec.result)),
+            }} />
         </div>
       )
     }
-    case 'tool_call':
-      return <ToolCallCard name={String(d.name ?? 'tool')}
-        args={JSON.stringify(d)} streaming={false} />
-    case 'tool_result':
-      return <ToolResultCard rec={d as unknown as ToolResultRec} />
-    case 'finished':
+    case 'round':
       return (
-        <div className="bg-ok/10 border border-ok/30 rounded-lg px-3 py-2 text-[12.5px] text-ok">
-          {String(d.summary || 'run finished')}
-          {typeof d.rounds === 'number' && (
-            <span className="text-text-faint"> · {d.rounds} rounds</span>)}
+        <div className="flex items-center gap-2 pt-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-text-faint">
+            round {node.n}
+          </span>
+          <div className="flex-1 h-px bg-border" />
         </div>
       )
-    case 'failed':
+    case 'approval': {
+      const isPending = pendingApproval?.seq === node.evt.seq
+      const d = node.evt.data as Record<string, unknown>
+      const name = String(d.tool ?? d.name ?? 'tool')
+      if (!isPending) {
+        return (
+          <div className="flex items-center gap-2 text-[11px] text-warn/80">
+            <Tag kind="warn">approval</Tag> {name}
+          </div>
+        )
+      }
       return (
-        <div className="bg-err/10 border border-err/30 rounded-lg px-3 py-2 text-[12.5px] text-err">
-          {String(d.error || 'run failed')}
+        <div className="bg-warn/10 border border-warn/40 rounded-card p-4">
+          <div className="flex items-center gap-2 mb-1">
+            <Tag kind="warn">approval required</Tag>
+            <span className="text-[12.5px] font-medium font-mono">{name}</span>
+          </div>
+          <pre className="text-[11.5px] text-text-dim font-mono whitespace-pre-wrap max-h-40 overflow-y-auto mb-3">
+            {JSON.stringify(d.args, null, 2)}
+          </pre>
+          <div className="flex gap-2">
+            <Btn variant="primary" onClick={() => onRespond(true)}>
+              <Check size={13} /> Approve
+            </Btn>
+            <Btn variant="danger" onClick={() => onRespond(false)}>
+              <X size={13} /> Deny
+            </Btn>
+          </div>
         </div>
+      )
+    }
+    case 'end': {
+      if (!node.ok) {
+        return (
+          <div className="bg-err/10 border border-err/30 rounded-lg px-3 py-2 text-[12.5px] text-err">
+            {String(node.data.error || 'run failed')}
+          </div>
+        )
+      }
+      const d = node.data
+      const sandbox = (d.sandbox ?? {}) as Record<string, unknown>
+      const toolsUsed = (sandbox.tools_used ?? []) as string[]
+      return (
+        <div className="bg-ok/10 border border-ok/30 rounded-card px-4 py-3">
+          <div className="flex items-center gap-2 text-[12.5px] text-ok font-medium">
+            <Check size={13} /> run finished
+            <span className="text-text-faint font-normal">
+              {typeof d.rounds === 'number' && `${d.rounds} rounds`}
+              {typeof d.elapsed_s === 'number' && ` · ${fmtDur(d.elapsed_s)}`}
+              {typeof sandbox.n_calls === 'number' && ` · ${sandbox.n_calls} calls`}
+            </span>
+          </div>
+          {Boolean(d.content) && (
+            <div className="mt-2">
+              <Markdown text={String(d.content)} className="!text-[12.5px]" />
+            </div>
+          )}
+          {toolsUsed.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {toolsUsed.slice(0, 12).map((t) => (
+                <Tag key={t} kind="idle" className="!text-[10px] font-mono">{t}</Tag>
+              ))}
+              {toolsUsed.length > 12 && (
+                <span className="text-[10px] text-text-faint">+{toolsUsed.length - 12}</span>)}
+            </div>
+          )}
+          {typeof d.safety === 'string' && d.safety !== 'no safety violations' && (
+            <div className="text-[11px] text-warn mt-2">{d.safety}</div>
+          )}
+        </div>
+      )
+    }
+    case 'raw':
+      return (
+        <details className="border border-border rounded-lg max-w-[92%]">
+          <summary className="px-3 py-1.5 text-[11px] text-text-faint cursor-pointer hover:text-text-dim select-none">
+            {node.label}
+          </summary>
+          <pre className="px-3 py-2 text-[11px] font-mono text-text-faint whitespace-pre-wrap max-h-72 overflow-y-auto border-t border-border">
+            {node.text}
+          </pre>
+        </details>
       )
     default:
       return null
   }
-}
-
-function UserBubble({ text }: { text: string }) {
-  return (
-    <div className="flex justify-end">
-      <div className="bg-accent/15 border border-accent/30 rounded-2xl rounded-tr-sm px-4 py-2 text-[13px] whitespace-pre-wrap max-w-[75%]">
-        {text}
-      </div>
-    </div>
-  )
-}
-
-function ThinkCard({ text, streaming }: { text: string; streaming: boolean }) {
-  const [open, setOpen] = useState(streaming)
-  return (
-    <div className="bg-think/8 border-l-2 border-think rounded-r-lg overflow-hidden max-w-[85%]">
-      <button onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-think w-full hover:bg-think/10 transition-colors cursor-pointer">
-        <Brain size={11} />
-        {streaming ? 'thinking…' : 'thought'}
-        {open ? <ChevronDown size={12} className="ml-auto" />
-          : <ChevronRight size={12} className="ml-auto" />}
-      </button>
-      {open && (
-        <div className="px-3 pb-2 text-[12px] text-text-dim whitespace-pre-wrap font-mono max-h-72 overflow-y-auto">
-          {text.trim()}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ToolCallCard({ name, args, streaming }: {
-  name: string; args: string; streaming: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  let summary = ''
-  try {
-    summary = toolCallSummary(args || '{}')
-  } catch { /* fall through to raw */ }
-  if (!summary) summary = args.length > 90 ? args.slice(0, 90) + '…' : args
-  return (
-    <div className="border border-border rounded-lg overflow-hidden max-w-[85%]">
-      <button onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-panel-alt transition-colors cursor-pointer">
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <Wrench size={11} className="text-accent" />
-        <span className="text-[12px] font-mono">{name}</span>
-        {streaming && <Spinner />}
-        <span className="text-[10.5px] text-text-faint truncate ml-1">{summary}</span>
-      </button>
-      {open && (
-        <pre className="px-3 py-2 text-[11.5px] font-mono text-text-dim whitespace-pre-wrap max-h-64 overflow-y-auto border-t border-border bg-bg-alt">
-          {args}
-        </pre>
-      )}
-    </div>
-  )
-}
-
-function ToolResultCard({ rec }: { rec: ToolResultRec }) {
-  const [open, setOpen] = useState(false)
-  const text = String(rec.result?.text ?? JSON.stringify(rec.result))
-  const preview = text.length > 90 ? text.slice(0, 90) + '…' : text
-  return (
-    <div className={clsx(
-      'border rounded-lg overflow-hidden max-w-[85%]',
-      rec.ok ? 'border-border' : 'border-err/40')}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-panel-alt transition-colors cursor-pointer">
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0',
-          rec.ok ? 'bg-ok' : 'bg-err')} />
-        <span className="text-[12px] font-mono">{rec.name}</span>
-        <span className="text-[10.5px] text-text-faint truncate">{preview}</span>
-        <span className="text-[10.5px] text-text-faint ml-auto shrink-0">
-          {rec.elapsed_s.toFixed(2)}s
-        </span>
-      </button>
-      {open && (
-        <pre className="px-3 py-2 text-[11.5px] font-mono text-text-dim whitespace-pre-wrap max-h-64 overflow-y-auto border-t border-border bg-bg-alt">
-          {text}
-        </pre>
-      )}
-    </div>
-  )
 }

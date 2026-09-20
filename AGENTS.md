@@ -150,11 +150,25 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
 - `forge/config.py` — ModelConfig dataclass + presets
 - `forge/model_loader.py` — facade re-exporting `forge/model/` (kv_cache,
   attention_ops, layers, builders, llm/ConfigurableResearchLLM, loader/ModelLoader)
+- `forge/checkpoint_io.py` — save/load_checkpoint (safetensors + .pt) and
+  `load_safetensors_pipelined()` — the fast CUDA weight loader: N parallel
+  file reads into per-thread pinned buffers + per-tensor async H2D on a
+  side stream (0.53s vs 3.3s per-tensor safetensors on the 6.4GB V2 ckpt;
+  fastsafetensors is broken on this Windows box — missing cudart DLL — so
+  pipelined is the de-facto fast path; both have safetensors fallback).
+  Wired into `ModelLoader._load_safetensors_mmap/_load_sharded_safetensors`
+  and `load_checkpoint`. `from_checkpoint` also overlaps the tokenizer
+  load on a daemon thread. Bench: `scripts/bench_weight_io.py` (I/O only),
+  `scripts/bench_load_time.py` (full engine load phases — V2: ~2.4s total).
 - `forge/engine/forge_engine.py` — ForgeEngine (inference engine; core init +
   8 mixins: engine_checkpoints, engine_activation, engine_generation,
   engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,
   engine_sessions; shared helpers in engine_common.py)
-- `forge/engine/decoding.py` — Decoding strategies
+- `forge/engine/decoding.py` — Decoding strategies (standard, speculative
+  family, `dola` self-contrastive R50-2, `uno`; DRY n-gram penalty R50-1
+  in the shared `_sample_from_logits` chain + all `engine_generation`
+  paths, `dry_multiplier`/`dry_base`/`dry_allowed_length`/
+  `dry_penalty_last_n` params, 0=off)
 - `forge/engine/gated.py` — ForgeGate three-probe gated generation
   (route/doom/convergence); `ForgeEngine.load_gate_probes()` +
   `generate_gated()`; probe bundle `research/checkpoints/gate_probes.pt`
@@ -164,7 +178,38 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   `.devin/scratchpad.md` (R&D: ForgeGate probes). Held-out eval on
   ForgeLM V2: +16.4pts acc at −34% tokens vs always-think; numbers are
   corpus-dependent — recalibrate probes on new domains/checkpoints
-  before trusting thresholds.
+  before trusting thresholds. GUI wiring:
+  `EngineService._load_blocking` auto-loads the bundle when present;
+  `chat_loop._route_p_easy` scores the route head once per turn on a
+  TOOLS-FREE render of the conversation (the ~17-schema `<tools>` block
+  collapses h_mean and drags p_easy ~0.25 below threshold — "Hello":
+  0.355 tools-free vs 0.098 with tools; probe was trained tools-free)
+  and switches to a closed-think render (`<think></think>` + "Answer:"
+  anchor — bare </think> leaves the model musing) when p_easy ≥ 0.2.
+  Bare greetings/acks bypass the probe entirely (`_is_trivial_turn`,
+  gate_r has no chit-chat class). Emits a `gate` SSE event the Chat page
+  shows as a `gate → mode (p=…)` chip. Routing + conv exit run ONLY on
+  fresh user turns (last conv msg is `user`) — tool-continuation rounds
+  go straight to think+budget: both probes are OOD on synthesis turns
+  (observed: conv-exit forced `Answer:` → model restated its plan and
+  re-called the same tool 5×). Think turns get TWO exits: the
+  conv probe early-exit (`_conv_exit_observer` scores per-step hidden
+  states via `generate_stream(hidden_observer=)`, K=2 consecutive
+  >0.75 past 32 tokens → inject force-answer; emits a `conv-exit` gate
+  event) AND the hard cap backstop (`_think_cap_processor` injects the
+  gated.py force-answer suffix after `think_budget` think tokens,
+  default 160, per-request via `ChatSendRequest.think_budget` /
+  Chat settings "Think budget", 0=no forced exit) — plus a `<think>`
+  (id 541) ban in generated text in every mode (a generated <think> can
+  only re-open a reasoning pass — observed: model emitted `Answer:` then
+  re-opened <think> and re-looped). Direct path passes `budget=None`
+  (ban only). Two output guards: repeat-call detection (`_call_sig` —
+  an identical name+args call drops tool defs so the next round must
+  synthesize) and `_strip_direct_musing` (direct-path text before a
+  stray `</think>` is reasoning voice — dropped; pre-call musing on
+  direct tool turns is dropped entirely). Threshold calibrated via
+  `scripts/bench_gate_route.py` — rerun it when the probes are
+  retrained or the chat template changes.
 - `forge/engine/decide.py` — SystemOneEvaluator: TypeSafe AI "System One"-
   compatible typed decisions (noul/choice/score questions → TypeSafe-style
   probability answers) via candidate-continuation scoring — single forward
@@ -178,7 +223,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   NOT calibrated.
 - `forge/engine/decision_head.py` — Tier-1 `DecisionScorer`: linear
   verifier head on last-token hidden states, `s(q,c) = w·h(prompt+" "+cand)`
-  softmaxed per question; covers noul/choice/score with one head.
+  softmaxed per question; covers noul/choice/score with one head. Also
+  `ProcessRewardHead` (R50-3): sigmoid step verifier on step-end hidden
+  states — `fit_prm(model, tok, device, dataset)` trains on per-step or
+  outcome-broadcast labels (BCE, frozen base), `score_steps` returns
+  P(step correct); ~10KB weights, feeds GRPO advantage shaping.
   Train via `fit_decision_scorer(model, tok, device, dataset)` —
   dataset rows `(state, question_spec, correct_candidate_idx)`, group
   softmax CE (proper scoring rule) + LBFGS temperature scaling; ~10 KB
@@ -187,7 +236,8 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   Real-model check (340 mixed templated examples): ECE 0.067 vs 0.141
   raw at equal accuracy — calibrated-style, not production-calibrated;
   validate on non-templated data before confidence gating.
-- `forge/keys/` — KeyStack architecture keys (25 canonical)
+- `forge/keys/` — KeyStack architecture keys (25 canonical + `kda` R49-2
+  side-path: `use_kda` config flag, gate=0 bit-exact, KDAKey BI port)
 - `forge/quant/` — Quantization implementations
 - `forge/decoding/` — Decoding implementations
 - `forge/training/` — Training runners + optimizers
@@ -197,13 +247,40 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   with progress-coupled stall detection, events.jsonl — to
   `research/checkpoints/self_play/` for the GUI Self-Play page + CLI polling;
   `--status-dir`/`--no-live-status` flags on the loop)
-- `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed)
+- `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed).
+  Web tools live in `forge_gui/api/web_tools.py` (defs + dispatch) backed by
+  stdlib-only `forge/web_primitives.py`: `web_search` (DuckDuckGo HTML),
+  `news_search` (Google News RSS — use for "the news"/current events; DDG
+  returns portal homepages for those queries; empty query → top headlines),
+  `web_fetch` (http/https only), `wikipedia_search`, `arxiv_search`. All
+  keyless GETs; never gated by safety checks, agent approval modes, or
+  read-only chat mode. `parse_ddg_html` drops DDG ad/tracker links (y.js
+  redirectors carry u3= not uddg= and can't be unwrapped) and `ddg_search`
+  falls back to Google News RSS when nothing parseable comes back. The
+  agent-loop fallback harness also wires `WebTools` so web tools exist even
+  if the deps harness factory fails.
 - `forge_gui_server/` — FastAPI GUI backend (REST `/api` + WebSocket `/ws`)
   serving the React UI; ports `forge_gui/api/` to plain async services.
   Launch: `python -m forge_gui_server` (desktop window via pywebview),
-  `--browser`, `--no-window`, or `--dev` (API only, Vite dev on :5173)
+  `--browser`, `--no-window`, or `--dev` (API only, Vite dev on :5173).
+  EngineService preloads the resident model in the background at startup
+  (`FORGE_GUI_NO_PRELOAD=1` to disable, `FORGE_GUI_PRELOAD` /
+  `FORGE_GUI_PRELOAD_CONFIG` to pick a different checkpoint/config);
+  a different-model request mid-load is queued (not dropped), a bare
+  re-request for the resident model is a no-op, and unload() uses
+  sleep(level=2) — no wasted GPU→CPU copy on discard.
 - `forge_ui/` — React 19 + TS + Vite + Tailwind v4 frontend
-  (`npm run dev` / `npm run build`; design tokens in `src/index.css`)
+  (`npm run dev` / `npm run build`; design tokens in `src/index.css`).
+  Shared chat/agent primitives live in `src/components/chat/` (Markdown,
+  blocks=ThinkCard/ToolActivityCard/SegmentedBody/UserBubble/CopyBtn,
+  Composer, ScrollFeed) — reuse them instead of duplicating message cards.
+  Backend endpoints the pages rely on: `POST /api/chats/{id}/truncate`
+  (regenerate/edit-and-resend), `POST /api/chats/import` (paste a
+  transcript → new conversation; `parse_transcript` in
+  `forge_gui/api/chat_store.py` handles JSON/ChatML/role-marked/plain
+  alternating-paragraph formats), `DELETE /api/agent/runs/{id}`,
+  `GET /api/agent/tools` (real harness tool defs for the Agent picker —
+  do not hardcode tool lists in the UI).
 - `tests/unit/` — Unit tests (CPU-runnable where possible)
 - `tests/integration/` — Integration tests (GPU required)
 - `docs/` — Documentation + R&D round notes

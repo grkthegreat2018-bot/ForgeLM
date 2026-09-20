@@ -65,6 +65,16 @@ async def rename_chat(conv_id: str, body: dict):
     return {"ok": True}
 
 
+@router.post("/chats/{conv_id}/truncate")
+async def truncate_chat(conv_id: str, body: dict):
+    """Drop messages[index:] — the UI uses this for regenerate/edit."""
+    conv = services.chat_store.truncate_messages(
+        conv_id, int(body.get("index", 0)))
+    if conv is None:
+        return {"error": "not found"}
+    return conv
+
+
 @router.post("/chats/{conv_id}/rate")
 async def rate_message(conv_id: str, body: dict):
     new = services.chat_store.rate_message(
@@ -85,6 +95,32 @@ async def list_exports():
     return {"exports": services.chat_store.list_exports()}
 
 
+class ChatImportRequest(BaseModel):
+    text: str = ""
+    title: str = ""
+
+
+@router.post("/chats/import")
+async def import_chat(body: ChatImportRequest):
+    """Import a pasted transcript (JSON / ChatML / role-marked / plain
+    alternating paragraphs) as a new conversation."""
+    from forge_gui.api.chat_store import parse_transcript
+    msgs = parse_transcript(body.text)
+    if not msgs:
+        return {"error": "no chat turns detected — paste ChatML, a JSON "
+                "message list, or 'User:'/'Assistant:'-marked text"}
+    conv = services.chat_store.create()
+    for m in msgs:
+        services.chat_store.append_message(
+            conv["id"], m["role"], m["content"])
+    title = body.title.strip() or next(
+        (m["content"].strip().splitlines()[0][:60]
+         for m in msgs if m["role"] == "user" and m["content"].strip()),
+        "Imported chat")
+    services.chat_store.rename(conv["id"], title)
+    return services.chat_store.get(conv["id"])
+
+
 # ── chat send (SSE) ───────────────────────────────────────────────────
 
 class ChatSendRequest(BaseModel):
@@ -100,6 +136,10 @@ class ChatSendRequest(BaseModel):
     repetition_penalty: float = 1.05
     tools_enabled: bool = True
     thinking: bool = True
+    think_budget: int | None = None
+    min_p: float = 0.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
 
 
 @router.post("/chat/send")
@@ -154,7 +194,11 @@ async def chat_send(body: ChatSendRequest):
                 top_k=body.top_k,
                 repetition_penalty=body.repetition_penalty,
                 tools_enabled=body.tools_enabled,
-                thinking=body.thinking):
+                thinking=body.thinking,
+                think_budget=body.think_budget,
+                min_p=body.min_p,
+                dry_multiplier=body.dry_multiplier,
+                dry_base=body.dry_base):
             if evt["type"] == "done":
                 collected = evt["data"].get("messages", [])
             yield _sse(evt)
@@ -171,10 +215,6 @@ async def chat_send(body: ChatSendRequest):
 
     return StreamingResponse(event_stream(),
                              media_type="text/event-stream")
-
-
-class ChatCancelRequest(BaseModel):
-    pass
 
 
 # ── agent runs ────────────────────────────────────────────────────────
@@ -245,6 +285,11 @@ async def agent_list():
 @router.post("/agent/runs/{run_id}/cancel")
 async def agent_cancel(run_id: str):
     return {"ok": services.agent.cancel(run_id)}
+
+
+@router.delete("/agent/runs/{run_id}")
+async def agent_delete(run_id: str):
+    return {"ok": services.agent.delete(run_id)}
 
 
 @router.post("/agent/runs/{run_id}/respond")
