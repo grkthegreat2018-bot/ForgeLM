@@ -1,6 +1,6 @@
 """ForgeEvolve runner — single entry point for all evolution runs.
 
-Driven by JSON configs in tests/evolution/configs/.
+Driven by JSON configs in forge/evolution/configs/.
 Replaces boot_evolve.py, deep_evolve.py, test_multi_domain.py, test_long.py.
 
 Usage:
@@ -46,7 +46,7 @@ from forge.evolution.llm_domain_gen import LLMDomainGenerator, GenericDomain
 from forge.evolution.simulators import _ensure_loaded
 _ensure_loaded()
 
-CONFIG_DIR = Path(__file__).parent / "configs"
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "configs"
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
 
 

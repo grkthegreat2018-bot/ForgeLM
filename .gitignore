@@ -10,6 +10,24 @@ __pycache__/
 *.pyd
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Coverage / build output
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Node (root-level safety net; forge_ui/ has its own .gitignore)
+node_modules/
+
+# Generic temp / backup files
+*.tmp
+*.bak
+*.orig
 
 # Virtual environments
 venv/
@@ -38,6 +56,9 @@ forge/cache/
 
 # Training data & task outputs
 data/
+# forge/training/data/ is source code (dataset pipeline modules imported by
+# sft_train.py) — not a data output dir; re-include it.
+!forge/training/data/
 research/data/
 research/tasks/
 forge/data/

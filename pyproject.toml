@@ -42,17 +42,16 @@ data = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["research*"]
+include = ["forge*", "research*"]
 exclude = ["tests*", ".devin*", "docs*"]
 
 # ── Ruff: lint + format in one tool ──────────────────────────────────────────
 [tool.ruff]
-target-version = "py313"
+target-version = "py311"
 line-length = 120
 extend-exclude = [
     ".devin",
     "docs",
-    "research/evaluation/prompt_tests_auto.py",  # auto-generated, 1467 lines
 ]
 
 [tool.ruff.lint]
@@ -79,7 +78,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["research"]
+known-first-party = ["forge", "forge_gui", "forge_gui_server", "research"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -104,9 +103,8 @@ markers = [
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 [tool.coverage.run]
-source = ["research"]
+source = ["forge", "forge_gui", "forge_gui_server", "research"]
 omit = [
-    "research/evaluation/prompt_tests_auto.py",
     "*/__main__",
 ]
 

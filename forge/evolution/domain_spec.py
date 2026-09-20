@@ -24,8 +24,6 @@ from .reward_guard import RewardGuard, ScoringSpec
 from .simulators import get_simulator
 
 CONFIG_DIR = Path(__file__).resolve().parent / "configs" / "domains"
-# Fallback to old tests/ location for backward compat (critique F24 migration)
-_LEGACY_CONFIG_DIR = Path(__file__).resolve().parents[2] / "tests" / "evolution" / "configs" / "domains"
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +224,7 @@ def set_spec_dir(path: str | Path | None) -> None:
 def spec_dir() -> Path:
     if _SPEC_DIR_OVERRIDE is not None:
         return _SPEC_DIR_OVERRIDE
-    # Prefer the production location; fall back to legacy tests/ location
-    # (critique F24 — specs moved from tests/ to forge/evolution/configs/)
-    if CONFIG_DIR.exists():
-        return CONFIG_DIR
-    return _LEGACY_CONFIG_DIR
+    return CONFIG_DIR
 
 
 def load_spec(name: str) -> DomainSpec:

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from forge.evolution.domains import DOMAINS, list_domains
 
-CONFIG_DIR = Path(__file__).parent / "configs"
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "configs"
 
 
 def load_json(name: str) -> dict:
