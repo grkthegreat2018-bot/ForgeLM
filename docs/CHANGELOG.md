@@ -294,7 +294,7 @@ fell into AirLLM meta-device streaming. Fixes:
 
 
 
-#### R&D round 50 (2026-09-19): Missing-feature batch � DRY, DoLa, filler-KV, PRM, depth upscale + R49-2 KDA key
+#### R&D round 50 (2026-09-19): Missing-feature batch � DRY, DoLa, filler-KV, PRM, depth upscale + R49-2 KDA key
 Survey of `indie_llm_research_scratchpad.md` vs the codebase found five gaps
 worth implementing; all shipped CPU-tested this round plus the R49-2 KDA key:
 
@@ -313,13 +313,13 @@ worth implementing; all shipped CPU-tested this round plus the R49-2 KDA key:
   log_softmax(early)` restricted to the final distribution's
   `candidate_top_k` set; dynamic premature-layer selection by max JSD over
   `{n/4, n/2, 3n/4}` (or fixed `early_layer`). Uses the existing
-  `return_hidden_states` path � no auxiliary model, no training. On the
+  `return_hidden_states` path � no auxiliary model, no training. On the
   hybrid, contrasting a Mamba block also isolates the attention layers'
   recall contribution.
 - **R50-3 stepwise Process Reward Model** (`ProcessRewardHead` +
   `fit_prm`/`score_steps` in `decision_head.py`): sigmoid step verifier on
   step-end hidden states; BCE on per-step labels or outcome-broadcast
-  (Math-Shepherd weak supervision); base model frozen � external probe,
+  (Math-Shepherd weak supervision); base model frozen � external probe,
   ~10KB weights, `save`/`load` with version guard. Metrics: val accuracy
   + ECE. Feeds future GRPO advantage shaping / ForgeGate step routing.
 - **R50-4 filler-token KV eviction** (`engine/kv/filler_kv.py` +
@@ -334,41 +334,41 @@ worth implementing; all shipped CPU-tested this round plus the R49-2 KDA key:
   `depth_upscale` + `parse_layer_map` + `depth_layer_types`, CLI
   `--method depth --layers "0-15,8-23"`): renumbers `blocks.{i}.*` per a
   layer map, preserves non-block tensors, writes a `.depth.json` sidecar
-  (layer_map + layer_types) for the loader. NOT lossless � duplicated
+  (layer_map + layer_types) for the loader. NOT lossless � duplicated
   Mamba/attention blocks change the function; warm start for continued
   training (SOLAR/mergekit semantics). Typed-layer caveat documented:
   the map only makes sense when duplicated source blocks share the type
   expected at their destination slot.
-- **R49-2 KDA key** (`forge/keys/attention/kda_key.py` � Kimi Delta
+- **R49-2 KDA key** (`forge/keys/attention/kda_key.py` � Kimi Delta
   Attention / Gated DeltaNet, arXiv:2510.26692): `KDALayer` side-path with
-  per-key-dim decay `S_t = Diag(a)S + �k(v - (Diag(a)S)?k)?`, GDN-style
-  init (A_log=log U(0.01,16), dt_bias=softplus?� U(1e-3,0.1), depthwise
+  per-key-dim decay `S_t = Diag(a)S + �k(v - (Diag(a)S)?k)?`, GDN-style
+  init (A_log=log U(0.01,16), dt_bias=softplus?� U(1e-3,0.1), depthwise
   causal conv k=4), fp32 sequential scan, sigmoid output gate, scalar
   `gate=0` ? bit-exact vs baseline. `KDAKey` (KeyClass.BI): deterministic
   seeded port adds `kda.*` per layer, reverse strips (lossless iff
-  gate�0), `convert_model_state` for whole checkpoints. Config:
-  `use_kda`, `kda_n_heads`, `kda_head_dim`, `kda_beta_gt1` (N3, off �
+  gate�0), `convert_model_state` for whole checkpoints. Config:
+  `use_kda`, `kda_n_heads`, `kda_head_dim`, `kda_beta_gt1` (N3, off �
   destabilization risk), `kda_decay_floor`. Recurrent state +
   conv-boundary snapshots wired into the new-sequence reset, prefill
-  snapshot, and prefix-cache save/restore paths � prefix hits continue
+  snapshot, and prefix-cache save/restore paths � prefix hits continue
   the recurrence instead of restarting at zero state. VRAM: ~25M
-  params/layer at 2560/20H (bf16 ~50MB/layer); fixed (H�d_k�d_v) state
-  ~1.3MB fp32, NO KV cache � the future 3:1 hybrid cuts KV ~75%.
+  params/layer at 2560/20H (bf16 ~50MB/layer); fixed (H�d_k�d_v) state
+  ~1.3MB fp32, NO KV cache � the future 3:1 hybrid cuts KV ~75%.
   Chunked-scan kernel remains a follow-up (naive scan is CPU-test speed).
 
 Bug fixes confirmed+fixed in-session (see BUG_LOG):
 - `SnapKVCache._evict`/`FillerKVCache._evict` bool-mask overflow: keep
-  mask sized `total` was applied to the overgrown buffer axis � masked to
+  mask sized `total` was applied to the overgrown buffer axis � masked to
   `:total` slots in both.
 - `_min_k_filter`/`_min_k_filter_logits`: dead `weighted_diffs >
-  sensitivity*max_decay` expression � sensitivity ignored; now truncates
+  sensitivity*max_decay` expression � sensitivity ignored; now truncates
   at the rightmost exceeding cliff (argmax fallback).
 - `fit_prm`: harvested features/labels were inference-mode tensors ?
   BCE loss couldn't backprop; post-harvest re-clone (fit_decision_scorer
   convention).
 
 Tests: `tests/unit/test_r49_kda.py` (17) + `tests/unit/test_r50_rd_features.py`
-(24) � hand-computed delta-rule check, prefill/decode parity, prefix-restore
+(24) � hand-computed delta-rule check, prefill/decode parity, prefix-restore
 consistency, block-level `torch.equal` bit-exactness, DRY suffix math,
 DoLa JSD/contrast/top-k mask, filler eviction ordering, depth map parsing +
 duplication + typed-layer validation, PRM learnability/ECE/save-load.
@@ -376,9 +376,313 @@ Full unit suite: **2607 passed**.
   - Smoke-verified all R50 features on the real ForgeLM V2 checkpoint
     (3.2B bf16 CUDA, `scripts/smoke_r50_gpu.py`, 9/9): DRY breaks a real
     repetition loop; DoLa generates richer continuations (after fixing an
-    inference-tensor autograd crash in `_contrast_logits` � now
+    inference-tensor autograd crash in `_contrast_logits` � now
     `@torch.no_grad()`, BUG_LOG'd); KDA `convert_model_state` ports all
     28 blocks with strict=True load and max|dlogit| = 0.0 vs baseline.
     CPU smoke `scripts/smoke_r50_features.py` 23/23 on real tokenizer +
     tiny model (filler eviction 38?23 tokens, PRM step scores, depth
     upscale strict load + typed-layer negative check).
+
+#### R&D round 51 (2026-09-22): FLUX � sparse online associative-memory LM
+
+Non-transformer experiment (`forge/model/flux.py`): a sub-1GB, CPU-native
+chat model where the "weights" are addressable memory cells written
+live, not dense matrices trained offline.
+
+- **R51-1 FluxLM architecture**: vocabulary = the existing tokenizer;
+  context = a *sketch* � rolling polynomial suffix-hashes at orders
+  1..32, an episodic ring buffer (tokens + prefix-hash ring, 1M-token
+  capacity) for seed-match + backward-extension longest-suffix
+  retrieval (effectively unbounded order), an EMA topic hypervector
+  (Hebbian `A[x] += lr*c`, cosine readout on candidates), and a recency
+  table.  No positional encoding ? no max context, no training needed
+  for longer contexts.  Prediction is a geometric mixture over channels
+  (`logit = log_uni + S w_c�(log p_c - log uni)`); channel weights w_c
+  adapt online via Hedge multiplicative weights � meta-learning on top
+  of the memory writes.
+- **R51-2 Live learning + provenance**: every mutation is journaled
+  (`FluxJournal`: op, channel, key, token, delta, tag) � "what is
+  stored in which weights" is auditable (`audit()`, `writes_since()`)
+  and revertible (`revert_since`, `revert_tag` � suffix-based un-learn;
+  `snapshot`/`load` for coarse rollback).  Topic-row deltas stored fp16
+  in a vec-delta ring; EMA inverted exactly on undo.  Decay sweeps are
+  the only non-exact writes (clamped, counted as `inexact`).
+- **R51-3 Engine support**: `ForgeEngine.from_flux(config=, checkpoint=,
+  tokenizer_path=, device=)` explicit path (skips checkpoint detection,
+  quant, KV activation); `unbounded_context=True` flag on the model makes
+  `_generate_impl` skip tokenizer truncation.  Model honors the
+  `(ids, past_key_values=None, use_cache) -> (logits, loss, None)`
+  contract so StandardDecoding/DRY/min-p/top-k all work unchanged.
+  Session learning is tagged `"live"` ? `revert_tag("live")` forgets
+  everything learned in-session.
+- **R51-5 GPU/mixed execution + generativity**: `FluxConfig.device="cuda"`
+  (or `from_flux(device="cuda")`) puts the dense readout - topic matrix
+  A, hypervector table R, context vector c, `proto` fingerprint, logit
+  assembly - on GPU (65k x 192 matvec; measured 84 tok/s gen+learn,
+  72MB VRAM) while sparse tables/journal stay host-resident (hash lookups
+  are pointer-chasing - wrong for GPU).  `FluxLM.to_device()` migrates
+  live.  New hedge channel `sem`: expected-next-token fingerprint
+  (`proto` = EMA of follower A-rows) cosine-scored against learned token
+  fingerprints - on CUDA the full vocab each step - so tokens
+  distributionally similar to memorized followers gain lift without ever
+  appearing in that context (recombination vs verbatim recall).
+  `fast_ingest` skips deep/topic/sem rewards during bulk corpus ingest.
+  Snapshots remap channel weights by name (checkpoint survives channel
+  list changes).
+- **R51-6 Anti-degeneration + selective distillation**: new hedged
+  `fatigue` channel penalizes tokens emitted in the last
+  `fatigue_span` (16) positions — intrinsic "you already said that";
+  killed the greedy `<|im_start|>`/newline loops (hedge correctly gives
+  it ~0.95 weight on non-repetitive text).  Hedge `w` revert is now
+  exact: pre-update w vector snapshotted fp64 in `journal.w_ring`
+  (multiplicative inverse was lossy through the min/max clip — revert
+  drift was 0.89, now 0).  Gap distillation: `track_gaps` records
+  positions where the probe-order table had < `gap_min_total` followers;
+  `rescan_gaps()` rebuilds them for pre-tracking snapshots;
+  `distill_from(score_fn)` batches 32-token gap windows through a
+  teacher and writes top-k probs as fractional counts under
+  `tag="distill"` (journaled ws/we block markers → `revert_tag` /
+  `revert_writes` remove them without touching stream state).
+  `scripts/distill_flux.py` drives ForgeLM V2 as the teacher.
+  Measured: V2 scores 86 gaps/s — 5,000 gaps in 56s, ~400k cells —
+  inside the few-minutes budget where full-corpus scoring (~350 tok/s
+  prefill) is not.  Teacher knowledge stays recall-level (V2 top-k
+  followers, not reasoning); explicit facts still prefer direct ingest.
+- **R51-4 Tooling**: `scripts/train_flux.py` (txt/jsonl/json corpora,
+  ChatML `messages` flattening, per-document `soft_reset`, `--resume`),
+  `scripts/bench_flux.py` (ingest/gen tok/s + tracemalloc memory),
+  `scripts/distill_flux.py` (selective teacher distillation driver).
+- Measured (RTX 5070 box): ~32k tok/s ingest on real SFT text (CPU),
+  ~250 tok/s predict+learn loop CPU, ~84 tok/s gen+learn on CUDA with
+  72MB VRAM, 134 MB host RAM after 63k tokens; worst-case bounded by
+  `max_cells_per_order`/`journal_cap`/`vec_delta_cap`.
+  Smoke: trained on `data/sft/nontool_general.jsonl` (ChatML) ?
+  "What is the capital of France?" answered "The capital of France is
+  Paris." by memory retrieval.  Live-feeding Wikipedia/dictionary text
+  raises recall quality directly (memory machine).  Greedy decoding
+  loops remain (temperature ~0.6-0.8 + repetition_penalty/DRY help).
+  (n-gram/episodic committee) � generalization is the known weak point;
+  candidate upgrades: distilled count priors from ForgeLM, char-level
+  fallback channel, learned sparse neural channel on hashed embeddings.
+- Tests: `tests/unit/test_flux.py` (15 tests � forward contract, instant
+  learning, episodic recall, cell locality, journal revert (exact w
+  restore), snapshot roundtrip, Hedge adaptation, gap tracking +
+  distill writes, CPU/CUDA engine integration, memory bound).
+
+#### R&D round 52 (2026-10-03): FLUX live-learning upgrade — knn channel, archived episodic, hot-training
+
+R51's known weak point was generalization (verbatim n-gram/episodic
+committee) and episodic death at the ring horizon.  R52 attacks both
+directly, keeping the associative-memory design (no gradients, no KV
+cache, all writes journaled/reversible).
+
+- **R52-1 `knn` channel — approximate-match context retrieval**:
+  per-position bank of normalized context fingerprints
+  (`normalize(c_prev @ Pcsem)`, 64-d) → successor token.  Prediction
+  retrieves top-`knn_k` cosine neighbors and votes their successors
+  weighted `relu(sim)**knn_gamma` (min-sim gated).  Exact `deep` only
+  fires on verbatim repeats; knn generalizes to *similar* contexts
+  across the whole stream — the memorizing-transformer pattern, fully
+  online.  Bank capacity `knn_capacity` (default 1<<19) ring; every
+  write journaled (`k` op) and revertible.  Hedged like every channel
+  + `evidence_lift`.  VRAM: fp32 bank on GPU-primary ≈128MB @ 512k
+  rows (capacity-configurable); CPU path stores an fp32 host bank.
+- **R52-2 Archived episodic — memory past the ring horizon**: epi
+  entries are now `(ctx_end, succ, cert_hashes)` tuples inserted
+  *deferred* — when the successor arrives — so off-ring positions
+  still vote via stored suffix-hash certificates (`cert_orders`,
+  default 24/96-gram confidence grading).  Global FIFO cap
+  (`epi_total_cap`) + per-key `epi_max_per_key`; evictions journaled
+  (`eE`/`epi_ev`/`eve`) for exact revert.  Legacy bare-position
+  entries still read (succ recovered from ring while bytes live).
+- **R52-3 `teach(context, target)` — instant hot-training**:
+  key-addressed write of a context→target association: multi-order
+  count writes + csem fingerprint + knn bank row, journaled under a
+  tag (`revert_tag`/`revert_writes` forget it).  Shares the
+  `_write_counts_keys` refactor with `write_counts`/`distill_from`.
+- **R52-4 VRAM fix — journal blocks on host**: `_ingest_bulk` block
+  payloads (deltas, epi/knn snapshots, evictions) now store CPU
+  tensors — bulk ingest no longer grows device memory with journal
+  retention; `_undo_block` re-migrates on demand (`load()` keeps them
+  host-side after deserialize).
+- **Bug fixes found this round** (all confirmed + tested):
+  - bulk `H_blk` closed form was off by one power of `P` (pre-existing
+    R51 bug): every bulk-ingest suffix key was `correct·P⁻¹` —
+    internally consistent, never matching live-era keys.  Episodic
+    recall after `fit()` was silently broken on both backends.
+  - `_pows` sized by max standard order but `cert_orders` reaches 96 —
+    now sized over all hash orders.
+  - GPU `used[row_epi]` counted per-entry not per-slot: duplicate keys
+    in one block inflated it (592 for 225 slots); now unique-slot
+    counted, revert returns to exact 0.
+  - `_undo_block` epi victim restore resurrected block-era cells as
+    zombie rows; now masks `pos >= base` cells and skips all-block
+    rows (also avoids `_pick_slot` displacing live pre-block rows).
+  - deferred epi `bout` flag: `dok1` bit packed into `bout[O+2]` —
+    raw int64 keys are negative ~50% of the time, `>=0` was not a
+    valid gate (half of deferred entries silently dropped).
+  - `_knn_write`/`_fused_step` cursor sync (`_knn_cur`/`_knncur_g`)
+    and `k`-undo cursor rewind.
+  - `deep` channel was missing `evidence_lift` (hedge starved it at
+    `hedge_min` during noise); GPU `_logits_dev` hardcoded channel
+    indices replaced by `_chix` (knn insertion shifted them).
+- **Known approximations** (documented, tested): bulk-ingest Hedge
+  update is per-chunk constant-w (uni-fallback rewards) vs per-token
+  live — weights converge slower on `fit()` corpora; GPU `index_add_`
+  atomics make logits bit-non-deterministic (argmax stable);
+  `_pick_slot` 2-choice victim restore is exact only when a
+  free/dead candidate exists.
+- Measured: CPU ingest ~1.4–3.4k tok/s (knn fp + write ≈ 2× R51
+  per-token cost — the price of approximate retrieval; GPU bulk path
+  unaffected), CUDA gen ~48 tok/s, 384MB host @ 200k tokens.
+  Tests: 22 in `tests/unit/test_flux.py` — knn approximate recall,
+  archived deep memory across ring wrap, teach+revert, snapshot
+  roundtrip with knn/tuple-epi state, CPU/CUDA bulk-hash parity.
+- **R52-5 Triton fusion + bulk-ingest correctness** (ForgeEngine
+  HAS_TRITON convention, FluxConfig.use_triton, eager fallback
+  everywhere):
+  - knn bank scans sliced to the live ring prefix, power-of-2
+    bucketed (knn_scan_min) so the shape stays static inside the
+    captured CUDA graph; _graph_knn_b recaptures only on bucket
+    crossing.  30k live rows: 32768 scanned vs 524288 padded —
+    live CUDA step 470 → ~692 tok/s at V=4096 (profiled).
+  - _flux_deep_votes_kernel — one launch evaluates all episodic
+    cells (seed-hash check, backward extension, certificate grading,
+    atomic vote scatter); replaces ~25 torch kernels, bit-exact.
+  - _flux_logit_tail_kernel — sem+csem+knn mixture + recency/
+    fatigue in one V-map pass, branchless device-scalar gates;
+    max|Δ| 4.8e-7 vs eager, argmax identical.
+  - _bout flag bit-packing vectorized (dot-product masks).
+  - Bug fixes (reproduced + regression-tested):
+    * _deep_votes_dev ignored the probe-found flag — a miss voted
+      the default slot's unrelated row (ghost votes).
+    * _Hg/_ringg bulk writes scattered with duplicate slots when
+      a block exceeds 
+ing_capacity — undefined order on CUDA,
+      diverged from numpy last-wins; now chunked to unique-slot
+      slices.
+    * bulk episodic insert let colliding same-block keys write ghost
+      cells under a foreign key; used counted entries not unique
+      slots.  Now wholesale candidate-slot snapshots, found-gated
+      cell writes, alternate-slot retry; _undo_block restores
+      (key,raw,pos,cnt,succ,cert) per slot, legacy epi_gpu/epi_ev
+      formats still readable.
+  - Tests now 25 in 	ests/unit/test_flux.py.
+- **R52-6 teacher graft + self-evolution primitives** (the V2-parent
+  pipeline + math-driven self-improvement):
+  - `graft_teacher(emb, method)` / `FluxConfig.teacher_embed` —
+    replace random bipolar `_R` with a projected teacher embedding
+    table (ForgeLM V2 `embed.weight`, [65536,2560] bf16).  Rows are
+    unit-normed, **de-meaned** (removes the frequency/"commonness"
+    axis — random-pair cosine baseline 0.116→0.002 while semantic
+    pairs keep signal), then randproj→`topic_dim` (default; JL
+    preserves pairwise structure — PCA collapses onto frequency axes,
+    measured) and rescaled to sqrt(topic_dim) so Hebbian/delta-rule
+    rates stay calibrated.  One transplant upgrades `c`/`_A`/proto/
+    csem/knn fingerprints at once.  Snapshots persist the grafted
+    matrix (`R_graft`); `load()` blanks the path so the teacher file
+    isn't re-read.  `train_flux.py --graft`.
+  - `distill_flux.py` loads the teacher via `ForgeEngine.from_checkpoint`
+    (pipelined safetensors — 2.0s vs 57.7s raw build on this box).
+  - `reinforce(tag, gain)` — outcome-weighted replay of a tag's
+    journaled cell writes (self-play reward hook: gain>0 strengthens,
+    gain<0 weakens with 0-floor clamps); journaled under
+    `reinforce:<tag>`, revertible.
+  - `consolidate(min_entries, min_agree, mass)` — self-distillation:
+    episodic keys with agreeing modal successors promote into the
+    order tables (`write_counts`, journaled) then free their cells
+    (`eE`-journaled).  Off-ring cells stay archived.
+  - Utility eviction: `_epi_hits` counts actual retrievals (CPU exact
+    per-cell; GPU via a `_dhit_g` flag + 2 new `bout` slots read in
+    `_fused_step`); `_epi_evict` scores the oldest `epi_evict_scan`
+    fifo candidates by hits*epi_hit_w + recency instead of blind FIFO.
+  - `_epi_drop`/`_epi_sync_row`: host evictions now resync the GPU
+    episodic row — fixes a pre-existing divergence where host-evicted
+    cells kept voting on CUDA.  `eE` undo resyncs the row too.
+  - load() fix: GPU-snapshot → CPU-load wiped `_tables` to {} then
+    triplet-rebuild KeyError'd; the per-order skeleton is kept when
+    saved tables are empty.
+  - Tests now 29 in `tests/unit/test_flux.py` (graft+snapshot,
+    reinforce+revert, consolidate, utility-evict survival).
+- **R52-7 ForgeEngine/GUI loadability + CPU→GPU snapshot fix**:
+  - .flux snapshots are first-class checkpoints: models_index
+    scans them (tagged config_name='flux'), EngineService._load_blocking
+    routes them to ForgeEngine.from_flux (cuda+cuda_primary when the
+    GPU is up), skipping the safetensors VRAM heuristic, activation
+    presets, and gate probes (no hidden states to probe).
+    config_name normalizes to 'flux' so dedupe/boot checks stay
+    stable; DELETE /models accepts .flux; UI ModelEntry.is_flux.
+  - rom_flux sets engine.checkpoint_path post-init (pre-init would
+    run safetensors KeyStack detection on a pickle).
+  - sleep(2)/wake() are flux-aware: FluxLM's weights ARE its live
+    memory, so sleep(2) snapshots to a tempfile before discarding and
+    wake() reloads via FluxLM.load — session learning survives the
+    cycle (verified: stream+epi intact, identical generations).
+    Sleep(1) stays a flag-only no-op for flux (no nn.Parameters —
+    memory tables are the resident state; use level 2 to release).
+  - Bug: CPU-snapshot → cuda_primary load wrote tok==vocab_size
+    'sentinel' tot-cells into ttoks; _logits_dev indexed uni_pv[V]
+    → device-side assert mid-decode.  Removed the sentinels (add()
+    accumulates ttot/tocc itself) and hardened _logits_dev with an
+    in-range clamp + mask so a stale cell id can never assert.
+  - 	rain_flux.py --out default moved to research/checkpoints/flux/
+    so snapshots appear in the GUI model index automatically.
+- **R52-8 High-impact corpus filtering (`--topic`)**:
+  - train_flux.py gained a domain scorer on title + intro (first 3k
+    chars): preset packs `ai` / `code` / `science` (high-precision
+    keyword sets — a false negative costs a page, a false positive
+    pollutes memory) plus comma-separated custom keywords merged into
+    the pack.  Title hit accepts outright; otherwise the intro needs
+    >=min_hits (default 2) DISTINCT text hits so one repeated word
+    can't carry a page in.
+  - Applies to --hf streams (wikimedia/wikipedia rows), jsonl/ndjson/
+    json records (row['title'] scored), and --dict-flatten kaikki
+    entries (row['word'] as title).  .txt/.md files stay unfiltered —
+    curated input.  [filter] progress lines report scanned/skipped.
+  - Corpus-scale ingest: --hf streaming, --wiki-filter reuse of
+    download_wikipedia.should_skip, --max-tokens/--max-docs,
+    --ckpt-every periodic snapshots, per-doc soft_reset.
+  - EngineService.learn(path, tag, max_tokens) + POST /engine/learn
+    (+cancel): slice-wise (8k tok) ingest under the generation lease
+    so chat interleaves; progress via engine_progress, result via
+    learn_done hub events; FluxLM-resident only.
+  - Tests: tests/unit/test_train_flux.py (12) — scorer accept/reject,
+    distinct-hit rule, custom keywords, dict flatten, jsonl title
+    scoring, txt passthrough.
+- **R52-9 FluxLM RSI mode in InfiniteSelfPlayLoop (`--training-mode flux`)**:
+  - Reuses the existing epoch skeleton (self-play -> train -> evaluate ->
+    promote/demote, status writer, resumability) with flux primitives in
+    place of the trainer: per-task journal-tagged generation attempts on
+    _concise_qa_pairs verified tasks; failures revert_tag'd IMMEDIATELY
+    (tag is the journal tail — deferred revert is a cascade bug, suffix
+    rewind erases all later tags); successes reinforce(tag, gain) in
+    Phase 2; failures teach_text()'d the verified answer in Q:/A:
+    template with newline terminator; consolidate() each epoch; promote
+    gates on a FIXED held-out QA set (flux_eval_seed — same questions
+    every epoch); demote = full rollback via revert_since(epoch_mark).
+  - Grader _flux_check: answer-first (startswith) or digit-aware
+    word-boundary match ("42." ok, "42.5" not).
+  - revert_since(seq_pos) fix: ws/we/g write-block markers are now
+    boundaries — a position-floor revert can no longer eat teach/
+    consolidate blocks below the mark (was silently draining journals).
+    Regression test: test_revert_since_seq_pos_floor.
+  - Verified run (6 epochs, ~60s/epoch, GPU): held-out acc 0 -> ~0.17-0.20
+    with correct promote/demote gating; plateau matches the memory-model
+    ceiling (finite-domain families memorize, arithmetic doesn't transfer).
+  - R52-9b concurrent attempts + GUI launch: FluxLM.clone() (BytesIO
+    snapshot round-trip — full-memory copy, zero shared state);
+    generate_batch() routes FluxLM to cloned-worker threads
+    (flux_batch_workers, default 4) with per-prompt temperature/seed/
+    top-p/top-k/stops — exploration writes live on the clones and are
+    rolled back per prompt, canonical model untouched; worker clones run
+    _use_cuda_graph=False (concurrent CUDA-graph captures on one device
+    invalidate each other — eager _step_dev instead).  LoopConfig gains
+    flux_group_size (samples per task), flux_workers, flux_temp(_spread),
+    flux_unique — cross-epoch prompt dedup via _flux_seen + eval-set
+    exclusion (anti-overfit: no repeated goals, eval stays held-out).
+    Attempts emit live task_start/task_done/flux_attempts_done/
+    flux_eval_done events to status.json/events.jsonl.  GUI:
+    /api/selfplay/start accepts mode="flux" + flux_checkpoint +
+    flux_group_size/flux_workers; /api/selfplay/status exposes
+    flux_models (checkpoints/flux/*.flux); SelfPlay page gains a
+    mode picker + FLUX checkpoint select + worker knobs.

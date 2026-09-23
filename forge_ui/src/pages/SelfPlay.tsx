@@ -16,6 +16,7 @@ interface SelfPlayStatus {
   heartbeat_age_s: number | null
   heartbeat_stalled: boolean | null
   topics: string[]
+  flux_models?: string[]
 }
 
 type TagKind = 'ok' | 'warn' | 'err' | 'idle' | 'accent' | 'think'
@@ -69,6 +70,11 @@ export default function SelfPlay() {
   const [hbAge, setHbAge] = useState<number | null>(null)
   const [stalled, setStalled] = useState(false)
   const [topics, setTopics] = useState<string[]>([])
+  const [fluxModels, setFluxModels] = useState<string[]>([])
+  const [mode, setMode] = useState<'sft' | 'grpo' | 'flux'>('sft')
+  const [fluxCkpt, setFluxCkpt] = useState('')
+  const [fluxGroup, setFluxGroup] = useState(4)
+  const [fluxWorkers, setFluxWorkers] = useState(4)
   const [topic, setTopic] = useState('python_algorithms')
   const [epochs, setEpochs] = useState(3)
   const [tasksPerEpoch, setTasksPerEpoch] = useState(50)
@@ -85,6 +91,7 @@ export default function SelfPlay() {
       setHbAge(r.heartbeat_age_s)
       setStalled(r.heartbeat_stalled === true)
       setTopics(r.topics ?? [])
+      setFluxModels(r.flux_models ?? [])
       setError('')
     } catch (e) { setError(String(e)) }
   }, [])
@@ -108,7 +115,9 @@ export default function SelfPlay() {
     try {
       const r = await api.post<{ ok: boolean; task_id?: string }>(
         '/api/selfplay/start',
-        { topic, epochs, tasks_per_epoch: tasksPerEpoch })
+        { topic, epochs, tasks_per_epoch: tasksPerEpoch, mode,
+          flux_checkpoint: fluxCkpt,
+          flux_group_size: fluxGroup, flux_workers: fluxWorkers })
       if (r.ok) {
         setNote(`Self-play launched${r.task_id ? ` (task ${r.task_id})` : ''} — telemetry appears as the loop writes it.`)
       } else {
@@ -148,11 +157,39 @@ export default function SelfPlay() {
       <Card>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
           <label className="text-[12px] text-text-dim space-y-1">
-            <span className="block">Topic</span>
-            <Select value={topic} onChange={(e) => setTopic(e.target.value)}>
-              {topicOpts.map((t) => <option key={t} value={t}>{t}</option>)}
+            <span className="block">Mode</span>
+            <Select value={mode}
+              onChange={(e) => setMode(e.target.value as typeof mode)}>
+              <option value="sft">ForgeLM (SFT)</option>
+              <option value="grpo">ForgeLM (GRPO)</option>
+              <option value="flux">FluxLM RSI</option>
             </Select>
           </label>
+          {mode === 'flux' ? (
+            <>
+              <label className="text-[12px] text-text-dim space-y-1">
+                <span className="block">FLUX checkpoint</span>
+                <Select value={fluxCkpt}
+                  onChange={(e) => setFluxCkpt(e.target.value)}>
+                  <option value="">fresh model</option>
+                  {fluxModels.map((f) =>
+                    <option key={f} value={f}>{f}</option>)}
+                </Select>
+              </label>
+              <NumInput label="Samples / task" value={fluxGroup}
+                onChange={setFluxGroup} min={1} max={16} step={1} />
+              <NumInput label="Gen workers" value={fluxWorkers}
+                onChange={setFluxWorkers} min={1} max={8} step={1} />
+            </>
+          ) : (
+            <label className="text-[12px] text-text-dim space-y-1">
+              <span className="block">Topic</span>
+              <Select value={topic}
+                onChange={(e) => setTopic(e.target.value)}>
+                {topicOpts.map((t) => <option key={t} value={t}>{t}</option>)}
+              </Select>
+            </label>
+          )}
           <NumInput label="Epochs" value={epochs} onChange={setEpochs}
             min={1} max={100} step={1} />
           <NumInput label="Tasks / epoch" value={tasksPerEpoch}

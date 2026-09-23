@@ -131,9 +131,13 @@ class _GenerationMixin:
         ctx_limit = context_limit or self.hotswap.current.max_context_tokens
 
         _t0 = time.perf_counter()
+        # Models with unbounded_context (e.g. FluxLM) never truncate —
+        # the context sketch has no maximum length by construction.
+        unbounded = getattr(self.model, "unbounded_context", False)
         ids = self.tokenizer(
             prompt, return_tensors="pt",
-            truncation=True, max_length=ctx_limit,
+            truncation=not unbounded,
+            max_length=None if unbounded else ctx_limit,
             add_special_tokens=True,  # BOS <|startoftext|> — required for sane raw prompts
         ).input_ids.to(self.device)
 
@@ -444,6 +448,14 @@ class _GenerationMixin:
         top_p: float = 1.0,
         top_k: int = 80,
         repetition_penalty: float = 1.05,
+        temperatures: list[float] | None = None,
+        top_ps: list[float] | None = None,
+        top_ks: list[int] | None = None,
+        repetition_penalties: list[float] | None = None,
+        seeds: list[int | None] | None = None,
+        stops: list[list[str] | None] | None = None,
+        logits_processors: list | None = None,
+        skip_special_tokens: bool = True,
     ) -> list[str]:
         """Generate text for multiple prompts in a single batched forward pass.
 
@@ -458,6 +470,17 @@ class _GenerationMixin:
             top_p: nucleus sampling threshold
             top_k: top-k sampling limit
             repetition_penalty: repetition penalty
+            temperatures / top_ps / top_ks / repetition_penalties / seeds /
+                stops: optional per-sequence overrides (same length as
+                prompts). Each sequence in the batch gets its own
+                sampling parameters, RNG seed, and stop strings.
+            logits_processors: optional per-sequence callables
+                ``(logits, generated_ids) -> logits`` — same contract as
+                generate_raw's logits_processor (e.g. think-cap /
+                structural-token bans). Applied before sampling.
+            skip_special_tokens: decode flag. Pass False when callers need
+                structural markers preserved (e.g. ``</think>`` for
+                reasoning-split post-processing).
 
         Returns:
             list of generated text strings (same order as prompts)
@@ -467,9 +490,119 @@ class _GenerationMixin:
         self._check_vram_and_offload_if_needed()
 
         with self._gen_lock:
+            if self.model.__class__.__name__ == "FluxLM":
+                return self._generate_batch_flux(
+                    prompts, max_new_tokens, temperature, top_p, top_k,
+                    repetition_penalty,
+                    temperatures=temperatures, top_ps=top_ps,
+                    top_ks=top_ks,
+                    repetition_penalties=repetition_penalties,
+                    seeds=seeds, stops=stops,
+                    logits_processors=logits_processors,
+                    skip_special_tokens=skip_special_tokens)
             return self._generate_batch_impl(
                 prompts, max_new_tokens, temperature, top_p, top_k,
-                repetition_penalty)
+                repetition_penalty,
+                temperatures=temperatures, top_ps=top_ps, top_ks=top_ks,
+                repetition_penalties=repetition_penalties,
+                seeds=seeds, stops=stops,
+                logits_processors=logits_processors,
+                skip_special_tokens=skip_special_tokens)
+
+    def _generate_batch_flux(
+        self, prompts, max_new_tokens, temperature, top_p, top_k,
+        repetition_penalty, temperatures=None, top_ps=None, top_ks=None,
+        repetition_penalties=None, seeds=None, stops=None,
+        logits_processors=None,
+        skip_special_tokens=True,
+    ) -> list[str]:
+        """FluxLM batched generation via shared-memory stream pool.
+
+        Standard LLM batching for a memory model: all learned state is
+        read-only at predict time, so N prompts run as N independent
+        streams over the SAME tables — one batched [N,V] logits step per
+        round on the model's device (no clones, no serialization, no
+        VRAM multiplication; ~1MB of context state per stream).
+
+        Streams are predict-only: the canonical model is never mutated,
+        no journal writes, no revert pass.  Each stream instead emits a
+        ``FluxPacket`` (prompt+gen ids under a tag); the single learning
+        process applies selected packets via ``model.apply_packets`` —
+        available on ``self.last_flux_packets`` after the call, applied
+        with ``self.apply_flux_packets(accept)``.
+
+        Per-prompt temperature/top_p/top_k/repetition_penalty/seed/
+        stops/logits_processors are honoured.  ``flux_batch_workers``
+        caps pool width (0/None = all prompts in one batch);
+        ``flux_workers_device`` is retained for compatibility but the
+        pool always runs on the model's own device.
+        """
+        from forge.model.flux_stream import FluxStreamPool
+
+        n = len(prompts)
+        if n == 0:
+            return []
+        pool = getattr(self, "_flux_pool", None)
+        if pool is None or pool.model is not self.model:
+            pool = FluxStreamPool(self.model)
+            self._flux_pool = pool
+
+        max_par = getattr(self, "flux_batch_workers", 0) or 0
+        if max_par <= 0:
+            max_par = n
+
+        norm = []
+        for p in prompts:
+            ids = self.tokenizer(
+                p, return_tensors="pt", add_special_tokens=True,
+            ).input_ids[0].tolist()
+            norm.append([int(t) for t in ids])
+
+        eos_ids = self._eos_token_ids()
+        outs: list[list[int]] = [[] for _ in range(n)]
+        packets = []
+        for off in range(0, n, max_par):
+            chunk = norm[off:off + max_par]
+            idx = list(range(off, off + len(chunk)))
+            sub = lambda name_list: ([name_list[i] for i in idx]
+                                     if name_list else None)
+            o, pk = pool.generate(
+                chunk,
+                max_new_tokens=max_new_tokens,
+                temperatures=sub(temperatures)
+                or ([temperature] * len(chunk)
+                    if temperature is not None else None),
+                top_ps=sub(top_ps)
+                or ([top_p] * len(chunk) if top_p is not None else None),
+                top_ks=sub(top_ks)
+                or ([top_k] * len(chunk) if top_k is not None else None),
+                repetition_penalties=sub(repetition_penalties)
+                or ([repetition_penalty] * len(chunk)
+                    if repetition_penalty is not None else None),
+                seeds=sub(seeds),
+                stops=sub(stops),
+                logits_processors=sub(logits_processors),
+                tokenizer=self.tokenizer,
+                eos_ids=eos_ids,
+                tag_fn=lambda j: f"batch:{off + j}",
+            )
+            for j, gi in enumerate(o):
+                outs[off + j] = gi
+            packets.extend(pk)
+        self.last_flux_packets = packets
+        return [self.tokenizer.decode(g,
+                                      skip_special_tokens=skip_special_tokens)
+                for g in outs]
+
+    def apply_flux_packets(self, accept=None) -> dict:
+        """Apply selected packets from the last flux batch through the
+        model's single learning process (``FluxLM.apply_packets``).
+
+        ``accept``: None = all, bool list aligned with the last batch's
+        prompt order, or predicate ``accept(packet) -> bool``.
+        """
+        packets = getattr(self, "last_flux_packets", None) or []
+        return self.model.apply_packets(packets, accept=accept)
 
     def _generate_batch_impl(
         self,
@@ -479,12 +612,28 @@ class _GenerationMixin:
         top_p: float,
         top_k: int,
         repetition_penalty: float,
+        temperatures: list[float] | None = None,
+        top_ps: list[float] | None = None,
+        top_ks: list[int] | None = None,
+        repetition_penalties: list[float] | None = None,
+        seeds: list[int | None] | None = None,
+        stops: list[list[str] | None] | None = None,
+        logits_processors: list | None = None,
+        skip_special_tokens: bool = True,
     ) -> list[str]:
         if not prompts:
             return []
 
-        # For single prompt, fall back to regular generate
+        # For single prompt, fall back to regular generate — generate_raw
+        # when a logits processor is supplied (generate() has no such arg).
         if len(prompts) == 1:
+            if logits_processors and logits_processors[0] is not None:
+                return [self.generate_raw(
+                    prompts[0], max_new_tokens=max_new_tokens,
+                    temperature=temperature, top_p=top_p, top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                    logits_processor=logits_processors[0],
+                    skip_special_tokens=skip_special_tokens)]
             return [self.generate(
                 prompts[0], max_new_tokens=max_new_tokens,
                 temperature=temperature, top_p=top_p, top_k=top_k,
@@ -499,19 +648,28 @@ class _GenerationMixin:
             ).input_ids.to(self.device)
             all_ids.append(ids)
 
-        # Use BatchedDecoding
+        # Use BatchedDecoding — pass the engine's resolved EOS set so
+        # per-sequence termination honors this model's real stop tokens
+        # (Jamba V2: <|endoftext|>=2, <|im_end|>=519 — the legacy default
+        # {7, 151643, 151645} never fires).
         from forge.engine.batched_decoding import BatchedDecoding
-        batched = BatchedDecoding()
+        batched = BatchedDecoding(eos_token_ids=self._eos_token_ids())
 
+        n = len(prompts)
         _t0 = time.perf_counter()
         try:
             output_ids = batched.generate_batch(
                 self.model, all_ids,
-                max_tokens_list=[max_new_tokens] * len(prompts),
-                temperatures=[temperature] * len(prompts),
-                top_ps=[top_p] * len(prompts),
-                top_k_list=[top_k] * len(prompts),
-                repetition_penalty_list=[repetition_penalty] * len(prompts),
+                max_tokens_list=[max_new_tokens] * n,
+                temperatures=temperatures or [temperature] * n,
+                top_ps=top_ps or [top_p] * n,
+                top_k_list=top_ks or [top_k] * n,
+                repetition_penalty_list=(
+                    repetition_penalties or [repetition_penalty] * n),
+                seed_list=seeds,
+                stop_list=stops,
+                tokenizer=self.tokenizer,
+                processor_list=logits_processors,
             )
         except torch.cuda.OutOfMemoryError:
             # Fallback: serial generation
@@ -529,7 +687,8 @@ class _GenerationMixin:
         for i, ids in enumerate(output_ids):
             prompt_len = all_ids[i].shape[1]
             generated = ids[0, prompt_len:]
-            text = self.tokenizer.decode(generated, skip_special_tokens=True)
+            text = self.tokenizer.decode(
+                generated, skip_special_tokens=skip_special_tokens)
             results.append(text)
 
         _gen_ms = (time.perf_counter() - _t0) * 1000

@@ -117,28 +117,44 @@ def generate_master_prompt(config, config_name: str = "",
     # Tools
     if tools_enabled:
         lines.append(
-            "- You have access to tools: remember/recall_memory/forget "
-            "for long-term memory, load_lora/unload_lora/list_loras for "
-            "skill specialization, read-only file tools (list_dir, "
-            "read_file, grep_project), and web tools (web_search, "
-            "news_search, web_fetch, wikipedia_search, arxiv_search) "
-            "for real-time "
-            "info, docs, and news. Use them when helpful.")
+            "- You have tools: remember/recall_memory/forget (long-term "
+            "memory), load_lora/unload_lora/list_loras (skill adapters), "
+            "file tools (list_dir, read_file, grep_project), and web "
+            "tools (web_search, news_search, web_fetch, "
+            "wikipedia_search, arxiv_search).")
 
     # Thinking
     if thinking_enabled:
         lines.append(
-            "- When solving complex problems, think step-by-step. "
-            "Show your reasoning before giving the final answer.")
+            "- Keep <think> reasoning short — a few sentences of "
+            "planning, not an essay. Save the detail for the answer.")
 
-    # Behavioral guidelines
+    # Behavioral contract — enforceable rules beat "be concise": lead
+    # with the answer, cap the shape, ban hedging and filler.
     lines.extend([
         "",
-        "## Guidelines",
-        "- Be concise and direct. Avoid unnecessary filler.",
-        "- If you're unsure, say so rather than guessing.",
-        "- When writing code, prefer small, verifiable changes.",
-        "- Ask for clarification when the request is ambiguous.",
+        "## Style",
+        "- Be blunt and brief. Lead with the answer in the first "
+        "sentence — never with preamble or restating the question.",
+        "- Short sentences. Bullets over paragraphs. No filler, "
+        "hedging, or pleasantries.",
+        "- Match length to the question: a yes/no question gets a "
+        "sentence, not an essay.",
+        "- If unsure, say so in one line and state what you'd check — "
+        "never guess silently.",
+        "",
+        "## Tool use",
+        "- Use tools for anything current, external, or "
+        "workspace-specific — don't answer from memory what a tool can "
+        "verify.",
+        "- For the web: web_search/news_search to find pages, then "
+        "web_fetch to read any URL — it returns the page text, title, "
+        "and links you can follow.",
+        "- One short line of intent before a call, then call it. After "
+        "the result, answer directly — don't narrate the tool call.",
+        "- If a tool result is missing what you need, call again with a "
+        "different query or fetch the result's links — don't repeat the "
+        "identical call.",
     ])
 
     return "\n".join(lines)
@@ -159,5 +175,6 @@ def get_default_prompt_for_config(config_name: str,
     except Exception as e:
         logger.warning("failed to generate master prompt for %s: %s",
                        config_name, e)
-        return ("You are a helpful coding assistant created by ForgeAI. "
-                "Be concise and direct.")
+        return ("You are a coding assistant created by ForgeAI. "
+                "Be blunt and brief: lead with the answer, short "
+                "sentences, bullets over paragraphs, no filler.")

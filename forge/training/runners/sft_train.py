@@ -90,9 +90,17 @@ from research.tokenizer_cache import get_tokenizer
 # Tool call markers — the tokenizer's native special tokens (ids 531/532).
 # The runtime parser (qwen_parse_tool_calls) expects JSON inside these tags:
 #   {"name": "func", "arguments": {"key": "val"}}
-# Built from hex to avoid IDE/tool-call parsing confusion.
-_TOOL_CALL_START = bytes.fromhex("3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
-_TOOL_CALL_END = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
+# Canonical Jamba markers (chat_template.TOOL_CALL_START/END) — the earlier
+# <|tool_call_start|>/<|tool_call_end|> pair was LFM2.5 legacy and does not
+# exist in the V2 tokenizer (rendered as literal text → off-format training).
+_TOOL_CALL_START = "<tool_call>"
+_TOOL_CALL_END = "</tool_call>"
+
+# Canonical Jamba ChatML message markers (ids 518/519). The previous
+# <|startofsegment|>/<|endofsegment|> markers are NOT in the V2 tokenizer —
+# every SFT example was rendered in a format inference never sees.
+_IM_START = "<|im_start|>"
+_IM_END = "<|im_end|>"
 
 
 # ── Chat-format rendering ────────────────────────────────────────────────────
@@ -112,11 +120,24 @@ def _render_tool_call(tc: dict) -> str:
     return _TOOL_CALL_START + "\n" + call_json + "\n" + _TOOL_CALL_END
 
 
+def _chat_render(messages: list[dict], add_generation_prompt: bool) -> str:
+    """Render via the canonical Jamba ChatML port (single source of truth —
+    forge/self_play/discovery/chat_template.py, a faithful port of the
+    tokenizer's built-in Jinja template). thinking=False: SFT data carries
+    direct answers; eval + the self-play solve path also render direct.
+    bos=False: the tokenizer adds BOS itself at encode time."""
+    from forge.self_play.discovery.chat_template import apply_chat_template
+    return apply_chat_template(
+        messages, add_generation_prompt=add_generation_prompt,
+        bos=False, thinking=False)
+
+
 def render_messages(messages: list[dict]) -> tuple[str, int]:
     """Render a multi-turn message list into Jamba chat format.
 
-    Uses <|startofsegment|>/<|endofsegment|> markers (Jamba-style), which
-    the ForgeLM V2 checkpoint responds to natively.
+    Uses the canonical ChatML render (<|im_start|>/<|im_end|> markers,
+    <tool_response> results inside a user turn) — the format the ForgeLM V2
+    checkpoint was actually trained on and that eval/inference use.
 
     Returns (text, completion_start_char). completion_start_char is the
     character offset where the FIRST assistant response begins — everything
@@ -127,34 +148,18 @@ def render_messages(messages: list[dict]) -> tuple[str, int]:
     the first user message is the "completion" — the model learns to produce
     the full assistant + tool + final-assistant sequence given the user prompt.
     """
-    parts = []
-    completion_start = None
-    for i, m in enumerate(messages):
-        role = m["role"]
-        if role == "user":
-            parts.append(f"<|startofsegment|>user\n{m['content']}<|endofsegment|>\n")
-        elif role == "assistant":
-            if completion_start is None:
-                # Mark where the first assistant turn begins (start of completion).
-                completion_start = sum(len(p) for p in parts)
-            if m.get("tool_calls"):
-                body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
-            else:
-                body = m.get("content", "")
-            parts.append(f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n")
-        elif role == "tool":
-            name = m.get("name", "tool")
-            content = m.get("content", "")
-            parts.append(f"<|startofsegment|>tool\n{name}\n{content}<|endofsegment|>\n")
-        else:
-            parts.append(f"<|startofsegment|>{role}\n{m.get('content','')}<|endofsegment|>\n")
-    # Add a final generation prompt so the model knows the assistant turn is next
-    # (only if the last message isn't already an assistant message).
-    if messages and messages[-1]["role"] != "assistant":
-        if completion_start is None:
-            completion_start = sum(len(p) for p in parts)
-        parts.append("<|startofsegment|>assistant\n")
-    return "".join(parts), (completion_start or 0)
+    first_asst = next(
+        (i for i, m in enumerate(messages) if m.get("role") == "assistant"),
+        len(messages))
+    # Prefix = conversation up to the first assistant turn + generation prompt
+    # ("<|im_start|>assistant\n") — a strict prefix of the full render, so its
+    # length is exactly the completion start.
+    prefix = _chat_render(messages[:first_asst], add_generation_prompt=True)
+    # No assistant turn → render ends in the generation prompt (empty
+    # completion), matching the original contract.
+    full = _chat_render(
+        messages, add_generation_prompt=(first_asst == len(messages)))
+    return full, len(prefix)
 
 
 def render_single_turn(prompt: str, response: str) -> tuple[str, int]:
@@ -162,28 +167,18 @@ def render_single_turn(prompt: str, response: str) -> tuple[str, int]:
 
     Returns (text, completion_start_char).
     """
-    prompt_text = f"<|startofsegment|>user\n{prompt}<|endofsegment|>\n<|startofsegment|>assistant\n"
-    completion_start = len(prompt_text)
-    full = prompt_text + response + "<|endofsegment|>\n"
-    return full, completion_start
+    prompt_text = _chat_render(
+        [{"role": "user", "content": prompt}], add_generation_prompt=True)
+    full = prompt_text + response + f"{_IM_END}\n"
+    return full, len(prompt_text)
 
 
-def _render_message(m: dict) -> str:
-    """Render a single message into Jamba chat format (no generation prompt)."""
-    role = m["role"]
-    if role == "user":
-        return f"<|startofsegment|>user\n{m['content']}<|endofsegment|>\n"
-    elif role == "assistant":
-        if m.get("tool_calls"):
-            body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
-        else:
-            body = m.get("content", "")
-        return f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n"
-    elif role == "tool":
-        name = m.get("name", "tool")
-        content = m.get("content", "")
-        return f"<|startofsegment|>tool\n{name}\n{content}<|endofsegment|>\n"
-    return f"<|startofsegment|>{role}\n{m.get('content','')}<|endofsegment|>\n"
+def _assistant_body(m: dict) -> str:
+    """Assistant turn body per the canonical template: content, then one
+    <tool_call> block per call (newline-separated)."""
+    content = m.get("content", "") or ""
+    calls = [_render_tool_call(tc) for tc in (m.get("tool_calls") or [])]
+    return "\n".join([content] + calls) if content else "\n".join(calls)
 
 
 def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
@@ -191,7 +186,7 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
 
     Each assistant turn becomes a separate (prompt, completion) pair where:
       - prompt = all messages up to (but not including) this assistant turn,
-        rendered in Qwen chat format + a generation prompt
+        rendered in Jamba ChatML + a generation prompt
         ("<|im_start|>assistant\n")
       - completion = the assistant turn body + "<|im_end|>\n"
 
@@ -207,21 +202,14 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
       2. prompt=user+tool_calls+tool+tool, completion=final+<|im_end|>
     """
     examples = []
-    prefix_parts = []
-    for m in messages:
-        if m["role"] == "assistant":
-            # This is a turn boundary — create a training example.
-            prompt_text = "".join(prefix_parts) + "<|startofsegment|>assistant\n"
-            if m.get("tool_calls"):
-                body = "\n".join(_render_tool_call(tc) for tc in m["tool_calls"])
-            else:
-                body = m.get("content", "")
-            completion_text = body + "<|endofsegment|>\n"
-            examples.append((prompt_text, completion_text))
-            # Add this assistant turn to the prefix for subsequent examples.
-            prefix_parts.append(f"<|startofsegment|>assistant\n{body}<|endofsegment|>\n")
-        else:
-            prefix_parts.append(_render_message(m))
+    for i, m in enumerate(messages):
+        if m["role"] != "assistant":
+            continue
+        # Render the prefix through the canonical template so tool messages
+        # group into user turns exactly as the model sees them at inference.
+        prompt_text = _chat_render(messages[:i], add_generation_prompt=True)
+        completion_text = _assistant_body(m) + f"{_IM_END}\n"
+        examples.append((prompt_text, completion_text))
     return examples
 
 
@@ -519,8 +507,8 @@ def tokenize_example(ex: dict, tokenizer, max_seq_len: int) -> list[dict]:
     if ex["type"] == "multi_turn":
         pairs = split_multi_turn(ex["messages"])
     else:
-        pairs = [(f"<|startofsegment|>user\n{ex['prompt']}<|endofsegment|>\n<|startofsegment|>assistant\n",
-                  ex["response"] + "<|endofsegment|>\n")]
+        full_text, comp_start = render_single_turn(ex["prompt"], ex["response"])
+        pairs = [(full_text[:comp_start], full_text[comp_start:])]
 
     results = []
     for prompt_text, completion_text in pairs:

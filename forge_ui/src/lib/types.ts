@@ -71,6 +71,7 @@ export interface ModelEntry {
   meta: Record<string, unknown>
   modified: number
   is_safetensors: boolean
+  is_flux: boolean
   is_lora: boolean
 }
 

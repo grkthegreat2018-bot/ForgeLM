@@ -561,7 +561,8 @@ export default function Chat() {
                 onRegenerate={regenerate} />
             ))}
             {stream && (
-              <StreamRow stream={stream} showThinking={cfg.showThinking} />
+              <StreamRow stream={stream} showThinking={cfg.showThinking}
+                thinking={cfg.thinking} />
             )}
             {error && (
               <div className="text-[12.5px] text-err bg-err/10 border border-err/30 rounded-lg px-3 py-2">
@@ -815,7 +816,10 @@ function ChatItem({ item, showThinking, isLastAssistant, busy, editing,
   }))
   return (
     <div className="group flex flex-col gap-1">
-      <div className="max-w-[92%] min-w-0">
+      <div className="max-w-[92%] min-w-0 space-y-2">
+        {showThinking && msg.reasoning_content && (
+          <ThinkCard text={msg.reasoning_content} streaming={false} />
+        )}
         <SegmentedBody raw={msg.content} showThinking={showThinking}
           results={results} />
         {msg.tool_calls?.map((tc, i) => (
@@ -849,11 +853,18 @@ function ChatItem({ item, showThinking, isLastAssistant, busy, editing,
 
 /* ---------- live stream row ---------- */
 
-function StreamRow({ stream, showThinking }: {
+function StreamRow({ stream, showThinking, thinking }: {
   stream: StreamState
   showThinking: boolean
+  thinking: boolean
 }) {
-  const segs = useMemo(() => parseStream(stream.raw), [stream.raw])
+  // thinking requests leave the prompt's <think> block open — raw stream
+  // starts mid-reasoning, so mark the lead segment as think (implicit).
+  // Exception: gate-routed direct mode closes the block server-side.
+  const implicit = thinking && stream.gate?.mode !== 'direct'
+  const segs = useMemo(
+    () => parseStream(stream.raw, { implicitThink: implicit }),
+    [stream.raw, implicit])
   let toolIdx = 0
   return (
     <div className="max-w-[92%] min-w-0 space-y-2">

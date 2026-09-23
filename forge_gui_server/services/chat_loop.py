@@ -81,6 +81,25 @@ _THINK_START_ID = 541         # <think>  (Jamba structural token)
 _THINK_END_ID = 542           # </think>
 _THINK_END_STR = "</think>"
 
+_IM_START_ID = 518            # <|im_start|> — never emitted mid-generation
+_TOOL_CALL_START_ID = 531     # <tool_call>
+_TOOL_RESP_END_ID = 540       # </tool_response>
+# Structural ids the model must never emit in generated text: 518 would
+# fake a new turn boundary, 539/540 would fake a tool result. (<tool_call>
+# is handled separately — legal, but only after </think>.)
+_BANNED_IDS = (_IM_START_ID, _TOOL_RESP_START_ID, _TOOL_RESP_END_ID)
+
+# Literal-marker stop strings — belt-and-suspenders for the case where the
+# model emits a marker as ordinary text tokens instead of the special id
+# (id-based EOS never fires, and the model would hallucinate the tool
+# result itself). Checked on a rolling tail of decoded text.
+_TEXT_STOP_TAIL = 24
+_TEXT_STOPS = ("</tool_call>", "<tool_response>")
+
+# Fed-back tool results are capped so a big page/file can't drown the
+# synthesis turn's context.
+_TOOL_RESULT_MAX_CHARS = 4000
+
 # Hard think budget — when the model takes the think path, inject the
 # force-answer suffix after this many generated think tokens so a
 # reasoning pass can't run away on trivial prompts. This is the BACKSTOP;
@@ -188,32 +207,46 @@ def _strip_direct_musing(content: str) -> str:
 
 
 def _think_cap_processor(budget: int | None, suffix_ids: list[int],
-                         exit_flag=None):
+                         exit_flag=None, tool_calls_allowed: bool = True,
+                         track_think: bool | None = None):
     """Per-step logits guard for chat generation.
 
-    - ``budget`` (think path only): after `budget` generated think tokens
-      without a ``</think>``, inject ``suffix_ids`` — the force-answer
-      tail ``"\\n</think>\\nAnswer:"`` — one forced token per step. The
+    - ``track_think`` (default ``budget is not None``): the prompt left a
+      ``<think>`` block open. While it stays open (no ``</think>``
+      generated), ``<tool_call>`` (531) is masked so a call can only start
+      after the reasoning pass closes — the trained Jamba order is
+      think → ``</think>`` → text → ``<tool_call>``. This is the fix for
+      thinking escaping into tool-call turns: a mid-think call used to
+      leave the block unclosed, so the reasoning ended up persisted and
+      displayed as the visible reply.
+    - ``budget``: after `budget` generated think tokens without a
+      ``</think>``, inject ``suffix_ids`` — the force-answer tail
+      ``"\\n</think>\\nAnswer:"`` — one forced token per step. The
       "Answer:" anchor flips the model into answer voice; a bare </think>
       leaves it musing. ``budget=None`` (direct path — the prompt already
       carries a closed think) disables the budget check.
     - ``exit_flag``: optional callable -> bool (the conv-probe observer's
       ``fired``) that triggers the same suffix injection before the
       budget — the learned convergence exit.
-    - ``<think>`` (541) is banned in generated text in every mode: the
-      prompt owns the think block, so a generated <think> can only ever
-      *re-open* a reasoning pass — observed on real output: after the cap
-      fired the model emitted `Answer:` then re-opened <think> and
-      started reasoning all over again.
+    - ``tool_calls_allowed``: False (tools disabled, or defs dropped by
+      the repeat-call guard) bans ``<tool_call>``/``</tool_call>``
+      outright — the model can't spend tokens on a call that will never
+      execute, and stray markers can't leak into the visible reply.
+    - Always banned in generated text: ``<think>`` (541 — a generated one
+      can only re-open a reasoning pass; observed on real output: after
+      the cap fired the model emitted `Answer:` then re-opened <think>
+      and started reasoning all over again), ``<|im_start|>`` (518 — fake
+      turn boundary), ``<tool_response>``/``</tool_response>`` (539/540 —
+      fake tool result; 539 used to be an EOS that truncated the turn).
     """
     queue: list[int] = []
+    track = (budget is not None) if track_think is None else track_think
 
     def proc(logits, generated_ids):
-        think_open = (budget is not None
-                      and _THINK_END_ID not in generated_ids)
+        think_open = track and _THINK_END_ID not in generated_ids
         forced = ((budget is not None and len(generated_ids) >= budget)
                   or (exit_flag is not None and exit_flag()))
-        if think_open and not queue and forced:
+        if think_open and not queue and forced and suffix_ids:
             queue.extend(suffix_ids)
         if queue:
             tid = queue.pop(0)
@@ -221,9 +254,46 @@ def _think_cap_processor(budget: int | None, suffix_ids: list[int],
             masked[..., tid] = logits[..., tid]
             return masked
         masked = logits.clone()
-        masked[..., _THINK_START_ID] = float("-inf")
+        for tid in _BANNED_IDS + (_THINK_START_ID,):
+            masked[..., tid] = float("-inf")
+        if think_open or not tool_calls_allowed:
+            masked[..., _TOOL_CALL_START_ID] = float("-inf")
+        if not tool_calls_allowed:
+            masked[..., _TOOL_CALL_END_ID] = float("-inf")
         return masked
     return proc
+
+
+def _split_reasoning(content: str) -> tuple[str, str]:
+    """Split a think-path completion into ``(reasoning, visible_body)``.
+
+    The prompt opens the ``<think>`` block, so raw output starts in
+    reasoning voice. A well-formed completion contains ``</think>``: text
+    before it is reasoning, text after is the answer. When the marker
+    never arrived — max-token truncation, an EOS inside the block, or a
+    bare-JSON tool call that bypassed the 531 mask — the whole completion
+    is reasoning and the visible body is empty (it must NOT be persisted
+    as the reply — that was the "thinking escapes" bug).
+    """
+    if _THINK_END_STR in content:
+        reasoning, _, body = content.partition(_THINK_END_STR)
+        # stray extra closers in the body are noise — drop them
+        return (reasoning.strip(),
+                body.replace(_THINK_END_STR, "").strip())
+    return content.strip(), ""
+
+
+_ANSWER_ANCHOR_RE = re.compile(
+    r"^\s*(?:final\s+)?answer\s*[:：]\s*", re.IGNORECASE)
+
+
+def _strip_answer_anchor(text: str) -> str:
+    """Drop a leading ``Answer:`` echo — the injected force-answer suffix
+    ends with the anchor and the model often repeats it verbatim."""
+    if not text:
+        return text
+    stripped = _ANSWER_ANCHOR_RE.sub("", text, count=1)
+    return stripped if stripped.strip() else text
 
 
 class ChatCancel:
@@ -347,7 +417,9 @@ async def run_chat(runtime, harness, messages: list[dict],
                         engine.tokenizer.encode(
                             _FORCE_ANSWER_SUFFIX,
                             add_special_tokens=False),
-                        exit_flag=exit_flag)
+                        exit_flag=exit_flag,
+                        tool_calls_allowed=defs is not None)
+                    tail = ""
                     for tok in engine.generate_stream(
                             rendered, max_new_tokens=max_new_tokens,
                             temperature=temperature, top_p=top_p,
@@ -363,6 +435,12 @@ async def run_chat(runtime, harness, messages: list[dict],
                             break
                         chunks.append(tok)
                         emit(("token", tok))
+                        # Literal-marker stop: catches markers emitted as
+                        # ordinary text tokens (the id-based EOS only sees
+                        # the special ids). Rolling tail keeps this O(1).
+                        tail = (tail + tok)[-_TEXT_STOP_TAIL:]
+                        if any(s in tail for s in _TEXT_STOPS):
+                            break
                 raw = "".join(chunks)
                 tool_calls, content = qwen_parse_tool_calls(raw)
                 if tool_calls:
@@ -389,9 +467,27 @@ async def run_chat(runtime, harness, messages: list[dict],
                 elif tool_calls and defs is None:
                     # tools were dropped by the repeat guard — treat a
                     # stray call as plain text and end the turn
-                    tool_calls, content = None, content
+                    tool_calls = None
+                reasoning = ""
+                if think_active:
+                    # Interleaved-thinking contract: reasoning rides along
+                    # as reasoning_content (re-rendered by the template on
+                    # the next tool round, dropped once a new user turn
+                    # starts), never as visible body text.
+                    reasoning, content = _split_reasoning(content or "")
+                content = _strip_answer_anchor(content or "")
+                # A literal-marker stop can leave a few chars of a faked
+                # tool response in the tail — cut at the marker itself so
+                # the payload never persists as visible text.
+                for marker in ("<tool_response>", "</tool_response>",
+                               "</tool_call>", "<tool_call>"):
+                    idx = content.find(marker)
+                    if idx >= 0:
+                        content = content[:idx]
                 msg = {"role": "assistant", "content": _clean_content(content or ""),
                        "tool_calls": tool_calls or None}
+                if reasoning:
+                    msg["reasoning_content"] = _clean_content(reasoning)
                 conv.append(msg)
                 new_messages.append(msg)
 
@@ -418,9 +514,13 @@ async def run_chat(runtime, harness, messages: list[dict],
                     emit(("tool_result", rec))
                     from forge_gui.api.agent_tools import (
                         tool_results_to_text)
+                    ttext = tool_results_to_text(rec)
+                    if len(ttext) > _TOOL_RESULT_MAX_CHARS:
+                        ttext = (ttext[:_TOOL_RESULT_MAX_CHARS]
+                                 + "...[truncated]")
                     tmsg = {"role": "tool",
                             "name": call.get("name", "tool"),
-                            "content": tool_results_to_text(rec)}
+                            "content": ttext}
                     conv.append(tmsg)
                     new_messages.append(tmsg)
 

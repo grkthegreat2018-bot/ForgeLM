@@ -29,6 +29,8 @@ import gc
 import json
 import logging
 import os
+import random
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -40,7 +42,7 @@ from forge.training.training_utils import oom_guard
 
 logger = logging.getLogger(__name__)
 
-from forge.self_play.infinite_curriculum import InfiniteCurriculum
+from forge.self_play.infinite_curriculum import GenTracer, InfiniteCurriculum
 
 
 @dataclass
@@ -55,7 +57,10 @@ class LoopConfig:
     distillation, sequential freeze, EMA, BitNet-everywhere).
     """
     # Self-play (AZR curriculum)
-    tasks_per_epoch: int = 30        # propose + solve per epoch
+    tasks_per_epoch: int = 60        # propose + solve per epoch (~60 →
+                                     # ~40+ unique SFT examples at typical
+                                     # solve rates; halves per-example
+                                     # repetition vs 30 at ft_max_steps)
     max_gen_tokens: int = 256        # max tokens per generation
     temperature: float = 0.7         # exploration temperature
     top_k: int = 80                  # LFM2.5-recommended
@@ -155,7 +160,27 @@ class LoopConfig:
     # "grpo" = GRPO-only RSI mode: train directly on verified self-play
     #          trajectories using Group Relative Policy Optimization.
     #          Skips SFT entirely — RL is the sole training signal.
+    # "flux" = FluxLM live-learning RSI: the model attempts verified
+    #          tasks, correct trajectories get reinforce()'d, failures
+    #          get revert_tag()'d + teach()'d the verified answer, then
+    #          consolidate() promotes agreeing episodic memory into the
+    #          fast tables.  Promotion gates on a FIXED held-out QA set
+    #          (same questions every epoch — the improvement trend).
     training_mode: str = "sft"
+
+    # ── FluxLM config (only used when training_mode="flux") ──
+    flux_eval_n: int = 40          # fixed held-out QA eval size
+    flux_eval_seed: int = 77777    # eval epoch seed — constant across run
+    flux_gen_tokens: int = 24      # QA answers are short
+    flux_gain: float = 4.0         # reinforce() gain on verified success
+    flux_consolidate_min: int = 4  # min agreeing episodic entries
+    flux_group_size: int = 4       # G sampled attempts per task (batch)
+    flux_workers: int = 4          # max concurrent predict-only streams
+    flux_workers_device: str = "cpu"  # retained for compat; streams run
+                                    # on the model's own device
+    flux_temp: float = 0.3         # attempt temperature center
+    flux_temp_spread: float = 0.5  # ± uniform range, clipped to [0, 1]
+    flux_unique: bool = True       # cross-epoch prompt dedup (no repeats)
 
     # ── GRPO config (only used when training_mode="grpo") ──
     grpo_max_steps: int = 50         # GRPO steps per epoch
@@ -180,6 +205,16 @@ class LoopConfig:
     replay_file: str = ""            # path to prior SFT JSONL
     replay_ratio: float = 0.2        # fraction of replay examples in each epoch
 
+    # Concise-answer stream: verified short-answer QA pairs mixed into each
+    # epoch's SFT export — teaches direct, minimal answers on easy prompts
+    # (the "don't overthink" + "short simple response" behaviors; eval's
+    # 'concise' category scores them). 0 disables.
+    concise_qa_per_epoch: int = 12
+    # GRPO length-efficiency bonus: within a passing group, shorter code
+    # earns slightly more reward (correctness still dominates). Restores
+    # nonzero advantage in all-pass groups and pushes concise solutions.
+    grpo_concise_bonus: float = 0.1  # 0 disables
+
     # Task source: "model" (AZR self-propose) or "api" (distillation APIs)
     task_source: str = "model"       # "model" or "api"
 
@@ -188,6 +223,183 @@ class LoopConfig:
     # and readable directly for CLI monitoring of an RSI run.
     live_status: bool = True
     status_dir: str = "research/checkpoints/self_play"
+
+    # Debug round: run Phase 1 self-play only (propose → validate → solve)
+    # with a GenTracer on the curriculum — every model generation's raw
+    # output + token ids are printed live and dumped to
+    # status_dir/debug_round_ep{N}.txt|.jsonl — then stop. No training,
+    # eval, or promotion. For inspecting model behavior before a real run.
+    debug_round: bool = False
+
+
+# ── Concise-QA stream ─────────────────────────────────────────────────
+# Verified (question → minimal answer) pairs. Answers are computed or
+# curated-correct — never model-generated — so every pair is ground truth.
+# ~Half the prompts carry an explicit brevity hint; the rest are bare so
+# the model learns brevity as the DEFAULT, not only when asked.
+
+_QA_FACTS = (
+    ("the capital of Japan", "Tokyo"),
+    ("the capital of Germany", "Berlin"),
+    ("the capital of the United Kingdom", "London"),
+    ("the capital of Italy", "Rome"),
+    ("the capital of Spain", "Madrid"),
+    ("the capital of Canada", "Ottawa"),
+    ("the capital of Australia", "Canberra"),
+    ("the chemical symbol for gold", "Au"),
+    ("the chemical symbol for iron", "Fe"),
+    ("the chemical symbol for sodium", "Na"),
+    ("the planet closest to the Sun", "Mercury"),
+    ("the Red Planet", "Mars"),
+    ("the largest ocean on Earth", "Pacific"),
+    ("the freezing point of water in Celsius", "0"),
+    ("the number of days in a week", "7"),
+    ("the number of months in a year", "12"),
+)
+
+_QA_BRIEF_HINTS = ("", "", "", " Be concise.", " One word.",
+                   " Short answer only.", " Just the answer.")
+
+
+def _concise_qa_pairs(n: int, epoch: int) -> list[dict]:
+    """Build n verified short-answer SFT pairs (prompt → minimal response).
+
+    Teaches what the code-trajectory stream cannot: answer an easy prompt
+    DIRECTLY and MINIMALLY. Deterministic per epoch (resumed runs rebuild
+    the same mix). Prompts deduplicated within the batch.
+    """
+    import random as _r
+    rng = _r.Random(7919 + epoch)
+
+    def _hinted(q: str) -> str:
+        return q + rng.choice(_QA_BRIEF_HINTS)
+
+    def arith():
+        a, b = rng.randint(7, 99), rng.randint(3, 97)
+        op = rng.choice("+-*")
+        ans = {"+": a + b, "-": a - b, "*": a * b}[op]
+        q = rng.choice((f"What is {a} {op} {b}?", f"Calculate {a} {op} {b}.",
+                        f"{a} {op} {b} ="))
+        return _hinted(q), str(ans)
+
+    def compound():
+        a, b, c = (rng.randint(2, 30) for _ in range(3))
+        return _hinted(f"What is ({a} + {b}) * {c}?"), str((a + b) * c)
+
+    def percent():
+        p, n_ = rng.choice((10, 20, 25, 50, 75)), rng.choice((20, 40, 60, 80, 120, 200))
+        return _hinted(f"What is {p}% of {n_}?"), str(int(n_ * p / 100))
+
+    def square():
+        k = rng.randint(3, 25)
+        return _hinted(f"What is {k} squared?"), str(k * k)
+
+    def string_op():
+        w = rng.choice(("python", "curriculum", "tensor", "jamba", "kernel",
+                        "gradient", "selfplay", "reasoning", "tokenizer", "mamba"))
+        kind = rng.choice(("reverse", "upper", "len", "vowels"))
+        if kind == "reverse":
+            return _hinted(f"Reverse the word '{w}'."), w[::-1]
+        if kind == "upper":
+            return _hinted(f"Write '{w}' in uppercase."), w.upper()
+        if kind == "len":
+            return _hinted(f"How many letters are in '{w}'?"), str(len(w))
+        return _hinted(f"How many vowels are in '{w}'?"), str(
+            sum(1 for ch in w if ch in "aeiou"))
+
+    def list_op():
+        xs = rng.sample(range(1, 60), rng.randint(4, 6))
+        kind = rng.choice(("sum", "max", "min"))
+        ans = {"sum": sum(xs), "max": max(xs), "min": min(xs)}[kind]
+        verb = {"sum": "the sum", "max": "the largest value",
+                "min": "the smallest value"}[kind]
+        return _hinted(f"What is {verb} of {xs}?"), str(ans)
+
+    def parity():
+        k = rng.randint(2, 200)
+        return _hinted(f"Is {k} even? Answer yes or no."), "yes" if k % 2 == 0 else "no"
+
+    def prime():
+        k = rng.randint(2, 60)
+        isp = k > 1 and all(k % d for d in range(2, int(k ** 0.5) + 1))
+        return _hinted(f"Is {k} a prime number? Answer yes or no."), "yes" if isp else "no"
+
+    def base_conv():
+        k = rng.randint(5, 255)
+        kind = rng.choice(("binary", "hexadecimal", "octal"))
+        ans = {"binary": bin(k)[2:], "hexadecimal": hex(k)[2:],
+               "octal": oct(k)[2:]}[kind]
+        return _hinted(f"What is {k} in {kind}?"), ans
+
+    def compare():
+        a, b = rng.sample(range(10, 500), 2)
+        hi = rng.random() < 0.5
+        return _hinted(f"Which is {'larger' if hi else 'smaller'}: {a} or {b}?"), str(
+            max(a, b) if hi else min(a, b))
+
+    def unit_conv():
+        k, kind = rng.randint(2, 90), rng.choice(("min2sec", "hr2min", "day2hr",
+                                                "week2day", "kg2g", "m2cm", "cm2mm"))
+        spec = {"min2sec": (f"{k} minutes in seconds", k * 60),
+                "hr2min": (f"{k} hours in minutes", k * 60),
+                "day2hr": (f"{k} days in hours", k * 24),
+                "week2day": (f"{k} weeks in days", k * 7),
+                "kg2g": (f"{k} kg in grams", k * 1000),
+                "m2cm": (f"{k} m in cm", k * 100),
+                "cm2mm": (f"{k} cm in mm", k * 10)}[kind]
+        return _hinted(f"How many is {spec[0]}?"), str(spec[1])
+
+    def seq_next():
+        a0, d = rng.randint(1, 20), rng.randint(2, 9)
+        xs = [a0 + d * i for i in range(4)]
+        return _hinted(f"What comes next: {', '.join(map(str, xs))}, ...?"), str(xs[-1] + d)
+
+    def digit_op():
+        k = rng.randint(100, 9999)
+        if rng.random() < 0.5:
+            return _hinted(f"What is the digit sum of {k}?"), str(sum(map(int, str(k))))
+        return _hinted(f"How many digits does {k} have?"), str(len(str(k)))
+
+    def fact():
+        q, a = rng.choice(_QA_FACTS)
+        q_fmt = rng.choice((f"What is {q}?", f"Name {q}.", f"{q.capitalize()} — what is it?"))
+        return _hinted(q_fmt), a
+
+    builders = (arith, compound, percent, square, string_op, list_op, parity,
+                prime, base_conv, compare, unit_conv, seq_next, digit_op, fact)
+
+    pairs: list[dict] = []
+    seen: set[str] = set()
+    attempts = 0
+    while len(pairs) < n and attempts < n * 8:
+        attempts += 1
+        prompt, response = rng.choice(builders)()
+        if prompt in seen:
+            continue
+        seen.add(prompt)
+        pairs.append({"prompt": prompt, "response": response})
+    return pairs
+
+
+def _concise_adjusted_rewards(comps: list, rews: list,
+                              bonus: float) -> list:
+    """Add a small length-efficiency bonus to PASSING completions.
+
+    Shortest pass earns +bonus, longest +0 — the binary correctness reward
+    still dominates (a fail is always 0), but all-pass groups regain a
+    nonzero advantage aimed at the terse solution instead of collapsing
+    to loss 0 (observed: identical rewards → no learning signal).
+    """
+    if bonus <= 0:
+        return list(rews)
+    lens = [len(c or "") for c in comps]
+    pass_lens = [ln for ln, r in zip(lens, rews) if r > 0]
+    if not pass_lens:
+        return list(rews)
+    lo, hi = min(pass_lens), max(pass_lens)
+    span = max(hi - lo, 1)
+    return [r + bonus * (1.0 - (ln - lo) / span) if r > 0 else r
+            for ln, r in zip(lens, rews)]
 
 
 class InfiniteSelfPlayLoop:
@@ -202,8 +414,14 @@ class InfiniteSelfPlayLoop:
 
         # Trajectory storage: (task_description, solution_code, success)
         self._trajectories: list[dict] = []
+        # Debug-round generation transcript (populated when
+        # config.debug_round attaches a GenTracer to the curriculum).
+        self._gen_trace: GenTracer | None = None
         # ForgeEngine retained across self-play → eval for weight-swap reuse.
         self._engine = None
+        # FluxLM mode state: cross-epoch prompt dedup + attempt rng.
+        self._flux_seen: set = set()
+        self._flux_rng = random.Random()
         # Live telemetry writer — created in run() so tests that call
         # run_epoch() directly never touch the filesystem.
         self._status_writer = None
@@ -320,6 +538,245 @@ class InfiniteSelfPlayLoop:
                              checkpoint_path=self.best_checkpoint)
         return engine
 
+    # ── FluxLM RSI mode (training_mode="flux") ───────────────────────
+    # Live-learning RSI: attempt verified tasks → reinforce successes /
+    # revert+teach failures → consolidate → snapshot → fixed-eval gate →
+    # promote or full epoch rollback.  Every write is journaled so a
+    # demoted epoch is erased exactly (revert_since(pre_epoch_mark)).
+
+    @staticmethod
+    def _flux_check(output: str, answer: str) -> bool:
+        """Verified-task grader: the answer is the first thing emitted
+        (answer-first skill) or appears word-bounded anywhere."""
+        a = answer.strip().lower()
+        if not a:
+            return False
+        out = output.strip().lower()
+        if out.startswith(a):
+            return True
+        # right edge: EOS, non-word char, or '.' NOT followed by a digit
+        # (so "42." matches "42" but "42.5" does not)
+        return re.search(r"(?<![\w.])" + re.escape(a)
+                         + r"(?=$|[^\w.]|\.(?!\d))", out) is not None
+
+    def _flux_checkpoint_path(self, epoch: int) -> str:
+        """Per-epoch .flux snapshot under the GUI-scanned flux dir."""
+        d = os.path.join(self.config.checkpoint_dir, "flux")
+        os.makedirs(d, exist_ok=True)
+        stem = os.path.join(d, f"FLUX_SP{epoch}")
+        path = f"{stem}.flux"
+        n = 1
+        while os.path.exists(path):
+            n += 1
+            path = f"{stem}_r{n}.flux"
+        return os.path.normpath(path)
+
+    def _flux_engine(self):
+        """Resident FluxLM engine — loaded once, kept across epochs."""
+        from forge.model.flux import FluxLM  # noqa: F401
+        if self._engine is not None and \
+                self._engine.model.__class__.__name__ == "FluxLM":
+            return self._engine
+        self._free_engine()
+        from forge.model.flux import FluxConfig
+        from forge.engine.forge_engine import ForgeEngine
+        cfg = self.config
+        fc = FluxConfig(vocab_size=65536, device=cfg.device,
+                        cuda_primary=cfg.device == "cuda")
+        ckpt = (self.best_checkpoint
+                if str(self.best_checkpoint).endswith(".flux") else None)
+        self._engine = ForgeEngine.from_flux(fc, checkpoint=ckpt,
+                                             device=cfg.device)
+        return self._engine
+
+    def _flux_eval_acc(self) -> float:
+        """Held-out accuracy on the FIXED eval set (same questions every
+        epoch via flux_eval_seed).  Predict-only batched streams —
+        measurement never teaches, so no learn+revert cycle is needed."""
+        cfg = self.config
+        pairs = _concise_qa_pairs(cfg.flux_eval_n, cfg.flux_eval_seed)
+        outs = self._engine.generate_batch(
+            [f"Q: {p['prompt']}\nA:" for p in pairs],
+            max_new_tokens=cfg.flux_gen_tokens,
+            temperatures=[0.0] * len(pairs))
+        hit = sum(self._flux_check(o, p["response"])
+                  for o, p in zip(outs, pairs))
+        return hit / max(len(pairs), 1)
+
+    def _flux_fresh_pairs(self, n: int) -> list[dict]:
+        """Draw n verified task pairs, deduped against every prompt this
+        run has already attempted (and against the fixed eval set).
+        Overfitting guard: goals stay novel across epochs — the model
+        can't plateau by re-reciting one static set."""
+        cfg = self.config
+        if not hasattr(self, "_flux_eval_prompts"):
+            self._flux_eval_prompts = {
+                p["prompt"] for p in
+                _concise_qa_pairs(cfg.flux_eval_n, cfg.flux_eval_seed)}
+        if not cfg.flux_unique:
+            return _concise_qa_pairs(n, self.epoch)
+        pairs: list[dict] = []
+        j = 0
+        while len(pairs) < n and j < 12:
+            for p in _concise_qa_pairs(n * 2, self.epoch * 977 + j):
+                q = p["prompt"]
+                if q in self._flux_seen or q in self._flux_eval_prompts:
+                    continue
+                self._flux_seen.add(q)
+                pairs.append(p)
+                if len(pairs) >= n:
+                    break
+            j += 1
+        return pairs
+
+    def _flux_self_play(self) -> dict:
+        """Phase 1 (flux): eval-pre → grouped concurrent attempts.
+
+        Each task gets ``flux_group_size`` samples with per-gen
+        seed/temperature via ``engine.generate_batch`` — for FluxLM that
+        runs predict-only streams over shared memory, so exploration
+        never touches the canonical model; each stream emits an update
+        packet.  Outcomes (packet apply+reinforce / teach) are applied
+        in Phase 2 (_flux_finish) against verified answers.
+        """
+        engine = self._flux_engine()
+        model = engine.model
+        self._flux_mark = model._count          # full-epoch rollback pos
+        cfg = self.config
+        sw = self._status_writer
+
+        if sw:
+            sw.set_phase("flux_eval",
+                         detail=f"epoch {self.epoch}: held-out probe")
+        acc_pre = self._flux_eval_acc()
+
+        pairs = self._flux_fresh_pairs(cfg.tasks_per_epoch)
+        G = max(1, cfg.flux_group_size)
+        prompts = [f"Q: {p['prompt']}\nA:" for p in pairs for _ in range(G)]
+        temps = [min(1.0, max(0.0, cfg.flux_temp +
+                 self._flux_rng.uniform(-cfg.flux_temp_spread,
+                                        cfg.flux_temp_spread)))
+                 for _ in prompts]
+        seeds = [self._flux_rng.randrange(1 << 31) for _ in prompts]
+        engine.flux_batch_workers = cfg.flux_workers
+        engine.flux_workers_device = cfg.flux_workers_device
+
+        if sw:
+            sw.set_phase(
+                "flux_attempts",
+                detail=f"{len(pairs)} tasks x{G} samples "
+                       f"({cfg.flux_workers} workers)")
+            for i, p in enumerate(pairs):
+                sw.task_started(p["prompt"], i, len(pairs))
+        outs = engine.generate_batch(
+            prompts, max_new_tokens=cfg.flux_gen_tokens,
+            temperatures=temps, seeds=seeds)
+        attempts: list[dict] = []
+        for i, p in enumerate(pairs):
+            group = outs[i * G:(i + 1) * G]
+            good = [(j, o) for j, o in enumerate(group)
+                    if self._flux_check(o, p["response"])]
+            attempts.append({"prompt": p["prompt"],
+                             "response": p["response"],
+                             "ok": bool(good),
+                             "best": good[0][1] if good else None,
+                             # packet index of the first verified attempt —
+                             # its learned update is applied in _flux_finish
+                             "pkt": (i * G + good[0][0])
+                             if good else None})
+            if sw:
+                sw.task_done(i, p["prompt"], success=bool(good),
+                             rounds_used=G)
+        self._flux_attempts = attempts
+        n_ok = sum(a["ok"] for a in attempts)
+        if sw:
+            sw.event("flux_attempts_done", epoch=self.epoch,
+                     correct=n_ok, total=len(attempts),
+                     acc_pre=round(acc_pre, 3))
+        print(f"  [flux] eval-pre acc={acc_pre:.3f} | "
+              f"attempts {n_ok}/{len(attempts)} correct")
+        return {"success_rate": n_ok / max(len(attempts), 1),
+                "acc_pre": acc_pre, "attempts": len(attempts),
+                "domain": "concise_qa"}
+
+    def _flux_finish(self, phases: dict) -> None:
+        """Phases 2-4 (flux): reinforce/revert+teach → consolidate →
+        snapshot → eval-post gate → promote or full rollback."""
+        cfg = self.config
+        engine = self._flux_engine()
+        model = engine.model
+        tok = engine.tokenizer
+
+        # Phase 2: outcome-weighted learning on this epoch's attempts —
+        # the single learning process applies each verified attempt's
+        # update packet (what the stream actually produced), amplified by
+        # reinforce(); failed attempts' packets are discarded and the
+        # correct answer is hot-taught instead.
+        packets = getattr(engine, "last_flux_packets", None) or []
+        n_reinf = n_taught = 0
+        for i, a in enumerate(self._flux_attempts):
+            tag = f"e{self.epoch}:t{i}"
+            model.tag = tag
+            if a["ok"]:
+                if a.get("pkt") is not None \
+                        and a["pkt"] < len(packets):
+                    pkt = packets[a["pkt"]]
+                    pkt.tag = tag
+                    model.apply_packets([pkt])
+                else:
+                    # fallback: no packet recorded (stale engine) —
+                    # ingest the verified Q/A pair directly
+                    ids = tok.encode(f"Q: {a['prompt']}\nA: "
+                                     f"{a['response']}\n",
+                                     add_special_tokens=False)
+                    ids = getattr(ids, "input_ids",
+                                  getattr(ids, "ids", ids))
+                    model.journal.append(("ws", tag))
+                    model.ingest(list(ids), tag=tag)
+                    model.journal.append(("we", tag))
+                model.reinforce(tag, gain=cfg.flux_gain)
+                n_reinf += 1
+            else:
+                model.teach_text(f"Q: {a['prompt']}\nA:",
+                                 f" {a['response']}\n", tok)
+                n_taught += 1
+            model.soft_reset()
+        cons = model.consolidate(min_entries=cfg.flux_consolidate_min)
+        print(f"  [flux] reinforced={n_reinf} taught={n_taught} "
+              f"consolidated={cons}")
+
+        # Snapshot the trained state as this epoch's candidate.
+        candidate = self._flux_checkpoint_path(self.epoch)
+        model.snapshot(candidate)
+        phases["flux"] = {"checkpoint": candidate,
+                          "reinforced": n_reinf, "taught": n_taught,
+                          "consolidate": cons}
+
+        # Phase 3: fixed held-out eval — post vs pre.
+        acc_post = self._flux_eval_acc()
+        acc_pre = phases.get("self_play", {}).get("acc_pre", 0.0)
+        eval_result = {
+            "passed": acc_post >= acc_pre,
+            "candidate_quality": acc_post,
+            "base_quality": acc_pre,
+            "winner": "CANDIDATE" if acc_post >= acc_pre else "BASE",
+        }
+        phases["evaluate"] = eval_result
+        if self._status_writer:
+            self._status_writer.event(
+                "flux_eval_done", epoch=self.epoch,
+                acc_pre=round(acc_pre, 3), acc_post=round(acc_post, 3),
+                reinforced=n_reinf, taught=n_taught)
+        print(f"  [flux] eval acc {acc_pre:.3f} -> {acc_post:.3f}")
+
+        # Phase 4: promote the snapshot; on demote roll the live memory
+        # back to the pre-epoch mark so nothing regressive persists.
+        promoted = self._maybe_promote(candidate, eval_result)
+        phases["promoted"] = promoted
+        if not promoted:
+            rep = model.revert_since(seq_pos=self._flux_mark)
+            print(f"  [flux] rolled back epoch writes: {rep}")
+
     # ── Phase 1: Self-Play (AZR curriculum) ──────────────────────────
 
     def _run_self_play(self) -> dict:
@@ -353,7 +810,13 @@ class InfiniteSelfPlayLoop:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
+            engine=engine,
         )
+        # Debug round: trace every model generation (propose/solve/retry)
+        # so the raw outputs + token ids can be inspected afterwards.
+        if self.config.debug_round:
+            curriculum.gen_trace = GenTracer(tokenizer)
+        self._gen_trace = curriculum.gen_trace
 
         # Clear seen descriptions from prior runs — fresh start per epoch
         # so the model can re-propose similar tasks (it has limited vocabulary).
@@ -436,56 +899,32 @@ class InfiniteSelfPlayLoop:
             return {"error": "no_valid_tasks", "n_proposed": 0}
 
         # ── Solve tasks ──
-        # Use ThreadPoolExecutor to overlap CPU-bound sandbox verification
-        # of one task with GPU generation of the next. GPU generation
-        # serializes naturally (single CUDA context); the win comes from
-        # parallelizing the subprocess-based test execution.
+        # All first attempts go through ONE concurrent engine.generate_batch
+        # call (true parallel decode with per-sequence controls); retries and
+        # sandbox verification run per-task afterward. Replaces the old
+        # lock-serialized per-task generation loop.
         successes = 0
         failures = 0
         self._trajectories = []
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from threading import Lock
-        max_workers = min(4, len(validated)) if len(validated) > 1 else 1
-
-        # Curriculum state (e.g. self.temperature, _seen_descriptions, stats)
-        # is not thread-safe. _solve_direct mutates self.temperature per retry.
-        # Serialize solve_task to prevent concurrent corruption. The GPU
-        # generation inside solve_task serializes via CUDA anyway, so the lock
-        # mainly costs us overlapping subprocess sandbox execution — acceptable
-        # for correctness.
-        _solve_lock = Lock()
         if sw:
             sw.set_phase("solving",
                          detail=f"epoch {self.epoch}: solving {len(validated)} tasks")
 
-        def _solve_and_record(task, idx, _curr=curriculum):
-            """Solve a single task and return (task, result, elapsed_ms).
-
-            ``curriculum`` is bound as a default arg so the closure survives
-            the ``del curriculum`` in the early-return path above.
-            """
-            # task_started fires when the solve actually begins (the lock
-            # serializes solves), not at submit time.
+        # All tasks are in-flight simultaneously in the batched decode —
+        # emit task_started for every task up front so the live feed shows
+        # them, then task_done as results land in order.
+        for i, task in enumerate(validated):
             if sw:
-                sw.task_started(task.description, idx, len(validated),
+                sw.task_started(task.description, i, len(validated),
                                 domain=task.domain)
-            t0 = time.time()
-            with _solve_lock:
-                result = _curr.solve_task(task)
-            return task, result, (time.time() - t0) * 1000.0
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks — GPU generation serializes via GIL+CUDA,
-            # but sandbox verification (subprocess) overlaps across threads
-            futures = {
-                executor.submit(_solve_and_record, task, i): i
-                for i, task in enumerate(validated)
-            }
-            results_ordered = [None] * len(validated)
-            for future in as_completed(futures):
-                idx = futures[future]
-                results_ordered[idx] = future.result()
+        # GRPO needs K rollouts of the SAME task prompt per group —
+        # within-group reward variance is what produces nonzero advantage.
+        # (Cross-task pairing collapsed to identical rewards → loss 0.)
+        group_k = (self.config.grpo_group_size
+                   if self.config.training_mode == "grpo" else 1)
+        results_ordered = curriculum.solve_tasks_batch(
+            validated, group_size=group_k)
 
         for i, item in enumerate(r for r in results_ordered if r is not None):
             task, result, elapsed_ms = item
@@ -509,20 +948,32 @@ class InfiniteSelfPlayLoop:
                 "diversity_score": curriculum.stats.diversity_score,
             })
 
+            # GRPO group: all K rollouts of this task's prompt with their
+            # binary rewards — the trainer needs per-prompt reward variance
+            # for a nonzero advantage.
+            group_comps = [a["code"] for a in attempts]
+            group_rews = [1.0 if a.get("success") else 0.0
+                          for a in attempts]
+
             if success and attempts:
-                # Find the successful attempt
-                for att in attempts:
-                    if att.get("success"):
-                        self._trajectories.append({
-                            "task_description": task.description,
-                            "signature": task.signature,
-                            "test_cases": task.test_cases,
-                            "solution_code": att["code"],
-                            "domain": task.domain,
-                            "difficulty": task.difficulty,
-                            "reward": 1.0,
-                        })
-                        break
+                # Export the SHORTEST passing attempt — earlier passes can
+                # carry scaffolding/dead code; the terse solution teaches
+                # concise answers (anti-overthinking data pressure).
+                best_att = min(
+                    (a for a in attempts if a.get("success")),
+                    key=lambda a: len(a.get("code") or ""), default=None)
+                if best_att is not None:
+                    self._trajectories.append({
+                        "task_description": task.description,
+                        "signature": task.signature,
+                        "test_cases": task.test_cases,
+                        "solution_code": best_att["code"],
+                        "domain": task.domain,
+                        "difficulty": task.difficulty,
+                        "reward": 1.0,
+                        "group_completions": group_comps,
+                        "group_rewards": group_rews,
+                    })
                 successes += 1
             else:
                 failures += 1
@@ -537,6 +988,8 @@ class InfiniteSelfPlayLoop:
                         "difficulty": task.difficulty,
                         "reward": 0.0,
                         "error": attempts[0].get("error", ""),
+                        "group_completions": group_comps,
+                        "group_rewards": group_rews,
                     })
 
             # Record result for curriculum difficulty adaptation
@@ -606,6 +1059,15 @@ class InfiniteSelfPlayLoop:
         # Sleep level 2 to drop the model from VRAM if the engine supports it.
         try:
             engine.sleep(level=2)
+            # FluxLM sleep(2) snapshots live memory to a flux_sleep_*.flux
+            # temp file for wake(); a freed engine never wakes — unlink it.
+            snap = getattr(engine, "_stored_checkpoint", None)
+            if snap and os.path.basename(str(snap)).startswith(
+                    "flux_sleep_"):
+                try:
+                    os.unlink(snap)
+                except OSError:
+                    pass
         except Exception:
             logger.debug("Error sleeping engine during cleanup", exc_info=True)
         del engine
@@ -622,6 +1084,49 @@ class InfiniteSelfPlayLoop:
             reserved = torch.cuda.memory_reserved() / 1e9
             print(f"  [VRAM] After engine free: {allocated:.2f} GB allocated, "
                   f"{reserved:.2f} GB reserved")
+
+    def _dump_debug_round(self) -> dict:
+        """Dump the debug-round generation transcript, then free the engine.
+
+        Every generation Phase 1 made (propose/solve/retry) is written with
+        its full rendered prompt, raw pre-strip output, and per-token
+        id+piece table — human-readable ``debug_round_ep{N}.txt`` plus a
+        machine-readable ``.jsonl``, both under ``status_dir``.
+        """
+        trace = self._gen_trace
+        n = len(trace.events) if trace is not None else 0
+        txt_path = jsonl_path = None
+        if trace is not None and trace.events:
+            os.makedirs(self.config.status_dir, exist_ok=True)
+            txt_path = os.path.normpath(os.path.join(
+                self.config.status_dir, f"debug_round_ep{self.epoch}.txt"))
+            jsonl_path = txt_path[:-len(".txt")] + ".jsonl"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(f"DEBUG ROUND epoch {self.epoch} — "
+                        f"{n} generations, no training\n")
+                for ev in trace.events:
+                    f.write(f"\n{'='*70}\n"
+                            f"GEN #{ev['i']} [{ev['phase']}] "
+                            f"{ev['n_tokens']} tokens ({ev['ids_source']})\n"
+                            f"{'='*70}\n"
+                            f"-- RENDERED PROMPT --\n{ev['rendered']}\n"
+                            f"-- RAW OUTPUT (pre-strip) --\n{ev['raw']}\n")
+                    if ev["reply"] != ev["raw"]:
+                        f.write(f"-- POST-STRIP (pipeline input) --\n"
+                                f"{ev['reply']}\n")
+                    f.write("-- TOKENS (id:piece) --\n" + " ".join(
+                        f"{t['id']}:{t['text']!r}" for t in ev["tokens"])
+                        + "\n")
+            with open(jsonl_path, "w", encoding="utf-8") as f:
+                for ev in trace.events:
+                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            print(f"\n  [DebugRound] {n} generations traced ->")
+            print(f"    {txt_path}\n    {jsonl_path}")
+        else:
+            print("\n  [DebugRound] no generations were traced")
+        self._free_engine()
+        return {"n_generations": n,
+                "transcript": txt_path, "transcript_jsonl": jsonl_path}
 
     # ── Phase 2: Export + Finetune ───────────────────────────────────
 
@@ -681,6 +1186,15 @@ class InfiniteSelfPlayLoop:
                 rng.shuffle(replay_examples)
                 examples.extend(replay_examples[:n_replay])
                 print(f"  [Export] +{n_replay} replay examples (anti-forgetting)")
+
+        # Concise-QA stream: verified short-answer pairs teach the model to
+        # answer easy prompts directly and minimally — the behavior the
+        # 'concise' eval scores and code-trajectory data can't reach.
+        n_qa = self.config.concise_qa_per_epoch
+        if n_qa > 0:
+            qa = _concise_qa_pairs(n_qa, epoch)
+            examples.extend(qa)
+            print(f"  [Export] +{len(qa)} concise-QA examples (direct answers)")
 
         # Shuffle
         import random as _rng
@@ -970,41 +1484,50 @@ class InfiniteSelfPlayLoop:
             print(f"  Too few trajectories ({len(verified)}), skipping GRPO")
             return ""
 
-        # Build prompt → completions → rewards structure for GRPO
-        # Group by task_description: each task gets G completions (the
-        # self-play attempts). For tasks with only 1 attempt, we duplicate
-        # with temperature variation is not possible post-hoc, so we group
-        # all trajectories by domain as a fallback.
-        #
-        # Better approach: use each task as a prompt, and the single
-        # self-play solution as one completion. GRPO needs ≥2 completions
-        # per prompt, so we pair tasks within the same domain.
-        from collections import defaultdict
-        by_domain = defaultdict(list)
-        for t in verified:
-            by_domain[t.get("domain", "default")].append(t)
-
+        # Build prompt → completions → rewards structure for GRPO.
+        # Proper groups: K rollouts of the SAME task prompt (recorded at
+        # solve time as group_completions/group_rewards). Same-prompt
+        # groups give within-group reward variance → nonzero advantage.
+        # (Previously paired completions of DIFFERENT tasks — rewards
+        # were usually equal → advantage 0 → loss 0 → no learning.)
         prompts = []
         completions = []
         rewards = []
 
-        for domain, tasks in by_domain.items():
-            # Pair tasks within domain: each pair becomes a GRPO group
-            for i in range(0, len(tasks) - 1, 2):
-                t1, t2 = tasks[i], tasks[i + 1]
-                prompt = t1["task_description"]
-                comp_pair = [t1["solution_code"], t2["solution_code"]]
-                reward_pair = [t1["reward"], t2["reward"]]
-                prompts.append(prompt)
-                completions.append(comp_pair)
-                rewards.append(reward_pair)
+        for t in verified:
+            comps = t.get("group_completions")
+            rews = t.get("group_rewards")
+            if comps and rews and len(comps) >= 2:
+                prompts.append(t["task_description"])
+                completions.append(comps)
+                # Conciseness bonus: shorter passing solutions earn more —
+                # anti-overthinking pressure + nonzero advantage in
+                # all-pass groups.
+                rewards.append(_concise_adjusted_rewards(
+                    comps, rews, c.grpo_concise_bonus))
+
+        if not prompts:
+            # Legacy fallback for trajectories without group data —
+            # pair same-domain tasks (weak: rewards often collapse).
+            from collections import defaultdict
+            by_domain = defaultdict(list)
+            for t in verified:
+                by_domain[t.get("domain", "default")].append(t)
+            for domain, tasks in by_domain.items():
+                for i in range(0, len(tasks) - 1, 2):
+                    t1, t2 = tasks[i], tasks[i + 1]
+                    prompts.append(t1["task_description"])
+                    completions.append(
+                        [t1["solution_code"], t2["solution_code"]])
+                    rewards.append([t1["reward"], t2["reward"]])
 
         if not prompts:
             print("  No valid GRPO groups formed, skipping")
             return ""
 
         print(f"  Trajectories: {len(verified)} verified")
-        print(f"  GRPO groups: {len(prompts)} (group_size=2)")
+        print(f"  GRPO groups: {len(prompts)} "
+              f"(group_size~{c.grpo_group_size})")
         print(f"  Algorithm: {c.grpo_rl_algorithm}")
         print(f"  Steps: {c.grpo_max_steps} | LR: {c.grpo_lr} | KL: {c.grpo_kl_coeff}")
 
@@ -1053,7 +1576,7 @@ class InfiniteSelfPlayLoop:
             learning_rate=c.grpo_lr,
             kl_coefficient=c.grpo_kl_coeff,
             clip_range=c.grpo_clip_range,
-            group_size=2,  # we pair tasks, so G=2
+            group_size=c.grpo_group_size,
             temperature=c.grpo_temperature,
             max_seq_len=c.grpo_max_seq_len,
             grad_accum_steps=c.grpo_grad_accum,
@@ -1113,7 +1636,8 @@ class InfiniteSelfPlayLoop:
         n_merged = merge_lora_adapters(model)
         print(f"  Merged {n_merged} LoRA adapters into base model")
         from forge.checkpoint_io import save_training_checkpoint
-        save_training_checkpoint(model, save_path, step)
+        save_training_checkpoint(model, save_path,
+                                 optimizer=trainer.optimizer, step=step)
 
         # Free VRAM
         del model, ref_model, trainer
@@ -1209,9 +1733,13 @@ class InfiniteSelfPlayLoop:
                 archived = os.path.join(archive_dir, f"{stem}_a{n}{ext}")
             if os.path.exists(candidate):
                 shutil.move(candidate, archived)
-                meta = candidate + ".meta.json"
-                if os.path.exists(meta):
-                    shutil.move(meta, archived + ".meta.json")
+                # Move sidecars too — .meta.json (save_checkpoint) and
+                # .train.pt (save_training_checkpoint optimizer/RNG state)
+                # would otherwise be orphaned in checkpoint_dir each epoch.
+                for suffix in (".meta.json", ".train.pt"):
+                    sidecar = candidate + suffix
+                    if os.path.exists(sidecar):
+                        shutil.move(sidecar, archived + suffix)
             print(f"  DEMOTED: reverted to {self.best_checkpoint}")
             if self._status_writer:
                 self._status_writer.event(
@@ -1230,8 +1758,17 @@ class InfiniteSelfPlayLoop:
 
         # Phase 1: Self-play (AZR curriculum)
         try:
-            sp_stats = self._run_self_play()
+            if self.config.training_mode == "flux":
+                sp_stats = self._flux_self_play()
+            else:
+                sp_stats = self._run_self_play()
             phases["self_play"] = sp_stats
+            # Debug round: Phase 1 only — dump the full generation
+            # transcript (every rendered prompt + raw output + token ids)
+            # and stop. No training, eval, or promotion.
+            if self.config.debug_round:
+                phases["debug_round"] = self._dump_debug_round()
+                return {"epoch": self.epoch, **phases}
             if "error" in sp_stats:
                 return {"epoch": self.epoch, **phases}
         except Exception as e:
@@ -1240,9 +1777,11 @@ class InfiniteSelfPlayLoop:
             self._free_engine()
             return {"epoch": self.epoch, "error": f"self_play: {e}"}
 
-        # Phase 2: Train (SFT or GRPO, based on training_mode)
+        # Phase 2: Train (SFT, GRPO, or FluxLM live-learn)
         try:
-            if self.config.training_mode == "grpo":
+            if self.config.training_mode == "flux":
+                self._flux_finish(phases)
+            elif self.config.training_mode == "grpo":
                 # GRPO-only RSI mode: train directly on verified trajectories
                 candidate = self._grpo_train(self.epoch)
                 if not candidate:
@@ -1317,7 +1856,9 @@ class InfiniteSelfPlayLoop:
 
     def run(self, max_epochs: int | None = None) -> list[dict]:
         """Run the infinite loop for max_epochs (or until interrupted)."""
-        n = max_epochs or self.config.max_epochs
+        # Debug round = exactly one Phase-1 pass, no training.
+        n = (1 if self.config.debug_round
+             else (max_epochs or self.config.max_epochs))
         self._init_status_writer()
         sw = self._status_writer
         if sw:
@@ -1329,6 +1870,9 @@ class InfiniteSelfPlayLoop:
         print(f"#  Max epochs: {n}")
         print(f"#  Tasks per epoch: {self.config.tasks_per_epoch}")
         print(f"#  Config: {self.config.config_name}")
+        if self.config.debug_round:
+            print("#  DEBUG ROUND — self-play only, NO training;")
+            print("#  every model generation is traced (raw output + tokens)")
         print(f"{'#'*70}")
 
         run_status, reason = "done", f"completed {n} epochs"
@@ -1393,8 +1937,10 @@ def main():
                              "research/checkpoints/ForgeLM_V2.safetensors")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Max epochs to run")
-    parser.add_argument("--tasks-per-epoch", type=int, default=30,
-                        help="Tasks to propose + solve per epoch")
+    parser.add_argument("--tasks-per-epoch", type=int, default=60,
+                        help="Tasks to propose + solve per epoch (60 gives "
+                             "~40+ unique SFT examples/epoch at typical "
+                             "solve rates — enough signal per finetune)")
     parser.add_argument("--ft-steps", type=int, default=100,
                         help="Finetune steps per epoch")
     parser.add_argument("--ft-lr", type=float, default=5e-5,
@@ -1440,6 +1986,13 @@ def main():
                         help="Prior SFT JSONL for replay (anti-forgetting)")
     parser.add_argument("--replay-ratio", type=float, default=0.2,
                         help="Fraction of replay examples per epoch")
+    parser.add_argument("--concise-qa-per-epoch", type=int, default=12,
+                        help="Verified short-answer QA pairs mixed into each "
+                             "epoch's SFT data (teaches direct minimal "
+                             "answers — anti-overthinking; 0 disables)")
+    parser.add_argument("--grpo-concise-bonus", type=float, default=0.1,
+                        help="Length-efficiency bonus for passing GRPO "
+                             "completions (shorter earns more; 0 disables)")
     parser.add_argument("--task-source", type=str, default="model",
                         choices=["model", "api"],
                         help="Task source: 'model' (AZR self-propose) or "
@@ -1455,10 +2008,12 @@ def main():
 
     # ── Training mode ──
     parser.add_argument("--training-mode", type=str, default="sft",
-                        choices=["sft", "grpo"],
-                        help="Training mode: 'sft' (SFT continuation, default) "
-                             "or 'grpo' (GRPO-only RSI: train directly on "
-                             "verified self-play trajectories via RL)")
+                        choices=["sft", "grpo", "flux"],
+                        help="Training mode: 'sft' (SFT continuation, default), "
+                             "'grpo' (GRPO-only RSI on verified trajectories), "
+                             "or 'flux' (FluxLM live-learning RSI: attempt → "
+                             "reinforce/revert+teach → consolidate → "
+                             "fixed-eval promote gate)")
     parser.add_argument("--grpo-steps", type=int, default=50,
                         help="GRPO steps per epoch (training_mode=grpo)")
     parser.add_argument("--grpo-lr", type=float, default=5e-6,
@@ -1469,6 +2024,17 @@ def main():
                         help="GRPO KL penalty coefficient")
     parser.add_argument("--grpo-clip", type=float, default=0.2,
                         help="GRPO PPO clip range")
+    parser.add_argument("--flux-group-size", type=int, default=4,
+                        help="flux mode: sampled attempts per task "
+                             "(concurrent batch, per-gen seed/temp)")
+    parser.add_argument("--flux-workers", type=int, default=4,
+                        help="flux mode: cloned-memory gen workers")
+    parser.add_argument("--flux-workers-device", type=str, default="cpu",
+                        choices=["cpu", "cuda", "auto"],
+                        help="clone worker device — cpu keeps the pool "
+                             "at ~0GB extra VRAM")
+    parser.add_argument("--flux-eval-n", type=int, default=40,
+                        help="flux mode: fixed held-out eval size")
     parser.add_argument("--grpo-algorithm", type=str, default="grpo",
                         choices=["grpo", "gtpo", "cispo", "sppo", "psppo",
                                  "evpo", "grpo_or"],
@@ -1553,6 +2119,12 @@ def main():
                              "live telemetry (GUI Self-Play page reads this)")
     parser.add_argument("--no-live-status", action="store_true",
                         help="Disable live telemetry files")
+    parser.add_argument("--debug-round", action="store_true",
+                        help="Run ONE self-play round (propose + solve) with "
+                             "NO training — every model generation is printed "
+                             "live and dumped to "
+                             "status_dir/debug_round_ep*.txt|.jsonl (rendered "
+                             "prompt, raw output, per-token ids)")
     args = parser.parse_args()
 
     config = LoopConfig(
@@ -1602,10 +2174,16 @@ def main():
         config_name=args.config,
         replay_file=args.replay_file,
         replay_ratio=args.replay_ratio,
+        concise_qa_per_epoch=args.concise_qa_per_epoch,
+        grpo_concise_bonus=args.grpo_concise_bonus,
         task_source=args.task_source,
         eval_threshold=args.eval_threshold,
         strict_promote=not args.lenient_promote,
         training_mode=args.training_mode,
+        flux_group_size=args.flux_group_size,
+        flux_workers=args.flux_workers,
+        flux_workers_device=args.flux_workers_device,
+        flux_eval_n=args.flux_eval_n,
         grpo_max_steps=args.grpo_steps,
         grpo_lr=args.grpo_lr,
         grpo_group_size=args.grpo_group_size,
@@ -1614,6 +2192,7 @@ def main():
         grpo_rl_algorithm=args.grpo_algorithm,
         status_dir=args.status_dir,
         live_status=not args.no_live_status,
+        debug_round=args.debug_round,
     )
 
     # Self-play mode dispatch

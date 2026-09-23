@@ -164,7 +164,9 @@ async def chat_send(body: ChatSendRequest):
             get_default_prompt_for_config)
         cfg = services.engine.info.get("config_name", "forgelm_v2")
         try:
-            sys_prompt = get_default_prompt_for_config(cfg)
+            sys_prompt = get_default_prompt_for_config(
+                cfg, tools_enabled=body.tools_enabled,
+                thinking_enabled=body.thinking)
         except Exception:
             sys_prompt = ""
     if sys_prompt:
@@ -208,7 +210,8 @@ async def chat_send(body: ChatSendRequest):
                 store.append_message(
                     conv_id, m["role"], m.get("content", ""),
                     tool_calls=m.get("tool_calls"),
-                    name=m.get("name", ""))
+                    name=m.get("name", ""),
+                    reasoning_content=m.get("reasoning_content"))
             except Exception:
                 logger.debug("persist message failed", exc_info=True)
         yield _sse({"type": "saved", "data": {"id": conv_id}})

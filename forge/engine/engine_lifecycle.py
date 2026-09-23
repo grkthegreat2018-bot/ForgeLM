@@ -1,4 +1,6 @@
 """Sleep/wake/VRAM lifecycle and crash-recovery mixin for ForgeEngine."""
+import os
+
 from .engine_common import *  # noqa: F403
 from .activation import ActivationConfig  # noqa: F401
 from .errors import CheckpointError, ConfigurationError  # noqa: F401
@@ -37,7 +39,8 @@ class _LifecycleMixin:
                 f"sleep level must be 1 or 2, got {level}")
         if not self._awake and level <= self._sleep_level:
             return  # Already asleep
-        if level == 2 and not self.checkpoint_path:
+        is_flux = self.model.__class__.__name__ == "FluxLM"
+        if level == 2 and not self.checkpoint_path and not is_flux:
             raise RuntimeError("Sleep level 2 requires a checkpoint path")
 
         if level == 1:
@@ -51,7 +54,19 @@ class _LifecycleMixin:
         # Store minimal state, discard model
         self._stored_config = getattr(self.model, "config", None)
         self._stored_dtype = self.dtype
-        self._stored_checkpoint = self.checkpoint_path
+        self._stored_is_flux = is_flux
+        if is_flux:
+            # FluxLM's weights ARE its live memory — snapshot to a temp
+            # file before discarding so session learning survives the
+            # sleep; wake() reloads from it (not the last manual save)
+            import tempfile
+            fd, snap = tempfile.mkstemp(suffix=".flux",
+                                        prefix="flux_sleep_")
+            os.close(fd)
+            self.model.snapshot(snap)
+            self._stored_checkpoint = snap
+        else:
+            self._stored_checkpoint = self.checkpoint_path
         self._profiler.model = None
         # Release acceleration resources that hold CUDA memory/graphs.
         # Without this, sleep(level=2) leaks CUDA graph + megakernel memory.
@@ -89,16 +104,27 @@ class _LifecycleMixin:
             raise CheckpointError(
                 "Level 2 wake requires stored checkpoint path",
                 suggestion="Load from checkpoint again with from_checkpoint().")
-        from forge.model_loader import ModelLoader
-        self.model = ModelLoader.build_model_fast(
-            self._stored_config, checkpoint_path=self._stored_checkpoint,
-            dtype=self._stored_dtype)
-        self.model.to(self.device)
+        if getattr(self, "_stored_is_flux", False):
+            from forge.model.flux import FluxLM
+            self.model = FluxLM.load(self._stored_checkpoint,
+                                     device=str(self.device))
+            try:
+                os.unlink(self._stored_checkpoint)   # temp sleep snapshot
+            except OSError:
+                pass
+        else:
+            from forge.model_loader import ModelLoader
+            self.model = ModelLoader.build_model_fast(
+                self._stored_config, checkpoint_path=self._stored_checkpoint,
+                dtype=self._stored_dtype)
+            self.model.to(self.device)
         self.model.eval()
         self._profiler.model = self.model
         del self._stored_config
         del self._stored_dtype
         del self._stored_checkpoint
+        if hasattr(self, "_stored_is_flux"):
+            del self._stored_is_flux
         self._awake = True
         self._sleep_level = 0
         self._log("Woke from level 2 sleep (reloaded from checkpoint)")

@@ -39,6 +39,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -56,10 +57,34 @@ _RE_QUOTED = re.compile(r'["\'](.+?)["\']')
 _RE_SOLVE_SIG = re.compile(r'def\s+solve\s*(\(.*?\))')
 _RE_SOLVE_TEST = re.compile(r'#\s*solve\s*\((.+?)\)\s*==\s*(.+?)(?:\n|$)')
 _RE_ASSERT_TEST = re.compile(r'#?\s*assert\s+solve\s*\((.+?)\)\s*==\s*(.+?)(?:,\s*["\']|\n|$)')
-_RE_SOLVE_IMPL = re.compile(r'(def\s+solve\s*\(.*?\):.*?)(?:\nassert|\n#|\n\ndef|\Z)', re.DOTALL)
+_RE_PRINT_TEST = re.compile(
+    r'print\(\s*solve\s*\((.+?)\)\s*\)\s*#\s*'
+    r'(?:[Ee]xpected\s*[:=]?\s*|==\s*|->\s*)?(.+?)(?:\n|$)')
+# Bare input lines: "# solve(<args>)" with no declared expected — AZR-style
+# proposals where the executor derives o = solve(args) as ground truth.
+_RE_SOLVE_INPUT = re.compile(
+    r'#\s*solve\s*\((.*?)\)\s*(?:->[^\n]*)?(?:\n|$)')
+# Bare test calls at line start: "solve(<args>)  # comment" — the model
+# drifts to this form inside the code block (observed live). Disjoint from
+# _RE_SOLVE_INPUT, which requires a leading '#'.
+_RE_SOLVE_BARE = re.compile(
+    r'^\s*solve\s*\((.*?)\)\s*(?:#.*)?$', re.MULTILINE)
+_RE_SOLVE_IMPL = re.compile(r'(def\s+solve\s*\([^)]*\)(?:\s*->\s*[^\n:]+)?:.*?)(?:\nassert|\n#|\n\ndef|\Z)', re.DOTALL)
 _RE_RETURN = re.compile(r'return\s+(.+)')
 _RE_CODEBLOCK_OPEN = re.compile(r'```python\s*\n?')
 _RE_CODEBLOCK_CLOSE = re.compile(r'```\s*$', re.MULTILINE)
+# Control-looking vocab tokens (<|im_start|>, <|reserved_NNN|>, <tool_call>,
+# <think>, …). Banned wholesale in self-play generated text — observed live:
+# the 3B model samples <|reserved_567|>-class garbage mid-answer, and the
+# GUI's six-id structural set doesn't cover the reserved range. Byte-fallback
+# tokens (<0x0A> = '\n', etc.) are EXCLUDED — they're how the tokenizer
+# emits newlines/unicode; banning them starves the sampler (observed:
+# force-injected suffix began with a banned <0x0A> → all -inf logits →
+# multinomial device-side assert).
+_RE_CONTROL_TOKEN = re.compile(r'^<(?!0x[0-9A-Fa-f]{2}>)[^>\n]+>$')
+# Ids generation legitimately needs: <|endoftext|> EOS, <|im_end|> turn end,
+# </think> (the model must be able to close its own think block).
+_CONTROL_TOKEN_KEEP = frozenset({2, 519, 542})
 
 from forge.evaluation.goal_tasks import GoalTask
 
@@ -91,6 +116,10 @@ class ProposedTask:
     solve_name: str = "solve"
     test_cases: list[dict[str, Any]] = field(default_factory=list)
     # each: {"args": (...,), "expected": ...}
+    # Bare inputs the model proposed without declaring outputs — expected
+    # values are derived by executing solve(*args) in validation (AZR-style:
+    # the executor, not the model, is the source of ground truth).
+    pending_inputs: list[tuple] = field(default_factory=list)
     stress_index: int | None = None
     proposer_confidence: float = 0.0     # model's own confidence
     validated: bool = False              # passed self-consistency check
@@ -217,6 +246,213 @@ SOLVER_PROMPT = """# Goal: {description}
 {test_lines}
 # Implement solve any way you choose."""
 
+# ─── Chat-mode prompts (engine path) ─────────────────────────────────
+# When a ForgeEngine is attached, prompts render as ChatML user turns and
+# the model replies with an instruction-following answer — NOT a raw code
+# continuation. The content requirements are identical to the completion
+# prompts above; only the surface format differs (single ```python block).
+
+CHAT_PROPOSE_PROMPT = """Here is an EXAMPLE of a Python programming task — study the format, do NOT copy it:
+
+```python
+# Task: Return the sum of the digits of n.
+def solve(n: int) -> int:
+    total = 0
+    n = abs(n)
+    while n > 0:
+        total += n % 10
+        n //= 10
+    return total
+
+# solve(0)
+# solve(123)
+# solve(-45)
+# solve(9999)
+```
+
+Now create ONE DIFFERENT {difficulty} task in the {domain} domain (idea: "{desc_hint}", or invent your own). Same format exactly: a `# Task:` line, a `def solve{signature}:` implementation using loops/conditionals (not just a builtin call), then 4+ `# solve(input)` test-INPUT lines covering edge cases. Expected outputs are computed automatically — do NOT write `== <expected>`. Reply with ONLY the code block."""
+
+CHAT_SOLVE_PROMPT = """{description}
+
+Write a complete Python function `def {solve_name}{sig_params}:` that returns (not prints) the correct output for ALL of these cases:
+
+{test_lines}
+
+Reply with ONLY a single ```python code block containing the full function definition."""
+
+# GUI _split_reasoning parity: the think-mode render opens <think> in the
+# assistant turn; everything before the last </think> is reasoning_content
+# (dropped), everything after is the reply. A leading Answer:/Final Answer:
+# anchor is stripped the same way the GUI does (_strip_answer_anchor).
+_RE_ANSWER_ANCHOR = re.compile(r"^\s*(?:Final\s+)?Answer\s*:\s*\n?")
+
+# Chat-mode replies include the model's <think> reasoning, so they need a
+# larger token floor than raw completion continuations, and the think block
+# itself gets a hard cap (GUI _think_cap_processor — after `budget` think
+# tokens without a </think>, force-inject the think-close + code-fence
+# suffix, dropping the model straight into code-completion mode; a bare
+# </think> or "Answer:" anchor left it musing — observed live). Self-play
+# bans tool markers outright (no tools exist).
+_CHAT_MIN_SOLVE_TOKENS = 384
+_CHAT_MIN_PROPOSE_TOKENS = 640
+_CHAT_SOLVE_THINK_BUDGET = 192
+_CHAT_PROPOSE_THINK_BUDGET = 320
+# Force-close suffixes for the think-cap: instead of the chat "Answer:"
+# anchor (the model keeps musing on meta-prompts — observed live), inject
+# the think-close PLUS the code-fence opener so the model lands directly
+# in code-completion mode on the required format.
+_CHAT_SOLVE_CLOSE = "\n</think>\n```python\n"
+_CHAT_PROPOSE_CLOSE = "\n</think>\n```python\n# Task: "
+# Propose prefill: instead of a think block (the 3B self-closes it early
+# then muses about the meta-instructions — observed live on every batch),
+# render the direct turn and prefill the code-fence opener so the model
+# continues as code. Task proposal is format imitation, not reasoning.
+_CHAT_PROPOSE_PREFILL = "```python\n"
+# Solve prefill: same mechanism — the solver's think block mused in
+# answer voice or truncated mid-function (observed: 0/4 solved, all
+# SyntaxError). Prefilled code keeps the whole budget for the function.
+_CHAT_SOLVE_PREFILL = "```python\n"
+# Post-think fence deadline: if the model closes </think> itself but the
+# "answer" rambles this many tokens without opening a code fence, inject
+# the fence part of the close suffix (observed live: 3B self-closes think
+# then muses in answer voice for the whole budget — think-cap can't fire
+# because think_open is False once 542 lands).
+_POST_THINK_FENCE_DEADLINE = 48
+
+
+# Structural markers that may survive decode when skip_special_tokens=False.
+# </think> is needed for the reasoning split, so decode must preserve it;
+# trailing turn markers (<|im_end|>, <|endoftext|>) get dropped here.
+_RE_TURN_MARKERS = re.compile(r"<\|im_end\|>|<\|endoftext\|>|<\|im_start\|>")
+
+
+def _strip_reply(text: str) -> str:
+    """Split reasoning from a chat reply (GUI _split_reasoning parity).
+
+    Drops everything through the last ``</think>`` (that text is the
+    model's reasoning_content, not the reply), removes a leading
+    ``Answer:``/``Final Answer:`` anchor if present, and strips any
+    surviving ChatML turn markers.
+    """
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[-1]
+    text = _RE_ANSWER_ANCHOR.sub("", text, count=1)
+    return _RE_TURN_MARKERS.sub("", text).strip("\n")
+
+
+class _DocstringStripper(ast.NodeTransformer):
+    """Remove docstring Expr nodes (module/function/class level)."""
+
+    def _strip(self, node):
+        self.generic_visit(node)
+        body = getattr(node, "body", None)
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+        return node
+
+    visit_Module = _strip
+    visit_FunctionDef = _strip
+    visit_AsyncFunctionDef = _strip
+    visit_ClassDef = _strip
+
+
+def _clean_code(code: str) -> str:
+    """Strip all comments + docstrings; canonicalize via AST round-trip.
+
+    The solver dumps reasoning into ``#`` comments and docstrings (observed
+    live: 40+ lines of musing inside the exported solution). Neither affects
+    execution, so dropping them yields terse, correct training code.
+    Returns "" when the code doesn't parse — the caller keeps the raw text
+    so verification can fail it naturally.
+    """
+    try:
+        tree = ast.parse(code)
+        cleaned = ast.unparse(_DocstringStripper().visit(tree))
+        return cleaned
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+        return ""
+
+
+def _json_default(o):
+    """json default= handler for task persistence: coerce values the model
+    can smuggle into test_cases via eval'd literals or sandbox outputs
+    (sets, bytes, arbitrary objects) into serializable forms."""
+    if isinstance(o, (set, frozenset)):
+        try:
+            return sorted(o)
+        except TypeError:
+            return list(o)
+    if isinstance(o, (bytes, bytearray)):
+        return o.decode("utf-8", "replace")
+    return repr(o)
+
+
+# ─── Generation tracer (debug rounds) ────────────────────────────────
+
+class GenTracer:
+    """Records every generation call so a debug round reveals exactly
+    what the model emitted.
+
+    Attached to ``InfiniteCurriculum.gen_trace`` by the loop when
+    ``LoopConfig.debug_round`` is set. Each ``_generate``/``_generate_batch``
+    call records the rendered prompt fed to the model, the RAW reply
+    (pre-strip — ``<think>``/``<|im_end|>``/fence markers all visible),
+    the post-strip reply the pipeline actually consumes, and per-token
+    ids + decoded pieces. Events print live and persist for the
+    ``debug_round_epN`` transcript the loop dumps after Phase 1.
+
+    Engine paths return text only, so token ids are re-encoded from the
+    raw output (``ids_source="reencoded"`` — special markers are added
+    tokens and re-encode faithfully; boundary merges may differ by ±1).
+    The legacy path supplies the true sampled ids (``"generated"``).
+    """
+
+    def __init__(self, tokenizer, live: bool = True):
+        self.tokenizer = tokenizer
+        self.live = live
+        self.events: list[dict] = []
+
+    def record(self, *, phase: str, prompt: str, rendered: str,
+               raw: str, reply: str,
+               gen_ids: list[int] | None = None, **meta) -> dict:
+        ids_source = "generated"
+        ids = [int(t) for t in gen_ids] if gen_ids is not None else None
+        if ids is None:
+            ids_source = "reencoded"
+            ids = [int(t) for t in self.tokenizer(
+                raw, add_special_tokens=False).input_ids]
+        ev = {
+            "i": len(self.events), "phase": phase, "prompt": prompt,
+            "rendered": rendered, "raw": raw, "reply": reply,
+            "n_tokens": len(ids), "ids_source": ids_source,
+            "tokens": [{"id": t, "text": self._piece(t)} for t in ids],
+            **meta,
+        }
+        self.events.append(ev)
+        if self.live:
+            self._print_live(ev)
+        return ev
+
+    def _piece(self, tid: int) -> str:
+        try:
+            return self.tokenizer.decode([tid])
+        except Exception:
+            return "<?>"
+
+    def _print_live(self, ev: dict) -> None:
+        # ASCII separators only — box-drawing chars mojibake on the
+        # Windows console's non-UTF-8 codepage.
+        bar = "-" * 66
+        print(f"\n{bar}\n  GEN #{ev['i']} [{ev['phase']}] "
+              f"{ev['n_tokens']} tokens ({ev['ids_source']})")
+        try:
+            print(ev["raw"] if ev["raw"].strip() else "  <empty output>")
+        except UnicodeEncodeError:
+            print(ev["raw"].encode("ascii", "replace").decode("ascii"))
+        print(bar)
+
 
 # ─── Infinite Curriculum Engine ───────────────────────────────────────
 
@@ -262,7 +498,8 @@ class InfiniteCurriculum:
                  top_k: int = 50,
                  top_p: float = 0.95,
                  task_queue_dir: str = None,
-                 live_status=None):
+                 live_status=None,
+                 engine=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -271,6 +508,21 @@ class InfiniteCurriculum:
         self.top_k = top_k
         self.top_p = top_p
         self.live = live_status
+        # When set, all generation routes through the ForgeEngine (activated
+        # features: prefix cache, spec decode, DRY, proper EOS) and prompts
+        # are rendered in the GUI's canonical Jamba ChatML — the model is
+        # chat-tuned, so raw completion prompts are off-distribution.
+        self.engine = engine
+        # Lazily-encoded force-close suffix ids for the think-cap
+        # processor, keyed by suffix text (needs the tokenizer).
+        self._think_suffix_ids = {}
+        # Lazily-built list of control-looking vocab ids banned in
+        # generated text (see _banned_special_ids).
+        self._banned_ids = None
+        # Debug-round generation tracer (LoopConfig.debug_round) — None in
+        # normal runs; _generate/_generate_batch record every call when set.
+        self.gen_trace: GenTracer | None = None
+        self._trace_phase = "gen"
         if task_queue_dir is None:
             from research.paths import CURRICULUM_DIR
             task_queue_dir = CURRICULUM_DIR
@@ -288,7 +540,14 @@ class InfiniteCurriculum:
         # All submitted task descriptions (valid + rejected) to prevent clones.
         # Stored normalized (lowercase, stripped, collapsed whitespace).
         self._seen_descriptions: set[str] = set()
+        self._seen_desc_tokens: list[set[str]] = []
         self._seen_desc_path = self.task_queue_dir / "seen_descriptions.json"
+        # Functional fingerprints: probe-input output signatures of
+        # validated reference impls — catches same-function clones whose
+        # descriptions differ ("count even digits" vs "number of even
+        # digits" are the same function → same fingerprint → reject).
+        self._seen_fingerprints: set[str] = set()
+        self._seen_fp_path = self.task_queue_dir / "seen_fingerprints.json"
 
         # Forward cache for repeated prompt prefixes (C2 — 20-40% fewer forward passes)
         from forge.runtime.forward_cache import ForwardCache
@@ -333,6 +592,7 @@ class InfiniteCurriculum:
         if difficulty is None:
             difficulty = self._adaptive_difficulty(domain)
 
+        self._trace_phase = "propose"
         valid_tasks = []
         proposed = 0
         parse_failed = 0
@@ -416,19 +676,25 @@ class InfiniteCurriculum:
                     self._batch_used_hints = set()
                     desc_hint = self.rng.choice(available_hints)
                 self._batch_used_hints.add(desc_hint)
-                prompt = INDUCTION_PROMPT.format(
-                    domain=domain, difficulty=difficulty,
-                    signature=sig_hint, desc_hint=desc_hint,
-                )
-                prompts.append(prompt)
+                prompts.append(self._propose_prompt(
+                    domain, difficulty, sig_hint, desc_hint))
 
-            # Batched generation — all prompts in one forward pass sequence
-            completions = self._generate_batch(prompts)
+            # Batched generation — all prompts in one forward pass sequence.
+            # Chat replies carry the <think> block — propose gets a higher
+            # floor and a longer think budget.
+            completions = self._generate_batch(
+                prompts, min_tokens=_CHAT_MIN_PROPOSE_TOKENS,
+                think_budget=_CHAT_PROPOSE_THINK_BUDGET,
+                close_suffix=_CHAT_PROPOSE_CLOSE,
+                prefill=_CHAT_PROPOSE_PREFILL)
 
-            # Parse and validate each completion
+            # Parse and validate each completion. In engine/chat mode the
+            # reply IS the task spec; in raw mode the completion continues
+            # the prompt's open `def solve` stub (prompt + completion).
             for j, completion in enumerate(completions):
                 proposed += 1
-                full_code = prompts[j] + completion
+                full_code = (completion if self.engine is not None
+                             else prompts[j] + completion)
                 task = self._parse_proposal(full_code, domain, difficulty, mode)
                 if task is not None:
                     task.raw_output = full_code
@@ -471,6 +737,18 @@ class InfiniteCurriculum:
 
                 # Validate: run proposer's reference solution against test cases
                 if self._validate_task(task):
+                    # Functional clone guard: run the ref impl on fixed
+                    # probes — identical output signature = same function
+                    # regardless of description wording.
+                    fp = self._functional_fingerprint(
+                        self._extract_reference_code(task.raw_output), task)
+                    if fp is not None and fp in self._seen_fingerprints:
+                        self._mark_description_seen(task.description)
+                        print("    -> REJECTED (functional clone — same "
+                              "outputs on probe inputs)")
+                        continue
+                    if fp is not None:
+                        self._seen_fingerprints.add(fp)
                     task.validated = True
                     self.stats.total_validated += 1
                     validated_count += 1
@@ -492,12 +770,38 @@ class InfiniteCurriculum:
         self._save_seen_descriptions()
         return valid_tasks
 
-    def _generate_batch(self, prompts: list[str]) -> list[str]:
+    def _render_chat(self, instruction: str,
+                     prefill: str | None = None) -> str:
+        """Render an instruction as the GUI does on a think turn:
+        canonical Jamba ChatML user turn, generation prompt opening the
+        assistant ``<think>`` block (thinking=True — the trained format;
+        direct-mode rendering left the model musing in think-voice and
+        starved the reply of tokens).
+
+        With ``prefill``, renders the direct (thinking=False) turn and
+        appends the prefill text — the model continues it as code, which
+        sidesteps the 3B's meta-musing failure on task-creation prompts.
+        """
+        from forge.self_play.discovery.qwen_adapter import (
+            render_messages_for_config)
+        rendered = render_messages_for_config(
+            [{"role": "user", "content": instruction}],
+            thinking=(prefill is None))
+        return rendered + prefill if prefill else rendered
+
+    def _generate_batch(self, prompts: list[str],
+                        min_tokens: int = _CHAT_MIN_SOLVE_TOKENS,
+                        think_budget: int = _CHAT_SOLVE_THINK_BUDGET,
+                        close_suffix: str = _CHAT_SOLVE_CLOSE,
+                        prefill: str | None = None,
+                        seeds: list[int | None] | None = None
+                        ) -> list[str]:
         """Generate completions for multiple prompts in a single batched pass.
 
-        Uses left-padding with proper attention_mask and position_ids to ensure
-        pad tokens don't corrupt generation. Each sequence generates independently,
-        stopping on EOS.
+        Engine path: ForgeEngine.generate_batch (BatchedDecoding — all
+        prompts in one forward sequence, proper EOS set, gen-lock, OOM
+        fallback). Legacy path: left-padding with proper attention_mask and
+        position_ids so pad tokens don't corrupt generation.
 
         Args:
             prompts: list of prompt strings (1-16 typically)
@@ -505,6 +809,39 @@ class InfiniteCurriculum:
         Returns:
             list of completion strings (same length as prompts)
         """
+        if self.engine is not None:
+            rendered = [self._render_chat(p, prefill=prefill)
+                        for p in prompts]
+            # One think-cap processor per sequence — each holds its own
+            # force-injection queue, so instances can't be shared.
+            # Prefill mode: budget=None — no think block to cap, the
+            # processor only applies the structural bans.
+            caps = [self._think_cap(
+                None if prefill else think_budget, close_suffix)
+                for _ in rendered]
+            replies = self.engine.generate_batch(
+                rendered,
+                max_new_tokens=max(self.max_gen_tokens, min_tokens),
+                temperature=self.temperature, top_p=self.top_p,
+                top_k=self.top_k, seeds=seeds,
+                logits_processors=caps,
+                # Preserve </think> for the reasoning split.
+                skip_special_tokens=False)
+            stripped = [_strip_reply(r) for r in replies]
+            if prefill:
+                # Model sometimes echoes the fence opener — strip it so
+                # the prepended prefill doesn't create an empty block.
+                stripped = [re.sub(r'^\s*```\w*\s*\n?', '', r)
+                            for r in stripped]
+                stripped = [prefill + r for r in stripped]
+            if self.gen_trace is not None:
+                for p, rend, raw, rep in zip(
+                        prompts, rendered, replies, stripped):
+                    self.gen_trace.record(
+                        phase=self._trace_phase, prompt=p, rendered=rend,
+                        raw=raw, reply=rep, temperature=self.temperature,
+                        max_new_tokens=max(self.max_gen_tokens, min_tokens))
+            return stripped
         if len(prompts) == 1:
             return [self._generate(prompts[0])]
 
@@ -585,6 +922,14 @@ class InfiniteCurriculum:
             text = self.tokenizer.decode(
                 torch.tensor(gen_ids[b]), skip_special_tokens=True)
             completions.append(text)
+            if self.gen_trace is not None:
+                raw = self.tokenizer.decode(
+                    torch.tensor(gen_ids[b]), skip_special_tokens=False)
+                self.gen_trace.record(
+                    phase=self._trace_phase, prompt=prompts[b],
+                    rendered=prompts[b], raw=raw, reply=text,
+                    gen_ids=gen_ids[b], temperature=self.temperature,
+                    max_new_tokens=self.max_gen_tokens)
         return completions
 
     def _sample_batch(self, logits: torch.Tensor) -> torch.Tensor:
@@ -625,9 +970,26 @@ class InfiniteCurriculum:
             out[b] = torch.multinomial(probs[b], num_samples=1, generator=gen).squeeze()
         return out
 
+    def _propose_prompt(self, domain: str, difficulty: str,
+                        sig_hint: str, desc_hint: str) -> str:
+        """Build the proposal prompt for the active generation mode.
+
+        Engine mode: instruction-style (CHAT_PROPOSE_PROMPT) — the model
+        replies with a complete ```python task spec. Legacy mode: raw
+        completion prompt ending in an open `def solve` stub.
+        """
+        if self.engine is not None:
+            return CHAT_PROPOSE_PROMPT.format(
+                domain=domain, difficulty=difficulty,
+                signature=sig_hint, desc_hint=desc_hint)
+        return INDUCTION_PROMPT.format(
+            domain=domain, difficulty=difficulty,
+            signature=sig_hint, desc_hint=desc_hint)
+
     def _propose_one(self, domain: str, difficulty: str,
                      mode: str = "induction") -> ProposedTask | None:
         """Generate one task via the model and parse it."""
+        self._trace_phase = "propose"
         # Pick a random signature pattern to guide the model
         sig_hint = self._random_signature(domain)
 
@@ -690,20 +1052,20 @@ class InfiniteCurriculum:
         }
         desc_hint = self.rng.choice(desc_hints.get(domain, desc_hints["algorithms"]))
 
-        prompt = INDUCTION_PROMPT.format(
-            domain=domain,
-            difficulty=difficulty,
-            signature=sig_hint,
-            desc_hint=desc_hint,
-        )
+        prompt = self._propose_prompt(domain, difficulty, sig_hint, desc_hint)
 
-        # Generate — the model completes the function body
-        completion = self._generate(prompt)
+        # Generate — chat mode replies with the full spec (thinks first,
+        # so raise the token floor); raw mode completes the open
+        # `def solve` stub in the prompt.
+        completion = self._generate(
+            prompt, min_tokens=_CHAT_MIN_PROPOSE_TOKENS,
+            think_budget=_CHAT_PROPOSE_THINK_BUDGET,
+            close_suffix=_CHAT_PROPOSE_CLOSE,
+            prefill=_CHAT_PROPOSE_PREFILL)
 
-        # Full code = prompt + completion (the model sees the stub and completes it)
-        # The prompt already has the function stub and example test cases.
-        # The model's completion will have the implementation + possibly more tests.
-        full_code = prompt + completion
+        # Full code = prompt + completion (the model sees the stub and
+        # completes it) in raw mode; just the reply in chat mode.
+        full_code = completion if self.engine is not None else prompt + completion
 
         # Parse the full code into a ProposedTask
         task = self._parse_proposal(full_code, domain, difficulty, mode)
@@ -918,12 +1280,121 @@ class InfiniteCurriculum:
             expected = ["25", "0", "100", "400"]
         return args, expected
 
-    def _generate(self, prompt: str) -> str:
-        """Generate text from the model using KV cache (O(n) not O(n²)).
+    def _think_cap(self, budget: int, close_suffix: str = _CHAT_SOLVE_CLOSE):
+        """Per-sequence think-cap + structural-ban logits processor.
 
-        Uses async D2H (pinned memory + non-blocking copy) to eliminate
-        CPU spikes from .item() host-device synchronization.
+        Reuses the GUI's own ``chat_loop._think_cap_processor``: while the
+        think block is open it bans <tool_call>; after ``budget`` think
+        tokens without a ``</think>`` it force-injects ``close_suffix``
+        (one token per step — "\n</think>\n```python\n…" drops the model
+        straight into code-completion mode); and it always bans
+        im_start/tool markers/<think> re-open. With
+        ``tool_calls_allowed=False`` the ban set is exactly the self-play
+        structural set {518, 531, 532, 539, 540, 541}.
         """
+        from forge_gui_server.services.chat_loop import (
+            _think_cap_processor, _THINK_END_ID)
+        ids = self._think_suffix_ids.get(close_suffix)
+        if ids is None:
+            ids = self.tokenizer.encode(
+                close_suffix, add_special_tokens=False)
+            self._think_suffix_ids[close_suffix] = ids
+        cap = _think_cap_processor(
+            budget, ids, tool_calls_allowed=False)
+        banned = self._banned_special_ids()
+
+        # Post-think fence deadline — when the model self-closes </think>
+        # then muses instead of emitting a code block, force the fence part
+        # of the close suffix after _POST_THINK_FENCE_DEADLINE fenceless
+        # answer tokens.
+        fence_suffix = close_suffix.split("</think>", 1)[-1]
+        fence_ids = self._think_suffix_ids.get(fence_suffix)
+        if fence_ids is None:
+            fence_ids = self.tokenizer.encode(
+                fence_suffix, add_special_tokens=False)
+            self._think_suffix_ids[fence_suffix] = fence_ids
+        try:
+            fence_start = self.tokenizer.encode(
+                "```", add_special_tokens=False)[0]
+        except Exception:
+            fence_start = None
+        extra_queue: list[int] = []
+
+        def proc(logits, generated_ids):
+            masked = cap(logits, generated_ids)
+            if banned:
+                masked[..., banned] = float("-inf")
+            if extra_queue:
+                tid = extra_queue.pop(0)
+                forced = torch.full_like(masked, float("-inf"))
+                forced[..., tid] = logits[..., tid]
+                return forced
+            if fence_start is not None and _THINK_END_ID in generated_ids:
+                last = (len(generated_ids) - 1
+                        - generated_ids[::-1].index(_THINK_END_ID))
+                post = generated_ids[last + 1:]
+                if (len(post) >= _POST_THINK_FENCE_DEADLINE
+                        and fence_start not in post):
+                    extra_queue.extend(fence_ids)
+            return masked
+        return proc
+
+    def _banned_special_ids(self) -> list[int]:
+        """Every control-looking vocab id minus the legitimate terminators
+        in _CONTROL_TOKEN_KEEP. One-time scan — the reserved-token class is
+        too large to enumerate in the GUI's six-id structural set."""
+        if self._banned_ids is None:
+            try:
+                vocab = self.tokenizer.get_vocab()
+            except Exception:
+                vocab = {}
+            self._banned_ids = [
+                tid for tok, tid in vocab.items()
+                if tid not in _CONTROL_TOKEN_KEEP
+                and _RE_CONTROL_TOKEN.match(tok)]
+        return self._banned_ids
+
+    def _generate(self, prompt: str,
+                  min_tokens: int = _CHAT_MIN_SOLVE_TOKENS,
+                  think_budget: int = _CHAT_SOLVE_THINK_BUDGET,
+                  close_suffix: str = _CHAT_SOLVE_CLOSE,
+                  prefill: str | None = None) -> str:
+        """Generate text — through the ForgeEngine when attached.
+
+        Engine path: ChatML think-mode render via generate_raw (activated
+        features: prefix cache, mtp_selfspec, spectral KV, DRY, think-cap +
+        structural token bans, EOS on <|im_end|>=519/<|endoftext|>=2); the
+        reply is reasoning-stripped via _strip_reply. ``min_tokens`` raises
+        the gen cap because chat replies carry the <think> block. Legacy
+        path: raw model() with KV cache + async D2H.
+        """
+        if self.engine is not None:
+            rendered = self._render_chat(prompt, prefill=prefill)
+            raw = self.engine.generate_raw(
+                rendered,
+                max_new_tokens=max(self.max_gen_tokens, min_tokens),
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                repetition_penalty=1.05,
+                logits_processor=self._think_cap(
+                    None if prefill else think_budget, close_suffix),
+                eos_token_ids=[2, 519],
+                # Keep </think> visible — _strip_reply needs it for the
+                # reasoning/content split (GUI _split_reasoning parity).
+                skip_special_tokens=False,
+            )
+            reply = _strip_reply(raw)
+            if prefill:
+                reply = prefill + re.sub(r'^\s*```\w*\s*\n?', '', reply)
+            if self.gen_trace is not None:
+                self.gen_trace.record(
+                    phase=self._trace_phase, prompt=prompt,
+                    rendered=rendered, raw=raw, reply=reply,
+                    temperature=self.temperature,
+                    max_new_tokens=max(self.max_gen_tokens, min_tokens))
+            return reply
+
         enc = self.tokenizer(prompt, return_tensors="pt",
                              truncation=True, max_length=512)
         input_ids = enc.input_ids.to(self.device)
@@ -978,6 +1449,14 @@ class InfiniteCurriculum:
 
         text = self.tokenizer.decode(
             torch.tensor(gen_ids), skip_special_tokens=True)
+        if self.gen_trace is not None:
+            raw = self.tokenizer.decode(
+                torch.tensor(gen_ids), skip_special_tokens=False)
+            self.gen_trace.record(
+                phase=self._trace_phase, prompt=prompt, rendered=prompt,
+                raw=raw, reply=text, gen_ids=gen_ids,
+                temperature=self.temperature,
+                max_new_tokens=self.max_gen_tokens)
         return text
 
     def _sample_gpu(self, logits: torch.Tensor) -> torch.Tensor:
@@ -1057,6 +1536,11 @@ class InfiniteCurriculum:
             # Try quoted: "Given a list..." or 'Given a list...'
             desc_match = _RE_QUOTED.search(code)
         description = desc_match.group(1).strip() if desc_match else "Model-proposed task"
+        # A code-looking or empty description (model skipped the '# Task:'
+        # line) collides in the clone guard — make it unique.
+        if not description or re.match(r'^(def|#|```)', description):
+            description = (f"{domain} {difficulty} task "
+                           f"#{self._task_counter + 1}")
 
         # Extract function signature — if no def solve found, infer from test cases
         sig_match = _RE_SOLVE_SIG.search(code)
@@ -1093,13 +1577,43 @@ class InfiniteCurriculum:
                     test_cases.append({"args": args, "expected": expected})
                 except Exception:
                     continue
+        # Pattern 3: print-style — print(solve(args))  # expected
+        # (chat models emit this often despite the requested format)
+        if not test_cases:
+            for m in _RE_PRINT_TEST.finditer(code):
+                args_str = m.group(1).strip()
+                expected_str = m.group(2).strip().rstrip(',')
+                try:
+                    args = ast.literal_eval(f"({args_str},)")
+                    expected = ast.literal_eval(expected_str)
+                    test_cases.append({"args": args, "expected": expected})
+                except Exception:
+                    continue
 
-        if len(test_cases) < 2:
-            return None  # need at least 2 test cases
+        # Bare inputs: "# solve(<args>)" lines with no declared expected.
+        # AZR-style — the executor derives outputs during validation, so a
+        # proposal only needs runnable code + inputs to be usable.
+        pending_inputs = []
+        for m in _RE_SOLVE_INPUT.finditer(code):
+            args_str = m.group(1).strip()
+            try:
+                pending_inputs.append(ast.literal_eval(f"({args_str},)"))
+            except Exception:
+                continue
+        for m in _RE_SOLVE_BARE.finditer(code):
+            args_str = m.group(1).strip()
+            try:
+                pending_inputs.append(ast.literal_eval(f"({args_str},)"))
+            except Exception:
+                continue
 
-        # Infer signature from test case args if not found above
+        if len(test_cases) + len(pending_inputs) < 2:
+            return None  # need at least 2 test cases/inputs
+
+        # Infer signature from test case/input args if not found above
         if signature is None:
-            first_args = test_cases[0]["args"]
+            first_args = (test_cases[0]["args"] if test_cases
+                          else pending_inputs[0])
             type_hints = []
             for a in first_args:
                 if isinstance(a, int):
@@ -1115,8 +1629,9 @@ class InfiniteCurriculum:
                 else:
                     type_hints.append("any")
             params = ", ".join(f"arg{i}: {t}" for i, t in enumerate(type_hints))
-            # Infer return type from first expected
-            ret = test_cases[0]["expected"]
+            # Infer return type from first expected (may be unknown when
+            # all inputs are pending — executor derives them later)
+            ret = test_cases[0]["expected"] if test_cases else None
             if isinstance(ret, int):
                 ret_type = "int"
             elif isinstance(ret, str):
@@ -1145,7 +1660,10 @@ class InfiniteCurriculum:
             signature=signature,
             solve_name="solve",
             test_cases=test_cases,
-            stress_index=len(test_cases) - 1 if len(test_cases) > 2 else None,
+            pending_inputs=pending_inputs,
+            stress_index=(len(test_cases) + len(pending_inputs) - 1
+                          if len(test_cases) + len(pending_inputs) > 2
+                          else None),
             archetype="model_proposed",
             raw_output=raw,
             generation_mode=mode,
@@ -1159,15 +1677,29 @@ class InfiniteCurriculum:
         In push-limits mode, we accept tasks even when the proposer's solution
         has bugs — the solver will determine if the task is solvable.
         We only reject tasks with:
-        - No test cases
+        - No test cases or inputs
         - Syntax errors in the reference code (can't even parse)
-        - Test cases that crash (invalid Python)
+        - Reference code that crashes on every proposed input
+
+        AZR-style: when the reference implementation runs, the EXECUTOR is
+        the source of truth — expected outputs are derived by running
+        ``solve(*args)`` on the proposed inputs, not trusted from the
+        model's own declarations.
         """
-        if not task.test_cases:
+        if not task.test_cases and not task.pending_inputs:
             return False
 
         # Extract reference implementation from raw output
         ref_code = self._extract_reference_code(task.raw_output)
+        if ref_code:
+            derived = self._derive_outputs(ref_code, task)
+            if derived:
+                task.test_cases = derived
+                task.pending_inputs = []
+                task.proposer_confidence = 1.0
+                return True
+        if not task.test_cases:
+            return False
         if not ref_code:
             # No reference code — accept with lower confidence
             task.proposer_confidence = 0.3
@@ -1204,6 +1736,39 @@ class InfiniteCurriculum:
             # Syntax error — the task is malformed, reject
             return False
 
+    def _derive_outputs(self, ref_code: str,
+                        task: ProposedTask) -> list[dict] | None:
+        """Derive expected outputs by executing the reference impl.
+
+        AZR semantics: the model proposes ``(program, inputs)``; the
+        executor computes ``o = solve(*args)`` and THAT is the ground
+        truth — the model never has to correctly predict its own outputs.
+        Runs each input in a separate sandbox (one bad input can't kill
+        the task). Returns ≥2 verified test cases or None.
+        """
+        all_inputs = ([tc["args"] for tc in task.test_cases]
+                      + list(task.pending_inputs))
+        if len(all_inputs) < 2:
+            return None
+        codes = []
+        for inp in all_inputs:
+            args_str = ", ".join(repr(a) for a in inp)
+            codes.append(ref_code + f"\nprint(repr(solve({args_str})))")
+        results = self._execute_sandbox_batch(codes, timeout_s=3.0)
+        out = []
+        for inp, res in zip(all_inputs, results):
+            if res.get("returncode") != 0:
+                continue
+            lines = res.get("stdout", "").strip().splitlines()
+            if not lines:
+                continue
+            try:
+                expected = ast.literal_eval(lines[-1].strip())
+            except Exception:
+                continue  # non-literal output — can't verify downstream
+            out.append({"args": inp, "expected": expected})
+        return out if len(out) >= 2 else None
+
     def _is_complex_enough(self, task: ProposedTask) -> bool:
         """Check if a task is complex enough to be worth training on (push-limits).
 
@@ -1215,8 +1780,12 @@ class InfiniteCurriculum:
         - Identity mappings (all test cases: solve(x) == x) — proposer gaming
         - Constant mappings (all test cases: solve(x) == c) — proposer gaming
         """
-        # Minimum test cases
-        if len(task.test_cases) < self.MIN_TEST_CASES:
+        # Minimum test cases — count pending inputs too: input-only
+        # proposals carry their cases in pending_inputs until
+        # _validate_task derives outputs (this check runs BEFORE
+        # validation, so tests=0 pending tasks were wrongly rejected).
+        if (len(task.test_cases) + len(task.pending_inputs)
+                < self.MIN_TEST_CASES):
             return False
 
         # Check signature has at least 1 argument
@@ -1342,8 +1911,20 @@ class InfiniteCurriculum:
         Can use the existing RecursiveSelfPlay engine, or generate directly.
         Returns success/failure + solution code.
         """
-        # Convert ProposedTask to GoalTask for compatibility with existing engine
-        goal_task = GoalTask(
+        goal_task = self._to_goal_task(task)
+
+        if engine is not None:
+            # Use existing recursive self-play engine
+            result = engine.run_goal_task(goal_task, k_samples=1, use_reasoning=True)
+            return result
+        else:
+            # Direct generation (simpler, no retry loop)
+            return self._solve_direct(goal_task)
+
+    @staticmethod
+    def _to_goal_task(task: ProposedTask) -> "GoalTask":
+        """Convert ProposedTask to GoalTask for solver compatibility."""
+        return GoalTask(
             id=task.id,
             domain=task.domain,
             difficulty=task.difficulty,
@@ -1355,13 +1936,89 @@ class InfiniteCurriculum:
             archetype=task.archetype,
         )
 
-        if engine is not None:
-            # Use existing recursive self-play engine
-            result = engine.run_goal_task(goal_task, k_samples=1, use_reasoning=True)
-            return result
-        else:
-            # Direct generation (simpler, no retry loop)
-            return self._solve_direct(goal_task)
+    def _solve_prompt_text(self, task: "GoalTask") -> str:
+        """Solve prompt for the active generation mode.
+
+        Engine mode: instruction asking for the complete function in a
+        ```python block (rendered as ChatML by _generate). Legacy mode:
+        raw completion prompt ending in an open `def solve` stub.
+        """
+        from forge.evaluation.goal_tasks import build_goal_prompt
+        if self.engine is None:
+            return build_goal_prompt(task)
+        test_lines = "\n".join(
+            f"#   {task.solve_name}({', '.join(repr(a) for a in tc['args'])})"
+            f" == {tc['expected']!r}"
+            for tc in task.test_cases)
+        return CHAT_SOLVE_PROMPT.format(
+            description=task.description,
+            solve_name=task.solve_name,
+            sig_params=task.input_signature.split(" -> ")[0],
+            test_lines=test_lines)
+
+    def _assemble_solution(self, task: "GoalTask", prompt: str,
+                           completion: str) -> str:
+        """Turn a raw completion into an executable solution string."""
+        code_match = _RE_PYTHON_BLOCK.search(completion)
+        body = code_match.group(1) if code_match else completion
+        if code_match is None:
+            # Prefilled/unfenced reply — drop a dangling fence opener line
+            # so it can't SyntaxError the assembled solution.
+            body = re.sub(r'^\s*```\w*\s*\n', '', body)
+        # Drop musing comments/docstrings — reasoning leaked into code
+        # comments bloats the SFT/GRPO data (the "overthinking" leak).
+        cleaned = _clean_code(body)
+        if cleaned:
+            body = cleaned
+        if self.engine is not None:
+            # Chat reply should carry the whole function; if the model
+            # returned a bare body, wrap it under the requested signature.
+            if re.search(r"def\s+" + re.escape(task.solve_name) + r"\s*\(",
+                         body):
+                return body
+            sig = task.input_signature.split(" -> ")[0]
+            indented = "\n".join(
+                "    " + ln if ln.strip() else ln
+                for ln in body.strip("\n").split("\n"))
+            return f"def {task.solve_name}{sig}:\n{indented}"
+        # Raw mode: prompt ends mid-function; completion is the body.
+        return prompt + body
+
+    def _verify_solution(self, task: "GoalTask",
+                         full_solution: str) -> tuple[bool, dict]:
+        """Run all test cases against a solution; (success, first_result)."""
+        test_codes = []
+        for tc in task.test_cases:
+            args_str = ", ".join(repr(a) for a in tc["args"])
+            expected_repr = repr(tc["expected"])
+            tc_code = (
+                full_solution + "\n"
+                f"assert {task.solve_name}({args_str}) == {expected_repr}, "
+                f"'{task.solve_name}({args_str}) failed'\n"
+                "print('PASS')"
+            )
+            test_codes.append(tc_code)
+
+        if not test_codes:
+            return False, {"stdout": "", "stderr": "NO_TESTS",
+                           "returncode": -1}
+        if len(test_codes) == 1:
+            result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
+            success = (result.get("returncode") == 0
+                       and "PASS" in result.get("stdout", ""))
+            return success, result
+        tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
+        success = all(
+            r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
+            for r in tc_results
+        )
+        # Aggregate error from first failing test case
+        result = next(
+            (r for r in tc_results if not (
+                r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
+            tc_results[0],
+        )
+        return success, result
 
     def _solve_direct(self, task: GoalTask) -> dict:
         """Solve a task with self-modeling retry (D5).
@@ -1369,8 +2026,8 @@ class InfiniteCurriculum:
         On low confidence, retry with higher temperature.
         Accept the best attempt (highest confidence or first that passes tests).
         """
-        from forge.evaluation.goal_tasks import build_goal_prompt
-        prompt = build_goal_prompt(task)
+        prompt = self._solve_prompt_text(task)
+        self._trace_phase = "solve"
 
         attempts = []
         best_solution = None
@@ -1381,49 +2038,11 @@ class InfiniteCurriculum:
             old_temp = self.temperature
             self.temperature = self.retry_policy.temperature_for_attempt(attempt)
 
-            completion = self._generate(prompt)
+            completion = self._generate(prompt, prefill=_CHAT_SOLVE_PREFILL)
             self.temperature = old_temp  # restore
 
-            # Extract code block if present
-            code_match = _RE_PYTHON_BLOCK.search(completion)
-            solution_body = code_match.group(1) if code_match else completion
-
-            # Build full solution: prompt (has def solve) + completion (has body)
-            full_solution = prompt + solution_body
-
-            # Execute and check — run individual test cases in parallel
-            # via the persistent sandbox worker pool.
-            test_codes = []
-            for tc in task.test_cases:
-                args_str = ", ".join(repr(a) for a in tc["args"])
-                expected_repr = repr(tc["expected"])
-                tc_code = (
-                    full_solution + "\n"
-                    f"assert solve({args_str}) == {expected_repr}, "
-                    f"'solve({args_str}) failed'\n"
-                    "print('PASS')"
-                )
-                test_codes.append(tc_code)
-
-            if not test_codes:
-                result = {"stdout": "", "stderr": "NO_TESTS", "returncode": -1}
-                success = False
-            elif len(test_codes) == 1:
-                result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
-                success = (result.get("returncode") == 0
-                           and "PASS" in result.get("stdout", ""))
-            else:
-                tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
-                success = all(
-                    r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
-                    for r in tc_results
-                )
-                # Aggregate error from first failing test case
-                result = next(
-                    (r for r in tc_results if not (
-                        r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
-                    tc_results[0],
-                )
+            full_solution = self._assemble_solution(task, prompt, completion)
+            success, result = self._verify_solution(task, full_solution)
 
             attempts.append({
                 "code": full_solution, "success": success,
@@ -1452,6 +2071,98 @@ class InfiniteCurriculum:
             "rounds_used": len(attempts),
             "best_quality": 1.0 if best_success else 0.0,
         }
+
+    def solve_tasks_batch(self, tasks: list[ProposedTask],
+                          group_size: int = 1) -> list[tuple]:
+        """Solve all tasks with one concurrent batched generation pass.
+
+        First attempts for every task go through a single
+        ``engine.generate_batch`` call (all prompts decode in parallel —
+        replaces the serial per-task generate loop). Failed tasks then get
+        their temperature-bumped retries serially. Works without an engine
+        too (falls back to the built-in raw batcher).
+
+        ``group_size`` > 1 (engine path only) generates k independent
+        rollouts per task prompt in the same batch — GRPO needs
+        within-group reward variance, and pairing completions of
+        DIFFERENT tasks collapses to zero advantage (observed: rewards
+        [1,1] → loss 0 → no learning).
+
+        Returns a list of ``(task, result_dict, elapsed_ms)`` in the same
+        order as *tasks*.
+        """
+        if not tasks:
+            return []
+        self._trace_phase = "solve"
+        goal_tasks = [self._to_goal_task(t) for t in tasks]
+        prompts = [self._solve_prompt_text(t) for t in goal_tasks]
+
+        t_batch = time.time()
+        if group_size > 1 and self.engine is not None:
+            ex_prompts = [p for p in prompts for _ in range(group_size)]
+            seeds = [7919 * i + 13 for i in range(len(ex_prompts))]
+            flat = self._generate_batch(
+                ex_prompts, prefill=_CHAT_SOLVE_PREFILL, seeds=seeds)
+            completions = [flat[i * group_size:(i + 1) * group_size]
+                           for i in range(len(tasks))]
+        else:
+            flat = self._generate_batch(prompts, prefill=_CHAT_SOLVE_PREFILL)
+            completions = [[c] for c in flat]
+        batch_ms = (time.time() - t_batch) * 1000.0
+
+        results = []
+        for i, (task, goal_task, task_comps) in enumerate(
+                zip(tasks, goal_tasks, completions)):
+            t0 = time.time()
+            attempts = []
+            best_solution, best_success = None, False
+            for sample_i, completion in enumerate(task_comps):
+                full_solution = self._assemble_solution(
+                    goal_task, prompts[i], completion)
+                success, result = self._verify_solution(
+                    goal_task, full_solution)
+                attempts.append({
+                    "code": full_solution, "success": success,
+                    "error": result.get("stderr", ""),
+                    "round": 0, "sample": sample_i,
+                    "temperature": self.retry_policy.temperature_for_attempt(0),
+                })
+                if success and not best_success:
+                    best_solution, best_success = full_solution, True
+
+            # Retries stay serial — temperature bump per the retry policy.
+            for attempt in range(1, self.retry_policy.max_retries + 1):
+                if best_success:
+                    break
+                old_temp = self.temperature
+                self.temperature = self.retry_policy.temperature_for_attempt(
+                    attempt)
+                retry_completion = self._generate(
+                    prompts[i], prefill=_CHAT_SOLVE_PREFILL)
+                self.temperature = old_temp
+
+                full_solution = self._assemble_solution(
+                    goal_task, prompts[i], retry_completion)
+                success, result = self._verify_solution(
+                    goal_task, full_solution)
+                attempts.append({
+                    "code": full_solution, "success": success,
+                    "error": result.get("stderr", ""),
+                    "round": 0, "sample": len(attempts),
+                    "temperature": self.retry_policy.temperature_for_attempt(
+                        attempt),
+                })
+                if success:
+                    best_solution, best_success = full_solution, True
+
+            elapsed_ms = batch_ms / len(tasks) + (time.time() - t0) * 1000.0
+            results.append((task, {
+                "final_success": best_success,
+                "attempts": attempts,
+                "rounds_used": len(attempts),
+                "best_quality": 1.0 if best_success else 0.0,
+            }, elapsed_ms))
+        return results
 
     # ─── LADDER: Recursive Problem Decomposition ──────────────────
 
@@ -1612,6 +2323,7 @@ class InfiniteCurriculum:
 
     def _generate_easier_description(self, task: ProposedTask) -> str | None:
         """Ask the model to generate an easier variant of the task description."""
+        self._trace_phase = "ladder_variant"
         prompt = f"""Simplify this programming task to make it easier:
 
 Original: {task.description}
@@ -1642,6 +2354,7 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
     def _solve_with_hint(self, task: ProposedTask, hint: str,
                          engine: Any | None = None) -> dict:
         """Solve a task with an additional hint context (from LADDER variants)."""
+        self._trace_phase = "solve_hint"
         from forge.evaluation.goal_tasks import build_goal_prompt
         goal_task = GoalTask(
             id=task.id, domain=task.domain, difficulty=task.difficulty,
@@ -1649,51 +2362,27 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             solve_name=task.solve_name, test_cases=task.test_cases,
             stress_index=task.stress_index, archetype=task.archetype,
         )
-        # Prepend hint to the goal prompt
-        original_prompt = build_goal_prompt(goal_task)
-        hinted_prompt = hint + "\n\n" + original_prompt
+        # Prepend hint to the goal prompt — chat mode uses the instruction
+        # prompt (rendered as ChatML by _generate); raw mode uses the
+        # completion-style goal prompt.
+        if self.engine is not None:
+            hinted_prompt = hint + "\n\n" + self._solve_prompt_text(goal_task)
+        else:
+            hinted_prompt = hint + "\n\n" + build_goal_prompt(goal_task)
 
         if engine is not None:
             # Patch the prompt in the engine call
             result = engine.run_goal_task(goal_task, k_samples=1, use_reasoning=True)
             return result
         else:
-            # Direct solve with hint
-            completion = self._generate(hinted_prompt)
-            code_match = _RE_PYTHON_BLOCK.search(completion)
-            solution_body = code_match.group(1) if code_match else completion
-            full_solution = hinted_prompt + solution_body
+            # Direct solve with hint — chat mode assembles the reply;
+            # raw mode concatenates prompt + body.
+            completion = self._generate(
+                hinted_prompt, prefill=_CHAT_SOLVE_PREFILL)
+            full_solution = self._assemble_solution(
+                goal_task, hinted_prompt, completion)
 
-            # Execute test cases in parallel via the persistent sandbox pool.
-            test_codes = []
-            for tc in task.test_cases:
-                args_str = ", ".join(repr(a) for a in tc["args"])
-                expected_repr = repr(tc["expected"])
-                tc_code = (
-                    full_solution + "\n"
-                    f"assert solve({args_str}) == {expected_repr}\n"
-                    "print('PASS')"
-                )
-                test_codes.append(tc_code)
-
-            if not test_codes:
-                result = {"stdout": "", "stderr": "NO_TESTS", "returncode": -1}
-                success = False
-            elif len(test_codes) == 1:
-                result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
-                success = (result.get("returncode") == 0
-                           and "PASS" in result.get("stdout", ""))
-            else:
-                tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
-                success = all(
-                    r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
-                    for r in tc_results
-                )
-                result = next(
-                    (r for r in tc_results if not (
-                        r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
-                    tc_results[0],
-                )
+            success, result = self._verify_solution(goal_task, full_solution)
 
             return {
                 "final_success": success,
@@ -1848,8 +2537,14 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             "proposer_confidence": task.proposer_confidence,
             "timestamp": datetime.now().isoformat(),
         }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2, default=_json_default)
+        except (OSError, TypeError, ValueError) as e:
+            # Task persistence is auxiliary — a save failure must NOT kill
+            # the epoch (observed: a set-valued test arg aborted an entire
+            # self-play epoch mid-propose via TypeError here).
+            print(f"  [Curriculum] _save_task failed for {task.id}: {e}")
 
     def load_queue(self, max_tasks: int = 1000):
         """Load previously saved tasks from disk into the queue."""
@@ -1879,19 +2574,33 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         self._load_seen_descriptions()
 
     def _load_seen_descriptions(self):
-        """Load seen task descriptions from disk to prevent clone tasks."""
+        """Load seen task descriptions + functional fingerprints from disk
+        to prevent clone tasks."""
         if self._seen_desc_path.exists():
             try:
                 self._seen_descriptions = set(loads(self._seen_desc_path.read_text()))
                 print(f"  [Curriculum] Loaded {len(self._seen_descriptions)} seen descriptions")
             except (json.JSONDecodeError, OSError):
                 self._seen_descriptions = set()
+        self._seen_desc_tokens = [
+            self._desc_tokens(d) for d in self._seen_descriptions]
+        if self._seen_fp_path.exists():
+            try:
+                self._seen_fingerprints = set(
+                    loads(self._seen_fp_path.read_text()))
+            except (json.JSONDecodeError, OSError):
+                self._seen_fingerprints = set()
 
     def _save_seen_descriptions(self):
-        """Persist seen descriptions to disk."""
+        """Persist seen descriptions + fingerprints to disk."""
         try:
             with open(self._seen_desc_path, "w") as f:
                 json.dump(sorted(self._seen_descriptions), f)
+        except OSError:
+            pass
+        try:
+            with open(self._seen_fp_path, "w") as f:
+                json.dump(sorted(self._seen_fingerprints), f)
         except OSError:
             pass
 
@@ -1904,16 +2613,76 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         d = d.rstrip('.;:')
         return d
 
+    _DESC_STOPWORDS = frozenset(
+        "a an the of in on to for and or is are it its with without by from "
+        "return returns returned given write create one all any each".split())
+
+    @classmethod
+    def _desc_tokens(cls, desc: str) -> set[str]:
+        """Content-word set of a description (stopwords removed, naive
+        plural stem) for similarity dedup."""
+        toks = re.findall(r"[a-z]+", desc.lower())
+        return {(t[:-1] if len(t) > 3 and t.endswith("s") else t)
+                for t in toks if t not in cls._DESC_STOPWORDS}
+
     def _is_seen_description(self, desc: str) -> bool:
-        """Check if a task description has been seen before (case-insensitive)."""
-        return self._normalize_desc(desc) in self._seen_descriptions
+        """Check if a task description has been seen — exact normalized
+        match OR high content-word overlap (semantic clone)."""
+        norm = self._normalize_desc(desc)
+        if norm in self._seen_descriptions:
+            return True
+        toks = self._desc_tokens(desc)
+        if toks:
+            for seen in self._seen_desc_tokens:
+                union = toks | seen
+                if union and len(toks & seen) / len(union) >= 0.5:
+                    return True
+        return False
 
     def _mark_description_seen(self, desc: str):
         """Record a task description as seen (valid or rejected)."""
         self._seen_descriptions.add(self._normalize_desc(desc))
+        self._seen_desc_tokens.append(self._desc_tokens(desc))
         # Periodically save (every 10 new descriptions)
         if len(self._seen_descriptions) % 10 == 0:
             self._save_seen_descriptions()
+
+    _FP_PROBES = {
+        int: [0, 1, 7, 42, -3],
+        str: ["", "a", "xyzzy", "Hello World", "aa bb"],
+        list: [[], [0], [2, 4, 6], [-1, 9], [5] * 5],
+        float: [0.0, 1.5, -2.25, 100.0, 3.75],
+        bool: [True, False, True, False, True],
+    }
+
+    def _functional_fingerprint(self, ref_code: str,
+                                task: ProposedTask) -> str | None:
+        """Execute the reference impl on fixed probe inputs; return the
+        output signature. Two tasks whose reference impls produce identical
+        outputs on the same probes are the same function — a clone,
+        whatever the description says. Returns None when probes can't be
+        built for the signature (no dedup applied then).
+        """
+        if not ref_code or not task.test_cases:
+            return None
+        arg_types = [type(a) for a in task.test_cases[0]["args"]]
+        if not arg_types or any(t not in self._FP_PROBES for t in arg_types):
+            return None
+        probe_vals = [self._FP_PROBES[t] for t in arg_types]
+        n_p = min(len(p) for p in probe_vals)
+        lines = [ref_code]
+        for i in range(n_p):
+            args = tuple(pv[i] for pv in probe_vals)
+            lines.append(
+                "try:\n"
+                f"    print(repr(solve(*{args!r})))\n"
+                "except Exception as _e:\n"
+                "    print('ERR:' + type(_e).__name__)")
+        res = self._execute_sandbox("\n".join(lines), timeout_s=3.0)
+        if res.get("returncode") != 0:
+            return None
+        return (f"{len(arg_types)}:{','.join(t.__name__ for t in arg_types)}:"
+                + res["stdout"].strip())
 
     # ─── Convert to GoalTask (for existing training pipeline) ──────
 

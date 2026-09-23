@@ -34,11 +34,20 @@ from forge_gui.api.tool_harness import ToolHarness
 class _FakeResp:
     """Minimal context-manager response object mimicking urlopen's return."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, content_type: str = "",
+                 final_url: str = ""):
         self._data = data
+        self._ctype = content_type
+        self._final = final_url
+        # dict satisfies headers.get("Content-Type") in http_get_full
+        self.headers = ({"Content-Type": content_type}
+                        if content_type else {})
 
     def read(self) -> bytes:
         return self._data
+
+    def geturl(self) -> str:
+        return self._final
 
     def __enter__(self):
         return self
@@ -47,11 +56,12 @@ class _FakeResp:
         return False
 
 
-def _fake_urlopen(data: bytes | str):
+def _fake_urlopen(data: bytes | str, content_type: str = "",
+                  final_url: str = ""):
     """Return a callable that yields a _FakeResp wrapping `data`."""
     if isinstance(data, str):
         data = data.encode("utf-8")
-    return lambda *a, **kw: _FakeResp(data)
+    return lambda *a, **kw: _FakeResp(data, content_type, final_url)
 
 
 # ── tool definition shape ───────────────────────────────────────────────
@@ -343,11 +353,11 @@ def test_webtools_execute_clamps_n():
 
 def test_webtools_execute_clamps_max_chars():
     wt = WebTools()
-    html = "<body>" + ("y " * 10000) + "</body>"
+    html = "<body>" + ("y " * 20000) + "</body>"
     with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
         res = wt.execute("web_fetch", {"url": "https://x.com", "max_chars": 999999})
-    # clamped to 8000
-    assert len(res["text"]) <= 8000
+    # clamped to 16000
+    assert len(res["text"]) <= 16000
 
 
 # ── ToolHarness integration ─────────────────────────────────────────────
@@ -401,3 +411,156 @@ def test_harness_read_only_keeps_web_tools(tmp_path):
     names = {d["function"]["name"] for d in h.tool_defs()}
     assert "web_search" in names
     assert "web_fetch" in names
+
+
+# ── fetch_url upgrades (any-URL access) ──────────────────────────────────
+def test_fetch_url_bare_domain_upgrades_https():
+    seen = []
+
+    def fake(req, timeout=None, **kw):
+        seen.append(req.full_url)
+        return _FakeResp(b"<html><body><p>hi</p></body></html>")
+
+    with patch("forge.web_primitives.urlopen", fake):
+        res = _web_fetch("example.com")
+    assert res["error"] is None
+    assert res["url"] == "https://example.com"
+    assert seen == ["https://example.com"]
+
+
+def test_fetch_url_extracts_links_and_titles():
+    html = ("<html><head><title>Doc Page</title></head><body>"
+            "<h1>Guide</h1><p>Intro text.</p>"
+            "<a href=\"/deep/dive\">Read the deep dive</a>"
+            "<a href=\"https://other.com/x\">External</a>"
+            "<a href=\"javascript:void(0)\">dead</a>"
+            "<ul><li>one</li><li>two</li></ul></body></html>")
+    with patch("forge.web_primitives.urlopen",
+               _fake_urlopen(html, content_type="text/html")):
+        res = _web_fetch("https://example.com/docs")
+    assert res["error"] is None
+    assert res["title"] == "Doc Page"
+    assert "# Guide" in res["text"]
+    # inline markdown links — link names stay visible to the model
+    assert "[Read the deep dive](https://example.com/deep/dive)" \
+        in res["text"]
+    assert "[External](https://other.com/x)" in res["text"]
+    assert "javascript" not in res["text"]
+    assert "- one" in res["text"] and "- two" in res["text"]
+    urls = {l["url"] for l in res["links"]}
+    assert "https://example.com/deep/dive" in urls
+    assert "https://other.com/x" in urls
+    texts = {l["text"] for l in res["links"]}
+    assert "Read the deep dive" in texts
+
+
+def test_fetch_url_reports_final_url_after_redirect():
+    html = "<html><body><p>article</p></body></html>"
+    with patch("forge.web_primitives.urlopen",
+               _fake_urlopen(html, content_type="text/html",
+                             final_url="https://real.example/article")):
+        res = _web_fetch("https://news.google.com/rss/articles/AAAA")
+    assert res["final_url"] == "https://real.example/article"
+    assert res["url"] == "https://news.google.com/rss/articles/AAAA"
+
+
+def test_fetch_url_json_passthrough():
+    payload = '{"ok": true, "items": [1, 2, 3]}'
+    with patch("forge.web_primitives.urlopen",
+               _fake_urlopen(payload,
+                             content_type="application/json")):
+        res = _web_fetch("https://api.example.com/data")
+    assert res["error"] is None
+    assert res["text"] == payload          # raw, not HTML-stripped
+    assert res["content_type"] == "application/json"
+    assert "links" not in res
+
+
+def test_fetch_url_offset_paging():
+    html = ("<body><p>"
+            + "".join(f"token{i} " for i in range(3000)) + "</p></body>")
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
+        res1 = _web_fetch("https://example.com/long", max_chars=2000)
+        res2 = _web_fetch("https://example.com/long", max_chars=2000,
+                          offset=res1["next_offset"])
+        resN = _web_fetch("https://example.com/long", max_chars=2000,
+                          offset=res1["chars"] - 500)
+    assert res1["truncated"] is True
+    assert res1["next_offset"] == 2000
+    assert res2["text"] != res1["text"]
+    assert res2["next_offset"] == 4000
+    assert resN["truncated"] is False      # last page has no next_offset
+    assert "next_offset" not in resN
+    assert res1["chars"] == res2["chars"] > 2000
+
+
+def test_webtools_execute_passes_offset():
+    wt = WebTools()
+    html = "<body><p>" + ("z " * 5000) + "</p></body>"
+    with patch("forge.web_primitives.urlopen", _fake_urlopen(html)):
+        res = wt.execute("web_fetch", {"url": "https://x.com",
+                                       "max_chars": 500, "offset": 400})
+    assert res["chars"] > 400
+    assert len(res["text"]) == 500
+    assert res["truncated"] is True
+
+
+# ── search fallback chain ───────────────────────────────────────────────
+_DDG_LITE_HTML = """
+<table>
+<tr><td><a class="result-link"
+ href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.example%2Fpage">
+Lite Result</a></td></tr>
+<tr><td class="result-snippet">lite snippet text</td></tr>
+</table>
+"""
+
+_BING_HTML = """
+<ul><li class="b_algo"><h2><a href="https://bing.example/r">
+Bing Result</a></h2><p>bing snippet</p></li></ul>
+"""
+
+
+def test_search_falls_back_to_ddg_lite():
+    """DDG HTML endpoint parses empty → lite endpoint supplies results."""
+    calls = []
+
+    def fake(req, timeout=None, **kw):
+        url = req.full_url
+        calls.append(url)
+        if "html.duckduckgo.com" in url:
+            return _FakeResp(b"<html>bot wall</html>")
+        if "lite.duckduckgo.com" in url:
+            return _FakeResp(_DDG_LITE_HTML.encode())
+        raise AssertionError(f"unexpected engine call: {url}")
+
+    with patch("forge.web_primitives.urlopen", fake):
+        res = _web_search("test query", n=5)
+    assert res["error"] is None
+    assert res["results"][0]["url"] == "https://lite.example/page"
+    assert res["results"][0]["title"] == "Lite Result"
+    assert "lite snippet" in res["results"][0]["snippet"]
+
+
+def test_search_falls_back_to_bing():
+    def fake(req, timeout=None, **kw):
+        url = req.full_url
+        if "bing.com" in url:
+            return _FakeResp(_BING_HTML.encode())
+        return _FakeResp(b"<html>nothing parseable</html>")
+
+    with patch("forge.web_primitives.urlopen", fake):
+        res = _web_search("test query", n=5)
+    assert res["error"] is None
+    assert res["results"][0]["url"] == "https://bing.example/r"
+    assert res["results"][0]["title"] == "Bing Result"
+    assert "bing snippet" in res["results"][0]["snippet"]
+
+
+def test_search_all_engines_dead_reports_error():
+    def boom(*a, **kw):
+        raise OSError("all down")
+    with patch("forge.web_primitives.urlopen", boom):
+        res = _web_search("anything")
+    assert res["results"] == []
+    assert "fetch failed" in res["error"]

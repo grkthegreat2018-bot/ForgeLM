@@ -172,6 +172,15 @@ def _selfplay_dir() -> Path:
     return project_root() / "research" / "checkpoints" / "self_play"
 
 
+def _flux_checkpoints() -> list[str]:
+    """.flux snapshots under research/checkpoints/flux/ — selectable as
+    the starting model for a flux-mode self-play run (or fresh)."""
+    d = project_root() / "research" / "checkpoints" / "flux"
+    if not d.is_dir():
+        return []
+    return sorted(p.name for p in d.glob("*.flux"))
+
+
 @router.get("/selfplay/status")
 async def selfplay_status():
     loop = asyncio.get_running_loop()
@@ -182,13 +191,18 @@ async def selfplay_status():
     return {"status": latest or {}, "events": events,
             "heartbeat_age_s": hb_age,
             "heartbeat_stalled": services.events.heartbeat_stalled(),
-            "topics": SELFPLAY_TOPICS}
+            "topics": SELFPLAY_TOPICS,
+            "flux_models": _flux_checkpoints()}
 
 
 class SelfPlayStartRequest(BaseModel):
     topic: str = "python_algorithms"
     epochs: int = 3
     tasks_per_epoch: int = 50
+    mode: str = "sft"               # 'sft' | 'grpo' | 'flux'
+    flux_checkpoint: str = ""       # .flux path, or "" for a fresh model
+    flux_group_size: int = 4        # sampled attempts per task
+    flux_workers: int = 4           # cloned-memory gen workers
 
 
 @router.post("/selfplay/start")
@@ -209,12 +223,24 @@ async def selfplay_start(body: SelfPlayStartRequest):
     venv_py = root / "venv" / "Scripts" / "python.exe"
     cmd = [str(venv_py if venv_py.is_file() else "python"), "-u",
            "-m", "forge.self_play.infinite_loop",
-           "--checkpoint", str(root / "research" / "checkpoints"
-                               / "ForgeLM_V2.safetensors"),
-           "--config", "forgelm_v2",
            "--epochs", str(body.epochs),
-           "--tasks-per-epoch", str(body.tasks_per_epoch),
-           "--ft-batch-size", "8"]
+           "--tasks-per-epoch", str(body.tasks_per_epoch)]
+    if body.mode == "flux":
+        ckpt = body.flux_checkpoint
+        if ckpt and not ckpt.startswith(("research/", "research\\")):
+            # name from the flux picker → checkpoint dir path
+            ckpt = str(root / "research" / "checkpoints" / "flux" / ckpt)
+        cmd += ["--training-mode", "flux",
+                "--checkpoint", ckpt or "none",
+                "--flux-group-size", str(max(1, body.flux_group_size)),
+                "--flux-workers", str(max(1, body.flux_workers))]
+    else:
+        cmd += ["--checkpoint",
+                str(root / "research" / "checkpoints"
+                    / "ForgeLM_V2.safetensors"),
+                "--config", "forgelm_v2",
+                "--training-mode", body.mode,
+                "--ft-batch-size", "8"]
     task_id = services.procs.launch("Self-Play Training", cmd)
     return {"ok": True, "task_id": task_id}
 

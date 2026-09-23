@@ -31,6 +31,43 @@ def _set_no_compile(use_compile: bool | None) -> None:
         os.environ["FORGE_NO_COMPILE"] = "1"
 
 
+def _iter_learn_texts(path: str):
+    """Yield text docs from a learn corpus file — .txt/.md whole,
+    .jsonl/.ndjson per-row (text/content/output or messages)."""
+    import json
+    if path.lower().endswith((".jsonl", ".ndjson")):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for k in ("text", "content", "output", "response"):
+                    v = row.get(k) if isinstance(row, dict) else None
+                    if isinstance(v, str) and v:
+                        yield v
+                        break
+    elif path.lower().endswith(".json"):
+        try:
+            rows = json.load(open(path, encoding="utf-8",
+                                  errors="replace"))
+        except Exception:
+            return
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, str):
+                yield row
+            elif isinstance(row, dict):
+                v = row.get("text") or row.get("content")
+                if v:
+                    yield str(v)
+    else:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            yield f.read()
+
+
 class EngineService:
     """Owns the resident engine; serializes generation across tasks."""
 
@@ -53,6 +90,8 @@ class EngineService:
         self._load_seq = 0
         self._loading_req: tuple | None = None
         self._queued_load: tuple | None = None
+        self._learn_task = None
+        self._learn_cancel = threading.Event()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -104,6 +143,9 @@ class EngineService:
              activation: dict | None = None,
              config_overrides: dict | None = None) -> None:
         """Kick off an async load. Progress/result arrives via hub events."""
+        if str(checkpoint).lower().endswith(".flux"):
+            config_name = "flux"   # .flux routes to from_flux; normalize
+                                   # so dedupe/reload checks stay stable
         req = (self._resolve_ckpt(checkpoint), config_name)
         if self._state == "loading":
             if self._loading_req == req:
@@ -197,6 +239,8 @@ class EngineService:
             raise RuntimeError(f"checkpoint not found: {ckpt}")
 
         import torch
+        if ckpt.lower().endswith(".flux"):
+            return self._load_flux(ckpt, t0)
         from forge.engine.engine_common import _fast_load_vram_required
         if torch.cuda.is_available():
             free, _total = torch.cuda.mem_get_info()
@@ -246,6 +290,27 @@ class EngineService:
             "use_compile": bool(active.get("use_compile",
                                          use_compile or False)),
             "activation": active,
+        }
+        return engine, info
+
+    def _load_flux(self, ckpt: str, t0: float):
+        """FluxLM memory snapshot — bypasses checkpoint detection, VRAM
+        sizing, activation presets and gate probes (no dense weights,
+        no hidden states).  GPU-resident tables when CUDA is up."""
+        self._progress(f"loading FLUX memory {ckpt}…")
+        from forge.engine.forge_engine import ForgeEngine  # type: ignore
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        engine = ForgeEngine.from_flux(
+            checkpoint=ckpt, device=dev, cuda_primary=(dev == "cuda"))
+        info = {
+            "checkpoint": ckpt,
+            "config_name": "flux",
+            "load_s": round(time.perf_counter() - t0, 2),
+            "device": dev,
+            "dtype": "memory",
+            "use_compile": False,
+            "activation": {},
         }
         return engine, info
 
@@ -322,6 +387,106 @@ class EngineService:
                 return ac.to_dict() if ac is not None else {}
             except Exception:
                 return {}
+
+    # ── live-learn (FluxLM) ───────────────────────────────────────────
+    LEARN_SLICE = 1 << 13          # ~8k tokens per lease hold
+
+    def learn(self, path: str, tag: str | None = None,
+              max_tokens: int = 0) -> None:
+        """Async live-learn: ingest a corpus file/dir into the resident
+        FluxLM.  Progress arrives via engine_progress / learn_done hub
+        events; cancel via learn_cancel()."""
+        if self._learn_task is not None and not self._learn_task.done():
+            self._hub.publish("engine_error",
+                              {"error": "a learn run is already active"})
+            return
+        self._learn_cancel.clear()
+        loop = self._loop or asyncio.get_event_loop()
+        coro = self._learn_async(loop, path, tag, max_tokens)
+        if loop.is_running():
+            self._learn_task = asyncio.run_coroutine_threadsafe(
+                coro, loop)
+        else:
+            self._learn_task = asyncio.ensure_future(coro)
+
+    def learn_cancel(self) -> None:
+        self._learn_cancel.set()
+
+    async def _learn_async(self, loop, path, tag, max_tokens) -> None:
+        try:
+            rep = await loop.run_in_executor(
+                self._pool, self._learn_blocking, path, tag, max_tokens)
+        except Exception as e:
+            self._hub.publish("engine_error", {"error": str(e)})
+            return
+        if rep is not None:
+            self._hub.publish("learn_done", rep)
+            self._info = dict(self._info, learn=rep)
+            self._set_state(self._state)
+
+    def _learn_blocking(self, path, tag, max_tokens):
+        """Slice-wise ingest under the generation lease — each hold is
+        ~8k tokens (~4s GPU) so chat can interleave between slices."""
+        if not self.is_ready():
+            raise RuntimeError("no resident engine — load a model first")
+        eng = self._engine
+        if eng.model.__class__.__name__ != "FluxLM":
+            raise RuntimeError(
+                "learn requires a resident FluxLM engine "
+                "(load a .flux checkpoint first)")
+        root = project_root()
+        p = path if os.path.isabs(path) else str(root / path)
+        pp = os.path.abspath(p)
+        if os.path.isdir(pp):
+            files = sorted(
+                os.path.join(pp, f) for f in os.listdir(pp)
+                if f.lower().endswith((".txt", ".md", ".jsonl",
+                                       ".ndjson", ".json")))
+        elif os.path.isfile(pp):
+            files = [pp]
+        else:
+            raise RuntimeError(f"learn path not found: {pp}")
+        tok = eng.tokenizer
+        total, docs, t0 = 0, 0, time.perf_counter()
+        last_log = t0
+        self._progress(f"learning {len(files)} file(s) into memory…")
+        for fp in files:
+            ftag = tag or os.path.splitext(os.path.basename(fp))[0]
+            for text in _iter_learn_texts(fp):
+                ids = tok.encode(text, add_special_tokens=False) \
+                    if hasattr(tok, "encode") else tok(text).input_ids
+                for off in range(0, len(ids), self.LEARN_SLICE):
+                    sl = ids[off:off + self.LEARN_SLICE]
+                    with self.acquire(timeout_s=300.0) as e:
+                        total += e.model.ingest(sl, tag=ftag)
+                    now = time.perf_counter()
+                    if now - last_log > 2.0:
+                        last_log = now
+                        rate = total / max(now - t0, 1e-9)
+                        self._progress(
+                            f"learn {ftag}: {total:,} tok "
+                            f"({rate:,.0f} tok/s)")
+                    if self._learn_cancel.is_set() or (
+                            max_tokens and total >= max_tokens):
+                        return {"tokens": total, "docs": docs,
+                                "tag": ftag, "cancelled": True,
+                                "tok_s": round(
+                                    total / max(now - t0, 1e-9), 1)}
+                with self.acquire(timeout_s=120.0) as e:
+                    e.model.soft_reset()      # docs are independent
+                docs += 1
+                if self._learn_cancel.is_set() or (
+                        max_tokens and total >= max_tokens):
+                    break
+            if self._learn_cancel.is_set() or (
+                    max_tokens and total >= max_tokens):
+                break
+        el = time.perf_counter() - t0
+        rep = {"tokens": total, "docs": docs,
+               "tok_s": round(total / max(el, 1e-9), 1),
+               "elapsed_s": round(el, 1), "cancelled":
+                   bool(self._learn_cancel.is_set())}
+        return rep
 
     # ── borrowing the engine ──────────────────────────────────────────
     def acquire(self, timeout_s: float = 600.0):

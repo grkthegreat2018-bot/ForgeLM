@@ -870,6 +870,9 @@ class _ActivationMixin:
         """
         if self.device.type != "cuda":
             return
+        # FluxLM has no KV cache — sparse memory, nothing to offload
+        if self.model.__class__.__name__ == "FluxLM":
+            return
         try:
             free, _ = torch.cuda.mem_get_info(self.device)
         except Exception:

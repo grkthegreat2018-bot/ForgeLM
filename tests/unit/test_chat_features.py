@@ -41,7 +41,14 @@ class TestMasterPrompt:
     def test_thinking_enabled(self):
         cfg = get_config("forgelm_v2")
         prompt = generate_master_prompt(cfg, "forgelm_v2", thinking_enabled=True)
-        assert "step-by-step" in prompt.lower()
+        assert "<think>" in prompt.lower()
+        assert "reasoning" in prompt.lower()
+
+    def test_blunt_brief_style_contract(self):
+        cfg = get_config("forgelm_v2")
+        prompt = generate_master_prompt(cfg, "forgelm_v2")
+        assert "blunt and brief" in prompt.lower()
+        assert "lead with the answer" in prompt.lower()
 
     def test_arch_in_prompt(self):
         cfg = get_config("forgelm_v2")
@@ -100,7 +107,7 @@ class TestGetDefaultPrompt:
     def test_fallback_on_bad_config(self):
         prompt = get_default_prompt_for_config("nonexistent_config")
         assert "ForgeAI" in prompt
-        assert "helpful" in prompt
+        assert "blunt" in prompt.lower()
 
 
 class TestChatStoreImage:

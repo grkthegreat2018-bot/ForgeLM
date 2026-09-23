@@ -461,11 +461,13 @@ def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda"):
 
 
 def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
-                          use_dynamic=True, seed=None):
+                          use_dynamic=True, seed=None, cats=None):
     """Run all test categories on an already-loaded engine.
 
     If use_dynamic=True, generates randomized questions + applies ban list
-    to prevent overfitting on memorized questions.
+    to prevent overfitting on memorized questions. Pass ``cats`` to run a
+    prebuilt question set — REQUIRED when comparing two checkpoints so
+    both sides answer identical questions.
     """
     print(f"\n{'='*70}")
     print(f"  Benchmarking: {name}")
@@ -473,7 +475,8 @@ def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
     result = ModelResult(name=name, checkpoint="")
 
     # Use dynamic categories (randomized + ban list) or static
-    cats = _build_dynamic_categories(seed=seed) if use_dynamic else CATEGORIES
+    if cats is None:
+        cats = _build_dynamic_categories(seed=seed) if use_dynamic else CATEGORIES
 
     for cat_name, tests in cats.items():
         if not tests:
@@ -552,8 +555,16 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
                         use_triton_conv=True, use_spec_attn=True,
                         kv_cache_tokens=4096, warmup=True)
 
+    # Build the eval set ONCE so both sides answer identical questions.
+    # Per-side builds advanced the rng AND the ban list (base's high
+    # scorers got banned before the candidate's categories were built),
+    # so base and candidate used to face different question sets —
+    # observed live: bit-identical checkpoints scored 0.54 vs 0.34.
+    cats = _build_dynamic_categories()
+
     # Run base tests
-    base_result = _run_tests_on_engine(engine, "BASE (V10)", device, verbose)
+    base_result = _run_tests_on_engine(engine, "BASE (V10)", device,
+                                       verbose, cats=cats)
     base_result.checkpoint = base_checkpoint
 
     # Swap to candidate weights (load directly to GPU)
@@ -565,14 +576,24 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             if name in candidate_state:
                 param.data.copy_(candidate_state[name])
     del candidate_state
+
+    # Invalidate cached KV — prefix-cache and CacheBlend entries were
+    # computed under the base weights; reusing them would contaminate the
+    # candidate pass with stale states.
+    for cache in (getattr(engine, "_prefix_cache", None),
+                  getattr(engine, "_cache_blend", None)):
+        if cache is not None and hasattr(cache, "clear"):
+            cache.clear()
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     print(f"  [FastEval] Weight swap done in {time.perf_counter() - t_swap:.1f}s")
 
-    # Run candidate tests
-    candidate_result = _run_tests_on_engine(engine, "CANDIDATE (SFT)", device, verbose)
+    # Run candidate tests — same question set as base
+    candidate_result = _run_tests_on_engine(engine, "CANDIDATE (SFT)",
+                                            device, verbose, cats=cats)
     candidate_result.checkpoint = candidate_checkpoint
 
     # If we created the engine internally (engine=None path), free it now.

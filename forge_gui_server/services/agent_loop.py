@@ -63,6 +63,13 @@ _TOOL_STOP_IDS = [2, 519, 532, 539]
 _TOOL_CALL_START = "<tool_call>"
 _RE_NAME_HINT = re.compile(r'\{"name"\s*:\s*"')
 
+# Agent think budget — the render opens a <think> block every round, but
+# an agent's job is action: past this many think tokens the loop injects
+# a bare </think> so the model proceeds to the call/answer. Generous vs
+# chat's 160 (agent steps legitimately reason more), still bounded.
+_AGENT_THINK_BUDGET = 384
+_AGENT_THINK_CLOSE = "\n</think>\n"
+
 
 def _musing_before_first_call(raw: str) -> str:
     """Text the model produced before its first tool call.
@@ -264,9 +271,20 @@ class AgentService:
             tool_calls, content = qwen_parse_tool_calls(raw)
             if tool_calls:
                 content = _musing_before_first_call(raw)
+            # The prompt opens <think> every round — split reasoning out
+            # of the visible text and keep it on the message so the
+            # template hands it back next round (interleaved thinking).
+            # Fallback: an EOS inside the block leaves body empty — for
+            # a final (no-call) round the reasoning IS the deliverable,
+            # surface it rather than returning "".
+            from .chat_loop import _split_reasoning
+            reasoning, content = _split_reasoning(content or "")
+            if not content and reasoning and not tool_calls:
+                content, reasoning = reasoning, ""
             self._emit(run, "raw_output", raw, round_idx)
             self._emit(run, "text", content or "", round_idx)
             messages.append({"role": "assistant", "content": content or "",
+                             "reasoning_content": reasoning or None,
                              "tool_calls": tool_calls or None})
 
             if not tool_calls:
@@ -297,10 +315,14 @@ class AgentService:
                     tool_calls, content = qwen_parse_tool_calls(raw)
                     if tool_calls:
                         content = _musing_before_first_call(raw)
+                    reasoning, content = _split_reasoning(content or "")
+                    if not content and reasoning and not tool_calls:
+                        content, reasoning = reasoning, ""
                     self._emit(run, "raw_output", raw, round_idx)
                     self._emit(run, "text", content or "", round_idx)
                     messages.append({"role": "assistant",
                                      "content": content or "",
+                                     "reasoning_content": reasoning or None,
                                      "tool_calls": tool_calls or None})
                     if tool_calls:
                         retried = True
@@ -356,15 +378,28 @@ class AgentService:
         }
 
     def _generate(self, run: AgentRun, rendered: str) -> str:
+        from .chat_loop import _think_cap_processor
         with self._runtime.acquire() as engine:
             gen_raw = getattr(engine, "generate_raw", None)
             if gen_raw is not None:
+                # The render opens <think> every round: mask <tool_call>
+                # while it's open (trained order is think → </think> →
+                # text → call; a mid-think call leaves reasoning leaking
+                # into the visible text) and cap the think with a bare
+                # </think> injection — not the chat "Answer:" suffix, so
+                # a capped think can still proceed to a tool call.
+                cap = _think_cap_processor(
+                    _AGENT_THINK_BUDGET,
+                    engine.tokenizer.encode(
+                        _AGENT_THINK_CLOSE, add_special_tokens=False),
+                    tool_calls_allowed=True)
                 return gen_raw(
                     rendered, max_new_tokens=run.max_new_tokens,
                     temperature=run.temperature, top_p=run.top_p,
                     top_k=run.top_k,
                     repetition_penalty=run.repetition_penalty,
                     skip_special_tokens=False,
+                    logits_processor=cap,
                     eos_token_ids=_TOOL_STOP_IDS)
             return engine.generate(
                 rendered, max_new_tokens=run.max_new_tokens,

@@ -679,6 +679,36 @@ class BatchQueue:
             seeds_list.append(eff_seed)
             stop_list.append(req.stop)
 
+        # FluxLM: BatchedDecoding assumes KV-cache forward semantics and
+        # would interleave unrelated prompts into one memory stream —
+        # route through the engine's flux stream-pool instead (shared
+        # read-only memory, per-sequence context, zero mutation).
+        if model.__class__.__name__ == "FluxLM":
+            outs = engine.generate_batch(
+                [r.prompt for r in requests],
+                max_new_tokens=max(max_tokens_list),
+                temperatures=temps_list, top_ps=top_ps_list,
+                top_ks=top_ks_list,
+                repetition_penalties=rep_penalties_list,
+                seeds=seeds_list, stops=stop_list,
+                skip_special_tokens=True)
+            for req, text in zip(requests, outs):
+                if req.task_id and self.session_manager:
+                    self.session_manager.append_message(
+                        req.task_id, "assistant", text)
+                if req.stream and req.stream_queue is not None:
+                    if self._push_stream(req, text):
+                        self._push_stream(req, None)
+                    else:
+                        req.future.set_result(text)
+                else:
+                    req.future.set_result(text)
+            with self.registry._lock:
+                entry.generation_count += len(requests)
+                entry.total_tokens += sum(
+                    len(tokenizer.encode(t)) for t in outs)
+            return
+
         # Run batched decoding with per-sequence settings.  Hold the
         # engine's generation lock — BatchedDecoding drives model.forward
         # directly and would otherwise interleave with in-flight requests

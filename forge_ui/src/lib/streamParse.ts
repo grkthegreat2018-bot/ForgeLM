@@ -187,3 +187,29 @@ export function toolCallSummary(text: string): string {
     return ''
   }
 }
+
+/** One-line preview of a tool result. JSON-aware — search/fetch payloads
+ *  summarize as "N results — first title" instead of raw braces. */
+export function toolResultSummary(text: string): string {
+  const t = text.trim()
+  if (!t) return ''
+  try {
+    const j = JSON.parse(t)
+    if (Array.isArray(j)) return `${j.length} items`
+    if (j && typeof j === 'object') {
+      if (j.error) return `error: ${String(j.error).slice(0, 80)}`
+      if (Array.isArray(j.results)) {
+        const n = j.results.length
+        const first = j.results[0]?.title ?? j.results[0]?.url ?? ''
+        return `${n} result${n === 1 ? '' : 's'}${first ? ` — ${String(first).slice(0, 60)}` : ''}`
+      }
+      if (j.title || j.text) {
+        const head = j.title ? String(j.title) : `${j.chars ?? '?'} chars`
+        return head.slice(0, 80)
+      }
+      return `{${Object.keys(j).slice(0, 4).join(', ')}}`
+    }
+  } catch { /* plain text */ }
+  const line = t.split('\n').find((l) => l.trim()) ?? ''
+  return line.length > 100 ? line.slice(0, 100) + '…' : line
+}

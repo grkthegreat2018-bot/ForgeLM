@@ -164,6 +164,47 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   8 mixins: engine_checkpoints, engine_activation, engine_generation,
   engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,
   engine_sessions; shared helpers in engine_common.py)
+- `forge/model/flux.py` — FluxLM (R52): sparse online associative-memory
+  LM, NOT a transformer.  Weights = addressable memory cells (per-order
+  n-gram tables keyed by rolling suffix hashes, Hebbian topic matrix,
+  episodic index) written live per token; context = order-agnostic
+  sketch → unbounded, no positional training.  Prediction = Hedge-weighted
+  geometric mixture over channels: `deep` = archived episodic retrieval —
+  entries are `(ctx_end, succ, cert_hashes)` tuples deferred-inserted so
+  positions past the ring horizon still vote via 24/96-gram suffix-hash
+  certificates (R52-2); `knn` = approximate-match bank of normalized
+  context fingerprints → successor votes via top-k cosine (R52-1,
+  generalizes where `deep` needs verbatim repeats); `sem` = expected-
+  next-token fingerprint cosine spread (generativity).  `teach(ctx,
+  target)` = instant hot-training — key-addressed multi-order writes +
+  csem + knn row, journaled under a tag (R52-3).  Every write is
+  journaled (`FluxJournal`) for audit (`audit()`, `writes_since()`) and
+  revert (`revert_since`, `revert_tag`, `snapshot`/`load`).  Engine path:
+  `ForgeEngine.from_flux(config=FluxConfig(...), checkpoint=..., device=)`
+  — bypasses checkpoint detect/quant/KV; `device="cuda"` runs fused
+  CUDA-graph steps with GPU-resident tables (`cuda_primary`), knn bank,
+  and host-side journal blocks (R52-4 — bulk ingest journal doesn't
+  grow VRAM); `unbounded_context=True` skips tokenizer truncation;
+  session learning tagged `"live"`.  Train: `scripts/train_flux.py`
+  (ingest = training, instant); bench: `scripts/bench_flux.py`.
+  R52-5: Triton kernels (deep-votes, logit-tail; `use_triton` flag + HAS_TRITON eager fallback), knn scan sliced to bucketed live prefix (graph recapture on bucket cross), ~692 tok/s live CUDA @V=4096.  R52-6: `graft_teacher` (V2 embed.weight → de-meaned randproj `_R`), `reinforce(tag,gain)` outcome replay, `consolidate()` episodic→ngram self-distillation, utility eviction via `_epi_hits`; distill_flux loads teacher via ForgeEngine.  R52-7: `.flux` snapshots load via ForgeEngine/GUI (models_index + engine_rt → `from_flux`); sleep/wake preserve live memory via temp snapshot; CPU→GPU sentinel-cell OOB fixed.  R52-9: `--training-mode flux` RSI in InfiniteSelfPlayLoop —
+  `FluxLM.clone()` (BytesIO round-trip, zero shared state), flux-aware
+  `generate_batch` (cloned-worker threads, per-prompt temp/seed, workers
+  run `_use_cuda_graph=False` — concurrent captures invalidate);
+  cross-epoch prompt dedup + eval-set exclusion; GUI launchable via
+  SelfPlay page (mode=flux + .flux checkpoint picker), live events in
+  status.json/events.jsonl.  R52-8: `train_flux.py --topic ai,code|science|custom-kw` high-precision
+  domain filter (title accept / intro ≥2 distinct hits) for --hf streams,
+  jsonl records, and --dict-flatten kaikki entries; corpus-scale flags
+  --hf/--wiki-filter/--max-tokens/--ckpt-every; GUI live-learn via
+  EngineService.learn + POST /engine/learn (sliced ingest under the
+  generation lease).  R52-9: `--training-mode flux` in
+  `forge/self_play/infinite_loop.py` — RSI on _concise_qa_pairs:
+  tagged attempts, immediate revert on fail, reinforce on success,
+  teach_text(Q:/A:) on fail, consolidate, fixed-set eval gate
+  (flux_eval_seed), demote = revert_since(epoch_mark).  Tests:
+  `tests/unit/test_flux.py` (30), `tests/unit/test_train_flux.py` (12),
+  `tests/unit/test_grpo_rsi_mode.py` TestFluxModeBranch.
 - `forge/engine/decoding.py` — Decoding strategies (standard, speculative
   family, `dola` self-contrastive R50-2, `uno`; DRY n-gram penalty R50-1
   in the shared `_sample_from_logits` chain + all `engine_generation`
@@ -203,13 +244,31 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   (id 541) ban in generated text in every mode (a generated <think> can
   only re-open a reasoning pass — observed: model emitted `Answer:` then
   re-opened <think> and re-looped). Direct path passes `budget=None`
-  (ban only). Two output guards: repeat-call detection (`_call_sig` —
+  (ban only). Structural bans also apply every mode: `<|im_start|>` 518,
+  `<tool_response>`/`</tool_response>` 539/540 (fake tool results), and
+  `<tool_call>` 531 is masked while the think block is open — trained
+  order is think → `</think>` → text → call; a mid-think call used to
+  leave the block unclosed so reasoning leaked into the persisted reply
+  (the "thinking escapes the tool call" bug). `tool_calls_allowed=False`
+  (tools off, or defs dropped by the repeat guard) bans 531+532 outright.
+  Text-level belt: a rolling 24-char tail stops the stream on literal
+  `</tool_call>`/`<tool_response>` emitted as ordinary tokens (id-EOS
+  can't see them). Post-parse: `_split_reasoning` puts pre-`</think>`
+  text in `msg["reasoning_content"]` (re-rendered into the next tool
+  round by the template, rendered as ThinkCard in the UI, dropped when
+  a new user turn starts) — unclosed output is all-reasoning/empty-body,
+  never a visible reply; `_strip_answer_anchor` drops an echoed
+  `Answer:`/`Final Answer:` lead. Fed-back tool results are truncated at
+  4000 chars. Two output guards: repeat-call detection (`_call_sig` —
   an identical name+args call drops tool defs so the next round must
   synthesize) and `_strip_direct_musing` (direct-path text before a
   stray `</think>` is reasoning voice — dropped; pre-call musing on
   direct tool turns is dropped entirely). Threshold calibrated via
   `scripts/bench_gate_route.py` — rerun it when the probes are
-  retrained or the chat template changes.
+  retrained or the chat template changes. The agent loop
+  (`agent_loop.py`) reuses the same processor with a 384-token think
+  budget and a bare `\n</think>\n` close (not the "Answer:" suffix) so
+  a capped think can still proceed to a tool call.
 - `forge/engine/decide.py` — SystemOneEvaluator: TypeSafe AI "System One"-
   compatible typed decisions (noul/choice/score questions → TypeSafe-style
   probability answers) via candidate-continuation scoring — single forward
@@ -246,22 +305,47 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   holds the dataset pipeline modules (`efficient_pipeline`,
   `parquet_dataset`, `curriculum_augment`, data-prep one-shots) — it is
   tracked source, exempted from the `data/` gitignore rule.
+  `runners/sft_train.py` renders all examples via the CANONICAL
+  `chat_template.apply_chat_template` (`<|im_start|>`/`<|im_end|>`,
+  `<tool_call>`/`<tool_response>`, thinking=False direct answers). The
+  legacy `<|startofsegment|>`/`<|tool_call_start|>` markers are gone —
+  they don't exist in the V2 tokenizer, so SFT was training a format
+  inference never sees (fixed 2026-09-21; see BUG_LOG).
 - `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains). Domain specs + run/focus profiles live in `forge/evolution/configs/` (canonical; the legacy `tests/evolution/configs/` copy was removed — the tests/evolution harness scripts now point at the canonical dir).
 - `forge/self_play/` — Self-play + discovery (`infinite_loop.py` is the RSI
   loop; `live_status.py` writes live telemetry — status.json, heartbeat.json
   with progress-coupled stall detection, events.jsonl — to
   `research/checkpoints/self_play/` for the GUI Self-Play page + CLI polling;
-  `--status-dir`/`--no-live-status` flags on the loop)
+  `--status-dir`/`--no-live-status` flags on the loop). RSI data path
+  (anti-overthinking): `_assemble_solution` AST-cleans every reply
+  (comments + docstrings stripped — model musing can't leak into SFT/GRPO
+  data); export picks the SHORTEST passing attempt and mixes
+  `concise_qa_per_epoch` verified short-answer pairs (default 12, computed/
+  curated answers — never model-generated) so each epoch trains direct
+  minimal answers; GRPO groups get `grpo_concise_bonus` (default 0.1)
+  length-efficiency shaping — correctness dominates, and all-pass groups
+  regain nonzero advantage. CLI: `--concise-qa-per-epoch`,
+  `--grpo-concise-bonus`. Debug: `--debug-round` runs ONE self-play round
+  (propose→solve) with NO training — a `GenTracer` on the curriculum
+  records every generation (rendered prompt, raw pre-strip output,
+  per-token ids), prints it live, and dumps
+  `status_dir/debug_round_ep*.txt|.jsonl`. Use it to check model behavior
+  before a real RSI run.
 - `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed).
   Web tools live in `forge_gui/api/web_tools.py` (defs + dispatch) backed by
-  stdlib-only `forge/web_primitives.py`: `web_search` (DuckDuckGo HTML),
-  `news_search` (Google News RSS — use for "the news"/current events; DDG
-  returns portal homepages for those queries; empty query → top headlines),
-  `web_fetch` (http/https only), `wikipedia_search`, `arxiv_search`. All
-  keyless GETs; never gated by safety checks, agent approval modes, or
-  read-only chat mode. `parse_ddg_html` drops DDG ad/tracker links (y.js
-  redirectors carry u3= not uddg= and can't be unwrapped) and `ddg_search`
-  falls back to Google News RSS when nothing parseable comes back. The
+  stdlib-only `forge/web_primitives.py`: `web_search` (multi-engine chain:
+  DDG HTML → DDG Lite → Bing → Google News RSS — first parseable result
+  wins), `news_search` (Google News RSS — use for "the news"/current
+  events; empty query → top headlines), `web_fetch` (ANY http(s) URL or
+  bare domain — auto-https, follows redirects, reports `final_url`; HTML
+  → markdown-ish text with inline `[label](url)` links + a deduped
+  `links` list of every anchor so the model can follow link names;
+  `offset`/`next_offset` page long docs; non-HTML bodies pass through raw
+  with `content_type`), `wikipedia_search`, `arxiv_search`. All keyless
+  GETs; never gated by safety checks, agent approval modes, or read-only
+  chat mode. `parse_ddg_html` drops DDG ad/tracker links (y.js
+  redirectors carry u3= not uddg= and can't be unwrapped). `web_fetch`
+  clamp is 200–16000 chars via `max_chars`. The
   agent-loop fallback harness also wires `WebTools` so web tools exist even
   if the deps harness factory fails.
 - `forge_gui_server/` — FastAPI GUI backend (REST `/api` + WebSocket `/ws`)

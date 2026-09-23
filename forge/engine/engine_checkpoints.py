@@ -164,6 +164,59 @@ class _CheckpointLoadingMixin:
             engine._auto_activate_optimal()
         return engine
 
+    @classmethod
+    def from_flux(cls, config=None, checkpoint: str | None = None,
+                  tokenizer_path: str | None = None, device: str = "cpu",
+                  cuda_primary: bool = False,
+                  **_kwargs) -> "ForgeEngine":
+        """Load a FluxLM sparse associative-memory model.
+
+        Explicit compatibility path — skips checkpoint-format detection,
+        quantization, KV cache and strategy activation entirely (FluxLM
+        has no KV cache and no dense weights to quantize; its state is
+        the memory itself).
+
+        Args:
+            config: FluxConfig instance (default: FluxConfig()).
+            checkpoint: optional path to a ``model.snapshot()`` file to
+                restore learned memory from.
+            tokenizer_path: tokenizer dir (default: auto by vocab_size).
+            device: engine device.  "cuda" puts FluxLM's dense readout
+                (A/R/c/proto + logits + sem matvec) on GPU; the sparse
+                memory tables stay host-resident either way.
+            cuda_primary: with device="cuda", move the sparse memory
+                itself into GPU open-addressed pair-key tables and use
+                the vectorized bulk-ingest path (much faster training +
+                V-wide probe prediction).
+        """
+        from forge.model.flux import FluxConfig, FluxLM
+        from research.tokenizer_cache import get_tokenizer
+
+        cfg = config or FluxConfig()
+        cfg.device = device
+        cfg.cuda_primary = cuda_primary or cfg.cuda_primary
+        if checkpoint:
+            model = FluxLM.load(checkpoint, device=device,
+                                cuda_primary=cuda_primary or None)
+            cfg = model.config
+        else:
+            model = FluxLM(cfg)
+        tok_path = tokenizer_path or _tokenizer_for_vocab(cfg.vocab_size)
+        tokenizer = get_tokenizer(tok_path)
+        # session learning is tagged "live" — revert_tag("live") forgets
+        # everything the model picked up during engine use; "live"/"gen"
+        # tags also get full-fidelity Hedge rewards (see fast_ingest).
+        model.tag = "live"
+        engine = cls(model, tokenizer, device=device)
+        # set post-init: passing it into __init__ would trigger safetensors
+        # KeyStack detection on a pickle; the path is needed for sleep(2)/wake
+        engine.checkpoint_path = checkpoint
+        engine._log(
+            f"FLUX loaded — sparse associative memory "
+            f"({sum(len(t) for t in model._tables.values())} cells, "
+            f"stream={model._count} tok)")
+        return engine
+
     def _auto_activate_optimal(self):
         """Auto-activate optimal strategies based on detected KeyStack features.
 

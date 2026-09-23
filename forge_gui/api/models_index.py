@@ -15,7 +15,7 @@ from .status_reader import project_root
 
 logger = logging.getLogger(__name__)
 
-CKPT_EXTS = (".safetensors", ".pt", ".bin", ".gguf")
+CKPT_EXTS = (".safetensors", ".pt", ".bin", ".gguf", ".flux")
 META_SUFFIXES = (".meta.json", ".json")
 
 
@@ -180,6 +180,8 @@ class ModelsIndex:
                         logger.warning("failed to parse metadata %s: %s", mp, e)
                         meta = {}
             cfg_name = meta.get("config") or meta.get("config_name")
+            if cfg_name is None and p.suffix.lower() == ".flux":
+                cfg_name = "flux"          # FluxLM memory snapshot
             if isinstance(cfg_name, dict):
                 # SFT checkpoints embed the full config dict in meta —
                 # use it directly (a dict key would crash dict.get).

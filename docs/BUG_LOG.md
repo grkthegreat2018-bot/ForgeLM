@@ -516,3 +516,156 @@ latent.
 `git grep` confirms zero references to removed modules;
 `vast_connector` manifest now resolves 73/73 paths; unit suite run in
 the same cleanup commit (see git log).
+
+## 2026-09-20 - Chat gating/tool loop: probes OOD on tools block + continuations, reasoning leaked into replies, junk news results
+
+### Symptom
+1. Bare greetings (`Hello`) burned ~150 think tokens parroting the master
+   prompt, then emitted a bland `Answer:` — route probe scored p_easy
+   ~0.10 on prompts that should route direct.
+2. Tool turns looped: conv-exit fired on the tool-continuation round, the
+   forced `Answer:` made the model restate its plan and re-emit the SAME
+   web_search 5x — never synthesized.
+3. Direct-routed tool turns persisted think-voice musing as the visible
+   reply; a mid-think `<tool_call>` left the think block unclosed so
+   reasoning leaked into the persisted reply (`thinking escapes the tool
+   call`); after the cap fired the model re-opened `<think>` and
+   re-looped; literal `</tool_call>`/`<tool_response>` emitted as
+   ordinary tokens bypassed the id-based EOS and the model hallucinated
+   its own tool results.
+4. `check the news` returned portal homepages (cnn.com/) + y.js ad
+   redirectors — zero real headlines; `web_fetch` stripped all markup so
+   link names/urls were destroyed and long pages had no paging.
+
+### Root Cause
+1. `_route_p_easy` scored the production render including the ~17-schema
+   `<tools>` block; gate_r probes were trained tools-free — the schema
+   block collapses h_mean, dragging p_easy ~0.25 under the 0.2 threshold
+   (`Hello`: 0.355 tools-free vs 0.098 with tools). gate_r also has no
+   chit-chat class.
+2. Route probe + conv observer ran on EVERY round — both are OOD on
+   tool-continuation (synthesis) turns.
+3. No repeat-call detection; direct-path pre-call musing persisted
+   verbatim; `<tool_call>` (531) unmasked while think open (trained
+   order: think ? </think> ? text ? call); generated `<think>` (541)
+   unbanned; no `reasoning_content` split — the template supports it
+   but the loop never populated it.
+4. DDG HTML returns portal homepages + ad redirectors for news queries —
+   a data problem, not a gating/restriction problem; single-engine search
+   had no fallback when an endpoint bot-walls; `html_to_text` flattened
+   pages to one line with zero link/structure info.
+
+### Resolution
+- `chat_loop.py`: tools-free probe render (generation keeps tools
+  render); `_is_trivial_turn` regex bypass; `fresh_turn` gate (probes
+  only when conv[-1] is user); `_call_sig` repeat guard drops defs;
+  `_think_cap_processor` now masks 531 while the think block is open,
+  bans 541/518/539/540 in generated text always, and bans 531+532 when
+  `tool_calls_allowed=False`; rolling 24-char literal-marker tail stop;
+  `_split_reasoning` ? `msg[reasoning_content]` (re-rendered into the
+  next tool round by the template, shown as ThinkCard, dropped on the
+  next user turn); `_strip_answer_anchor`; tool results truncated at
+  4000 chars before re-render.
+- `agent_loop.py`: reuses `_think_cap_processor` with a 384-token
+  think budget + bare `\n</think>\n` close (a capped think can still
+  proceed to a call); same reasoning split; empty-body fallback so an
+  early EOS inside think still yields the run's final text.
+- `routes/chat.py`: persists `reasoning_content`; master prompt now
+  gets real `tools_enabled`/`thinking` flags.
+- `master_prompt.py`: enforceable blunt/brief contract (lead with the
+  answer, bullets over paragraphs, match length to question) + actionable
+  tool-use policy instead of soft guidelines.
+- `web_primitives.py`: `fetch_url` reads any http(s) URL — bare
+  domains auto-https, redirects followed (`final_url`), HTML ?
+  markdown-ish text via a streaming `HTMLParser` (headings/lists/links
+  kept; `[label](url)` inline + deduped `links` list; script/style/
+  nav chrome dropped), non-HTML bodies pass through raw, `offset`/
+  `next_offset` paging; search cascade DDG HTML ? DDG Lite ? Bing ?
+  Google News RSS.
+- `web_tools.py`: `web_fetch` clamp raised to 16000 + `offset` arg;
+  descriptions rewritten so the model knows it can open ANY url and
+  follow links.
+- `streamParse.ts`/`Chat.tsx`: `implicitThink` marks the lead
+  segment as thinking while the prompt-opened block is unclosed
+  (suppressed when gate routed direct); persisted `reasoning_content`
+  renders as a ThinkCard; `toolResultSummary` gives JSON-aware one-line
+  tool previews.
+
+### Files Modified
+- `forge_gui_server/services/chat_loop.py`,
+  `forge_gui_server/services/agent_loop.py`,
+  `forge_gui_server/routes/chat.py`, `forge_gui/api/master_prompt.py`,
+  `forge_gui/api/web_tools.py`, `forge/web_primitives.py`,
+  `forge_ui/src/lib/streamParse.ts`, `forge_ui/src/pages/Chat.tsx`,
+  `forge_ui/src/components/chat/blocks.tsx`,
+  `tests/unit/test_gated.py`, `tests/unit/test_gui_web_tools.py`,
+  `tests/unit/test_chat_features.py`
+
+### Verification
+- `pytest tests/unit/test_gui_web_tools.py test_gated.py
+  test_gui_server.py test_gui_chat_store.py test_gui_tool_harness.py
+  test_jamba_tool_format.py test_chat_features.py test_thinking_pipeline.py
+  test_gui_agent_tools.py test_gui_mcp_client.py test_agent_safety_backup.py`
+  — 281 passed.
+- `npm run build` (tsc + vite) clean.
+
+## 2026-09-21 — RSI loop: SFT trained a fake chat format + reasoning leaked into exported code
+
+### Symptom
+RSI (self-play) epochs produced little/no improvement on the eval gate:
+the model stayed prone to overthinking and weak at short, simple answers
+even though those are exactly what the loop should be sharpening.
+
+### Root Cause
+1. **SFT rendered a non-existent chat format (CRITICAL)** — `sft_train.py`
+   emitted `<|startofsegment|>`/`<|endofsegment|>` + `<|tool_call_start|>`/
+   `<|tool_call_end|>` markers. None exist in the ForgeLM V2 (Jamba
+   Reasoning 3B) tokenizer — they tokenize as literal text fragments.
+   Every SFT epoch trained completions conditioned on a format the model
+   never sees at inference (`<|im_start|>` ChatML + `<tool_call>` ids
+   531/532). The module docstring already claimed im_start markers —
+   the code was left stale through the Jamba migration.
+2. **Reasoning leaked into training data** — the solver's post-fence
+   musing was captured as `#` comments/docstrings inside exported
+   solutions (observed in `azr_epoch1.jsonl`: 40+ comment lines of
+   second-guessing before the actual function). SFT literally taught
+   "write a wall of reasoning comments before the answer".
+3. **No direct-answer training signal** — epoch data was 100% code
+   tasks; nothing taught "easy prompt ? short direct answer", so the
+   `concise` eval category could never move.
+4. **First-pass selection** exported the first passing attempt, not the
+   best one; GRPO groups carried raw binary rewards, so all-pass groups
+   had zero advantage (loss 0).
+
+### Resolution
+1. `sft_train.py` renders via the canonical
+   `chat_template.apply_chat_template` (`<|im_start|>`/`<|im_end|>`,
+   `<tool_call>`/`<tool_response>`, thinking=False direct answers) —
+   verified real special ids 518/519/531/532/539 in encoded output.
+2. `infinite_curriculum._assemble_solution` AST-cleans every reply
+   (`_clean_code` + `_DocstringStripper`): comments + docstrings dropped,
+   code canonicalized; unparseable bodies fall back to raw text so
+   verification still fails them naturally. Applies to SFT export AND
+   GRPO group completions.
+3. `infinite_loop._concise_qa_pairs` mixes `concise_qa_per_epoch`
+   (default 12) verified short-answer pairs per epoch — computed answers
+   (math/string/list/logic/conversions) + curated facts, ~half with
+   explicit brevity hints, half bare so brevity becomes the default.
+4. Export picks the SHORTEST passing attempt; `_concise_adjusted_rewards`
+   adds `grpo_concise_bonus` (default 0.1) length-efficiency shaping —
+   correctness still dominates; all-pass groups regain nonzero advantage.
+
+### Files Modified
+- `forge/training/runners/sft_train.py`,
+  `forge/self_play/infinite_curriculum.py`,
+  `forge/self_play/infinite_loop.py`,
+  `tests/unit/test_grpo_rsi_mode.py`, `AGENTS.md`
+
+### Verification
+- `pytest tests/unit/test_grpo_rsi_mode.py test_curriculum_engine_gen.py
+  test_sft_data_loader.py test_thinking_pipeline.py
+  test_jamba_tool_format.py test_gui_chat_store.py test_gated.py`
+  ? 163 passed (38 new: canonical render, code cleaning, QA stream,
+  concise rewards).
+- Tokenizer check: rendered examples now encode ids 518/519/531/532/539
+  (previously literal text).

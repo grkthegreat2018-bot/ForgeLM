@@ -27,9 +27,15 @@ class BatchedDecoding(DecodingStrategy):
     completely different generation parameters.
     """
 
-    def __init__(self, eos_token_id: int = 7):
+    def __init__(self, eos_token_id: int = 7,
+                 eos_token_ids: set[int] | None = None):
         self.eos_token_id = eos_token_id
-        self.eos_set = {7, 151643, 151645}  # LFM + Qwen EOS tokens
+        # Callers should pass the engine's resolved EOS set — on Jamba V2 a
+        # chat turn ends on <|im_end|> (519) / <|endoftext|> (2), which the
+        # legacy LFM/Qwen-only default would never stop on (batch runs to
+        # max_tokens every time).
+        self.eos_set = (set(eos_token_ids) if eos_token_ids
+                        else {7, 151643, 151645})
 
     @property
     def name(self) -> str:
@@ -59,6 +65,7 @@ class BatchedDecoding(DecodingStrategy):
         seed_list: list[int | None] | None = None,
         stop_list: list[list[str] | None] | None = None,
         tokenizer=None,
+        processor_list: list | None = None,
     ) -> list[torch.Tensor]:
         B = len(prompts)
         if B == 0:
@@ -74,6 +81,8 @@ class BatchedDecoding(DecodingStrategy):
             seed_list = [None] * B
         if stop_list is None:
             stop_list = [None] * B
+        if processor_list is None:
+            processor_list = [None] * B
 
         # Per-sequence generators for reproducible sampling
         generators = []
@@ -172,6 +181,15 @@ class BatchedDecoding(DecodingStrategy):
                     next_logits_all[i] = self._top_p(
                         next_logits_all[i].unsqueeze(0), top_ps[i]).squeeze(0)
 
+            # Per-sequence logits processors (e.g. chat_loop's think-cap /
+            # structural-token bans). Each gets generated-only ids —
+            # same contract as the serial path's logits_processor.
+            for i in range(B):
+                if processor_list[i] is not None and active_cpu[i]:
+                    gen_only = generated[i][0, prompt_lens[i]:].tolist()
+                    next_logits_all[i] = processor_list[i](
+                        next_logits_all[i].unsqueeze(0), gen_only).squeeze(0)
+
             # Mask finished sequences
             next_logits_all[~active] = float('-inf')
 
@@ -206,9 +224,11 @@ class BatchedDecoding(DecodingStrategy):
                 if stop_token_ids[i] and active_cpu[i]:
                     if next_tokens[i].item() in stop_token_ids[i]:
                         eos_mask_gpu[i] = True
-            # Single scalar sync — only transfer full tensor when EOS occurs
+            # Single scalar sync — only transfer full tensor when EOS occurs.
+            # .cpu() is a no-op returning the SAME tensor when already on CPU —
+            # clone() so eos_mask_gpu.zero_() below can't wipe is_eos_cpu.
             if eos_mask_gpu.any().item():
-                is_eos_cpu = eos_mask_gpu.cpu()
+                is_eos_cpu = eos_mask_gpu.cpu().clone()
             else:
                 is_eos_cpu = torch.zeros(B, dtype=torch.bool)
             eos_mask_gpu.zero_()

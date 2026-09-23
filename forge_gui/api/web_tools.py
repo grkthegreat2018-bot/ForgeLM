@@ -33,11 +33,10 @@ _WEB_TOOL_DEFS = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the web for real-time info, docs, and general "
-                "results. Returns {url, title, snippet} per result. Use "
-                "web_fetch to read a full page from a result url. For "
-                "current news/headlines prefer news_search. No API key "
-                "needed."),
+                "Search the whole web — multi-engine, no API key. Returns "
+                "{url, title, snippet} per result. Use web_fetch to read "
+                "any result url (it returns full page text + links). For "
+                "current news/headlines prefer news_search."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -77,15 +76,22 @@ _WEB_TOOL_DEFS = [
         "function": {
             "name": "web_fetch",
             "description": (
-                "Fetch a URL and return its text content. Use to read "
-                "full articles or docs found via web_search. Only http(s) "
-                "URLs accepted. HTML tags stripped, output truncated."),
+                "Open any page on the internet and read it. Works on ANY "
+                "http(s) URL — articles, docs, search results, link "
+                "targets. Returns {title, text, links, final_url}: text "
+                "is the page content with [label](url) links kept inline; "
+                "links lists every link name + url on the page so you can "
+                "follow them. Bare domains are OK (auto-https). Long pages "
+                "page through with offset/next_offset."),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "http(s) URL to fetch"},
+                    "url": {"type": "string",
+                            "description": "URL to fetch — any http(s) page or bare domain"},
                     "max_chars": {"type": "integer",
-                                  "description": "max chars to return (default 4000)"},
+                                  "description": "max chars to return (default 4000, max 16000)"},
+                    "offset": {"type": "integer",
+                               "description": "skip this many chars — page through long docs via next_offset (default 0)"},
                 },
                 "required": ["url"],
             },
@@ -179,8 +185,10 @@ class WebTools:
             res = google_news_search(args.get("query", ""), n=n)
         elif name == "web_fetch":
             max_chars = int(args.get("max_chars", MAX_FETCH_CHARS))
-            max_chars = max(200, min(max_chars, 8000))
-            res = fetch_url(args.get("url", ""), max_chars=max_chars)
+            max_chars = max(200, min(max_chars, 16000))
+            offset = max(0, int(args.get("offset", 0) or 0))
+            res = fetch_url(args.get("url", ""), max_chars=max_chars,
+                            offset=offset)
         elif name == "wikipedia_search":
             res = wikipedia_search(args.get("query", ""), n=n)
         elif name == "arxiv_search":

@@ -93,6 +93,26 @@ async def engine_unload():
     return {"ok": True}
 
 
+class LearnRequest(BaseModel):
+    path: str
+    tag: str | None = None
+    max_tokens: int = 0
+
+
+@router.post("/engine/learn")
+async def engine_learn(body: LearnRequest):
+    """Live-learn a corpus file/dir into the resident FluxLM engine."""
+    services.engine.learn(body.path, tag=body.tag,
+                          max_tokens=body.max_tokens)
+    return {"ok": True}
+
+
+@router.post("/engine/learn/cancel")
+async def engine_learn_cancel():
+    services.engine.learn_cancel()
+    return {"ok": True}
+
+
 @router.post("/engine/reactivate")
 async def engine_reactivate(body: dict):
     services.engine.reactivate(body.get("activation") or body)
@@ -545,6 +565,7 @@ async def models():
          "config_name": m.config_name, "config": m.config,
          "meta": m.meta, "modified": m.modified,
          "is_safetensors": m.is_safetensors,
+         "is_flux": m.ext == ".flux",
          "is_lora": "lora" in m.name.lower()}
         for m in entries]}
 
@@ -563,7 +584,7 @@ async def delete_model(path: str):
     root = project_root()
     p = root / path
     if not p.is_file() or p.suffix not in (".safetensors", ".gguf",
-                                           ".pt", ".bin"):
+                                           ".pt", ".bin", ".flux"):
         return {"ok": False, "error": "not a model file"}
     try:
         p.relative_to(root / "research" / "checkpoints")

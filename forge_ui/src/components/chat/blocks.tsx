@@ -8,7 +8,8 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import {
-  parseStream, toolCallName, toolCallSummary, type Segment,
+  parseStream, toolCallName, toolCallSummary, toolResultSummary,
+  type Segment,
 } from '../../lib/streamParse'
 import { Spinner } from '../ui'
 import { Markdown } from './Markdown'
@@ -84,7 +85,8 @@ export function ToolActivityCard({ name, args, summary, result, running }: {
     try { summary = toolCallSummary(args) } catch { /* raw */ }
   }
   const preview = result
-    ? result.text.replace(/\s+/g, ' ').trim().slice(0, 80)
+    ? (toolResultSummary(result.text)
+      || result.text.replace(/\s+/g, ' ').trim().slice(0, 80))
     : (summary ?? '')
   const failed = result !== undefined && result.ok === false
   return (

@@ -221,10 +221,14 @@ class TestThinkCap:
     reasoning pass after </think>."""
 
     SUFFIX = [542, 100, 101]     # "\n</think>\nAnswer:"-style id list
+    # always banned: <think> 541, <|im_start|> 518, <tool_response> 539,
+    # </tool_response> 540; 531 joins while the think block is open.
+    BASE_BANNED = (541, 518, 539, 540)
 
-    def _masked(self, logits, banned=541):
+    def _masked(self, logits, banned=BASE_BANNED):
         m = logits.clone()
-        m[..., banned] = float('-inf')
+        for t in banned:
+            m[..., t] = float('-inf')
         return m
 
     def test_under_budget_only_bans_rethink(self):
@@ -233,7 +237,9 @@ class TestThinkCap:
         proc = _think_cap_processor(4, self.SUFFIX)
         logits = torch.randn(1, 1000)
         out = proc(logits, [1, 2, 3])
-        assert torch.equal(out, self._masked(logits))
+        # think still open -> <tool_call> (531) is masked too
+        assert torch.equal(out, self._masked(
+            logits, self.BASE_BANNED + (531,)))
 
     def test_rethink_banned_after_natural_close(self):
         from forge_gui_server.services.chat_loop import (
@@ -285,6 +291,42 @@ class TestThinkCap:
             out = proc(logits, gen)
             assert out.argmax(-1).item() == want
             gen.append(want)
+
+    def test_tool_call_masked_while_think_open(self):
+        # the "thinking escapes into tool calls" fix: while the prompt-
+        # opened <think> is unclosed, 531 must be -inf so a call can only
+        # start after the reasoning pass closes.
+        from forge_gui_server.services.chat_loop import (
+            _THINK_END_ID, _think_cap_processor)
+        proc = _think_cap_processor(160, self.SUFFIX)
+        open_out = proc(torch.randn(1, 1000), [1, 2, 3])
+        assert open_out[0, 531].item() == float("-inf")
+        closed_out = proc(torch.randn(1, 1000), [1, 2, _THINK_END_ID, 9])
+        assert closed_out[0, 531].item() > float("-inf")
+
+    def test_tool_calls_disallowed_bans_call_ids(self):
+        # defs dropped (repeat-call guard or tools off): both <tool_call>
+        # and </tool_call> are banned outright, even after </think>.
+        from forge_gui_server.services.chat_loop import (
+            _THINK_END_ID, _think_cap_processor)
+        proc = _think_cap_processor(None, self.SUFFIX,
+                                    tool_calls_allowed=False)
+        out = proc(torch.randn(1, 1000), [1, _THINK_END_ID, 2])
+        assert out[0, 531].item() == float("-inf")
+        assert out[0, 532].item() == float("-inf")
+
+    def test_agent_suffix_without_answer_anchor(self):
+        # agent loop injects a bare "\n</think>\n" — after the close the
+        # tool_call mask must lift so the capped think can proceed to call
+        from forge_gui_server.services.chat_loop import (
+            _think_cap_processor)
+        proc = _think_cap_processor(2, [542])
+        gen = [7, 8]
+        out = proc(torch.randn(1, 1000), gen)   # budget hit -> force 542
+        assert out.argmax(-1).item() == 542
+        gen.append(542)
+        out = proc(torch.randn(1, 1000), gen)
+        assert out[0, 531].item() > float("-inf")
 
 
 class TestConvExitObserver:
@@ -390,3 +432,43 @@ class TestChatLoopGuards:
         # multiple markers -> take text after the last one
         two = "a\n</think>\nb\n</think>\nfinal"
         assert _strip_direct_musing(two) == "final"
+
+
+class TestReasoningSplit:
+    """chat_loop._split_reasoning + _strip_answer_anchor — the
+    interleaved-thinking contract: reasoning rides reasoning_content,
+    never the visible reply."""
+
+    def test_splits_at_think_end(self):
+        from forge_gui_server.services.chat_loop import _split_reasoning
+        r, body = _split_reasoning("step one\nstep two\n</think>\n\n42")
+        assert r == "step one\nstep two"
+        assert body == "42"
+
+    def test_no_closer_is_all_reasoning(self):
+        # truncated/EOS'd inside the block — nothing may leak into the
+        # visible body (the "thinking escapes" bug shape)
+        from forge_gui_server.services.chat_loop import _split_reasoning
+        r, body = _split_reasoning("musing with no close")
+        assert r == "musing with no close"
+        assert body == ""
+
+    def test_extra_closers_dropped_from_body(self):
+        from forge_gui_server.services.chat_loop import _split_reasoning
+        r, body = _split_reasoning("think</think>real</think>stray")
+        assert r == "think"
+        assert body == "realstray"
+
+    def test_empty_content(self):
+        from forge_gui_server.services.chat_loop import _split_reasoning
+        assert _split_reasoning("") == ("", "")
+
+    def test_strip_answer_anchor(self):
+        from forge_gui_server.services.chat_loop import (
+            _strip_answer_anchor)
+        assert _strip_answer_anchor("Answer: 42") == "42"
+        assert _strip_answer_anchor("  Final Answer: 42") == "42"
+        assert _strip_answer_anchor("plain reply") == "plain reply"
+        # anchor alone must not blank the reply
+        assert _strip_answer_anchor("Answer:") == "Answer:"
+        assert _strip_answer_anchor("") == ""
